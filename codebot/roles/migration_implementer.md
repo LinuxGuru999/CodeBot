@@ -40,3 +40,40 @@ Read `.codebot/project.yaml` for architecture and data storage patterns. Read `.
 2. NEVER skip rollback testing.
 3. NEVER assume clean state — handle partial migrations gracefully.
 4. Constitution §9 (Destructive Operations) requires human approval for data loss.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: ".codebot/project.yaml"
+  offset: 1
+  limit: 30
+
+Tool: grep
+Arguments:
+  pattern: "schema_version"
+  path: "codebot/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "codebot/migrations/*.py"
+
+Tool: write
+Arguments:
+  path: "codebot/migrations/migration_003.py"
+  content: "def forward(store):\n    \"\"\"Migrate agent records to new schema.\"\"\"\n    pass\n\ndef rollback(store):\n    \"\"\"Revert agent records to old schema.\"\"\"\n    pass"
+
+Tool: edit
+Arguments:
+  path: "codebot/migrations/migration_002.py"
+  old_string: "def forward(store):\n    pass"
+  new_string: "def forward(store):\n    \"\"\"Add company_id field to agent records.\"\"\"\n    for agent in store.list_all_agents():\n        store.update_agent(agent['id'], {'company_id': agent.get('company_id', 'default')})"
+
+Tool: bash
+Arguments:
+  command: "python3 -m pytest tests/test_migration_003.py -q --tb=short"
+  timeout: 30000

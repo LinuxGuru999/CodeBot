@@ -42,3 +42,40 @@ If you hit a timeout, rate limit, or fatal error, your scratchpad is automatical
 2. NEVER embed credentials in client-side code.
 3. NEVER disable CSP headers.
 4. Same-PR rule: update JS/CSS version tags together.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "codebot/static_manager/manager.js"
+  offset: 1
+  limit: 60
+
+Tool: grep
+Arguments:
+  pattern: "modalShell"
+  path: "codebot/static_manager/"
+  include: "*.js"
+
+Tool: glob
+Arguments:
+  pattern: "codebot/static_manager/*.html"
+
+Tool: write
+Arguments:
+  path: "codebot/static_manager/modal.js"
+  content: "function showModal(title, body) {\n  modalShell(title, body);\n}"
+
+Tool: edit
+Arguments:
+  path: "codebot/static_manager/manager.js"
+  old_string: "alert('Error occurred')"
+  new_string: "modalShell('Error', 'An error occurred. Please try again.')"
+
+Tool: bash
+Arguments:
+  command: "grep -r 'prompt\\|confirm\\|alert' codebot/static_manager/*.js --include='*.js'"
+  timeout: 10000

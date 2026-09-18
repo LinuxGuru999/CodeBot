@@ -2889,6 +2889,23 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             bot.process = None
             if exit_code == 0:
                 bot.consecutive_errors = 0
+                assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+                if assigned_tid:
+                    try:
+                        from codebot.ticket_engine import TicketStore, TicketState
+                        store_path = STATE_DIR / "tickets.json"
+                        if not store_path.exists():
+                            store_path = Path(".codebot/state/tickets.json")
+                        if store_path.exists():
+                            ts = TicketStore(store_path)
+                            ts.transition(assigned_tid, TicketState.REVIEWING)
+                            logger.info(f"Ticket {assigned_tid} -> REVIEWING (agent {name} completed)")
+                            claims_dir = STATE_DIR / "claims"
+                            for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
+                                cf.unlink(missing_ok=True)
+                    except Exception as te:
+                        logger.warning(f"Ticket transition failed for {assigned_tid}: {te}")
+                    bot._assigned_ticket_id = ''
             else:
                 bot.consecutive_errors += 1
                 if bot.consecutive_errors >= 3:

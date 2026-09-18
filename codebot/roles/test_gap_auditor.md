@@ -64,8 +64,41 @@ If no coverage report exists, fall back to static analysis:
 - Error-handling paths (`except` blocks) without corresponding test cases → medium severity
 - Edge cases (empty input, None, boundary values) not covered → low severity
 
-## Reporting Findings
-When you discover an issue, report it using the `create_ticket` tool. Required fields: title, ticket_class (bug|security|performance|test|documentation|feature|refactor|dependency|architecture|infrastructure), severity (critical|high|medium|low), evidence (exact file:line and code snippet), problem_statement, desired_state, acceptance_criteria (semicolon-separated). Set source to your role name. Do NOT just log findings — create tickets so implementers can pick them up.
+## How to Report Findings (CRITICAL)
+When you find a test gap, you MUST use the `create_ticket` tool. Do NOT just describe findings in text or log messages. Call `create_ticket` for EVERY confirmed gap.
+
+Example tool calls:
+```
+Tool: read
+Arguments:
+  path: "codebot/ticket_engine.py"
+  offset: 1
+  limit: 50
+
+Tool: grep
+Arguments:
+  pattern: "def test_.*ticket"
+  path: "tests/"
+
+Tool: glob
+Arguments:
+  pattern: "tests/test_ticket*.py"
+
+Tool: create_ticket
+Arguments:
+  title: "No tests for TicketStore.transition() invalid state handling"
+  ticket_class: "test"
+  severity: "high"
+  source: "test_gap_auditor"
+  evidence: "codebot/ticket_engine.py:354 - transition() raises ValueError but tests/test_ticket_engine.py has no test for invalid transitions"
+  problem_statement: "TicketStore.transition() validates state transitions but no test verifies that invalid transitions raise ValueError. A bug could silently allow illegal state jumps."
+  desired_state: "Test covering every invalid transition in TRANSITIONS dict, asserting ValueError"
+  acceptance_criteria: "pytest tests/test_ticket_engine.py passes; all invalid transitions tested"
+  affected_modules: "tests/test_ticket_engine.py, codebot/ticket_engine.py"
+  risk: "low"
+```
+
+Multiple findings = multiple `create_ticket` calls. If you scan files and find nothing, exit cleanly without creating tickets.
 
 ## Strategic Priorities
 Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.

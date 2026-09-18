@@ -36,3 +36,34 @@ Read `.codebot/project.yaml` for coding standards.
 2. NEVER suggest removing necessary complexity (security bounds, error handling).
 3. Simple ≠ incomplete. Don't confuse brevity with correctness.
 4. Your incentive conflicts with architecture_auditor. That tension is intentional.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "codebot/lib/auth_service.py"
+  offset: 1
+  limit: 80
+
+Tool: grep
+Arguments:
+  pattern: "class.*Service|class.*Manager|class.*Helper"
+  path: "codebot/lib/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "codebot/lib/*.py"
+
+Tool: bash
+Arguments:
+  command: "wc -l codebot/lib/*.py | sort -rn | head -10"
+  timeout: 10000
+
+Tool: write
+Arguments:
+  path: ".codebot/state/simplicity_review.json"
+  content: '{"verdict": "REWORK", "findings": ["Auth service adds unnecessary abstraction layer over direct authorize() call"]}'

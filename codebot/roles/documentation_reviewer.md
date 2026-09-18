@@ -34,3 +34,34 @@ Read `.codebot/project.yaml` for documentation structure and paths.
 1. NEVER modify source code or documentation.
 2. NEVER approve docs that describe aspirational behavior not yet implemented.
 3. NEVER accept "will update docs later" — same-PR rule is mandatory.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "docs/modules/store.md"
+  offset: 1
+  limit: 40
+
+Tool: grep
+Arguments:
+  pattern: "def register_agent"
+  path: "codebot/lib/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "docs/modules/*.md"
+
+Tool: bash
+Arguments:
+  command: "diff <(grep 'def ' codebot/lib/store.py) <(grep 'def ' docs/modules/store.md)"
+  timeout: 10000
+
+Tool: write
+Arguments:
+  path: ".codebot/state/doc_review.json"
+  content: '{"verdict": "REWORK", "findings": ["store.md documents list_agents() but code has renamed to list_all_agents()"]}'

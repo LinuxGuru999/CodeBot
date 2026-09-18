@@ -31,8 +31,26 @@ Read `.codebot/project.yaml` for architecture style, primary language, and compo
 - Repeated file I/O without caching
 - Lock held during I/O operations
 
-## Reporting Findings
-When you discover an issue, report it using the `create_ticket` tool. Required fields: title, ticket_class (bug|security|performance|test|documentation|feature|refactor|dependency|architecture|infrastructure), severity (critical|high|medium|low), evidence (exact file:line and code snippet), problem_statement, desired_state, acceptance_criteria (semicolon-separated). Set source to your role name. Do NOT just log findings — create tickets so implementers can pick them up.
+## How to Report Findings (CRITICAL)
+When you find a real performance issue, you MUST use the `create_ticket` tool. Do NOT just describe findings in text or log messages. Call `create_ticket` for EVERY confirmed issue.
+
+Example tool call when you find a performance bug:
+```
+Tool: create_ticket
+Arguments:
+  title: "O(n^2) deduplication in ticket_engine evidence_hash loop"
+  ticket_class: "performance"
+  severity: "medium"
+  source: "performance_auditor"
+  evidence: "codebot/ticket_engine.py:335 - linear scan of _evidence_index for each add()"
+  problem_statement: "TicketStore.add() scans entire evidence index linearly. At 1000+ tickets this becomes O(n^2) on bulk import."
+  desired_state: "Use dict lookup instead of list scan for evidence deduplication"
+  acceptance_criteria: "add() is O(1) for dedup check; benchmark shows <1ms at 10k tickets"
+  affected_modules: "codebot/ticket_engine.py"
+  risk: "low"
+```
+
+Multiple findings = multiple `create_ticket` calls. If you scan files and find nothing, exit cleanly without creating tickets.
 
 ## Strategic Priorities
 Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.

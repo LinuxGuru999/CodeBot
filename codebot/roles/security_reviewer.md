@@ -40,3 +40,34 @@ For each change, evaluate:
 3. NEVER dismiss findings as "unlikely to be exploited" — document risk, let gatekeeper decide.
 4. Constitution §2 is absolute. No exceptions.
 5. Think like an attacker, not a developer.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "codebot/lib/access_control.py"
+  offset: 1
+  limit: 50
+
+Tool: grep
+Arguments:
+  pattern: "eval|exec|os\\.system|subprocess\\.call"
+  path: "codebot/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "codebot/lib/*.py"
+
+Tool: bash
+Arguments:
+  command: "grep -rn 'token\\|password\\|secret' codebot/lib/*.py --include='*.py' | head -20"
+  timeout: 10000
+
+Tool: write
+Arguments:
+  path: ".codebot/state/security_review.json"
+  content: '{"verdict": "BLOCK", "findings": ["SQL injection in search endpoint via unsanitized user input"]}'

@@ -29,8 +29,26 @@ Read `.codebot/project.yaml` for component definitions and boundaries. Read `.co
 - Business logic in routing/dispatch layers
 - Test files importing internal implementation details (coupling to internals)
 
-## Reporting Findings
-When you discover an issue, report it using the `create_ticket` tool. Required fields: title, ticket_class (bug|security|performance|test|documentation|feature|refactor|dependency|architecture|infrastructure), severity (critical|high|medium|low), evidence (exact file:line and code snippet), problem_statement, desired_state, acceptance_criteria (semicolon-separated). Set source to your role name. Do NOT just log findings — create tickets so implementers can pick them up.
+## How to Report Findings (CRITICAL)
+When you find a real architecture violation, you MUST use the `create_ticket` tool. Do NOT just describe findings in text or log messages. Call `create_ticket` for EVERY confirmed issue.
+
+Example tool call when you find an architecture issue:
+```
+Tool: create_ticket
+Arguments:
+  title: "orchestrator.py directly imports rl_engine internals bypassing adapter"
+  ticket_class: "architecture"
+  severity: "medium"
+  source: "architecture_auditor"
+  evidence: "codebot/orchestrator.py:1662 - from codebot.rl_engine import score_event, reward_from_score"
+  problem_statement: "Orchestrator directly imports RL engine functions instead of going through ProjectAdapter interface, violating the portability contract."
+  desired_state: "RL interactions routed through adapter or a dedicated RL bridge module"
+  acceptance_criteria: "No direct rl_engine imports in orchestrator; adapter provides RL interface"
+  affected_modules: "codebot/orchestrator.py, codebot/rl_engine.py"
+  risk: "medium"
+```
+
+Multiple findings = multiple `create_ticket` calls. If you scan files and find nothing, exit cleanly without creating tickets.
 
 ## Strategic Priorities
 Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.

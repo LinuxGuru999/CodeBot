@@ -35,3 +35,34 @@ Read `.codebot/project.yaml` for scale targets and architecture style.
 1. NEVER modify source code.
 2. NEVER approve removal of bounds/caps for performance.
 3. Quantify regressions: "adds O(n) per heartbeat, n=10K agents = unacceptable".
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "codebot/lib/store.py"
+  offset: 1
+  limit: 100
+
+Tool: grep
+Arguments:
+  pattern: "for .* in .*\\.values\\(\\)"
+  path: "codebot/lib/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "codebot/lib/*.py"
+
+Tool: bash
+Arguments:
+  command: "grep -rn 'while\\|for ' codebot/lib/*.py | grep -v test | grep -v __pycache__"
+  timeout: 10000
+
+Tool: write
+Arguments:
+  path: ".codebot/state/performance_review.json"
+  content: '{"verdict": "REWORK", "findings": ["O(n) scan per request in list_agents without index"]}'

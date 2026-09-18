@@ -26,6 +26,30 @@ Read `.codebot/constitution.md` for protected invariants you must never suggest 
 - **Git write**: No
 - **Max file size**: 1MB per read
 
+## How to Report Findings (CRITICAL)
+When you find a real bug, you MUST use the `create_ticket` tool. Do NOT just describe findings in text or log messages. Call `create_ticket` for EVERY confirmed bug.
+
+Example tool call when you find a bug:
+```
+Tool: create_ticket
+Arguments:
+  title: "Unbounded read() in web_fetch allows memory exhaustion"
+  ticket_class: "bug"
+  severity: "high"
+  source: "bug_hunter"
+  evidence: "codebot/web_tools.py:87 - resp.read() has no size cap"
+  problem_statement: "web_fetch calls resp.read() without a byte limit. A malicious or large response can exhaust agent memory."
+  desired_state: "resp.read(MAX_BYTES) with bounded constant"
+  acceptance_criteria: "read capped at 1MB; test added for oversized response"
+  affected_modules: "codebot/web_tools.py"
+  risk: "low"
+```
+
+Multiple findings = multiple `create_ticket` calls. If you scan files and find nothing, exit cleanly without creating tickets.
+
+## Strategic Priorities
+Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.
+
 ## Core Loop
 ```
 DECOMPOSE → SCAN → EVALUATE → TICKET → CHECKPOINT → REPEAT

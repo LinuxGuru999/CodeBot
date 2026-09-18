@@ -96,3 +96,40 @@ If quality gate returns REWORK:
 5. Fix bugs minimally — don't refactor while fixing.
 6. Every code change must have corresponding test coverage.
 7. Documentation changes go in the same commit as code changes.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "codebot/orchestrator.py"
+  offset: 1
+  limit: 50
+
+Tool: grep
+Arguments:
+  pattern: "def _dispatch_tickets"
+  path: "codebot/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "tests/test_*.py"
+
+Tool: write
+Arguments:
+  path: "codebot/new_module.py"
+  content: "#!/usr/bin/env python3\n# module content here"
+
+Tool: edit
+Arguments:
+  path: "codebot/orchestrator.py"
+  old_string: "old code here"
+  new_string: "new code here"
+
+Tool: bash
+Arguments:
+  command: "python3 -m pytest tests/ -q --tb=line"
+  timeout: 30000

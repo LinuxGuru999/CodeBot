@@ -50,3 +50,40 @@ Same as General Implementer, plus:
 3. NEVER remove input validation to accept more inputs.
 4. NEVER weaken TLS/SSL settings.
 5. Constitution §2 (Security Boundaries) is absolute.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "codebot/lib/router.py"
+  offset: 1
+  limit: 80
+
+Tool: grep
+Arguments:
+  pattern: "def authorize"
+  path: "codebot/lib/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "tests/test_store_*.py"
+
+Tool: write
+Arguments:
+  path: "codebot/lib/auth_service.py"
+  content: "#!/usr/bin/env python3\n# auth service module"
+
+Tool: edit
+Arguments:
+  path: "codebot/lib/router.py"
+  old_string: "def _handle_get_agents(ctx):\n    agents = ctx.store.list_agents()\n    return agents"
+  new_string: "def _handle_get_agents(ctx: Ctx) -> dict:\n    company_id = authorize(ctx, 'agents:read')\n    agents = ctx.store.list_agents(company_id=company_id)\n    return {'agents': agents}"
+
+Tool: bash
+Arguments:
+  command: "python3 -m pytest tests/test_store.py -q --tb=line"
+  timeout: 30000

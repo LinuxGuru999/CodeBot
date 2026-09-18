@@ -44,3 +44,40 @@ When code changes touch any of these, update the corresponding doc:
 2. NEVER remove documentation to hide missing implementation.
 3. NEVER document aspirational behavior that doesn't exist yet.
 4. Accuracy over completeness — better to say "unknown" than lie.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "docs/modules/store.md"
+  offset: 1
+  limit: 40
+
+Tool: grep
+Arguments:
+  pattern: "def register_agent"
+  path: "codebot/lib/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "docs/modules/*.md"
+
+Tool: write
+Arguments:
+  path: "docs/modules/auth_service.md"
+  content: "# Module: auth_service\n\n## Summary\nProvides authentication and authorization for API endpoints.\n\n## Purpose\nCalled by router.py to validate credentials before business logic.\n\n## Why\nCentralizes auth to avoid duplication across routes."
+
+Tool: edit
+Arguments:
+  path: "docs/modules/store.md"
+  old_string: "## Purpose\nManages agent data storage."
+  new_string: "## Purpose\nManages agent data storage with thread-safe RLock per Store instance.\n\n## Why\nSingle-process invariant means we use RLock, not multiprocessing shared state."
+
+Tool: bash
+Arguments:
+  command: "python3 -c \"import ast; ast.parse(open('codebot/lib/store.py').read())\""
+  timeout: 10000

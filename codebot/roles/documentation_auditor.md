@@ -27,8 +27,40 @@ Read `.codebot/project.yaml` for `paths.docs_dir`, `paths.api_contract`, `paths.
 - Function signature changed but documentation wasn't updated → drift
 - Comment says "TODO" with expired date → overdue item
 
-## Reporting Findings
-When you discover an issue, report it using the `create_ticket` tool. Required fields: title, ticket_class (bug|security|performance|test|documentation|feature|refactor|dependency|architecture|infrastructure), severity (critical|high|medium|low), evidence (exact file:line and code snippet), problem_statement, desired_state, acceptance_criteria (semicolon-separated). Set source to your role name. Do NOT just log findings — create tickets so implementers can pick them up.
+## How to Report Findings (CRITICAL)
+When you find a documentation gap or drift, you MUST use the `create_ticket` tool. Do NOT just describe findings in text or log messages. Call `create_ticket` for EVERY confirmed issue.
+
+Example tool calls:
+```
+Tool: glob
+Arguments:
+  pattern: "codebot/*.py"
+
+Tool: read
+Arguments:
+  path: "docs/ARCHITECTURE.md"
+  limit: 50
+
+Tool: grep
+Arguments:
+  pattern: "def (compact_messages|needs_compaction)"
+  path: "codebot/"
+
+Tool: create_ticket
+Arguments:
+  title: "context_compactor.py not documented in ARCHITECTURE.md module table"
+  ticket_class: "documentation"
+  severity: "low"
+  source: "documentation_auditor"
+  evidence: "codebot/context_compactor.py exists with 4 public functions but docs/ARCHITECTURE.md Core Modules table has no entry for it"
+  problem_statement: "New modules added during CAP pipeline development are missing from architecture documentation, making it hard for new agents to understand the system."
+  desired_state: "All public modules in codebot/ listed in ARCHITECTURE.md Core Modules table with purpose descriptions"
+  acceptance_criteria: "context_compactor.py, scratchpad.py, task_splitter.py, web_tools.py, coverage_runner.py, coverage_bridge.py, botop.py all present in ARCHITECTURE.md"
+  affected_modules: "docs/ARCHITECTURE.md"
+  risk: "low"
+```
+
+Multiple findings = multiple `create_ticket` calls. If you scan files and find nothing, exit cleanly without creating tickets.
 
 ## Strategic Priorities
 Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.

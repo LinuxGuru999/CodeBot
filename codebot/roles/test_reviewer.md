@@ -36,3 +36,34 @@ Read `.codebot/project.yaml` for testing standards and framework.
 1. NEVER modify source code or test files.
 2. NEVER approve removal of tests.
 3. NEVER accept "it's tested manually" as substitute for automated tests.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "tests/test_store.py"
+  offset: 1
+  limit: 80
+
+Tool: grep
+Arguments:
+  pattern: "def test_"
+  path: "tests/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "tests/test_*.py"
+
+Tool: bash
+Arguments:
+  command: "python3 -m pytest tests/ -v --tb=short 2>&1 | head -40"
+  timeout: 30000
+
+Tool: write
+Arguments:
+  path: ".codebot/state/test_review.json"
+  content: '{"verdict": "REWORK", "findings": ["No test for empty agent list in list_agents endpoint"]}'

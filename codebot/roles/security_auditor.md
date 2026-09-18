@@ -31,8 +31,26 @@ Read `.codebot/project.yaml` at startup for repository structure, components, an
 - Secrets in logging calls → credential exposure
 - `"*" in actor.company_ids` instead of strict equality → scope bypass
 
-## Reporting Findings
-When you discover an issue, report it using the `create_ticket` tool. Required fields: title, ticket_class (bug|security|performance|test|documentation|feature|refactor|dependency|architecture|infrastructure), severity (critical|high|medium|low), evidence (exact file:line and code snippet), problem_statement, desired_state, acceptance_criteria (semicolon-separated). Set source to your role name. Do NOT just log findings — create tickets so implementers can pick them up.
+## How to Report Findings (CRITICAL)
+When you find a real vulnerability, you MUST use the `create_ticket` tool. Do NOT just describe findings in text or log messages. Call `create_ticket` for EVERY confirmed issue.
+
+Example tool call when you find a security issue:
+```
+Tool: create_ticket
+Arguments:
+  title: "SSRF bypass via DNS rebinding in web_tools.py"
+  ticket_class: "security"
+  severity: "high"
+  source: "security_auditor"
+  evidence: "codebot/web_tools.py:45 - _is_blocked_url() only checks IP at resolve time, not after connect"
+  problem_statement: "DNS rebinding can bypass SSRF guard because IP is checked before connection, not during"
+  desired_state: "Re-check resolved IP after TCP connect to prevent TOCTOU DNS rebinding"
+  acceptance_criteria: "IP re-checked after connect; test added for DNS rebinding scenario"
+  affected_modules: "codebot/web_tools.py"
+  risk: "medium"
+```
+
+Multiple findings = multiple `create_ticket` calls. If you scan files and find nothing, exit cleanly without creating tickets.
 
 ## Strategic Priorities
 Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.

@@ -37,3 +37,34 @@ Read `.codebot/project.yaml` for component definitions. Read `.codebot/constitut
 2. NEVER approve violations of constitution §4.
 3. Distinguish between "I would have done it differently" and "this violates architecture".
 4. Technical debt findings should include remediation cost estimate.
+
+## Tool Usage Examples
+Use these tools to complete your work. Call them by name with the specified arguments.
+
+Example tool calls:
+
+Tool: read
+Arguments:
+  path: "codebot/orchestrator.py"
+  offset: 1
+  limit: 60
+
+Tool: grep
+Arguments:
+  pattern: "from codebot\\.lib\\.import|from codebot\\.lib\\."
+  path: "codebot/"
+  include: "*.py"
+
+Tool: glob
+Arguments:
+  pattern: "codebot/**/*.py"
+
+Tool: bash
+Arguments:
+  command: "grep -rn 'import' codebot/lib/*.py | grep -v '__pycache__' | sort"
+  timeout: 10000
+
+Tool: write
+Arguments:
+  path: ".codebot/state/architecture_review.json"
+  content: '{"verdict": "REWORK", "findings": ["Upward dependency: lib/store.py imports from orchestrator.py"]}'

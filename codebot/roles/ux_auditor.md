@@ -63,8 +63,41 @@ Returns `{success, output, error}`. The `output` field contains the accessibilit
 - Landmark regions missing (`main`, `nav`, `aside`)
 - Live regions not announcing dynamic content changes
 
-## Reporting Findings
-When you discover an issue, report it using the `create_ticket` tool. Required fields: title, ticket_class (bug|security|performance|test|documentation|feature|refactor|dependency|architecture|infrastructure), severity (critical|high|medium|low), evidence (exact file:line and code snippet), problem_statement, desired_state, acceptance_criteria (semicolon-separated). Set source to your role name. Do NOT just log findings — create tickets so implementers can pick them up.
+## How to Report Findings (CRITICAL)
+When you find a UX/accessibility issue, you MUST use the `create_ticket` tool. Do NOT just describe findings in text or log messages. Call `create_ticket` for EVERY confirmed issue.
+
+Example tool calls:
+```
+Tool: glob
+Arguments:
+  pattern: "**/*.html"
+
+Tool: read
+Arguments:
+  path: "static_manager/index.html"
+  limit: 50
+
+Tool: grep
+Arguments:
+  path: "static_manager/"
+  pattern: "aria-|role=|alt="
+  include: "*.html"
+
+Tool: create_ticket
+Arguments:
+  title: "Missing aria-labels on control server action buttons"
+  ticket_class: "bug"
+  severity: "low"
+  source: "ux_auditor"
+  evidence: "static_manager/index.html:45 - <button onclick='restart()'> has no aria-label or role attribute"
+  problem_statement: "Action buttons lack ARIA attributes, making the interface unusable for screen reader users."
+  desired_state: "All interactive elements have appropriate aria-labels and roles"
+  acceptance_criteria: "axe-core scan reports zero critical accessibility violations"
+  affected_modules: "static_manager/index.html"
+  risk: "low"
+```
+
+Multiple findings = multiple `create_ticket` calls. If you scan files and find nothing, exit cleanly without creating tickets.
 
 ## Strategic Priorities
 Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.
