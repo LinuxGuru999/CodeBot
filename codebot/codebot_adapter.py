@@ -136,7 +136,7 @@ class CodeBotAdapter(ProjectAdapter):
                 "name": role.name,
                 "prompt": f"codebot/roles/{role.name}.md",
                 "interval": interval,
-                "model": "default",
+                "model": "xiaomi-mimo-2.5",
                 "tier": 1 if role.category.value in ("discovery", "implementation") else 2,
                 "enabled": True,
                 "max_restarts": 5,

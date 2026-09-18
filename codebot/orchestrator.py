@@ -108,7 +108,20 @@ except ImportError:
 CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "30"))
 MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "3"))
 MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "2"))
+MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "20"))
+MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "7"))
+MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "1"))
 USE_MANIFEST_SCHEDULER = os.getenv("CODEBOT_MANIFEST_SCHEDULER", "0") == "1"
+
+IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
+    "general_implementer", "backend_implementer", "frontend_implementer",
+    "test_implementer", "migration_implementer", "documentation_implementer",
+})
+
+DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
+    "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
+    "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
+})
 
 
 def _get_available_memory_mb() -> float:
@@ -193,7 +206,7 @@ def _build_worker_pool() -> frozenset[str]:
     return frozenset(c.name for c in BOT_REGISTRY if c.name.startswith("worker-"))
 
 
-MIN_ROTATING_SLOTS = 10
+MIN_ROTATING_SLOTS = 28
 
 
 def worker_reserved_slots(max_concurrent: int) -> int:
@@ -825,7 +838,25 @@ def _count_running_non_workers(bots: dict[str, BotState] | None = None) -> int:
     return n
 
 
-def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False, runner_mode: str = "api", bot_model: str = "", bot_name: str = "") -> tuple[bool, str]:
+def _count_running_by_category(bots: dict[str, BotState] | None) -> tuple[int, int, int]:
+    implementers = 0
+    discovery = 0
+    other = 0
+    if not bots:
+        return implementers, discovery, other
+    for name, bot in bots.items():
+        if bot.process is None or bot.process.poll() is not None:
+            continue
+        if name in IMPLEMENTER_ROLE_NAMES:
+            implementers += 1
+        elif name in DISCOVERY_ROLE_NAMES:
+            discovery += 1
+        else:
+            other += 1
+    return implementers, discovery, other
+
+
+def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False, runner_mode: str = "api", bot_model: str = "", bot_name: str = "", is_overture: bool = False) -> tuple[bool, str]:
     now = time.time()
     running = _count_api_runner_processes()
     if bots is not None and bot_model:
@@ -848,6 +879,16 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
         slots = rotating_slots(GATEWAY_MAX_CONCURRENT)
         if running_non >= slots:
             return False, f"rotating slots full ({slots}/{slots})"
+    impl_running, discovery_running, other_running = _count_running_by_category(bots)
+    if bot_name in IMPLEMENTER_ROLE_NAMES:
+        if impl_running >= MAX_IMPLEMENTER_SLOTS:
+            return False, f"implementer slots full ({impl_running}/{MAX_IMPLEMENTER_SLOTS})"
+    elif bot_name in DISCOVERY_ROLE_NAMES:
+        if discovery_running >= MAX_DISCOVERY_SLOTS:
+            return False, f"discovery slots full ({discovery_running}/{MAX_DISCOVERY_SLOTS})"
+    else:
+        if other_running >= MAX_NON_IMPLEMENTER_SLOTS:
+            return False, f"non-implementer slots full ({other_running}/{MAX_NON_IMPLEMENTER_SLOTS})"
     cap = GATEWAY_MAX_CONCURRENT
     if running >= cap:
         return False, f"cap {running}/{cap} running"
@@ -861,15 +902,16 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
     except Exception:
         last = 0.0
     gap = now - last
-    if bot_name in WORKER_POOL:
-        if gap < 1:
-            return False, f"gap {gap:.1f}s<1s"
-    elif gap < GATEWAY_MIN_SPAWN_GAP:
-        return False, f"gap {gap:.0f}s<{GATEWAY_MIN_SPAWN_GAP}s"
+    if not is_overture:
+        if bot_name in WORKER_POOL:
+            if gap < 1:
+                return False, f"gap {gap:.1f}s<1s"
+        elif gap < GATEWAY_MIN_SPAWN_GAP:
+            return False, f"gap {gap:.0f}s<{GATEWAY_MIN_SPAWN_GAP}s"
     return True, "slot available"
 
 
-def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: str | None = None, bots: dict[str, BotState] | None = None) -> bool:
+def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: str | None = None, bots: dict[str, BotState] | None = None, is_overture: bool = False) -> bool:
     """Spawn a bot as a subprocess. Returns True on success."""
     if (STATE_DIR / f"{bot.config.name}.paused").exists():
         update_bot_state(bot, "paused")
@@ -910,7 +952,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
         return False
     due = bot.next_run_at
     is_queued = _is_queued(bot)
-    ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api", bot_model=bot.config.model, bot_name=bot.config.name)
+    ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api", bot_model=bot.config.model, bot_name=bot.config.name, is_overture=is_overture)
     if not ok:
         if due:
             bot.next_run_at = due
@@ -987,10 +1029,12 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
 
         mission_file = LOGS_DIR / f"{bot.config.name}.mission"
         mission_file.write_text(message, encoding="utf-8")
+        child_env = os.environ.copy()
+        child_env["PYTHONPATH"] = str(BOTS_DIR)
         process = subprocess.Popen(
             [
                 sys.executable,
-                str(BOTS_DIR / "api_runner.py"),
+                "-m", "codebot.api_runner",
                 bot.config.name,
                 bot.config.model,
                 str(heartbeat_file),
@@ -1002,7 +1046,8 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             ],
             stdout=log_fh,
             stderr=subprocess.STDOUT,
-            cwd=str(BOTS_DIR.parent),
+            cwd=str(BOTS_DIR),
+            env=child_env,
             start_new_session=True,
         )
 
@@ -2945,7 +2990,7 @@ def main() -> None:
     _codebot_adapter = None
     try:
         from codebot.codebot_bootstrap import bootstrap as _cb_bootstrap
-        _codebot_adapter = _cb_bootstrap(BOTS_DIR.parent)
+        _codebot_adapter = _cb_bootstrap(BOTS_DIR)
         if _codebot_adapter:
             logger.info("CodeBot core bootstrapped: project=%s", _codebot_adapter.project_name())
     except ImportError:
@@ -2979,10 +3024,9 @@ def main() -> None:
             [b for b in bots.values() if b.config.enabled],
             key=lambda b: (TIER_PRIORITY.get(b.config.name, 2), b.config.interval_seconds),
         )
-        logger.info(f"Overture: {len(order)} bots tier-ordered, {GATEWAY_MIN_SPAWN_GAP}s apart")
+        logger.info(f"Overture: {len(order)} bots tier-ordered, immediate start")
         for bot in order:
-            start_bot(bot, bots=bots)
-            time.sleep(GATEWAY_MIN_SPAWN_GAP)
+            start_bot(bot, bots=bots, is_overture=True)
 
     logger.info("Orchestrator starting")
     logger.info(f"Health check every {args.check_interval}s")
