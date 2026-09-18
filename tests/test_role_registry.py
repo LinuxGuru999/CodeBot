@@ -26,6 +26,7 @@ from codebot.role_registry import (
     CONTROL_ROLES,
     STANDARD_TOOLS,
     READ_ONLY_TOOLS,
+    UX_AUDIT_TOOLS,
 )
 
 
@@ -91,7 +92,10 @@ class TestRoleRegistry:
 
     def test_discovery_roles_read_only(self):
         for role in DISCOVERY_ROLES:
-            assert role.tool_policy.allowed_tools == READ_ONLY_TOOLS
+            if role.name == "ux_auditor":
+                assert role.tool_policy.allowed_tools == UX_AUDIT_TOOLS
+            else:
+                assert role.tool_policy.allowed_tools == READ_ONLY_TOOLS
 
     def test_implementation_roles_have_git_write(self):
         for role in IMPLEMENTATION_ROLES:
