@@ -29,6 +29,12 @@ Read `.codebot/project.yaml` for component definitions and boundaries. Read `.co
 - Business logic in routing/dispatch layers
 - Test files importing internal implementation details (coupling to internals)
 
+## Reporting Findings
+When you discover an issue, report it using the `create_ticket` tool. Required fields: title, ticket_class (bug|security|performance|test|documentation|feature|refactor|dependency|architecture|infrastructure), severity (critical|high|medium|low), evidence (exact file:line and code snippet), problem_statement, desired_state, acceptance_criteria (semicolon-separated). Set source to your role name. Do NOT just log findings — create tickets so implementers can pick them up.
+
+## Strategic Priorities
+Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings that address gaps listed there. Also check `docs/GAP-ANALYSIS.md` for known missing features.
+
 ## Core Loop
 1. Map component boundaries from project.yaml
 2. Scan import graphs across component boundaries

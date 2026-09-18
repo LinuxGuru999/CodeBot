@@ -432,6 +432,29 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_ticket",
+            "description": "Create a new work ticket in the TicketStore. Use this to report bugs, security issues, performance problems, missing tests, documentation gaps, or feature requests discovered during code analysis.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short descriptive title of the issue found"},
+                    "ticket_class": {"type": "string", "enum": ["bug", "feature", "security", "performance", "documentation", "test", "refactor", "dependency", "architecture", "infrastructure"], "description": "Category of work needed"},
+                    "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "How severe is this issue"},
+                    "source": {"type": "string", "description": "Your role name (e.g., bug_hunter, security_auditor)"},
+                    "evidence": {"type": "string", "description": "Exact code snippet, file path:line, or log output proving the issue"},
+                    "problem_statement": {"type": "string", "description": "What is wrong and why it matters"},
+                    "desired_state": {"type": "string", "description": "What correct behavior looks like"},
+                    "acceptance_criteria": {"type": "string", "description": "Semicolon-separated list of conditions that prove this is fixed"},
+                    "affected_modules": {"type": "string", "description": "Comma-separated list of files or directories affected"},
+                    "risk": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "Risk level of implementing the fix"},
+                },
+                "required": ["title", "ticket_class", "severity", "evidence", "problem_statement", "desired_state", "acceptance_criteria"],
+            },
+        },
+    },
 ]
 
 try:

@@ -79,18 +79,18 @@ class Gatekeeper:
         if passed:
             decision = "COMPLETE"
             logger.info("ticket %s PASSED all quality gates", ticket_id)
-        elif rework_count >= MAX_REWORK_ATTEMPTS:
-            decision = "REWORK"
-            logger.warning(
-                "ticket %s FAILED after %d rework attempts — cycling to REWORK for QA review",
-                ticket_id, rework_count,
-            )
         else:
             decision = "REWORK"
-            logger.info(
-                "ticket %s FAILED gates (attempt %d/%d) — sending to REWORK",
-                ticket_id, rework_count + 1, MAX_REWORK_ATTEMPTS,
-            )
+            if rework_count >= MAX_REWORK_ATTEMPTS:
+                logger.warning(
+                    "ticket %s FAILED %d attempts — triggering prompt evolution + REWORK",
+                    ticket_id, rework_count + 1,
+                )
+            else:
+                logger.info(
+                    "ticket %s FAILED gates (attempt %d) — sending to REWORK",
+                    ticket_id, rework_count + 1,
+                )
 
         failed_gates = [
             ev.gate_name for ev in evaluations
@@ -104,6 +104,7 @@ class Gatekeeper:
             "failed_gates": failed_gates,
             "total_gates": len(evaluations),
             "rework_count": rework_count,
+            "evolve_prompt": not passed and rework_count >= MAX_REWORK_ATTEMPTS,
             "timestamp": time.time(),
         }
 

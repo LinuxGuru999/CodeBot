@@ -757,6 +757,9 @@ def record_event_reward(
     bs["last_reward"] = float(reward)
     bs["last_score"] = int(score)
 
+    prev_reward = bs.get("last_improvement_reward")
+    decay_epsilon(bs, float(reward), prev_reward)
+
     # improvement tracking
     prev_best = bs.get("last_improvement_reward")
     if prev_best is None or float(reward) > float(prev_best) + 0.05:

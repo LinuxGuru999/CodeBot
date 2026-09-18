@@ -1755,6 +1755,23 @@ def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
             )
             return True
 
+        consec = int(bot_state.get("consecutive_failures", 0))
+        if consec >= 3:
+            write_trigger(
+                bot_name, score_result["score"], reward,
+                "evolve_after_retries",
+                f"{consec} consecutive failures, evolving prompt",
+                score_result.get("breakdown", {}),
+                event, bot_state,
+            )
+            logger.info(f"Alignment pipeline: {bot_name} {consec} consecutive failures, prompt evolution triggered")
+            mark_event_processed(
+                event_file, event,
+                score_result["score"], reward,
+                "evolve_after_retries",
+            )
+            return True
+
         mark_event_processed(
             event_file, event,
             score_result["score"], reward,
