@@ -2957,6 +2957,17 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         _dispatch_tickets_to_implementers(bots)
     except Exception as e:
         logger.warning(f"Ticket dispatch failed: {e}")
+    try:
+        from codebot.prompt_optimizer import consume_triggers
+        triggers_dir = STATE_DIR / "alignment_triggers"
+        roles_dir = BOTS_DIR / "codebot" / "roles"
+        consumed = consume_triggers(triggers_dir, roles_dir)
+        if consumed:
+            logger.info(f"Prompt optimizer: evolved {consumed} role prompt(s)")
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"Prompt optimizer failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Status & Control
