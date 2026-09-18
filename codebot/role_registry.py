@@ -157,6 +157,7 @@ class AgentTask:
 
 STANDARD_TOOLS = frozenset({"read", "write", "edit", "grep", "glob", "bash"})
 READ_ONLY_TOOLS = frozenset({"read", "grep", "glob"})
+UX_AUDIT_TOOLS = frozenset({"read", "grep", "glob", "screenshot", "a11y_snapshot"})
 STANDARD_COMMANDS = frozenset({
     "python3", "pytest", "ls", "wc", "cat", "head", "tail",
     "git", "cp", "mv", "mkdir", "date", "realpath",
@@ -224,6 +225,14 @@ DISCOVERY_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS | frozenset({"pip"}), "project_root", network_access=True),
         incentive="Find supply chain risks.",
+    ),
+    AgentRole(
+        name="ux_auditor",
+        category=RoleCategory.DISCOVERY,
+        description="Evaluates UI for usability, accessibility (WCAG), and workflow friction using static analysis and Playwright browser snapshots",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node"}), "project_root", network_access=True),
+        incentive="Find usability issues, accessibility violations, and workflow friction.",
     ),
 ]
 
