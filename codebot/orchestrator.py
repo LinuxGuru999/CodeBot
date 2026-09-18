@@ -853,8 +853,8 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
         return False, f"cap {running}/{cap} running"
     if runner_mode == "api":
         available = _get_available_memory_mb()
-        if available < BOTNET_MIN_MEMORY_MB:
-            return False, f"memory {available:.0f}MB < {BOTNET_MIN_MEMORY_MB}MB"
+        if available < CODEBOT_MIN_MEMORY_MB:
+            return False, f"memory {available:.0f}MB < {CODEBOT_MIN_MEMORY_MB}MB"
     marker = STATE_DIR / ".last_spawn"
     try:
         last = float(marker.read_text().strip().split()[0]) if marker.exists() else 0.0
@@ -2937,9 +2937,8 @@ def main() -> None:
     # the 3-bot fallback. Now that the adapter is wired, reload from it.
     import codebot.orchestrator as _self_mod
     _self_mod.BOT_REGISTRY = _load_bot_registry()
-    BOT_REGISTRY = _self_mod.BOT_REGISTRY
     bots: dict[str, BotState] = {}
-    for config in BOT_REGISTRY:
+    for config in _self_mod.BOT_REGISTRY:
         bots[config.name] = BotState(config=config)
 
     def shutdown_handler(signum, frame):
