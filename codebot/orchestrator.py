@@ -104,7 +104,7 @@ except ImportError:
     _GATEWAY = False
     _PG_MAX_CONCURRENT = 10
     GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "20"))
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "28"))
+    GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "48"))
 
 CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "30"))
 MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "10"))
@@ -221,11 +221,11 @@ def _build_worker_pool() -> frozenset[str]:
     return frozenset(c.name for c in BOT_REGISTRY if c.name in IMPLEMENTER_ROLE_NAMES or any(c.name.startswith(f"{r}-") for r in IMPLEMENTER_ROLE_NAMES))
 
 
-MIN_ROTATING_SLOTS = 28
+MIN_ROTATING_SLOTS = 8
 
 
 def worker_reserved_slots(max_concurrent: int) -> int:
-    return min(len(WORKER_POOL), max(0, max_concurrent - MIN_ROTATING_SLOTS))
+    return len(WORKER_POOL)
 
 
 def rotating_slots(max_concurrent: int) -> int:
@@ -514,15 +514,17 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     role_map = {c.name: c for c in base_impl}
     ticket_classes = _peek_ticket_classes()
     out = list(non_impl)
-    added = 0
+    name_counts: dict[str, int] = {}
     for i in range(target):
         tc_val = ticket_classes[i] if i < len(ticket_classes) else "feature"
         base_name = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
         role = role_map.get(base_name, base_impl[0])
-        idx = added % len(WORKER_MODEL_CYCLE)
+        count = name_counts.get(role.name, 0)
+        name_counts[role.name] = count + 1
+        name = role.name if count == 0 else f"{role.name}-{count+1}"
+        idx = i % len(WORKER_MODEL_CYCLE)
         model = WORKER_MODEL_CYCLE[idx]
         fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
-        name = role.name if added == 0 or (added < len(base_impl) and i < len(base_impl)) else f"{role.name}-{added+1}"
         tier = 13 if model in MODEL_TIER_EXPENSIVE or "thinking" in model else 12
         out.append(BotConfig(
             name, role.prompt_file, role.interval_seconds, role.heartbeat_timeout,
@@ -531,7 +533,6 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
             max_restarts=role.max_restarts,
         ))
         TIER_PRIORITY[name] = tier
-        added += 1
     return out
 
 
@@ -2894,6 +2895,14 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if alive:
             update_bot_state(bot, "running")
     _log_bot_statuses(bots)
+    try:
+        _sweep_orphan_claims(bots)
+    except Exception:
+        pass
+    try:
+        _dispatch_tickets_to_implementers(bots)
+    except Exception as e:
+        logger.warning(f"Ticket dispatch failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Status & Control
