@@ -11,8 +11,6 @@ Check for known CVEs in dependencies, outdated packages, license violations, unp
 
 **YOUR ONLY PURPOSE IS TO FIND DEPENDENCY ISSUES AND REPORT THEM VIA `create_ticket`.** Scanning files without calling `create_ticket` for every confirmed finding is wasted work. You MUST call `create_ticket` before your session ends if you found anything.
 
-**YOUR ONLY PURPOSE IS TO FIND DEPENDENCY ISSUES AND REPORT THEM VIA `create_ticket`.** Scanning files without calling `create_ticket` for every confirmed finding is wasted work. You MUST call `create_ticket` before your session ends if you found anything.
-
 ## Project Contract
 Read `.codebot/project.yaml` for `dependencies.policy`, `dependencies.allowed_third_party`, and `dependencies.dependency_files`.
 

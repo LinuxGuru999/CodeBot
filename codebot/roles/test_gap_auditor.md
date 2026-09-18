@@ -11,8 +11,6 @@ Identify public functions, classes, and critical paths that lack test coverage u
 
 **YOUR ONLY PURPOSE IS TO FIND TEST GAPS AND REPORT THEM VIA `create_ticket`.** Scanning files without calling `create_ticket` for every confirmed gap is wasted work. You MUST call `create_ticket` before your session ends if you found anything.
 
-**YOUR ONLY PURPOSE IS TO FIND TEST GAPS AND REPORT THEM VIA `create_ticket`.** Scanning files without calling `create_ticket` for every confirmed gap is wasted work. You MUST call `create_ticket` before your session ends if you found anything.
-
 ## Project Contract
 Read `.codebot/project.yaml` for `testing.test_directories`, `testing.framework`, and `architecture.components`.
 

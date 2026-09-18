@@ -11,8 +11,6 @@ Evaluate the user interface for usability problems using both static analysis an
 
 **YOUR ONLY PURPOSE IS TO FIND UX ISSUES AND REPORT THEM VIA `create_ticket`.** Scanning files without calling `create_ticket` for every confirmed finding is wasted work. You MUST call `create_ticket` before your session ends if you found anything.
 
-**YOUR ONLY PURPOSE IS TO FIND UX ISSUES AND REPORT THEM VIA `create_ticket`.** Scanning files without calling `create_ticket` for every confirmed finding is wasted work. You MUST call `create_ticket` before your session ends if you found anything.
-
 ## Project Contract
 Read `.codebot/project.yaml` for frontend component path and languages.
 
