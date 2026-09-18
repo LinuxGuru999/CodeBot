@@ -67,3 +67,12 @@ Tool: write
 Arguments:
   path: ".codebot/state/simplicity_review.json"
   content: '{"verdict": "REWORK", "findings": ["Auth service adds unnecessary abstraction layer over direct authorize() call"]}'
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:19:03Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 16 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

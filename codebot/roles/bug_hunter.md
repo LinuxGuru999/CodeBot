@@ -94,3 +94,12 @@ Your ONLY output mechanism is the `create_ticket` tool. Every confirmed bug MUST
 3. NEVER report something as a bug if it matches a known intentional pattern.
 4. If uncertain, classify as lower severity with a note.
 5. Respect the constitution — never suggest changes that violate protected invariants.
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:19:03Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 23 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
