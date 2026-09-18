@@ -54,8 +54,9 @@ def discover_adapter_class(project_root: Path) -> Any | None:
     adapter_candidates = [
         f"codebot.{project_name}_adapter",
         f"{project_name}_adapter",
-        "codebot.monitor_adapter",
     ]
+    if project_name == "monitor":
+        adapter_candidates.append("codebot.monitor_adapter")
     for adapter_module in adapter_candidates:
         class_name = "".join(w.capitalize() for w in adapter_module.rsplit(".", 1)[-1].replace("_", " ").split()).replace(" ", "")
         if not class_name.endswith("Adapter"):
