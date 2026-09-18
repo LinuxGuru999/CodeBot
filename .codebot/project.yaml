@@ -1,0 +1,119 @@
+# CodeBot Project Contract
+# Standardized portable project interface for autonomous software engineering.
+# Every CodeBot-managed repository MUST contain this file at .codebot/project.yaml.
+#
+# Schema version: 1.0
+# Last updated: 2026-09-18
+
+schema_version: "1.0"
+
+project:
+  name: "monitor"
+  display_name: "Monitor Platform"
+  description: "Self-hosted fleet monitoring, security, and management platform with AI-driven continuous improvement."
+  repository_root: "."
+  primary_language: "python"
+  languages:
+    - python
+    - javascript
+    - css
+  python_version: "3.14.7"
+
+architecture:
+  style: "monorepo"
+  components:
+    - name: "manager"
+      path: "Monitor-Manager-Python/"
+      type: "backend"
+      language: "python"
+      description: "Central manager: REST API, SSE, auth, storage, plugins, reports"
+    - name: "client"
+      path: "Monitor-Client-Python/"
+      type: "agent"
+      language: "python"
+      description: "Per-machine agent: health collection, terminal, updates, NetShield sensor"
+    - name: "lib-common"
+      path: "lib-common/"
+      type: "shared_kernel"
+      language: "python"
+      description: "Canonical shared library vendored into manager and client"
+    - name: "botnet"
+      path: "bots/"
+      type: "autonomous_improvement"
+      language: "python"
+      description: "AI agent fleet for continuous code discovery, implementation, and review"
+    - name: "frontend"
+      path: "Monitor-Manager-Python/static_manager/"
+      type: "frontend"
+      language: "javascript"
+      description: "Admin console SPA (vanilla JS/CSS)"
+
+testing:
+  framework: "pytest"
+  test_command: "python3 -m pytest -q"
+  test_directories:
+    - "Monitor-Manager-Python/tests/"
+    - "Monitor-Client-Python/tests/"
+    - "lib-common/tests/"
+    - "bots/tests/"
+  coverage_tool: "pytest-cov"
+  lint_tool: "none"
+  type_checker: "mypy"
+  type_check_command: "mypy --config-file mypy.ini"
+
+dependencies:
+  policy: "stdlib-only"
+  allowed_third_party:
+    - name: "argon2-cffi"
+      scope: "manager"
+      justification: "Password hashing (ADR required for additions)"
+    - name: "pytest"
+      scope: "dev"
+      justification: "Test runner"
+  dependency_files:
+    - "Monitor-Manager-Python/pyproject.toml"
+    - "Monitor-Client-Python/pyproject.toml"
+    - "lib-common/pyproject.toml"
+
+paths:
+  state_dir: "bots/state/"
+  logs_dir: "bots/logs/"
+  docs_dir: "docs/"
+  issues_dir: "docs/issues/"
+  modules_docs_dir: "docs/modules/"
+  adr_dir: "docs/adr/"
+  api_contract: "API_CONTRACT.md"
+  entrypoint: "ENTRYPOINT.md"
+  context_map: "CONTEXT-MAP.md"
+  bugs_file: "BUGS.md"
+  features_file: "FEATURES.md"
+  roadmap_file: "ROADMAP.md"
+  queue_file: "bots/QUEUE.md"
+
+security:
+  ssrf_protection: true
+  bearer_token_auth: true
+  password_hashing: "argon2id"
+  rate_limiting: true
+  security_headers: true
+  blocklist_validation: true
+  tls_verification_default: true
+
+autonomy:
+  level: 2
+  human_approval_required_for:
+    - "authentication_architecture"
+    - "authorization_boundaries"
+    - "cryptography"
+    - "destructive_migrations"
+    - "secrets"
+    - "security_policy_relaxation"
+    - "constitution_changes"
+    - "major_architecture_changes"
+  autonomous_allowed_for:
+    - "documentation_corrections"
+    - "test_additions"
+    - "lint_fixes"
+    - "safe_refactors"
+    - "known_bug_fixes"
+    - "low_risk_ui_corrections"

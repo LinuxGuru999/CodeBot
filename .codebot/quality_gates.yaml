@@ -1,0 +1,34 @@
+# CodeBot Quality Gate Policy
+# Defines required and conditional verification gates for ticket completion.
+# Per CODEBOT-ROADMAP.md §5: no ticket reaches COMPLETE without passing these.
+
+required:
+  - name: build
+    command: "python3 -m py_compile {file}"
+  - name: unit_tests
+    command: "python3 -m pytest -q {test_dirs}"
+
+conditional:
+  security_boundary:
+    - name: security_review
+      command: "echo 'requires adversarial security review'"
+    - name: adversarial_test
+      command: "python3 -m pytest -q -k security {test_dirs}"
+
+  api_change:
+    - name: contract_tests
+      command: "python3 -m pytest -q -k contract {test_dirs}"
+
+  data_migration:
+    - name: migration_test
+      command: "python3 -m pytest -q -k migration {test_dirs}"
+    - name: rollback_test
+      command: "python3 -m pytest -q -k rollback {test_dirs}"
+
+  performance_sensitive:
+    - name: benchmark
+      command: "python3 -m pytest -q -k benchmark {test_dirs}"
+
+  documentation_impact:
+    - name: documentation_review
+      command: "echo 'verify docs updated per Same-PR rule'"

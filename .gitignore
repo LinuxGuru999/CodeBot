@@ -1,0 +1,51 @@
+# CodeBot runtime state
+state/
+logs/
+*.heartbeat
+*.checkpoint.json
+*.status.json
+.drain
+.update_lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Token ledger (runtime data, not source)
+token_ledger.json
+ticket_costs.jsonl
+gate_results.jsonl
+gatekeeper_log.jsonl
