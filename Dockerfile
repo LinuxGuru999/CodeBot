@@ -7,22 +7,28 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     CODEBOT_PROJECT_ROOT=/project \
     CODEBOT_STATE_DIR=/data/state \
-    CODEBOT_LOGS_DIR=/data/logs
+    CODEBOT_LOGS_DIR=/data/logs \
+    CONTROL_TOKEN="" \
+    SSH_PRIVATE_KEY="" \
+    GH_TOKEN="" \
+    GITHUB_DRY_RUN="1"
 
 RUN useradd -m -r codebot && \
     mkdir -p /app /data/state /data/logs /project && \
     chown -R codebot:codebot /app /data /project
 
 WORKDIR /app
-COPY --chown=codebot:codebot bots/ ./bots/
-COPY --chown=codebot:codebot .codebot/ ./.codebot/
+COPY --chown=codebot:codebot codebot/ ./codebot/
+COPY --chown=codebot:codebot pyproject.toml README.md ./
 
 USER codebot
 
 VOLUME ["/data", "/project"]
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python3 -c "import json; print('ok')" || exit 1
+EXPOSE 8081
 
-ENTRYPOINT ["python3", "-m", "bots.codebot_bootstrap"]
-CMD ["--project-root", "/project"]
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python3 -c "from codebot.ticket_engine import TicketStore; print('ok')" || exit 1
+
+ENTRYPOINT ["python3", "-m", "codebot"]
+CMD ["serve", "--project", "/project"]

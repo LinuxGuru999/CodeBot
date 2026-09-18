@@ -14,20 +14,25 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CodeBot — Autonomous Engineering Platform")
-    parser.add_argument("--project", type=str, default=".", help="Path to project root containing .codebot/")
     sub = parser.add_subparsers(dest="cmd")
 
-    sub.add_parser("serve", help="Start the orchestrator")
-    sub.add_parser("status", help="Print agent status and exit")
-    sub.add_parser("drain", help="Set drain flag (stop spawning)")
-    sub.add_parser("clear-drain", help="Clear drain flag (resume spawning)")
-    sub.add_parser("validate", help="Validate project contract and exit")
-    stop = sub.add_parser("stop-all", help="Stop all running agents")
+    for name, help_text in [
+        ("serve", "Start the orchestrator"),
+        ("status", "Print agent status and exit"),
+        ("drain", "Set drain flag (stop spawning)"),
+        ("clear-drain", "Clear drain flag (resume spawning)"),
+        ("validate", "Validate project contract and exit"),
+        ("stop-all", "Stop all running agents"),
+    ]:
+        sp = sub.add_parser(name, help=help_text)
+        sp.add_argument("--project", type=str, default=".", help="Path to project root containing .codebot/")
+
     start = sub.add_parser("start", help="Start specific agents or all")
     start.add_argument("agents", nargs="*", help="Agent names to start")
+    start.add_argument("--project", type=str, default=".", help="Path to project root")
 
     args = parser.parse_args()
-    project_root = Path(args.project).resolve()
+    project_root = Path(getattr(args, "project", ".") or ".").resolve()
 
     if args.cmd == "validate":
         _cmd_validate(project_root)
@@ -62,7 +67,7 @@ def _cmd_orchestrator(cmd: str, project_root: Path, args: argparse.Namespace) ->
     os.environ["CODEBOT_PROJECT_ROOT"] = str(project_root)
 
     from codebot.codebot_bootstrap import bootstrap
-    adapter = bootstrap(project_root)
+    bootstrap(project_root)
 
     from codebot.orchestrator import main as orch_main
     sys.argv = [sys.argv[0]]

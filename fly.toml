@@ -1,0 +1,30 @@
+app = "codebot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  CODEBOT_PROJECT_ROOT = "/project"
+  GITHUB_DRY_RUN = "1"
+
+[http_service]
+  internal_port = 8081
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "codebot_data"
+  destination = "/data"
+  initial_size = "3gb"
