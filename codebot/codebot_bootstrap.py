@@ -57,23 +57,22 @@ def discover_adapter_class(project_root: Path) -> Any | None:
     ]
     if project_name == "monitor":
         adapter_candidates.append("codebot.monitor_adapter")
+    if project_name == "codebot":
+        adapter_candidates.insert(0, "codebot.codebot_adapter")
     for adapter_module in adapter_candidates:
-        class_name = "".join(w.capitalize() for w in adapter_module.rsplit(".", 1)[-1].replace("_", " ").split()).replace(" ", "")
-        if not class_name.endswith("Adapter"):
-            class_name += "Adapter"
         try:
             mod = importlib.import_module(adapter_module)
+            from codebot.project_adapter import ProjectAdapter
             for attr_name in dir(mod):
                 attr = getattr(mod, attr_name)
-                if isinstance(attr, type) and attr_name != "ProjectAdapter":
+                if isinstance(attr, type) and attr is not ProjectAdapter:
                     try:
-                        from codebot.project_adapter import ProjectAdapter
-                        if issubclass(attr, ProjectAdapter) and attr is not ProjectAdapter:
+                        if issubclass(attr, ProjectAdapter):
                             instance = _try_instantiate(attr, project_root)
                             if instance is not None:
                                 logger.info("loaded adapter %s.%s", adapter_module, attr_name)
                                 return instance
-                    except ImportError:
+                    except TypeError:
                         pass
         except ImportError:
             continue
