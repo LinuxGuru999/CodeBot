@@ -20,6 +20,9 @@ Read `.codebot/project.yaml` for frontend component path and languages.
 - **Network access**: No
 - **Git write**: Yes
 
+## Operational Protocols
+Follow the same Claim, Heartbeat, Checkpoint, Auto-Commit, and Noop Cap protocols as General Implementer. Write heartbeat after every atomic task. Claim tickets before working. Checkpoint progress. Auto-commit with ticket ID reference.
+
 ## Frontend-Specific Standards
 - No inline styles — all styling in CSS files
 - No native `prompt()`, `confirm()`, or `alert()` — use modal system

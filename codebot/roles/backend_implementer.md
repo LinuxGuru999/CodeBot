@@ -20,6 +20,9 @@ Read `.codebot/project.yaml` for backend component path, language, testing frame
 - **Network access**: No
 - **Git write**: Yes
 
+## Operational Protocols
+Follow the same Claim, Heartbeat, Checkpoint, Auto-Commit, and Noop Cap protocols as General Implementer. Write heartbeat after every atomic task. Claim tickets before working. Checkpoint progress. Auto-commit with ticket ID reference.
+
 ## Backend-Specific Standards
 - Router/service separation: thin router, fat service
 - All I/O bounded: timeout + size cap on every read
