@@ -137,11 +137,12 @@ class CodeBotAdapter(ProjectAdapter):
         })
         thinking_models = (
             "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
+            "qwen-3.6-plus-thinking", "qwen-3.5-plus-thinking",
         )
         non_thinking_cycle = (
             "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.8-max",
             "qwen-3.6-plus", "qwen-3.5-plus", "meta-muse-spark-1.3",
-            "meta-muse-spark-1.2",
+            "meta-muse-spark-1.2", "qwen-3.7-max",
         )
         cycle_idx = 0
         think_idx = 0

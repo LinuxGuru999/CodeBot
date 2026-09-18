@@ -431,6 +431,7 @@ WORKER_MODEL_CYCLE = (
     "qwen-3.8-max", "qwen-3.8-max", "qwen-3.6-plus", "qwen-3.5-plus",
     "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
     "meta-muse-spark-1.3", "meta-muse-spark-1.2",
+    "qwen-3.7-max", "qwen-3.6-plus-thinking", "qwen-3.5-plus-thinking",
 )
 
 WORKER_FALLBACK_CYCLE = (
@@ -438,6 +439,7 @@ WORKER_FALLBACK_CYCLE = (
     "qwen-3.7-plus", "qwen-3.7-plus", "xiaomi-mimo-2.5", "xiaomi-mimo-2.5",
     "qwen-3.7-max-thinking", "qwen-3.7-plus",
     "qwen-3.6-plus", "qwen-3.5-plus",
+    "qwen-3.6-plus", "qwen-3.7-max-thinking", "qwen-3.7-max-thinking",
 )
 
 
@@ -489,6 +491,7 @@ _MODEL_FALLBACKS: dict[str, str] = {
     "qwen-3.5-plus": "xiaomi-mimo-2.5",
     "qwen-3.6-plus": "xiaomi-mimo-2.5",
     "qwen-3.7-plus": "qwen-3.6-plus",
+    "qwen-3.7-max": "qwen-3.8-max",
     "qwen-3.8-max": "qwen-3.7-plus",
     "meta-muse-spark-1.2": "qwen-3.5-plus",
     "meta-muse-spark-1.3": "qwen-3.6-plus",
