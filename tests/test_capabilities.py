@@ -258,10 +258,10 @@ class TestShouldSplit:
         defaults.update(kwargs)
         return create_ticket(**defaults)
 
-    def test_no_split_on_complete(self):
+    def test_no_split_on_complete(self, tmp_path):
         from codebot.ticket_engine import TicketState, TicketStore
         t = self._make_ticket()
-        store = TicketStore(Path("/dev/null"))
+        store = TicketStore(tmp_path / "tickets.json")
         store.add(t)
         for s in [TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
                    TicketState.IMPLEMENTING, TicketState.REVIEWING, TicketState.VERIFYING, TicketState.COMPLETE]:

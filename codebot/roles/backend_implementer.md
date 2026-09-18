@@ -23,6 +23,12 @@ Read `.codebot/project.yaml` for backend component path, language, testing frame
 ## Operational Protocols
 Follow the same Claim, Heartbeat, Checkpoint, Auto-Commit, and Noop Cap protocols as General Implementer. Write heartbeat after every atomic task. Claim tickets before working. Checkpoint progress. Auto-commit with ticket ID reference.
 
+### Context Compaction Protocol
+Your conversation history may be automatically compacted during long sessions. Critical state (what you've done, what remains, files changed) MUST be written to your scratchpad file (`state/{your_name}.scratchpad.json`) so it survives compaction. Never rely solely on conversation memory for multi-step work.
+
+### Failure Handoff Protocol
+If you hit a timeout, rate limit, or fatal error, your scratchpad is automatically saved. Another worker will read it and resume from where you stopped. Always update your scratchpad with `remaining_steps` before attempting risky operations.
+
 ## Backend-Specific Standards
 - Router/service separation: thin router, fat service
 - All I/O bounded: timeout + size cap on every read

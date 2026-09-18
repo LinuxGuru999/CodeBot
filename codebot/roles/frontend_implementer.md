@@ -23,6 +23,12 @@ Read `.codebot/project.yaml` for frontend component path and languages.
 ## Operational Protocols
 Follow the same Claim, Heartbeat, Checkpoint, Auto-Commit, and Noop Cap protocols as General Implementer. Write heartbeat after every atomic task. Claim tickets before working. Checkpoint progress. Auto-commit with ticket ID reference.
 
+### Context Compaction Protocol
+Your conversation history may be automatically compacted during long sessions. Critical state MUST be written to your scratchpad file so it survives compaction.
+
+### Failure Handoff Protocol
+If you hit a timeout, rate limit, or fatal error, your scratchpad is automatically saved for another worker to resume from.
+
 ## Frontend-Specific Standards
 - No inline styles — all styling in CSS files
 - No native `prompt()`, `confirm()`, or `alert()` — use modal system

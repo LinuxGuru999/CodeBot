@@ -26,6 +26,7 @@ from codebot.role_registry import (
     CONTROL_ROLES,
     STANDARD_TOOLS,
     READ_ONLY_TOOLS,
+    RESEARCH_TOOLS,
     UX_AUDIT_TOOLS,
 )
 
@@ -94,6 +95,9 @@ class TestRoleRegistry:
         for role in DISCOVERY_ROLES:
             if role.name == "ux_auditor":
                 assert role.tool_policy.allowed_tools == UX_AUDIT_TOOLS
+            elif role.name in ("bug_hunter", "security_auditor", "architecture_auditor",
+                               "performance_auditor", "test_gap_auditor", "dependency_auditor"):
+                assert role.tool_policy.allowed_tools == RESEARCH_TOOLS
             else:
                 assert role.tool_policy.allowed_tools == READ_ONLY_TOOLS
 

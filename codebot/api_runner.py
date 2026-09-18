@@ -1251,6 +1251,26 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     continue_nudges = 0
     exit_reason = "unknown"
 
+    # CAP-07: Context compaction state
+    try:
+        from codebot.context_compactor import compact_messages, needs_compaction
+        _compaction_available = True
+    except ImportError:
+        _compaction_available = False
+    _compaction_budget = max_tokens_per_run if max_tokens_per_run > 0 else 120_000
+
+    # CAP-09/CAP-11: Structured scratchpad for handoff on failure
+    try:
+        from codebot.scratchpad import load_scratchpad, save_scratchpad, ScratchpadState
+        _scratch_state = load_scratchpad(state_dir, bot_name)
+        _scratch_state.phase = "running"
+        _scratch_state.ticket_id = bot_name
+        save_scratchpad(state_dir, _scratch_state)
+        _scratch_available = True
+    except ImportError:
+        _scratch_state = None
+        _scratch_available = False
+
     # SIGTERM → SystemExit so the finally block persists the stream before death
     def _sigterm_handler(signum, frame):
         nonlocal exit_reason
@@ -1265,6 +1285,11 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
             if tool_iterations >= MAX_TOOL_ITERATIONS:
                 _log(f"{bot_name}: FATAL — hit {MAX_TOOL_ITERATIONS} tool iteration limit")
                 exit_reason = "iteration_limit"
+                # CAP-11: Save scratchpad for task_splitter handoff before exit
+                if _scratch_available and _scratch_state is not None:
+                    _scratch_state.mark_error(f"iteration limit {MAX_TOOL_ITERATIONS}")
+                    _scratch_state.iteration = tool_iterations
+                    save_scratchpad(state_dir, _scratch_state)
                 sys.exit(1)
 
             # Periodic drain check between iterations (tool executions check individually too)
@@ -1272,6 +1297,17 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                 _log(f"{bot_name}: drain detected mid-run, exiting cleanly")
                 _write_heartbeat(heartbeat_file)
                 exit_reason = "drain"
+                sys.exit(0)
+
+            # CAP-07: Auto-compact context when approaching token budget
+            if _compaction_available and tool_iterations > 0 and tool_iterations % 5 == 0:
+                if needs_compaction(messages, max_tokens=_compaction_budget):
+                    old_len = len(messages)
+                    messages = compact_messages(messages, max_tokens=_compaction_budget)
+                    _log(f"{bot_name}: context compacted ({old_len}→{len(messages)} messages)")
+                    if _scratch_available and _scratch_state is not None:
+                        _scratch_state.context_summary = f"Compacted at iter {tool_iterations}, {len(messages)} msgs remain"
+                        save_scratchpad(state_dir, _scratch_state)
                 sys.exit(0)
 
             # ---- API call with retry envelope ----
@@ -1454,6 +1490,16 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
             sys.exit(1)
     finally:
         _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reason)
+        # CAP-11: Finalize scratchpad state for handoff or completion record
+        if _scratch_available and _scratch_state is not None:
+            if exit_reason in ("timeout", "rate_limit", "fatal_error", "token_cap", "iteration_limit", "connection_error"):
+                _scratch_state.mark_error(f"exited: {exit_reason}")
+                _scratch_state.phase = "interrupted"
+            elif exit_reason in ("completed", "drain"):
+                _scratch_state.phase = "completed"
+            _scratch_state.iteration = tool_iterations
+            _scratch_state.last_tool_result_summary = f"reason={exit_reason} iters={tool_iterations}"
+            save_scratchpad(state_dir, _scratch_state)
 
 
 if __name__ == "__main__":
