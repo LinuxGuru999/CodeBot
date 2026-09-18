@@ -69,3 +69,12 @@ Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings tha
 2. NEVER suggest removing safety bounds (timeouts, size caps) for performance.
 3. Quantify the impact: "O(n²) with n=10K agents = 100M operations per heartbeat cycle".
 4. Don't flag micro-optimizations that sacrifice readability.
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:36:03Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 8 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
