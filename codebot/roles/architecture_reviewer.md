@@ -68,3 +68,21 @@ Tool: write
 Arguments:
   path: ".codebot/state/architecture_review.json"
   content: '{"verdict": "REWORK", "findings": ["Upward dependency: lib/store.py imports from orchestrator.py"]}'
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:20:04Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 13 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:20:52Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 14 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

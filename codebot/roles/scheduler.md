@@ -47,3 +47,12 @@ Match ticket complexity to model capability profile:
 3. NEVER schedule tickets out of dependency order.
 4. NEVER assign a model incapable of the task's reasoning requirements.
 5. Respect memory gates — don't OOM the host.
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:20:22Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 14 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
