@@ -269,3 +269,85 @@ python3 -m codebot.migrate_queue --project ~/Work --queue bots/QUEUE.md
 ```
 
 Parses `### [ID] Title` patterns, extracts severity/class/status fields, creates normalized tickets, transitions to READY state.
+
+## Bot Operations CLI (`botop`)
+
+Standalone CLI for managing running agents without the control server HTTP API.
+
+```bash
+python -m codebot.botop --project <path> <command>
+```
+
+| Command | Description |
+|---------|-------------|
+| `status` | Agent heartbeat ages, PIDs, drain status |
+| `logs <agent> [--lines N]` | Tail agent log file |
+| `restart <agent>` | SIGTERM → SIGKILL sequence |
+| `pause <agent>` | Create `.paused` flag (prevents respawn) |
+| `resume <agent>` | Remove `.paused` flag |
+| `drain --reason "..."` | Set global drain flag |
+| `clear-drain` | Remove drain flag |
+| `claims` | Show active ticket claim files with ages |
+| `tickets` | TicketStore summary + READY queue |
+
+## Web Research Tools
+
+Available to all discovery roles via `RESEARCH_TOOLS` frozenset.
+
+```python
+from codebot.web_tools import web_search, web_fetch
+
+results = web_search("OWASP JWT security best practices", max_results=5)
+text = web_fetch("https://example.com/doc", max_bytes=100_000)
+```
+
+SSRF guard blocks private IPs (loopback, link-local, metadata endpoints).
+
+## Context Compaction
+
+Auto-injected into `api_runner.run_bot()` loop every 5 iterations.
+
+```python
+from codebot.context_compactor import needs_compaction, compact_messages, estimate_messages_tokens
+
+tokens = estimate_messages_tokens(messages)
+if needs_compaction(messages, max_tokens=120_000):
+    messages = compact_messages(messages, model="default")
+```
+
+## Scratchpad Handoff
+
+Structured JSON persistence across agent sessions. Saved on fatal exits, loaded at startup.
+
+```python
+from codebot.scratchpad import load_scratchpad, save_scratchpad, create_handoff_note, ScratchpadState
+
+state = load_scratchpad(state_dir)
+state.completed_steps.append("wrote failing test")
+state.phase = "implementing"
+save_scratchpad(state_dir, state)
+
+note = create_handoff_note(state)  # Markdown summary for next worker
+```
+
+## Task Splitting
+
+Decomposes oversized tickets when agents hit timeout/rate_limit/fatal_error.
+
+```python
+from codebot.task_splitter import should_split, split_ticket
+
+if should_split(exit_reason="timeout", iteration_count=50):
+    sub_tasks = split_ticket(ticket, max_chunks=10)
+```
+
+## Coverage Bridge
+
+Generates tickets from coverage gaps detected by `coverage_runner`.
+
+```python
+from codebot.coverage_bridge import generate_coverage_tickets, coverage_delta_score
+
+tickets = generate_coverage_tickets(coverage_report, project_name="codebot")
+delta = coverage_delta_score(before_report, after_report)
+```

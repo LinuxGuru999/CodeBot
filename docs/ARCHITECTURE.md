@@ -70,6 +70,19 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `project_adapter.py` | ~130 | Abstract base class defining the 13-method adapter interface |
 | `monitor_adapter.py` | ~180 | Concrete Monitor Platform adapter implementation |
 | `migrate_queue.py` | ~230 | One-time QUEUE.md → TicketStore migration script |
+| `codebot_adapter.py` | ~220 | Self-hosting adapter: CodeBot manages its own repo via 26-role registry |
+
+### Capability Modules (CAP Pipeline)
+
+| Module | Purpose |
+|--------|---------|
+| `web_tools.py` | Internet search (DuckDuckGo HTML lite) and bounded web fetch with SSRF guard |
+| `context_compactor.py` | Sliding window message summarization when approaching token budget |
+| `scratchpad.py` | Structured JSON session persistence with atomic write, handoff notes, 8KB cap |
+| `task_splitter.py` | Decomposes oversized tickets into ≤10 sub-tasks on agent failure |
+| `coverage_runner.py` | Runs pytest-cov, parses output into per-module coverage reports |
+| `coverage_bridge.py` | Generates tickets from coverage gaps, computes coverage delta scores |
+| `botop.py` | Standalone CLI for agent operations (status, logs, restart, drain, tickets) |
 
 ### Infrastructure Modules
 

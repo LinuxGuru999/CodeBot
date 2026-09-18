@@ -149,7 +149,37 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> None:
 
     Why: Workers often skip the git commit step even when told to commit.
     This structural fix ensures changes are always committed after completion.
+    SELF-03: Gatekeeper must PASS before any commit proceeds.
     """
+    if _adapter_instance is not None and files_touched:
+        try:
+            from codebot.gatekeeper import Gatekeeper
+            paths = _adapter_instance.paths()  # type: ignore[union-attr]
+            gk = Gatekeeper(
+                state_dir=paths.state_dir,
+                policy_path=getattr(paths, 'quality_policy', None),
+                workspace=paths.repository_root,
+            )
+            ticket_class = "bug"
+            if "test" in bot_name.lower():
+                ticket_class = "test"
+            elif "doc" in bot_name.lower():
+                ticket_class = "documentation"
+            elif "security" in bot_name.lower():
+                ticket_class = "security"
+            result = gk.verify_ticket(
+                ticket_id=bot_name,
+                ticket_class=ticket_class,
+                changed_files=files_touched,
+            )
+            if result.get("decision") != "COMPLETE":
+                _log(f"{bot_name}: gatekeeper BLOCKED commit — decision={result.get('decision')} failed_gates={result.get('failed_gates', [])}")
+                return
+        except ImportError:
+            pass
+        except Exception as gk_err:
+            _log(f"{bot_name}: gatekeeper check failed (allowing commit): {gk_err}")
+
     repos = set()
     for f in files_touched:
         abs_path = f if f.startswith("/") else str(WORK_ROOT / f)

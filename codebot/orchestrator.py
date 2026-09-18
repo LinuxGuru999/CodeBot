@@ -1429,7 +1429,7 @@ def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
     prompt optimization was triggered (bot should wait for next run).
     """
     try:
-        from rl_engine import (
+        from codebot.rl_engine import (
             list_pending_events,
             score_event,
             reward_from_score,
@@ -1441,8 +1441,21 @@ def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
             ensure_bot,
         )
     except ImportError:
-        logger.warning("rl_engine not available, skipping alignment pipeline")
-        return False
+        try:
+            from rl_engine import (
+                list_pending_events,
+                score_event,
+                reward_from_score,
+                record_event_reward,
+                mark_event_processed,
+                write_trigger,
+                load_rl_state,
+                save_rl_state,
+                ensure_bot,
+            )
+        except ImportError:
+            logger.warning("rl_engine not available, skipping alignment pipeline")
+            return False
 
     event_file = ALIGNMENT_EVENTS_DIR / f"{bot_name}.exit.json"
     if not event_file.exists():
@@ -1468,10 +1481,10 @@ def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
         score_result = score_event(event)
         metrics_entry: dict = {}
         try:
-            import metrics_collector as _mc  # type: ignore
+            from codebot import metrics_collector as _mc  # type: ignore
         except ImportError:
             try:
-                from bots import metrics_collector as _mc  # type: ignore
+                import metrics_collector as _mc  # type: ignore
             except ImportError:
                 _mc = None  # type: ignore
         if _mc is not None:
@@ -1734,21 +1747,29 @@ def _manifest_load_queue_text() -> str:
     TicketStore instead of parsing QUEUE.md markdown. Falls back to QUEUE.md
     parsing when ticket_engine is unavailable or no ticket store exists yet.
     """
-    # Try CodeBot ticket engine first (WIRE-02 incremental)
     try:
-        from ticket_engine import TicketStore, TicketState
-        store_path = STATE_DIR / "codebot_tickets.json"
+        from codebot.ticket_engine import TicketStore, TicketState
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
         if store_path.exists():
             ts = TicketStore(store_path)
             ready = ts.list_ready()
             if ready:
                 lines = []
                 for t in ready:
-                    lines.append(f"### [{t.id}] {t.title}")
-                    lines.append(f"   Complexity: {t.severity.value}")
-                    lines.append(f"   Status: {t.state.value}")
-                    if t.acceptance_criteria:
-                        lines.append(f"   Acceptance: {'; '.join(t.acceptance_criteria[:3])}")
+                    tid = getattr(t, 'id', None) or getattr(t, 'ticket_id', str(t))
+                    title = getattr(t, 'title', str(t))
+                    severity = getattr(t, 'severity', None)
+                    sev_val = severity.value if hasattr(severity, 'value') else str(severity) if severity else "medium"
+                    state = getattr(t, 'state', None)
+                    state_val = state.value if hasattr(state, 'value') else str(state) if state else "READY"
+                    ac = getattr(t, 'acceptance_criteria', []) or []
+                    lines.append(f"### [{tid}] {title}")
+                    lines.append(f"   Complexity: {sev_val}")
+                    lines.append(f"   Status: {state_val}")
+                    if ac:
+                        lines.append(f"   Acceptance: {'; '.join(ac[:3])}")
                     lines.append("")
                 return "\n".join(lines)
     except ImportError:
