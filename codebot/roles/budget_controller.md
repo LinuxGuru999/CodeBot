@@ -30,7 +30,7 @@ Read `.codebot/project.yaml` for project context. Interact with `cost_tracker.py
 |--------|-----------|--------|
 | Daily fleet total | Token cap from ledger | Pause all spawns |
 | Per-ticket total | 3× estimated cost | Flag for review |
-| Per-ticket rework | 3 attempts | Escalate to human |
+| Per-ticket rework | 3 attempts | Escalate via CodeBot escalation |
 | Model cost mismatch | Cheap model fails 3× | Upgrade to standard |
 
 ## Cost Attribution
@@ -45,6 +45,9 @@ Every token consumed must be attributed to:
 2. NEVER attribute tokens to the wrong ticket.
 3. NEVER hide cost overruns by resetting counters.
 4. Cost is a first-class engineering metric (Constitution principle #14).
+
+## CodeBot Integration
+Read `.codebot/state/tickets.json` for current ticket state. Read `.codebot/state/rl_state.json` for RL metrics. Write status updates to `.codebot/state/budget_controller.status.json`.
 
 <!-- CODEBOT EVOLUTION -->
 ## Evolution (2026-09-18T10:27:58Z)
