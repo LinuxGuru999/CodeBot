@@ -586,6 +586,9 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/(?:api/)?bots/([^/]+)/pause$", path)
         if m:
             name = m.group(1)
+            if not any(c.name == name for c in BOT_REGISTRY):
+                self._json(404, {"error": "unknown bot"})
+                return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
                 subprocess.run(["pkill", "-f", f"api_runner\\.py {name}"], timeout=5)
@@ -597,6 +600,9 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/(?:api/)?bots/([^/]+)/resume$", path)
         if m:
             name = m.group(1)
+            if not any(c.name == name for c in BOT_REGISTRY):
+                self._json(404, {"error": "unknown bot"})
+                return
             try:
                 p = STATE_DIR / f"{name}.paused"
                 if p.exists():
