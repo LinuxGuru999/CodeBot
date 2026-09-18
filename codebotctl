@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# codebotctl — Safe lifecycle management for CodeBot orchestrator.
+#
+# Usage:
+#   ./codebotctl start       Start orchestrator (no-op if already running)
+#   ./codebotctl restart     Graceful drain → stop → start
+#   ./codebotctl stop        Drain + SIGTERM → SIGKILL after grace period
+#   ./codebotctl clear       Wipe state (heartbeats, checkpoints, logs) while stopped
+#   ./codebotctl status      Show process health, worker count, ticket summary
+#
+set -euo pipefail
+
+PROJECT_ROOT="/home/kozuka/Work/CodeBot"
+STATE_DIR="$PROJECT_ROOT/.codebot/state"
+LOG_DIR="$PROJECT_ROOT/logs"
+BOT_LOG_DIR="$PROJECT_ROOT/.codebot/logs"
+LOG_FILE="$LOG_DIR/orchestrator.log"
+DRAIN_FILE="$STATE_DIR/.drain"
+RESTART_FILE="$STATE_DIR/.restart"
+PID_FILE="$STATE_DIR/.orchestrator.pid"
+GRACE_PERIOD=10
+
+cd "$PROJECT_ROOT"
+
+_get_orch_pid() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+    pgrep -x -f "python3.*codebot.serve.*$PROJECT_ROOT" 2>/dev/null | head -1 || true
+}
+
+_is_running() {
+    local pid
+    pid=$(_get_orch_pid)
+    [[ -n "$pid" ]]
+}
+
+_set_drain() {
+    mkdir -p "$STATE_DIR"
+    echo "$(date +%s) $1" > "$DRAIN_FILE"
+}
+
+_clear_drain() {
+    rm -f "$DRAIN_FILE" "$RESTART_FILE" 2>/dev/null || true
+}
+
+cmd_start() {
+    if _is_running; then
+        echo "CodeBot already running (PID $(_get_orch_pid))"
+        return 0
+    fi
+    _clear_drain
+    mkdir -p "$LOG_DIR" "$BOT_LOG_DIR" "$STATE_DIR" \
+             "$STATE_DIR/alignment_events" "$STATE_DIR/alignment_triggers"
+    setsid env GITHUB_DRY_RUN=1 CODEBOT_PROJECT_ROOT="$PROJECT_ROOT" \
+        python3 -m codebot serve --project "$PROJECT_ROOT" \
+        >> "$LOG_FILE" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$PID_FILE"
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "CodeBot started (PID $pid)"
+    else
+        echo "ERROR: CodeBot failed to start. Check $LOG_FILE" >&2
+        rm -f "$PID_FILE"
+        return 1
+    fi
+}
+
+cmd_stop() {
+    local pid
+    pid=$(_get_orch_pid)
+    if [[ -z "$pid" ]]; then
+        echo "CodeBot not running"
+        _clear_drain
+        return 0
+    fi
+    echo "Draining CodeBot (PID $pid)..."
+    _set_drain "stop requested"
+    kill -TERM "$pid" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && (( waited < GRACE_PERIOD )); do
+        sleep 1
+        ((waited++))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Grace period expired, sending SIGKILL..."
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 1
+    fi
+    rm -f "$PID_FILE"
+    _clear_drain
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "ERROR: Failed to stop PID $pid" >&2
+        return 1
+    fi
+    echo "CodeBot stopped"
+}
+
+cmd_restart() {
+    cmd_stop
+    sleep 1
+    cmd_start
+}
+
+cmd_clear() {
+    if _is_running; then
+        echo "ERROR: Stop CodeBot before clearing state" >&2
+        echo "Run: ./codebotctl stop" >&2
+        return 1
+    fi
+    echo "Clearing state..."
+    rm -f "$STATE_DIR"/*.heartbeat 2>/dev/null || true
+    rm -f "$STATE_DIR"/*.state.json 2>/dev/null || true
+    rm -f "$STATE_DIR"/*.checkpoint.json 2>/dev/null || true
+    rm -f "$STATE_DIR"/*.checkpoint.json.bak 2>/dev/null || true
+    rm -rf "$STATE_DIR/alignment_events"/* 2>/dev/null || true
+    rm -rf "$STATE_DIR/alignment_triggers"/* 2>/dev/null || true
+    rm -rf "$STATE_DIR/claims"/* 2>/dev/null || true
+    rm -f "$LOG_FILE" 2>/dev/null || true
+    rm -f "$BOT_LOG_DIR"/*.log 2>/dev/null || true
+    rm -f "$BOT_LOG_DIR"/*.mission 2>/dev/null || true
+    rm -f "$BOT_LOG_DIR"/*.tasklog 2>/dev/null || true
+    _clear_drain
+    echo "State cleared"
+}
+
+cmd_status() {
+    local pid
+    pid=$(_get_orch_pid)
+    if [[ -n "$pid" ]]; then
+        echo "Orchestrator: RUNNING (PID $pid)"
+    else
+        echo "Orchestrator: STOPPED"
+    fi
+    if [[ -f "$DRAIN_FILE" ]]; then
+        echo "Drain: ACTIVE ($(cat "$DRAIN_FILE" 2>/dev/null))"
+    else
+        echo "Drain: inactive"
+    fi
+    local workers
+    workers=$(pgrep -c -f "codebot.api_runner" 2>/dev/null || echo 0)
+    echo "Workers: $workers active"
+    if [[ -f "$STATE_DIR/tickets.json" ]]; then
+        python3 -c "
+import sys; sys.path.insert(0, '$PROJECT_ROOT')
+from codebot.ticket_engine import TicketStore
+from pathlib import Path
+try:
+    ts = TicketStore(Path('$STATE_DIR/tickets.json'))
+    print(f'Tickets: {ts.count()} total')
+    for s, c in sorted(ts.summary().items()):
+        if c > 0: print(f'  {s}: {c}')
+except Exception as e:
+    print(f'Tickets: error reading store ({e})')
+" 2>/dev/null || echo "Tickets: unable to read"
+    else
+        echo "Tickets: no store found"
+    fi
+    if [[ -f "$LOG_FILE" ]]; then
+        local errors
+        errors=$(grep -ciE "error|traceback|exception|crash" "$LOG_FILE" 2>/dev/null || echo 0)
+        local adaptive
+        adaptive=$(grep -c "\[adaptive\]" "$LOG_FILE" 2>/dev/null || echo 0)
+        echo "Log errors: $errors"
+        echo "Adaptive decisions: $adaptive"
+    fi
+}
+
+case "${1:-help}" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    clear)   cmd_clear ;;
+    status)  cmd_status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|clear|status}"
+        exit 1
+        ;;
+esac

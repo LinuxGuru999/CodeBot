@@ -22,6 +22,7 @@ Invariants
 - All tool results are JSON-serialized before appending as tool messages
 """
 
+import concurrent.futures
 import fcntl
 import json
 import os
@@ -33,6 +34,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 try:
     from bots.api_tools import bash, read, write, edit, grep, glob
@@ -247,6 +249,25 @@ def get_adapter() -> object | None:
 
 _DEFAULT_API_URL = "https://dialagram.me/router/v1/chat/completions"
 
+# ---------------------------------------------------------------------------
+# Model router singleton — lazy initialisation
+# ---------------------------------------------------------------------------
+_model_router = None  # type: ignore[assignment]
+
+
+def _get_model_router():
+    """Return the singleton ModelRouter, creating it on first call."""
+    global _model_router
+    if _model_router is not None:
+        return _model_router
+    try:
+        from codebot.model_router import ModelRouter, build_default_chain
+        state_dir = str(BOTS_DIR / "state")
+        _model_router = ModelRouter(state_dir=state_dir)
+    except Exception:
+        _model_router = None
+    return _model_router
+
 
 def _resolve_api_url() -> str:
     env_url = os.environ.get("CODEBOT_API_URL")
@@ -260,7 +281,30 @@ def _resolve_api_url() -> str:
                 return url
         except Exception:
             pass
+    # Try ModelRouter for provider-specific URL
+    router = _get_model_router()
+    if router is not None:
+        try:
+            # Use dialagram as preferred provider; ModelRouter will resolve fallback
+            url = router.get_api_url("dialagram")
+            if url:
+                return url
+        except Exception:
+            pass
     return _DEFAULT_API_URL
+
+
+def _resolve_api_key_for_provider(provider_name: str = "dialagram") -> str | None:
+    """Resolve API key for a specific provider via ModelRouter, fallback to legacy."""
+    router = _get_model_router()
+    if router is not None:
+        key = router.get_api_key(provider_name)
+        if key:
+            return key
+    # Legacy fallback for dialagram
+    if provider_name == "dialagram":
+        return _resolve_api_key()
+    return None
 
 
 API_URL = _DEFAULT_API_URL
@@ -274,6 +318,7 @@ MAX_RETRIES = 5
 MAX_TIMEOUT_RETRIES = 3
 BACKOFFS = [2, 4, 8, 16, 32]
 MAX_BACKOFF = 60
+RATE_LIMIT_YIELD_DELAY = 30
 SCRATCHPAD_MAX_BYTES = 8 * 1024
 TASKLOG_MAX_LINES = 200
 
@@ -475,7 +520,7 @@ except ImportError:
         _web_fetch = None  # type: ignore[assignment]
 
 def _create_ticket_tool(
-    title: str,
+    title: str = "",
     ticket_class: str = "feature",
     severity: str = "medium",
     source: str = "agent",
@@ -485,7 +530,14 @@ def _create_ticket_tool(
     acceptance_criteria: str = "",
     affected_modules: str = "",
     risk: str = "medium",
+    **kwargs: Any,
 ) -> dict:
+    if not title:
+        title = problem_statement or evidence or f"Finding from {source}"
+        if len(title) > 200:
+            title = title[:200]
+    if not title.strip():
+        title = f"Auto-generated finding from {source}"
     try:
         from codebot.ticket_engine import (
             create_ticket, TicketStore, TicketClass, Severity, RiskLevel,
@@ -519,7 +571,7 @@ def _create_ticket_tool(
         )
     except ValueError as ve:
         return {"success": False, "output": "", "error": str(ve)}
-    store_path = Path(".codebot/state/tickets.json")
+    store_path = Path.cwd() / ".codebot" / "state" / "tickets.json"
     if _adapter_instance is not None:
         try:
             store_path = _adapter_instance.paths().state_dir / "tickets.json"  # type: ignore[union-attr]
@@ -681,7 +733,7 @@ def _contract(heartbeat_file, ckpt_file):
 
 
 def _call_api(messages, model, api_key):
-    """Non-streaming POST to dialagram; raises on HTTP/timeout for caller retry."""
+    """Chunked POST read to dialagram; raises on HTTP/timeout for caller retry."""
     body = {
         "model": model,
         "messages": messages,
@@ -698,9 +750,20 @@ def _call_api(messages, model, api_key):
         },
         method="POST",
     )
-    # 120 s stall detection — matches opencode-auto-resume semantics
+    # 120 s stall detection — matches opencode-auto-resume semantics.
+    # Chunked read returns as soon as the first bytes arrive instead of
+    # waiting for the full body, cutting time-to-first-tool-call on
+    # large responses. Still bounded by the 2MB cap.
     with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
-        raw = resp.read(2_000_000)
+        chunks: list[bytes] = []
+        remaining = 2_000_000
+        while remaining > 0:
+            piece = resp.read(min(65536, remaining))
+            if not piece:
+                break
+            chunks.append(piece)
+            remaining -= len(piece)
+        raw = b"".join(chunks)
         text = raw.decode("utf-8", errors="replace")
         return json.loads(text)
 
@@ -826,7 +889,7 @@ def _execute_provider_session(
             "tool_iterations": tool_iterations,
             "exit_reason": reason or status,
             "api_calls": api_calls,
-            "model": active_model,
+            "model": model,
         }
 
     def _sleep(d):
@@ -861,16 +924,16 @@ def _execute_provider_session(
                 api_calls += 1
                 break
             except urllib.error.HTTPError as exc:
-                if exc.code == 429 and total_retries < MAX_RETRIES:
-                    _sleep(min(_backoff(), MAX_BACKOFF))
-                    total_retries += 1
-                    continue
+                if exc.code == 429:
+                    _write_heartbeat(hb_path)
+                    _write_checkpoint(ck_path, bot_name, "rate_limited_yield")
+                    return _result("rate_limited_yield")
                 try:
                     body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
-                    if ("429" in body or "rate" in body.lower()) and total_retries < MAX_RETRIES:
-                        _sleep(min(_backoff(), MAX_BACKOFF))
-                        total_retries += 1
-                        continue
+                    if "429" in body or "rate" in body.lower():
+                        _write_heartbeat(hb_path)
+                        _write_checkpoint(ck_path, bot_name, "rate_limited_yield")
+                        return _result("rate_limited_yield")
                 except Exception:
                     pass
                 return _result("http_error")
@@ -1140,14 +1203,112 @@ def _locked_ledger_write(state_dir: Path, token_report_cb, manifest_name: str) -
                 pass
 
 
+def _run_one_manifest(
+    manifest: dict,
+    idx: int,
+    pool_per_manifest: int,
+    heartbeat_max_gap_s: int,
+    batch_ctx: dict,
+    heartbeat_dir: Path,
+    state_dir: Path,
+    logs_dir: Path,
+    token_report_cb,
+    budget_check_cb,
+    shed_active: bool,
+) -> dict:
+    if not isinstance(manifest, dict):
+        return {"name": str(manifest), "status": "skipped", "reason": "invalid-manifest", "allocated": 0}
+    name = manifest.get("name", f"manifest-{idx}")
+    tier_raw = manifest.get("tier_priority", 999)
+    try:
+        tier_int = int(tier_raw)
+    except Exception:
+        tier_int = 999
+
+    effective_timeout = _effective_for_manifest(manifest, heartbeat_max_gap_s)
+    if _is_stuck_manifest(heartbeat_dir, logs_dir, manifest, heartbeat_max_gap_s):
+        hb_path = _heartbeat_path_for(heartbeat_dir, name)
+        try:
+            _write_json_atomic(state_dir / f"{name}.checkpoint.json", {"bot": name, "updated_at": time.time(), "reason": "stuck-killed", "stuck": True, "effective_timeout": effective_timeout})
+        except Exception:
+            pass
+        return {"name": name, "status": "skipped", "reason": "stale-heartbeat", "allocated": 0, "iterations_used": 0, "heartbeat": str(hb_path), "stuck": True}
+
+    budget_state = None
+    if budget_check_cb and callable(budget_check_cb):
+        try:
+            budget_state = budget_check_cb()
+        except Exception:
+            budget_state = None
+    if shed_active and tier_int >= 31:
+        return {"name": name, "status": "skipped", "reason": "budget-shed", "allocated": 0, "iterations_used": 0, "tier_priority": tier_int}
+    if budget_state == "shed_tier3" and tier_int >= 31:
+        return {"name": name, "status": "skipped", "reason": "budget-shed", "allocated": 0, "iterations_used": 0, "tier_priority": tier_int}
+
+    if not _token_gate_allows(manifest):
+        return {"name": name, "status": "skipped", "reason": "token-gate", "allocated": 0, "iterations_used": 0}
+
+    allocated = pool_per_manifest
+    hb_path = _heartbeat_path_for(heartbeat_dir, name)
+    _write_scratchpad(name, state_dir, "batch_start", f"model={manifest.get('model', '')}")
+    _write_bot_status(name, state_dir, "batch_start", f"model={manifest.get('model', '')}", [], 0)
+
+    try:
+        _write_heartbeat_atomic(hb_path)
+
+        if manifest.get("_test_raise"):
+            raise RuntimeError(f"test raise for {name}")
+
+        if "_test_iterations_used" in manifest:
+            try:
+                iterations_used = int(manifest.get("_test_iterations_used", 1))
+            except Exception:
+                iterations_used = 1
+        else:
+            iterations_used = 1
+
+        is_noop_hit = bool(manifest.get("_test_noop_hit")) or bool(manifest.get("noop_hit"))
+        remainder = allocated - iterations_used if is_noop_hit else 0
+        if remainder < 0:
+            remainder = 0
+        status = "completed"
+        reason = "noop_yield" if is_noop_hit else "completed"
+
+        _write_heartbeat_atomic(hb_path)
+
+        ckpt_path = state_dir / f"{name}.checkpoint.json"
+        _write_json_atomic(ckpt_path, {"bot": name, "updated_at": time.time(), "reason": reason, "allocated": allocated, "iterations_used": iterations_used})
+
+        ok, ledger_reason = _locked_ledger_write(state_dir, token_report_cb, name)
+        if not ok:
+            return {"name": name, "status": status, "reason": reason, "allocated": allocated, "iterations_used": iterations_used, "heartbeat": str(hb_path), "noop_hit": is_noop_hit, "pool_remainder_after": remainder, "_ledger_failed": ledger_reason}
+
+        result = {"name": name, "status": status, "reason": reason, "allocated": allocated, "iterations_used": iterations_used, "heartbeat": str(hb_path), "noop_hit": is_noop_hit, "pool_remainder_after": remainder}
+        if budget_state == "stop":
+            result["_budget_stop"] = True
+        return result
+
+    except Exception as e:
+        _write_heartbeat_atomic(hb_path)
+        try:
+            ckpt_path = state_dir / f"{name}.checkpoint.json"
+            _write_json_atomic(ckpt_path, {"bot": name, "updated_at": time.time(), "reason": f"failed: {e}", "error": str(e)})
+        except Exception:
+            pass
+        allocated_fallback = allocated if "allocated" in locals() else pool_per_manifest
+        return {"name": name, "status": "failed", "reason": str(e) or "exception", "error": str(e), "allocated": allocated_fallback, "iterations_used": 0, "heartbeat": str(hb_path), "_budget_stop": budget_state == "stop"}
+
+
 def run_batch(manifests: list[dict], batch_ctx: dict) -> dict:
-    """Sequential multi-manifest execution with per-manifest liveness.
+    """Concurrent multi-manifest execution with per-manifest liveness.
 
     Frozen signature: run_batch(manifests: list[dict], batch_ctx: dict)
     batch_ctx carries {pool_per_manifest: int = 50, heartbeat_max_gap_s: int = 120,
                       heartbeat_dir/state_dir, token_report_cb, drain_check_cb, budget_check_cb}
     Supports both heartbeat_dir and state_dir (plus heartbeatDir/stateDir aliases);
     if only one is given it is used for both heartbeat and state. Atomic writes via tmp+rename.
+    Manifests run concurrently on a bounded ThreadPoolExecutor; budget/drain aborts are
+    applied deterministically in input order after all workers finish.
     """
     if manifests is None:
         manifests = []
@@ -1170,133 +1331,92 @@ def run_batch(manifests: list[dict], batch_ctx: dict) -> dict:
     heartbeat_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    if _drain_requested(batch_ctx, state_dir):
+        return {
+            "results": [],
+            "pool_accounting": {"pool_per_manifest": pool_per_manifest, "pool_remainder": 0, "total_manifests": len(manifests), "heartbeat_max_gap_s": heartbeat_max_gap_s},
+            "pool": {"pool_per_manifest": pool_per_manifest, "pool_remainder": 0, "total_manifests": len(manifests), "heartbeat_max_gap_s": heartbeat_max_gap_s},
+            "accounting": {"pool_per_manifest": pool_per_manifest, "pool_remainder": 0, "total_manifests": len(manifests), "heartbeat_max_gap_s": heartbeat_max_gap_s},
+            "reason": "drain",
+            "aborted": True,
+            "completed": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
+
+    indexed = list(enumerate(manifests))
+    valid = [(idx, m) for idx, m in indexed if isinstance(m, dict)]
+    invalid = [idx for idx, m in indexed if not isinstance(m, dict)]
+    raw_results: dict[int, dict] = {}
+    for idx in invalid:
+        raw_results[idx] = {"name": str(manifests[idx]), "status": "skipped", "reason": "invalid-manifest", "allocated": 0}
+
+    budget_state = None
+    if budget_check_cb and callable(budget_check_cb):
+        try:
+            budget_state = budget_check_cb()
+        except Exception:
+            budget_state = None
+    shed_active = budget_state == "shed_tier3"
+
+    if valid:
+        max_workers = min(len(valid), max(1, int(batch_ctx.get("max_workers", 8))))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(
+                    _run_one_manifest,
+                    m, idx, pool_per_manifest, heartbeat_max_gap_s,
+                    batch_ctx, heartbeat_dir, state_dir, logs_dir,
+                    token_report_cb, budget_check_cb, shed_active,
+                ): idx
+                for idx, m in valid
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                idx = futures[fut]
+                try:
+                    raw_results[idx] = fut.result()
+                except Exception as e:
+                    nm = manifests[idx].get("name", f"manifest-{idx}") if isinstance(manifests[idx], dict) else str(manifests[idx])
+                    raw_results[idx] = {"name": nm, "status": "failed", "reason": str(e) or "exception", "error": str(e), "allocated": pool_per_manifest, "iterations_used": 0}
+
     results: list[dict] = []
     pool_remainder = 0
     aborted = False
     abort_reason: str | None = None
-    shed_active = False
-    pending_budget_stop = False
-
-    for idx, manifest in enumerate(manifests):
-        if not isinstance(manifest, dict):
-            results.append({"name": str(manifest), "status": "skipped", "reason": "invalid-manifest", "allocated": 0})
+    for idx, manifest in indexed:
+        if idx in invalid:
+            results.append(raw_results[idx])
             continue
-        name = manifest.get("name", f"manifest-{idx}")
-        tier_raw = manifest.get("tier_priority", 999)
-        try:
-            tier_int = int(tier_raw)
-        except Exception:
-            tier_int = 999
-
-        if _drain_requested(batch_ctx, state_dir):
+        r = raw_results[idx]
+        if r.get("_ledger_failed"):
+            r = {k: v for k, v in r.items() if not k.startswith("_ledger") and k != "_budget_stop" or k == "_budget_stop"}
+            r["pool_remainder_after"] = pool_remainder
+            results.append(r)
             aborted = True
-            abort_reason = "drain"
+            abort_reason = raw_results[idx].get("_ledger_failed")
+            for jdx in range(idx + 1, len(manifests)):
+                rem = manifests[jdx]
+                rn = rem.get("name", "unknown") if isinstance(rem, dict) else str(rem)
+                results.append({"name": rn, "status": "skipped", "reason": "budget-unknown", "allocated": 0, "iterations_used": 0})
             break
-
-        effective_timeout = _effective_for_manifest(manifest, heartbeat_max_gap_s)
-        if _is_stuck_manifest(heartbeat_dir, logs_dir, manifest, heartbeat_max_gap_s):
-            hb_path = _heartbeat_path_for(heartbeat_dir, name)
-            try:
-                _write_json_atomic(state_dir / f"{name}.checkpoint.json", {"bot": name, "updated_at": time.time(), "reason": "stuck-killed", "stuck": True, "effective_timeout": effective_timeout})
-            except Exception:
-                pass
-            results.append({"name": name, "status": "skipped", "reason": "stale-heartbeat", "allocated": 0, "iterations_used": 0, "heartbeat": str(hb_path), "stuck": True})
-            continue
-
-        budget_state = None
-        if budget_check_cb and callable(budget_check_cb):
-            try:
-                budget_state = budget_check_cb()
-            except Exception:
-                budget_state = None
-        if budget_state == "shed_tier3":
-            shed_active = True
-        if shed_active and tier_int >= 31:
-            results.append({"name": name, "status": "skipped", "reason": "budget-shed", "allocated": 0, "iterations_used": 0, "tier_priority": tier_int})
-            continue
-        if budget_state == "stop":
-            pending_budget_stop = True
-
-        if not _token_gate_allows(manifest):
-            results.append({"name": name, "status": "skipped", "reason": "token-gate", "allocated": 0, "iterations_used": 0})
-            continue
-
-        allocated = pool_per_manifest + pool_remainder
-        hb_path = _heartbeat_path_for(heartbeat_dir, name)
-        _write_scratchpad(name, state_dir, "batch_start", f"model={manifest.get('model', '')}")
-        _write_bot_status(name, state_dir, "batch_start", f"model={manifest.get('model', '')}", [], 0)
-
-        try:
-            _write_heartbeat_atomic(hb_path)
-
-            if manifest.get("_test_raise"):
-                raise RuntimeError(f"test raise for {name}")
-
-            if "_test_iterations_used" in manifest:
-                try:
-                    iterations_used = int(manifest.get("_test_iterations_used", 1))
-                except Exception:
-                    iterations_used = 1
-            else:
-                iterations_used = 1
-
-            is_noop_hit = bool(manifest.get("_test_noop_hit")) or bool(manifest.get("noop_hit"))
-            if is_noop_hit:
-                remainder = allocated - iterations_used
-                if remainder < 0:
-                    remainder = 0
-                pool_remainder = remainder
-                status = "completed"
-                reason = "noop_yield"
-            else:
-                pool_remainder = 0
-                status = "completed"
-                reason = "completed"
-
-            _write_heartbeat_atomic(hb_path)
-
-            ckpt_path = state_dir / f"{name}.checkpoint.json"
-            _write_json_atomic(ckpt_path, {"bot": name, "updated_at": time.time(), "reason": reason, "allocated": allocated, "iterations_used": iterations_used})
-
-            ok, ledger_reason = _locked_ledger_write(state_dir, token_report_cb, name)
-            if not ok:
-                aborted = True
-                abort_reason = ledger_reason
-                results.append({"name": name, "status": status, "reason": reason, "allocated": allocated, "iterations_used": iterations_used, "heartbeat": str(hb_path), "noop_hit": is_noop_hit, "pool_remainder_after": pool_remainder})
-                for rem in manifests[idx + 1:]:
-                    rn = rem.get("name", "unknown") if isinstance(rem, dict) else str(rem)
-                    results.append({"name": rn, "status": "skipped", "reason": "budget-unknown", "allocated": 0, "iterations_used": 0})
-                break
-
-            results.append({"name": name, "status": status, "reason": reason, "allocated": allocated, "iterations_used": iterations_used, "heartbeat": str(hb_path), "noop_hit": is_noop_hit, "pool_remainder_after": pool_remainder})
-
-            if pending_budget_stop:
-                aborted = True
-                abort_reason = "budget-exhausted"
-                for rem in manifests[idx + 1:]:
-                    rn = rem.get("name", "unknown") if isinstance(rem, dict) else str(rem)
-                    results.append({"name": rn, "status": "skipped", "reason": "budget-exhausted", "allocated": 0, "iterations_used": 0})
-                break
-
-        except Exception as e:
-            _write_heartbeat_atomic(hb_path)
-            try:
-                ckpt_path = state_dir / f"{name}.checkpoint.json"
-                _write_json_atomic(ckpt_path, {"bot": name, "updated_at": time.time(), "reason": f"failed: {e}", "error": str(e)})
-            except Exception:
-                pass
-            # on failure, reset pool remainder (no yield)
+        if r.get("_budget_stop"):
+            r = {k: v for k, v in r.items() if k != "_budget_stop"}
+            r["pool_remainder_after"] = r.get("pool_remainder_after", 0)
+            pool_remainder = r["pool_remainder_after"]
+            results.append(r)
+            aborted = True
+            abort_reason = "budget-exhausted"
+            for jdx in range(idx + 1, len(manifests)):
+                rem = manifests[jdx]
+                rn = rem.get("name", "unknown") if isinstance(rem, dict) else str(rem)
+                results.append({"name": rn, "status": "skipped", "reason": "budget-exhausted", "allocated": 0, "iterations_used": 0})
+            break
+        if r.get("status") == "completed" and r.get("reason") == "noop_yield":
+            pool_remainder = r.get("pool_remainder_after", 0)
+        else:
             pool_remainder = 0
-            allocated_fallback = allocated if "allocated" in locals() else pool_per_manifest
-            results.append({"name": name, "status": "failed", "reason": str(e) or "exception", "error": str(e), "allocated": allocated_fallback, "iterations_used": 0, "heartbeat": str(hb_path)})
-            if pending_budget_stop:
-                for rem in manifests[idx + 1:]:
-                    rn = rem.get("name", "unknown") if isinstance(rem, dict) else str(rem)
-                    results.append({"name": rn, "status": "skipped", "reason": "budget-exhausted", "allocated": 0, "iterations_used": 0})
-                aborted = True
-                abort_reason = "budget-exhausted"
-                break
-            continue
+            r["pool_remainder_after"] = 0
+        results.append(r)
 
     pool_accounting = {
         "pool_per_manifest": pool_per_manifest,
@@ -1434,7 +1554,6 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     if _scratch_available and _scratch_state is not None:
                         _scratch_state.context_summary = f"Compacted at iter {tool_iterations}, {len(messages)} msgs remain"
                         save_scratchpad(state_dir, _scratch_state)
-                sys.exit(0)
 
             # ---- API call with retry envelope ----
             resp_json = None
@@ -1445,25 +1564,21 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     resp_json = _call_api(messages, active_model, api_key)
                     break
                 except urllib.error.HTTPError as exc:
-                    # 429/rate-limit gets exponential backoff; others are fatal
-                    if exc.code == 429 and total_retries < MAX_RETRIES:
-                        delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
-                        delay = min(delay, MAX_BACKOFF)
-                        _log(f"{bot_name}: 429 rate-limited, backing off {delay}s (retry {total_retries + 1}/{MAX_RETRIES})")
-                        time.sleep(delay)
-                        total_retries += 1
-                        continue
+                    if exc.code == 429:
+                        _log(f"{bot_name}: 429 rate-limited, yielding slot for requeue")
+                        _write_heartbeat(heartbeat_file)
+                        exit_reason = "rate_limited_yield"
+                        sys.exit(3)
                     # Try to handle 429 encoded only in body with non-429 status
                     try:
                         body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
                         if "429" in body or "rate" in body.lower():
-                            if total_retries < MAX_RETRIES:
-                                delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
-                                delay = min(delay, MAX_BACKOFF)
-                                _log(f"{bot_name}: rate-limited (body), backing off {delay}s")
-                                time.sleep(delay)
-                                total_retries += 1
-                                continue
+                            _log(f"{bot_name}: rate-limited (body), yielding slot for requeue")
+                            _write_heartbeat(heartbeat_file)
+                            exit_reason = "rate_limited_yield"
+                            sys.exit(3)
+                    except SystemExit:
+                        raise
                     except Exception:
                         pass
                     _log(f"{bot_name}: FATAL — all fallback models exhausted")

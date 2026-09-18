@@ -84,6 +84,19 @@ class RiskLevel(str, Enum):
     LOW = "low"
 
 
+# Minimum risk level that requires an implementation plan before IMPLEMENTING.
+# Configurable: raise to HIGH to exempt medium-risk tickets from planning.
+MIN_RISK_FOR_PLANNING = RiskLevel.MEDIUM
+
+# Ordered risk levels for threshold comparison
+_RISK_ORDER: dict[str, int] = {
+    RiskLevel.LOW.value: 0,
+    RiskLevel.MEDIUM.value: 1,
+    RiskLevel.HIGH.value: 2,
+    RiskLevel.CRITICAL.value: 3,
+}
+
+
 # Valid state transitions: from_state -> set of allowed to_states
 TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     TicketState.DISCOVERED: frozenset({
@@ -178,12 +191,15 @@ class Ticket:
     rework_count: int = 0
     assigned_agent: str = ""
     assigned_model: str = ""
+    reviewer_feedback: list[dict] = field(default_factory=list)
+    last_gate_result: dict[str, Any] = field(default_factory=dict)
+    gate_history: list[dict[str, Any]] = field(default_factory=list)
 
     def evidence_hash(self) -> str:
         canonical = f"{self.ticket_class}:{self.problem_statement}:{self.evidence}"
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
-    def transition(self, new_state: TicketState) -> Ticket:
+    def transition(self, new_state: TicketState, reviewer_feedback: list[dict] | None = None) -> Ticket:
         allowed = TRANSITIONS.get(self.state, frozenset())
         if new_state not in allowed:
             raise ValueError(
@@ -193,6 +209,10 @@ class Ticket:
         updates = {"state": new_state, "updated_at": time.time()}
         if new_state == TicketState.REWORK:
             updates["rework_count"] = self.rework_count + 1
+            if reviewer_feedback:
+                existing = list(self.reviewer_feedback) if self.reviewer_feedback else []
+                existing.extend(reviewer_feedback)
+                updates["reviewer_feedback"] = existing
         if new_state == TicketState.IMPLEMENTING:
             updates["attempts"] = self.attempts + 1
         return Ticket(**{**asdict(self), **updates})
@@ -215,7 +235,9 @@ class Ticket:
         data["severity"] = Severity(data["severity"])
         data["state"] = TicketState(data["state"])
         data["risk"] = RiskLevel(data["risk"])
-        return cls(**data)
+        valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered)
 
     @classmethod
     def from_json(cls, raw: str) -> Ticket:
@@ -293,7 +315,7 @@ class TicketStore:
     def __init__(self, path: Path) -> None:
         import threading
         self._path = path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._tickets: dict[str, Ticket] = {}
         self._evidence_index: dict[str, str] = {}
         self._load()
@@ -323,39 +345,92 @@ class TicketStore:
 
     def add(self, ticket: Ticket) -> Ticket:
         eh = ticket.evidence_hash()
-        if eh in self._evidence_index:
-            existing_id = self._evidence_index[eh]
-            existing = self._tickets.get(existing_id)
-            if existing and existing.state not in (
-                TicketState.COMPLETE,
-                TicketState.REJECTED,
-            ):
-                raise ValueError(
-                    f"duplicate ticket: evidence matches {existing_id}"
-                )
         with self._lock:
+            if eh in self._evidence_index:
+                existing_id = self._evidence_index[eh]
+                existing = self._tickets.get(existing_id)
+                if existing and existing.state not in (
+                    TicketState.COMPLETE,
+                    TicketState.REJECTED,
+                ):
+                    raise ValueError(
+                        f"duplicate ticket: evidence matches {existing_id}"
+                    )
             self._tickets[ticket.id] = ticket
             self._evidence_index[eh] = ticket.id
-        self._save()
+            self._save()
         return ticket
 
     def get(self, ticket_id: str) -> Ticket | None:
-        return self._tickets.get(ticket_id)
+        with self._lock:
+            return self._tickets.get(ticket_id)
 
-    def transition(self, ticket_id: str, new_state: TicketState) -> Ticket:
-        ticket = self._tickets.get(ticket_id)
-        if ticket is None:
-            raise KeyError(f"ticket not found: {ticket_id}")
-        updated = ticket.transition(new_state)
-        self._tickets[ticket_id] = updated
-        self._save()
-        return updated
+    def _has_plan(self, ticket_id: str) -> bool:
+        """Check if an implementation plan exists for the given ticket."""
+        try:
+            from codebot.implementation_planner import PlanStore
+            plans_dir = self._path.parent / "plans"
+            if not plans_dir.exists():
+                return False
+            plan_store = PlanStore(self._path.parent)
+            return plan_store.exists(ticket_id)
+        except Exception:
+            return False
+
+    def _has_gate_approval(self, ticket_id: str) -> bool:
+        """Check if the latest gate result for ticket_id indicates approval.
+
+        Reads gate_results.jsonl from the state directory and looks for the
+        most recent entry for ticket_id.  Returns True only if that entry
+        exists *and* ``passed`` is True.
+        """
+        gate_path = self._path.parent / "gate_results.jsonl"
+        if not gate_path.exists():
+            return False
+        try:
+            last_record: dict[str, Any] | None = None
+            with open(gate_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        if record.get("ticket_id") == ticket_id:
+                            last_record = record
+                    except json.JSONDecodeError:
+                        continue
+            return last_record is not None and last_record.get("passed") is True
+        except OSError:
+            return False
+
+    def transition(self, ticket_id: str, new_state: TicketState, reviewer_feedback: list[dict] | None = None) -> Ticket:
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None:
+                raise KeyError(f"ticket not found: {ticket_id}")
+            # Enforce planning prerequisite for medium+ risk tickets
+            if (ticket.state == TicketState.READY and
+                new_state == TicketState.IMPLEMENTING and
+                ticket.risk.value in (RiskLevel.MEDIUM.value, RiskLevel.HIGH.value, RiskLevel.CRITICAL.value)):
+                if not self._has_plan(ticket_id):
+                    raise ValueError(
+                        f"ticket {ticket_id} has risk={ticket.risk.value} which requires "
+                        f"an implementation plan before transitioning to IMPLEMENTING. "
+                        f"Move to PLANNING state first or generate a plan."
+                    )
+            updated = ticket.transition(new_state, reviewer_feedback)
+            self._tickets[ticket_id] = updated
+            self._save()
+            return updated
 
     def list_by_state(self, state: TicketState) -> list[Ticket]:
-        return [t for t in self._tickets.values() if t.state == state]
+        with self._lock:
+            return [t for t in self._tickets.values() if t.state == state]
 
     def list_ready(self) -> list[Ticket]:
-        ready = self.list_by_state(TicketState.READY)
+        with self._lock:
+            ready = [t for t in self._tickets.values() if t.state == TicketState.READY]
         severity_order = {
             Severity.CRITICAL: 0,
             Severity.HIGH: 1,
@@ -365,10 +440,12 @@ class TicketStore:
         return sorted(ready, key=lambda t: severity_order.get(t.severity, 99))
 
     def count(self) -> int:
-        return len(self._tickets)
+        with self._lock:
+            return len(self._tickets)
 
     def summary(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for t in self._tickets.values():
-            counts[t.state.value] = counts.get(t.state.value, 0) + 1
-        return counts
+        with self._lock:
+            counts: dict[str, int] = {}
+            for t in self._tickets.values():
+                counts[t.state.value] = counts.get(t.state.value, 0) + 1
+            return counts

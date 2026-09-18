@@ -48,6 +48,15 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
+| `adaptive_scheduler.py` | ~700 | Core 30-slot adaptive concurrency scheduler control loop integrating all subsystems |
+| `conflict_detector.py` | ~300 | File/module overlap detection between concurrent tickets, worktree isolation tracking |
+| `discovery_manager.py` | ~435 | Discovery cooldown tracking, yield statistics per role, diversity allocation, saturation detection |
+| `pipeline_state.py` | ~350 | Frozen dataclass snapshot of the entire engineering pipeline for scheduler decisions |
+| `prompt_optimizer.py` | ~180 | Consumes RL alignment triggers to evolve agent prompts automatically |
+| `queue_pressure.py` | ~470 | Calculates queue pressure ratios and detects bottlenecks for adaptive scheduling |
+| `scheduler_config.py` | ~376 | Centralized configuration for the adaptive scheduler with YAML/JSON loading |
+| `scheduler_metrics.py` | ~290 | Throughput metrics collector: utilization, cycle time, discovery yield, cost per ticket |
+| `work_scorer.py` | ~392 | Utility scoring engine: priority + bottleneck relief + dependency unlock + aging - penalties |
 | `orchestrator.py` | ~2900 | Process lifecycle: start, stop, health monitoring, heartbeat checking, drain management |
 | `api_runner.py` | ~1450 | LLM execution loop: prompt assembly, tool dispatch, claim protocol, auto-commit |
 | `ticket_engine.py` | ~390 | Normalized ticket schema v2, 14-state machine, SHA-256 dedup, persistent CRUD |
@@ -71,6 +80,8 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `monitor_adapter.py` | ~180 | Concrete Monitor Platform adapter implementation |
 | `migrate_queue.py` | ~230 | One-time QUEUE.md → TicketStore migration script |
 | `codebot_adapter.py` | ~220 | Self-hosting adapter: CodeBot manages its own repo via 26-role registry |
+| `model_router.py` | ~300 | Multi-provider model routing with automatic fallback and capability matching |
+| `pricing_table.py` | ~170 | Model pricing table for monetary cost calculation (tokens to USD conversion) |
 
 ### Capability Modules (CAP Pipeline)
 
@@ -88,6 +99,8 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 
 | Module | Purpose |
 |--------|---------|
+| `stats_collector.py` | Per-model API call statistics tracking (success, cost, tokens) |
+| `telemetry.py` | HTTP ingestion endpoint for production telemetry signals to create tickets |
 | `api_tools.py` | read/write/edit/bash/grep/glob tool implementations for LLM agents |
 | `tool_policy.py` | Sandbox boundary: path resolution, command allowlisting |
 | `readiness.py` | Readiness checks, noop detection, queue complexity parsing |
@@ -96,6 +109,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `lease_state.py` | Distributed coordination via file-based leases |
 | `event_log.py` | Append-only event persistence |
 | `findings_log.py` | Findings persistence |
+| `migrations/` | Database/schema migration scripts (migration_001, 003, 004) |
 | `anomaly_alerts.py` | Anomaly detection on metrics |
 | `auto_revert.py` | Automatic rollback on build gate failure |
 

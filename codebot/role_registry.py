@@ -393,7 +393,19 @@ CONTROL_ROLES: list[AgentRole] = [
 ]
 
 
-ALL_ROLES: list[AgentRole] = DISCOVERY_ROLES + IMPLEMENTATION_ROLES + REVIEW_ROLES + CONTROL_ROLES
+PLANNING_ROLES: list[AgentRole] = [
+    AgentRole(
+        name="feature_decomposer",
+        category=RoleCategory.PLANNING,
+        description="Decomposes roadmap items and epic tickets into atomic implementable work items",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
+        incentive="Break mountains into climbable steps. Every plan you make is actionable by someone else.",
+    ),
+]
+
+
+ALL_ROLES: list[AgentRole] = DISCOVERY_ROLES + IMPLEMENTATION_ROLES + REVIEW_ROLES + CONTROL_ROLES + PLANNING_ROLES
 ROLE_REGISTRY: dict[str, AgentRole] = {r.name: r for r in ALL_ROLES}
 
 

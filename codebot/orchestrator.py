@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 # ---------------------------------------------------------------------------
 # Paths — resolved via ProjectAdapter; fallback to CODEBOT_PROJECT_ROOT env or cwd
@@ -57,14 +57,9 @@ ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
 # override the defaults above.
 _adapter_instance: Any = None
 
-try:
-    from typing import Any as _Any
-except ImportError:
-    _Any = object  # type: ignore[misc,assignment]
-
 
 def set_project_adapter(adapter: Any) -> None:
-    global _adapter_instance, BOTS_DIR, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR, DRAIN_FILE, UPDATE_LOCK
+    global _adapter_instance, BOTS_DIR, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR, DRAIN_FILE, UPDATE_LOCK, RESTART_FILE
     _adapter_instance = adapter
     try:
         p = adapter.paths()
@@ -75,6 +70,7 @@ def set_project_adapter(adapter: Any) -> None:
         ALIGNMENT_EVENTS_DIR = p.state_dir / "alignment_events"
         DRAIN_FILE = p.state_dir / ".drain"
         UPDATE_LOCK = p.state_dir / ".update_lock"
+        RESTART_FILE = p.state_dir / ".restart"
     except Exception:
         pass
 
@@ -91,6 +87,7 @@ ALIGNMENT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 DRAIN_FILE = STATE_DIR / ".drain"
 UPDATE_LOCK = STATE_DIR / ".update_lock"
+RESTART_FILE = STATE_DIR / ".restart"
 
 try:
     from codebot.prompt_gateway import (
@@ -103,16 +100,17 @@ try:
 except ImportError:
     _GATEWAY = False
     _PG_MAX_CONCURRENT = 10
-    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "20"))
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "48"))
+    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "5"))
+GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "22"))
 
-CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "30"))
-MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "10"))
-MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "8"))
-MAX_QWEN_38_CONCURRENT = int(os.getenv("CODEBOT_MAX_QWEN_38", "6"))
-MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "20"))
-MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "7"))
-MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "8"))
+CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "60"))
+MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "4"))
+MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "4"))
+MAX_QWEN_38_CONCURRENT = int(os.getenv("CODEBOT_MAX_QWEN_38", "4"))
+MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "12"))
+MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "6"))
+MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "6"))
+MAX_REVIEWER_SLOTS = int(os.getenv("CODEBOT_MAX_REVIEWERS", "6"))
 USE_MANIFEST_SCHEDULER = os.getenv("CODEBOT_MANIFEST_SCHEDULER", "0") == "1"
 
 IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
@@ -123,6 +121,32 @@ IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
 DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
     "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
     "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
+})
+
+REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
+    "correctness_reviewer", "security_reviewer", "architecture_reviewer",
+    "test_reviewer", "performance_reviewer", "simplicity_reviewer",
+    "documentation_reviewer",
+})
+PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
+    "feature_decomposer",
+})
+
+MAX_DISCOVERY_NO_TICKET_RUNS = 10
+RATE_LIMIT_REQUEUE_S = int(os.getenv("CODEBOT_RATE_LIMIT_REQUEUE_S", "300"))
+_metrics_tick = 0
+
+ALWAYS_RESPAWN = frozenset({
+    "bug_hunter", "security_auditor", "architecture_auditor",
+    "performance_auditor", "test_gap_auditor", "documentation_auditor",
+    "dependency_auditor", "ux_auditor",
+    "general_implementer", "backend_implementer", "frontend_implementer",
+    "test_implementer", "migration_implementer", "documentation_implementer",
+    "scheduler", "conflict_resolver", "budget_controller",
+    "correctness_reviewer", "security_reviewer", "architecture_reviewer",
+    "test_reviewer", "performance_reviewer", "simplicity_reviewer",
+    "documentation_reviewer",
+    "feature_decomposer",
 })
 
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
@@ -136,6 +160,19 @@ TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
     "documentation": "documentation_implementer",
     "dependency": "migration_implementer",
     "infrastructure": "migration_implementer",
+}
+
+TICKET_CLASS_TO_REVIEWER: dict[str, str] = {
+    "bug": "correctness_reviewer",
+    "feature": "correctness_reviewer",
+    "refactor": "simplicity_reviewer",
+    "security": "security_reviewer",
+    "performance": "performance_reviewer",
+    "architecture": "architecture_reviewer",
+    "test": "test_reviewer",
+    "documentation": "documentation_reviewer",
+    "dependency": "correctness_reviewer",
+    "infrastructure": "correctness_reviewer",
 }
 
 
@@ -162,9 +199,121 @@ def _get_available_memory_mb() -> float:
 def is_draining() -> bool:
     return DRAIN_FILE.exists()
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+
+def _check_self_restart(bots: dict[str, BotState]) -> bool:
+    if not RESTART_FILE.exists():
+        return False
+    try:
+        reason = RESTART_FILE.read_text(encoding="utf-8").strip() or "manual"
+    except OSError:
+        reason = "manual"
+    logger.info(f"Self-restart signal detected (reason: {reason}) — draining and restarting")
+    for bot in bots.values():
+        if bot.process is not None and bot.process.poll() is None:
+            stop_bot(bot, "self-restart")
+    try:
+        RESTART_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    python = sys.executable
+    args = [python] + sys.argv
+    logger.info(f"Executing self-restart: {' '.join(args)}")
+    os.execv(python, args)
+    return True
+
+def _check_prompt_changes(bots: dict[str, BotState]) -> None:
+    for name, bot in bots.items():
+        if not bot.config.enabled:
+            continue
+        prompt_path = BOTS_DIR / bot.config.prompt_file
+        try:
+            current_mtime = prompt_path.stat().st_mtime if prompt_path.exists() else 0.0
+        except OSError:
+            current_mtime = 0.0
+        if current_mtime == 0.0:
+            continue
+        if bot.last_prompt_mtime > 0 and current_mtime > bot.last_prompt_mtime:
+            alive = bot.process is not None and bot.process.poll() is None
+            if alive:
+                logger.info(f"Prompt changed for '{name}' — triggering live reload (graceful respawn)")
+                stop_bot(bot, "prompt-hot-reload")
+                bot.next_run_at = time.time()
+        bot.last_prompt_mtime = current_mtime
+
+
+def _get_code_mtimes() -> dict[str, float]:
+    mtimes: dict[str, float] = {}
+    pkg_dir = Path(__file__).parent
+    try:
+        for py_file in pkg_dir.glob("*.py"):
+            try:
+                mtimes[py_file.name] = py_file.stat().st_mtime
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return mtimes
+
+
+def _check_code_changes(bots: dict[str, BotState]) -> None:
+    current_mtimes = _get_code_mtimes()
+    if not current_mtimes:
+        return
+    changed_modules: list[str] = []
+    for mod_name, mtime in current_mtimes.items():
+        for bot in bots.values():
+            prev = bot.last_code_mtimes.get(mod_name, 0.0)
+            if prev > 0 and mtime > prev:
+                changed_modules.append(mod_name)
+                break
+    if not changed_modules:
+        for bot in bots.values():
+            if not bot.last_code_mtimes:
+                bot.last_code_mtimes = dict(current_mtimes)
+            else:
+                bot.last_code_mtimes.update(current_mtimes)
+        return
+    unique_changed = sorted(set(changed_modules))
+    logger.info(f"Code change detected in {unique_changed} — respawning active bots")
+    for name, bot in bots.items():
+        if not bot.config.enabled:
+            continue
+        alive = bot.process is not None and bot.process.poll() is None
+        if alive:
+            stop_bot(bot, f"code-hot-reload:{','.join(unique_changed)}")
+            bot.next_run_at = time.time()
+        bot.last_code_mtimes = dict(current_mtimes)
+
+
+def _check_config_changes(bots: dict[str, BotState]) -> None:
+    if _adapter_instance is None:
+        return
+    try:
+        new_entries = _adapter_instance.bot_registry()
+    except Exception:
+        return
+    if not new_entries:
+        return
+    new_map = {e["name"]: e for e in new_entries}
+    changed = False
+    for name, bot in bots.items():
+        base = name.split("-")[0] if "-" in name else name
+        entry = new_map.get(base)
+        if not entry:
+            continue
+        new_interval = entry.get("interval", bot.config.interval_seconds)
+        new_model = entry.get("model", bot.config.model)
+        new_tier = entry.get("tier", bot.config.tier)
+        if new_interval != bot.config.interval_seconds or new_model != bot.config.model or new_tier != bot.config.tier:
+            logger.info(f"Config changed for '{name}': interval={bot.config.interval_seconds}->{new_interval} model={bot.config.model}->{new_model}")
+            bot.config.interval_seconds = new_interval
+            bot.config.heartbeat_timeout = new_interval * 2
+            bot.config.model = new_model
+            bot.config.fallback_model = entry.get("fallback_model", bot.config.fallback_model)
+            bot.config.tier = new_tier
+            changed = True
+    if changed:
+        _rescale_registry()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -399,6 +548,8 @@ class BotState:
     last_throttle_log: float = 0.0
     started_at: float | None = None
     prompt_mtime: float = 0.0
+    last_prompt_mtime: float = 0.0
+    last_code_mtimes: dict[str, float] = field(default_factory=dict)
 
 
 def _load_bot_registry() -> list["BotConfig"]:
@@ -639,7 +790,7 @@ def log_mtime(bot_name: str) -> float:
         return 0.0
 
 
-CLAIM_TTL_SECONDS = 7200
+CLAIM_TTL_SECONDS = 1800
 
 
 def _reap_expired_claims(bot_name: str) -> int:
@@ -733,10 +884,136 @@ def _load_ticket_context(ticket_id: str) -> str:
                 lines.append(f"  - {ac}")
         if t.affected_modules:
             lines.append(f"Affected Modules: {', '.join(t.affected_modules)}")
+        if t.rework_count > 0:
+            lines.append(f"Rework Count: {t.rework_count}")
+        if t.reviewer_feedback:
+            lines.append("")
+            lines.append("=== REVIEWER FEEDBACK (address these issues) ===")
+            for i, fb in enumerate(t.reviewer_feedback, 1):
+                lines.append(f"\nFeedback #{i} from {fb.get('reviewer', 'unknown')}:")
+                if fb.get('file'):
+                    lines.append(f"  File: {fb['file']}")
+                if fb.get('description'):
+                    lines.append(f"  Issue: {fb['description']}")
+                if fb.get('recommendation'):
+                    lines.append(f"  Fix: {fb['recommendation']}")
+            lines.append("=== END REVIEWER FEEDBACK ===")
         lines.append("--- END TICKET CONTEXT ---")
         return "\n".join(lines)
     except Exception:
         return ""
+
+
+_ADAPTIVE_SCHEDULER = None
+_ADAPTIVE_IMPL_CAP_OVERRIDE: int | None = None
+
+
+def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
+    """Use the adaptive scheduler to dynamically throttle implementer spawning.
+
+    When review pressure exceeds implementation pressure, temporarily reduces
+    MAX_IMPLEMENTER_SLOTS to prevent flooding the review queue. When the
+    backlog is healthy, restores normal capacity.
+    """
+    global _ADAPTIVE_SCHEDULER, _ADAPTIVE_IMPL_CAP_OVERRIDE, MAX_IMPLEMENTER_SLOTS
+    try:
+        from codebot.adaptive_scheduler import AdaptiveScheduler
+        from codebot.scheduler_config import SchedulerConfig
+        from codebot.pipeline_state import PipelineState, WorkerSlot
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return
+
+    if _ADAPTIVE_SCHEDULER is None:
+        try:
+            cfg = SchedulerConfig.default()
+            _ADAPTIVE_SCHEDULER = AdaptiveScheduler(config=cfg)
+        except Exception:
+            return
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return
+
+    try:
+        ts = TicketStore(store_path)
+        counts = ts.summary()
+    except Exception:
+        return
+
+    now = time.time()
+    workers = []
+    for name, bot in bots.items():
+        if bot.process is not None and bot.process.poll() is None:
+            base = name.split("-")[0] if "-" in name else name
+            role = base if base in IMPLEMENTER_ROLE_NAMES | DISCOVERY_ROLE_NAMES | REVIEWER_ROLE_NAMES else base
+            workers.append(WorkerSlot(
+                worker_id=name,
+                ticket_id=getattr(bot, "_assigned_ticket_id", "") or name,
+                role=role,
+                started_at=bot.started_at or now,
+                heartbeat_at=read_heartbeat(name) or now,
+                lease_expires=now + 600,
+                model=bot.config.model,
+            ))
+
+    ps = PipelineState(
+        discovered_count=counts.get("DISCOVERED", 0),
+        validating_count=counts.get("VALIDATING", 0),
+        triaged_count=counts.get("TRIAGED", 0),
+        ready_count=counts.get("READY", 0),
+        planning_count=counts.get("PLANNING", 0),
+        implementing_count=counts.get("IMPLEMENTING", 0),
+        reviewing_count=counts.get("REVIEWING", 0),
+        verifying_count=counts.get("VERIFYING", 0),
+        rework_count=counts.get("REWORK", 0),
+        blocked_count=counts.get("BLOCKED", 0),
+        candidate_count=0,
+        active_workers=tuple(workers),
+        total_slots=GATEWAY_MAX_CONCURRENT,
+        snapshot_time=now,
+    )
+
+    decision = _ADAPTIVE_SCHEDULER.tick(
+        pipeline=ps,
+        ready_tickets=[],
+        review_tickets=[],
+        verify_tickets=[],
+        rework_tickets=[],
+        planning_tickets=[],
+        candidate_tickets=[],
+        now=now,
+    )
+
+    from codebot.queue_pressure import SchedulerMode
+    mode = decision.mode
+
+    if mode in (SchedulerMode.REVIEW_HEAVY, SchedulerMode.VERIFICATION_HEAVY, SchedulerMode.REWORK_HEAVY):
+        impl_active = sum(1 for w in workers if w.role in IMPLEMENTER_ROLE_NAMES)
+        if impl_active > 2:
+            new_cap = max(2, impl_active // 2)
+            if _ADAPTIVE_IMPL_CAP_OVERRIDE != new_cap:
+                _ADAPTIVE_IMPL_CAP_OVERRIDE = new_cap
+                logger.info(
+                    f"[adaptive] Mode={mode.value}: review congestion detected. "
+                    f"Throttling implementers: {MAX_IMPLEMENTER_SLOTS} -> {new_cap} "
+                    f"(reviewing={ps.reviewing_count}, implementing={ps.implementing_count})"
+                )
+    elif _ADAPTIVE_IMPL_CAP_OVERRIDE is not None:
+        logger.info(
+            f"[adaptive] Mode={mode.value}: congestion cleared. "
+            f"Restoring implementer cap: {_ADAPTIVE_IMPL_CAP_OVERRIDE} -> {MAX_IMPLEMENTER_SLOTS}"
+        )
+        _ADAPTIVE_IMPL_CAP_OVERRIDE = None
+
+
+def _effective_max_implementers() -> int:
+    """Return the current implementer cap, considering adaptive throttling."""
+    if _ADAPTIVE_IMPL_CAP_OVERRIDE is not None:
+        return _ADAPTIVE_IMPL_CAP_OVERRIDE
+    return MAX_IMPLEMENTER_SLOTS
 
 
 def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
@@ -819,6 +1096,305 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
     return dispatched
 
 
+def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    reviewing = ts.list_by_state(TicketState.REVIEWING)
+    if not reviewing:
+        return 0
+
+    claims_dir = STATE_DIR / "claims"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    active_claims: set[str] = set()
+    for p in claims_dir.glob("*.json"):
+        active_claims.add(p.stem.rsplit(".", 1)[0])
+
+    idle_reviewers = []
+    unassigned_running = []
+    for name, bot in bots.items():
+        base_name = name.split("-")[0] if "-" in name else name
+        if base_name not in REVIEWER_ROLE_NAMES:
+            continue
+        if bot.process is not None and bot.process.poll() is None:
+            if not getattr(bot, '_assigned_ticket_id', ''):
+                unassigned_running.append((name, bot))
+        else:
+            idle_reviewers.append((name, bot))
+
+    available = idle_reviewers + unassigned_running
+    dispatched = 0
+
+    for ticket in reviewing:
+        if not available:
+            break
+
+        tid = getattr(ticket, 'id', '')
+        if tid in active_claims:
+            continue
+
+        tc = getattr(ticket, 'ticket_class', None)
+        tc_val = tc.value if hasattr(tc, 'value') else str(tc) if tc else "feature"
+        target_base = TICKET_CLASS_TO_REVIEWER.get(tc_val, "correctness_reviewer")
+
+        matched = None
+        for i, (name, bot) in enumerate(available):
+            base = name.split("-")[0] if "-" in name else name
+            if base == target_base:
+                matched = (i, name, bot)
+                break
+
+        if matched is None:
+            for i, (name, bot) in enumerate(available):
+                base = name.split("-")[0] if "-" in name else name
+                if base == "correctness_reviewer":
+                    matched = (i, name, bot)
+                    break
+
+        if matched is None and available:
+            matched = (0, available[0][0], available[0][1])
+
+        if matched is None:
+            break
+
+        idx, bot_name, bot = matched
+        available.pop(idx)
+
+        claim_file = claims_dir / f"{tid}.{bot_name}.json"
+        try:
+            claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": tc_val}
+            tmp = claim_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
+            tmp.replace(claim_file)
+        except OSError:
+            continue
+
+        bot._assigned_ticket_id = tid
+        dispatched += 1
+        logger.info(f"Dispatched review for ticket {tid} ({tc_val}) -> {bot_name}")
+
+    return dispatched
+
+
+def _advance_reviewed_tickets(bots: dict[str, BotState]) -> int:
+    """Transition REVIEWING tickets to VERIFYING or REWORK based on reviewer verdicts.
+
+    Checks each reviewing ticket's assigned reviewer claim files for completed
+    reviews. If all required reviewers have finished (claim released), advances
+    the ticket to VERIFYING. If any reviewer flagged rework, sends to REWORK.
+    """
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    reviewing = ts.list_by_state(TicketState.REVIEWING)
+    if not reviewing:
+        return 0
+
+    claims_dir = STATE_DIR / "claims"
+    if not claims_dir.exists():
+        return 0
+
+    advanced = 0
+    for ticket in reviewing:
+        tid = getattr(ticket, 'id', '')
+        if not tid:
+            continue
+
+        review_claims = list(claims_dir.glob(f"{tid}.*.json"))
+        if not review_claims:
+            continue
+
+        has_rework_flag = False
+        all_reviewers_done = True
+
+        for claim_file in review_claims:
+            bot_name = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
+            base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
+            if base_name not in REVIEWER_ROLE_NAMES:
+                continue
+
+            bot = bots.get(bot_name)
+            if bot is None:
+                continue
+
+            is_running = bot.process is not None and bot.process.poll() is None
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+
+            if is_running and assigned == tid:
+                all_reviewers_done = False
+                continue
+
+            tasklog = LOGS_DIR / f"{bot_name}.tasklog"
+            if tasklog.exists():
+                try:
+                    content = tasklog.read_text(encoding="utf-8", errors="ignore")
+                    last_lines = content.strip().splitlines()[-5:] if content.strip() else []
+                    last_text = " ".join(last_lines).upper()
+                    if "VERDICT: REWORK" in last_text or "VERDICT: BLOCK" in last_text or "VERDICT: FAIL" in last_text:
+                        has_rework_flag = True
+                except OSError:
+                    pass
+
+        if not all_reviewers_done:
+            continue
+
+        try:
+            if has_rework_flag:
+                ts.transition(tid, TicketState.REWORK)
+                logger.info(f"Review verdict: {tid} -> REWORK")
+            else:
+                ts.transition(tid, TicketState.VERIFYING)
+                logger.info(f"Review verdict: {tid} -> VERIFYING")
+
+            for claim_file in review_claims:
+                try:
+                    claim_file.unlink()
+                except OSError:
+                    pass
+
+            for name, bot in bots.items():
+                if getattr(bot, '_assigned_ticket_id', '') == tid:
+                    bot._assigned_ticket_id = ''
+
+            advanced += 1
+        except ValueError as e:
+            logger.warning(f"Failed to advance {tid}: {e}")
+
+    return advanced
+
+
+def _gatekeeper_verify_tickets() -> int:
+    """Advance VERIFYING tickets to COMPLETE via quality gate evaluation.
+
+    Runs deterministic quality gates (build, tests) on each verifying ticket.
+    If all gates pass, transitions to COMPLETE. If gates fail, sends to REWORK.
+    This is the sole authority for completion (§5).
+    """
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    verifying = ts.list_by_state(TicketState.VERIFYING)
+    if not verifying:
+        return 0
+
+    advanced = 0
+    for ticket in verifying:
+        tid = getattr(ticket, 'id', '')
+        if not tid:
+            continue
+
+        try:
+            from codebot.quality_gate import run_quality_gates, load_policy, record_gate_results
+            policy = load_policy()
+            workspace = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
+            tc = getattr(ticket, 'ticket_class', None)
+            tc_val = tc.value if hasattr(tc, 'value') else str(tc) if tc else "feature"
+            passed, evaluations = run_quality_gates(
+                policy=policy,
+                workspace=workspace,
+                ticket_class=tc_val,
+            )
+            record_gate_results(STATE_DIR, tid, passed, evaluations)
+
+            if passed:
+                ts.transition(tid, TicketState.COMPLETE)
+                logger.info(f"Gatekeeper: {tid} -> COMPLETE (all gates passed)")
+                advanced += 1
+            else:
+                rework_count = getattr(ticket, 'rework_count', 0)
+                if rework_count < 3:
+                    ts.transition(tid, TicketState.REWORK)
+                    logger.info(f"Gatekeeper: {tid} -> REWORK (gates failed, attempt {rework_count + 1})")
+                else:
+                    logger.warning(f"Gatekeeper: {tid} exceeded max reworks ({rework_count}), leaving in VERIFYING")
+                advanced += 1
+        except Exception as e:
+            logger.warning(f"Gatekeeper verification failed for {tid}: {e}")
+
+    return advanced
+
+
+MIN_READY_BACKLOG = 5
+
+
+def _auto_triage_backlog() -> int:
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+    ready_count = len(ts.list_ready())
+    discovered = ts.list_by_state(TicketState.DISCOVERED)
+    validating = ts.list_by_state(TicketState.VALIDATING)
+    triaged = ts.list_by_state(TicketState.TRIAGED)
+    backlog_depth = len(discovered) + len(validating) + len(triaged)
+    max_advance_per_tick = max(5, min(backlog_depth, 20))
+    advanced = 0
+    for state in (TicketState.DISCOVERED, TicketState.VALIDATING, TicketState.TRIAGED):
+        if advanced >= max_advance_per_tick:
+            break
+        for ticket in ts.list_by_state(state):
+            if advanced >= max_advance_per_tick:
+                break
+            target = TicketState.VALIDATING if state == TicketState.DISCOVERED else (
+                TicketState.TRIAGED if state == TicketState.VALIDATING else TicketState.READY
+            )
+            try:
+                ts.transition(ticket.id, target)
+                advanced += 1
+                logger.info(f"Auto-triaged {ticket.id}: {state.value} -> {target.value}")
+            except ValueError:
+                pass
+    return advanced
+
+
 _METRICS_PATH = STATE_DIR / "bot_metrics.json"
 _METRICS_WINDOW_DAYS = 7
 
@@ -844,8 +1420,20 @@ def _record_bot_metric(name: str, bot: BotState, alive: bool, exit_code: int | N
         entry["total_duration_s"] = entry.get("total_duration_s", 0) + (now - started)
         # C2: accumulate per-run token counts for burn rate tracking.
         entry["total_tokens"] = entry.get("total_tokens", 0) + int(tokens_this_run)
+        # Cap runs list to prevent unbounded growth; serialize fully to avoid corrupt JSON
+        MAX_RUNS_PER_BOT = 500
+        if len(entry["runs"]) > MAX_RUNS_PER_BOT:
+            entry["runs"] = entry["runs"][-MAX_RUNS_PER_BOT:]
+        serialized = json.dumps(data, indent=2)
+        if len(serialized) > 50000:
+            # Prune oldest runs across all bots until under budget
+            for bot_key in data:
+                runs_list = data[bot_key].get("runs", [])
+                if len(runs_list) > 10:
+                    data[bot_key]["runs"] = runs_list[-10:]
+            serialized = json.dumps(data, indent=2)
         tmp = _METRICS_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2)[:50000], encoding="utf-8")
+        tmp.write_text(serialized, encoding="utf-8")
         tmp.replace(_METRICS_PATH)
     except Exception:
         pass
@@ -1018,22 +1606,26 @@ def _count_running_non_workers(bots: dict[str, BotState] | None = None) -> int:
     return n
 
 
-def _count_running_by_category(bots: dict[str, BotState] | None) -> tuple[int, int, int]:
+def _count_running_by_category(bots: dict[str, BotState] | None) -> tuple[int, int, int, int]:
     implementers = 0
     discovery = 0
+    reviewers = 0
     other = 0
     if not bots:
-        return implementers, discovery, other
+        return implementers, discovery, reviewers, other
     for name, bot in bots.items():
+        base = name.split("-")[0] if "-" in name else name
         if bot.process is None or bot.process.poll() is not None:
             continue
-        if name in IMPLEMENTER_ROLE_NAMES:
+        if base in IMPLEMENTER_ROLE_NAMES:
             implementers += 1
-        elif name in DISCOVERY_ROLE_NAMES:
+        elif base in DISCOVERY_ROLE_NAMES:
             discovery += 1
+        elif base in REVIEWER_ROLE_NAMES:
+            reviewers += 1
         else:
             other += 1
-    return implementers, discovery, other
+    return implementers, discovery, reviewers, other
 
 
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False, runner_mode: str = "api", bot_model: str = "", bot_name: str = "", is_overture: bool = False) -> tuple[bool, str]:
@@ -1048,24 +1640,31 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
         if bot_model == "qwen-3.8-max":
             if model_counts.get("qwen-3.8-max", 0) >= MAX_QWEN_38_CONCURRENT:
                 return False, f"qwen-3.8-max cap {model_counts['qwen-3.8-max']}/{MAX_QWEN_38_CONCURRENT}"
+    base_role = bot_name.split("-")[0] if "-" in bot_name else bot_name
     if bot_name in WORKER_POOL:
         reserved = worker_reserved_slots(GATEWAY_MAX_CONCURRENT)
         if _count_running_workers(bots) >= reserved:
             return False, f"worker pool full ({reserved}/{reserved})"
+    elif base_role in PLANNING_ROLE_NAMES:
+        pass
     elif bots is not None:
-        non_workers = {n: b for n, b in bots.items() if n not in WORKER_POOL}
+        non_workers = {n: b for n, b in bots.items() if n not in WORKER_POOL and n.split("-")[0] not in PLANNING_ROLE_NAMES}
         running_non = sum(1 for b in non_workers.values()
                           if b.process is not None and b.process.poll() is None)
         slots = rotating_slots(GATEWAY_MAX_CONCURRENT)
         if running_non >= slots:
             return False, f"rotating slots full ({slots}/{slots})"
-    impl_running, discovery_running, other_running = _count_running_by_category(bots)
-    if bot_name in IMPLEMENTER_ROLE_NAMES:
-        if impl_running >= MAX_IMPLEMENTER_SLOTS:
-            return False, f"implementer slots full ({impl_running}/{MAX_IMPLEMENTER_SLOTS})"
-    elif bot_name in DISCOVERY_ROLE_NAMES:
+    impl_running, discovery_running, reviewer_running, other_running = _count_running_by_category(bots)
+    if base_role in IMPLEMENTER_ROLE_NAMES:
+        eff_cap = _effective_max_implementers()
+        if impl_running >= eff_cap:
+            return False, f"implementer slots full ({impl_running}/{eff_cap})"
+    elif base_role in DISCOVERY_ROLE_NAMES:
         if discovery_running >= MAX_DISCOVERY_SLOTS:
             return False, f"discovery slots full ({discovery_running}/{MAX_DISCOVERY_SLOTS})"
+    elif base_role in REVIEWER_ROLE_NAMES:
+        if reviewer_running >= MAX_REVIEWER_SLOTS:
+            return False, f"reviewer slots full ({reviewer_running}/{MAX_REVIEWER_SLOTS})"
     else:
         if other_running >= MAX_NON_IMPLEMENTER_SLOTS:
             return False, f"non-implementer slots full ({other_running}/{MAX_NON_IMPLEMENTER_SLOTS})"
@@ -1119,14 +1718,6 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
     prompt_path = BOTS_DIR / bot.config.prompt_file
     if prompt_path.exists() and prompt_path.stat().st_mtime > last_run_mtime:
         inputs_changed = True
-    ALWAYS_RESPAWN = frozenset({
-        "bug_hunter", "security_auditor", "architecture_auditor",
-        "performance_auditor", "test_gap_auditor", "documentation_auditor",
-        "dependency_auditor", "ux_auditor",
-        "general_implementer", "backend_implementer", "frontend_implementer",
-        "test_implementer", "migration_implementer", "documentation_implementer",
-        "scheduler", "quality_gate", "conflict_resolver", "budget_controller",
-    })
     if not inputs_changed and last_run_mtime > 0 and bot.config.name not in WORKER_POOL and bot.config.name not in ALWAYS_RESPAWN:
         logger.info(f"Bot '{bot.config.name}' skipped — no input changes since last run")
         bot.next_run_at = time.time() + bot.config.interval_seconds
@@ -1174,8 +1765,12 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             prompt_text = f"{prompt_text}\n\n{ticket_ctx}"
     try:
         bot.prompt_mtime = prompt_file.stat().st_mtime
+        bot.last_prompt_mtime = bot.prompt_mtime
     except OSError:
         bot.prompt_mtime = 0.0
+        bot.last_prompt_mtime = 0.0
+    if not bot.last_code_mtimes:
+        bot.last_code_mtimes = _get_code_mtimes()
     heartbeat_file = STATE_DIR / f"{bot.config.name}.heartbeat"
     ckpt_file = checkpoint_path(bot.config.name)
     ckpt = read_checkpoint(bot.config.name) if resume_checkpoint else None
@@ -1364,29 +1959,65 @@ def checkpoint_path(bot_name: str) -> Path:
 
 def read_checkpoint(bot_name: str) -> dict | None:
     p = checkpoint_path(bot_name)
+    bak = p.with_suffix(".checkpoint.bak")
     if not p.exists():
+        if bak.exists():
+            try:
+                raw = bak.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    logger.info(f"Restored last-good checkpoint for '{bot_name}' from .bak")
+                    return data
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                pass
         return None
     try:
         raw = p.read_text(encoding="utf-8")
         data = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        logger.warning(f"Checkpoint corrupt for '{bot_name}': {exc} — deleting and starting fresh")
+        logger.warning(f"Checkpoint corrupt for '{bot_name}': {exc} — falling back to .bak")
         try:
-            p.unlink()
+            p.rename(bak)
         except OSError:
-            pass
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        if bak.exists():
+            try:
+                fallback_raw = bak.read_text(encoding="utf-8")
+                fallback_data = json.loads(fallback_raw)
+                if isinstance(fallback_data, dict):
+                    return fallback_data
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                pass
         return None
     except Exception:
         return None
     if not isinstance(data, dict):
-        logger.warning(f"Checkpoint for '{bot_name}' is not a JSON object — deleting")
+        logger.warning(f"Checkpoint for '{bot_name}' is not a JSON object — falling back to .bak")
         try:
-            p.unlink()
+            p.rename(bak)
         except OSError:
-            pass
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        if bak.exists():
+            try:
+                fallback_raw = bak.read_text(encoding="utf-8")
+                fallback_data = json.loads(fallback_raw)
+                if isinstance(fallback_data, dict):
+                    return fallback_data
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                pass
         return None
     if len(raw.encode("utf-8")) > 4096:
         logger.warning(f"Checkpoint for '{bot_name}' exceeds 4KB ({len(raw.encode('utf-8'))} bytes) — truncating")
+    try:
+        bak.write_text(raw, encoding="utf-8")
+    except OSError:
+        pass
     return data
 
 
@@ -1654,6 +2285,33 @@ def _write_alignment_event(
         logger.warning(f"Failed to write alignment event for {bot_name}: {e}")
 
 
+def _collect_reviewer_feedback_for_trigger(bot_name: str) -> list[dict]:
+    feedback = []
+    try:
+        from codebot.ticket_engine import TicketStore
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
+        if not store_path.exists():
+            return feedback
+        ts = TicketStore(store_path)
+        for ticket in ts._tickets.values():
+            if ticket.assigned_agent == bot_name and ticket.rework_count >= 3 and ticket.reviewer_feedback:
+                for fb in ticket.reviewer_feedback:
+                    feedback.append({
+                        "ticket_id": ticket.id,
+                        "ticket_title": ticket.title,
+                        "rework_count": ticket.rework_count,
+                        "reviewer": fb.get("reviewer", ""),
+                        "file": fb.get("file", ""),
+                        "description": fb.get("description", ""),
+                        "recommendation": fb.get("recommendation", ""),
+                    })
+    except Exception as e:
+        logger.debug(f"Failed to collect reviewer feedback for {bot_name}: {e}")
+    return feedback
+
+
 def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
     """Run alignment scoring + prompt optimization synchronously for a bot.
 
@@ -1759,14 +2417,16 @@ def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
 
         consec = int(bot_state.get("consecutive_failures", 0))
         if consec >= 3:
+            reviewer_feedback = _collect_reviewer_feedback_for_trigger(bot_name)
             write_trigger(
                 bot_name, score_result["score"], reward,
                 "evolve_after_retries",
                 f"{consec} consecutive failures, evolving prompt",
                 score_result.get("breakdown", {}),
                 event, bot_state,
+                reviewer_feedback=reviewer_feedback,
             )
-            logger.info(f"Alignment pipeline: {bot_name} {consec} consecutive failures, prompt evolution triggered")
+            logger.info(f"Alignment pipeline: {bot_name} {consec} consecutive failures, prompt evolution triggered with {len(reviewer_feedback)} feedback items")
             mark_event_processed(
                 event_file, event,
                 score_result["score"], reward,
@@ -2460,10 +3120,10 @@ def _plan_manifest_batches(
     ready_ordered.extend(extra)
 
     budget_state = _manifest_get_budget_state()
-    packed = _pb(ready_ordered, max_per_batch=5, max_batches=2, budget_state=budget_state, stagger_s=20)
+    packed = _pb(ready_ordered, max_per_batch=8, max_batches=3, budget_state=budget_state, stagger_s=5)
     # Apply model/slot caps
     try:
-        capped = _ac(packed, thinking_cap=3, qwen38max_cap=2, slot_cap=10)
+        capped = _ac(packed, thinking_cap=3, qwen38max_cap=2, slot_cap=24)
         return capped
     except Exception as e:
         logger.warning(f"apply_caps failed: {e}")
@@ -2488,7 +3148,15 @@ def _dispatch_manifest_batches(packed: dict, bots: dict[str, BotState]) -> None:
         run_batch_fn = None
 
     queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
-    queue_items = _parse_queue_complexity(queue_path)
+    queue_text_for_items = packed.get("queue_text") if isinstance(packed, dict) else None
+    if isinstance(queue_text_for_items, str) and queue_text_for_items:
+        try:
+            from codebot.readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
+        except ImportError:
+            _pqct = None  # type: ignore
+        queue_items = _pqct(queue_text_for_items) if _pqct is not None else _parse_queue_complexity(queue_path)
+    else:
+        queue_items = _parse_queue_complexity(queue_path)
 
     for idx, batch in enumerate(batches):
         if not isinstance(batch, list):
@@ -2628,8 +3296,13 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 _manifest_error_record(name, is_error=(exit_code != 0))
             except Exception:
                 pass
-            if exit_code == 0:
+            if exit_code in (0, 3):
                 bot.consecutive_errors = 0
+                if exit_code == 3:
+                    logger.info(f"Bot '{name}' yielded on rate limit — requeue soon, no error count")
+                    bot.next_run_at = now + RATE_LIMIT_REQUEUE_S
+                    update_bot_state(bot, "waiting")
+                    continue
             else:
                 bot.consecutive_errors += 1
                 if bot.consecutive_errors >= 3:
@@ -2696,15 +3369,38 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
         _sweep_orphan_claims(bots)
     except Exception:
         pass
+    # Adaptive scheduler gate: throttle implementers when review-congested
+    try:
+        _adaptive_schedule_gate(bots)
+    except Exception as e:
+        logger.warning(f"Adaptive schedule gate failed: {e}")
     # Dispatch READY tickets to idle implementers by class
     try:
-        _dispatch_tickets_to_implementers(bots)
+        _dispatch_tickets_to_reviewers(bots)
     except Exception as e:
-        logger.warning(f"Ticket dispatch failed: {e}")
+        logger.warning(f"Review dispatch failed: {e}")
+    try:
+        _advance_reviewed_tickets(bots)
+    except Exception as e:
+        logger.warning(f"Review advance failed: {e}")
+    try:
+        _dispatch_tickets_to_reviewers(bots)
+    except Exception as e:
+        logger.warning(f"Review dispatch failed: {e}")
+    try:
+        _advance_reviewed_tickets(bots)
+    except Exception as e:
+        logger.warning(f"Review advance failed: {e}")
+    try:
+        _gatekeeper_verify_tickets()
+    except Exception as e:
+        logger.warning(f"Gatekeeper verify failed: {e}")
     # Manifest readiness / ordering / packing / dispatch
     queue_text = _manifest_load_queue_text()
     ready, skipped, considered = _collect_manifest_readiness(bots, now, queue_text=queue_text)
     packed = _plan_manifest_batches(ready, bots)
+    if isinstance(packed, dict):
+        packed["queue_text"] = queue_text
     batches = packed.get("batches", []) if isinstance(packed, dict) else []
     dropped = packed.get("dropped", []) if isinstance(packed, dict) else []
     all_skipped: list[tuple[str, str]] = list(skipped)
@@ -2714,9 +3410,15 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
     batched_count = sum(len(b) for b in batches) if isinstance(batches, list) else 0
     # Per-tick reasoning log (required by acceptance)
     logger.info(f"tick: considered={considered} ready={len(ready)} batched={batched_count} skipped={all_skipped}")
+    # Metrics collection is I/O-heavy (~375 file reads); run at most every
+    # CODEBOT_METRICS_EVERY_TICKS ticks so the single-threaded loop stays responsive.
     try:
-        import subprocess as _sp
-        _sp.run(["python3", str(BOTS_DIR / "metrics_collector.py")], timeout=60, capture_output=True)
+        global _metrics_tick
+        _metrics_tick += 1
+        _metrics_every = max(1, int(os.getenv("CODEBOT_METRICS_EVERY_TICKS", "4")))
+        if _metrics_tick % _metrics_every == 1:
+            import subprocess as _sp
+            _sp.run(["python3", str(BOTS_DIR / "metrics_collector.py"), "--incremental"], timeout=60, capture_output=True)
     except Exception:
         pass
     if batches:
@@ -2846,10 +3548,61 @@ def _preview_manifest_batches() -> dict:
     return {"batches": batches, "dropped": dropped, "considered": considered, "ready": ready, "skipped": skipped, "budget_state": budget_state, "day_total": day_total_display}
 
 
+def _process_verifying_tickets() -> None:
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.gatekeeper import Gatekeeper
+
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
+        if not store_path.exists():
+            return
+
+        store = TicketStore(store_path)
+        verifying = store.list_by_state(TicketState.VERIFYING)
+
+        if not verifying:
+            return
+
+        logger.info(f"Processing {len(verifying)} VERIFYING tickets through gatekeeper")
+
+        for ticket in verifying:
+            try:
+                gk = Gatekeeper(
+                    state_dir=STATE_DIR,
+                    policy_path=STATE_DIR.parent / "quality_gates.yaml" if (STATE_DIR.parent / "quality_gates.yaml").exists() else None,
+                    workspace=BOTS_DIR,
+                )
+
+                ticket_class = ticket.ticket_class.value if hasattr(ticket.ticket_class, 'value') else str(ticket.ticket_class)
+                changed_files = ticket.affected_modules if ticket.affected_modules else []
+
+                result = gk.verify_ticket(
+                    ticket_id=ticket.id,
+                    ticket_class=ticket_class,
+                    changed_files=changed_files,
+                    rework_count=ticket.rework_count,
+                )
+
+                logger.info(f"Gatekeeper decision for {ticket.id}: {result.get('decision')}")
+
+            except Exception as e:
+                logger.error(f"Failed to process VERIFYING ticket {ticket.id}: {e}")
+
+    except Exception as e:
+        logger.error(f"Failed to process VERIFYING tickets: {e}")
+
+
 def check_all_bots(bots: dict[str, BotState]) -> None:
+    if _check_self_restart(bots):
+        return
     if USE_MANIFEST_SCHEDULER:
         return _check_all_bots_manifest(bots)
     rotate_logs()
+    _check_prompt_changes(bots)
+    _check_code_changes(bots)
+    _check_config_changes(bots)
     if is_draining():
         for bot in bots.values():
             if bot.process is not None and bot.process.poll() is None:
@@ -2907,8 +3660,26 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 if not created_ticket:
                     marker = STATE_DIR / f"{name}.no_tickets"
                     try:
-                        marker.write_text(str(time.time()), encoding="utf-8")
-                        logger.info(f"Discovery agent {name} exited without create_ticket — penalty marker written")
+                        prev = 0
+                        if marker.exists():
+                            try:
+                                prev = int(marker.read_text(encoding="utf-8").strip().split("|")[0])
+                            except (ValueError, IndexError):
+                                prev = 0
+                        new_count = prev + 1
+                        marker.write_text(f"{new_count}|{time.time()}", encoding="utf-8")
+                        logger.info(f"Discovery agent {name} exited without create_ticket — penalty marker written ({new_count} consecutive)")
+                        if new_count >= MAX_DISCOVERY_NO_TICKET_RUNS:
+                            bot.config.enabled = False
+                            logger.error(f"Discovery agent '{name}' disabled after {new_count} runs without creating tickets")
+                            update_bot_state(bot, "disabled")
+                    except OSError:
+                        pass
+                else:
+                    marker = STATE_DIR / f"{name}.no_tickets"
+                    try:
+                        if marker.exists():
+                            marker.unlink()
                     except OSError:
                         pass
             _write_alignment_event(name, exit_code=exit_code, exit_reason="clean" if exit_code == 0 else "error", started_at=bot.started_at)
@@ -2917,9 +3688,15 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             except Exception as e:
                 logger.warning(f"Alignment pipeline failed for {name}: {e}")
             bot.process = None
+            if exit_code == 3:
+                bot.consecutive_errors = 0
+                bot.next_run_at = now + RATE_LIMIT_REQUEUE_S
+                update_bot_state(bot, "waiting")
+                continue
             if exit_code == 0:
                 bot.consecutive_errors = 0
                 assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+                base_role = name.split("-")[0] if "-" in name else name
                 if assigned_tid:
                     try:
                         from codebot.ticket_engine import TicketStore, TicketState
@@ -2928,15 +3705,20 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                             store_path = Path(".codebot/state/tickets.json")
                         if store_path.exists():
                             ts = TicketStore(store_path)
-                            ts.transition(assigned_tid, TicketState.REVIEWING)
-                            logger.info(f"Ticket {assigned_tid} -> REVIEWING (agent {name} completed)")
+                            if base_role in REVIEWER_ROLE_NAMES:
+                                target_state = TicketState.VERIFYING
+                                state_label = "VERIFYING"
+                            else:
+                                target_state = TicketState.REVIEWING
+                                state_label = "REVIEWING"
+                            ts.transition(assigned_tid, target_state)
+                            logger.info(f"Ticket {assigned_tid} -> {state_label} (agent {name} completed)")
                             claims_dir = STATE_DIR / "claims"
                             for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
                                 cf.unlink(missing_ok=True)
                     except Exception as te:
                         logger.warning(f"Ticket transition failed for {assigned_tid}: {te}")
                     bot._assigned_ticket_id = ''
-                base_role = name.split("-")[0] if "-" in name else name
                 if base_role in DISCOVERY_ROLE_NAMES:
                     stream_path = LOGS_DIR / f"{name}.stream.json"
                     created_ticket = False
@@ -2965,8 +3747,26 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                     if not created_ticket:
                         marker = STATE_DIR / f"{name}.no_tickets"
                         try:
-                            marker.write_text(str(time.time()), encoding="utf-8")
-                            logger.info(f"Discovery agent {name} exited without create_ticket — penalty marker written")
+                            prev = 0
+                            if marker.exists():
+                                try:
+                                    prev = int(marker.read_text(encoding="utf-8").strip().split("|")[0])
+                                except (ValueError, IndexError):
+                                    prev = 0
+                            new_count = prev + 1
+                            marker.write_text(f"{new_count}|{time.time()}", encoding="utf-8")
+                            logger.info(f"Discovery agent {name} exited without create_ticket — penalty marker written ({new_count} consecutive)")
+                            if new_count >= MAX_DISCOVERY_NO_TICKET_RUNS:
+                                bot.config.enabled = False
+                                logger.error(f"Discovery agent '{name}' disabled after {new_count} runs without creating tickets")
+                                update_bot_state(bot, "disabled")
+                        except OSError:
+                            pass
+                    else:
+                        marker = STATE_DIR / f"{name}.no_tickets"
+                        try:
+                            if marker.exists():
+                                marker.unlink()
                         except OSError:
                             pass
             else:
@@ -3020,9 +3820,33 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     except Exception:
         pass
     try:
+        _auto_triage_backlog()
+    except Exception as e:
+        logger.warning(f"Auto-triage failed: {e}")
+    try:
+        _adaptive_schedule_gate(bots)
+    except Exception as e:
+        logger.warning(f"Adaptive schedule gate failed: {e}")
+    try:
         _dispatch_tickets_to_implementers(bots)
     except Exception as e:
         logger.warning(f"Ticket dispatch failed: {e}")
+    try:
+        _dispatch_tickets_to_reviewers(bots)
+    except Exception as e:
+        logger.warning(f"Reviewer dispatch failed: {e}")
+    try:
+        _advance_reviewed_tickets(bots)
+    except Exception as e:
+        logger.warning(f"Review advance failed: {e}")
+    try:
+        _gatekeeper_verify_tickets()
+    except Exception as e:
+        logger.warning(f"Gatekeeper verify failed: {e}")
+    try:
+        _process_verifying_tickets()
+    except Exception as e:
+        logger.warning(f"VERIFYING ticket processing failed: {e}")
     try:
         from codebot.prompt_optimizer import consume_triggers
         triggers_dir = STATE_DIR / "alignment_triggers"
