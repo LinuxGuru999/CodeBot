@@ -231,9 +231,14 @@ class Ticket:
         return cls.from_dict(json.loads(raw))
 
 
+_ticket_counter = 0
+
+
 def generate_ticket_id(prefix: str = "CB") -> str:
+    global _ticket_counter
+    _ticket_counter += 1
     ts = int(time.time() * 1000) % 10_000_000
-    rand = hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:4].upper()
+    rand = hashlib.sha256(f"{time.time_ns()}-{_ticket_counter}".encode()).hexdigest()[:4].upper()
     return f"{prefix}-{ts}-{rand}"
 
 
