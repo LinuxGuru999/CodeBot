@@ -1089,7 +1089,13 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         except OSError:
             continue
         try:
-            ts.transition(tid, TicketState.IMPLEMENTING)
+            risk = getattr(ticket, 'risk', None)
+            risk_val = risk.value if hasattr(risk, 'value') else str(risk) if risk else "medium"
+            if risk_val in ("high", "critical") and ticket.state.value == "READY":
+                ts.transition(tid, TicketState.PLANNING)
+                logger.info(f"Ticket {tid} risk={risk_val} -> PLANNING (enforced)")
+            else:
+                ts.transition(tid, TicketState.IMPLEMENTING)
         except Exception:
             pass
         bot._assigned_ticket_id = tid

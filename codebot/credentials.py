@@ -63,8 +63,8 @@ def get_ssh_auth_sock() -> str:
 def get_git_ssh_command() -> str:
     key_path = get_ssh_key_path()
     if key_path:
-        return f"ssh -i {key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
-    return "ssh -o StrictHostKeyChecking=no"
+        return f"ssh -i {key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    return "ssh -o StrictHostKeyChecking=accept-new"
 
 
 def get_dry_run() -> bool:
