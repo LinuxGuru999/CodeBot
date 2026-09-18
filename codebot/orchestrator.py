@@ -1084,8 +1084,8 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
     gap = now - last
     if not is_overture:
         if bot_name in WORKER_POOL:
-            if gap < 1:
-                return False, f"gap {gap:.1f}s<1s"
+            if gap < 0:
+                return False, f"gap {gap:.1f}s<0s"
         elif gap < GATEWAY_MIN_SPAWN_GAP:
             return False, f"gap {gap:.0f}s<{GATEWAY_MIN_SPAWN_GAP}s"
     return True, "slot available"
