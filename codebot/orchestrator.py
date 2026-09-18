@@ -2878,6 +2878,39 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         alive = bot.process is not None and bot.process.poll() is None
         if not alive and bot.process is not None:
             exit_code = bot.process.returncode
+            base_role = name.split("-")[0] if "-" in name else name
+            if base_role in DISCOVERY_ROLE_NAMES:
+                stream_path = LOGS_DIR / f"{name}.stream.json"
+                created_ticket = False
+                if stream_path.exists():
+                    try:
+                        sdata = json.loads(stream_path.read_text(encoding="utf-8", errors="ignore"))
+                        for m in sdata.get("messages", []):
+                            if m.get("role") == "assistant":
+                                for tc in m.get("tool_calls", []):
+                                    if tc.get("function", {}).get("name") == "create_ticket":
+                                        created_ticket = True
+                                        break
+                            if created_ticket:
+                                break
+                    except Exception:
+                        pass
+                if not created_ticket:
+                    log_path = LOGS_DIR / f"{name}.log"
+                    if log_path.exists():
+                        try:
+                            log_text = log_path.read_text(errors="ignore")
+                            if "create_ticket" in log_text:
+                                created_ticket = True
+                        except Exception:
+                            pass
+                if not created_ticket:
+                    marker = STATE_DIR / f"{name}.no_tickets"
+                    try:
+                        marker.write_text(str(time.time()), encoding="utf-8")
+                        logger.info(f"Discovery agent {name} exited without create_ticket — penalty marker written")
+                    except OSError:
+                        pass
             _write_alignment_event(name, exit_code=exit_code, exit_reason="clean" if exit_code == 0 else "error", started_at=bot.started_at)
             try:
                 _run_alignment_pipeline(name)

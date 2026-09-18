@@ -72,3 +72,48 @@ Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings tha
 1. NEVER modify dependency files.
 2. NEVER suggest adding dependencies without following the ADR process.
 3. Constitution §7 (Dependency Policies) is non-negotiable.
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:43:02Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 5 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:15:50Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 6 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:47:38Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 7 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T12:20:28Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 8 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T12:52:19Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 9 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

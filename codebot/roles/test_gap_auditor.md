@@ -126,3 +126,48 @@ Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings tha
 4. Prefer measured coverage over static guessing when available.
 5. Never create tickets for constitution-protected paths.
 6. Include specific line numbers in evidence — vague tickets waste implementer time.
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:42:00Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 5 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:14:17Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 6 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:46:37Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 7 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T12:18:56Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 8 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T12:50:46Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 9 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

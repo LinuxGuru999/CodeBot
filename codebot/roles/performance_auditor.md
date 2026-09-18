@@ -78,3 +78,39 @@ Pattern: tighten_heartbeat_format
 
 Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
 <!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:41:30Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 9 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:13:46Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 10 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:46:06Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 11 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T12:18:25Z)
+Trigger: stagnation_evolve (score=65, reward=0.65)
+Reason: 12 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

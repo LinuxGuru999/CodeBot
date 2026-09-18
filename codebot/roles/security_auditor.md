@@ -94,3 +94,30 @@ Pattern: tighten_heartbeat_format
 
 Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
 <!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:39:58Z)
+Trigger: misaligned (score=50, reward=0.48)
+Reason: exit=0 reason=clean dur=62.0s hb_age=37.0 reb=0 err=0 ckpt=False eff=5 prod=0 no_tickets_pen=15
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:12:13Z)
+Trigger: misaligned (score=50, reward=0.48)
+Reason: exit=0 reason=clean dur=62.08s hb_age=62.1 reb=0 err=0 ckpt=False eff=5 prod=0 no_tickets_pen=15
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T11:44:33Z)
+Trigger: misaligned (score=50, reward=0.48)
+Reason: exit=0 reason=clean dur=92.46s hb_age=92.5 reb=0 err=0 ckpt=False eff=5 prod=0 no_tickets_pen=15
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
