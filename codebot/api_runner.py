@@ -1375,6 +1375,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     timeout_retries = 0
     continue_nudges = 0
     exit_reason = "unknown"
+    tickets_created = 0
 
     # CAP-07: Context compaction state
     try:
@@ -1572,6 +1573,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     if name in ("edit", "write") and args.get("path"):
                         files_touched.append(args["path"])
                     if name == "create_ticket" and result.get("success"):
+                        tickets_created += 1
                         _scratch_state.context_summary = (
                             (_scratch_state.context_summary or "") + f"\nTICKET_CREATED: {result.get('output', '')}"
                         ).strip()[:2000]
@@ -1624,9 +1626,8 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
             "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
         })
         base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
-        if base_name in discovery_roles and _scratch_state is not None:
-            ctx = _scratch_state.context_summary or ""
-            if "TICKET_CREATED" not in ctx and exit_reason in ("completed", "iteration_limit", "drain"):
+        if base_name in discovery_roles and tickets_created == 0:
+            if exit_reason in ("completed", "iteration_limit", "drain"):
                 marker = state_dir / f"{bot_name}.no_tickets"
                 try:
                     marker.write_text(str(time.time()), encoding="utf-8")
