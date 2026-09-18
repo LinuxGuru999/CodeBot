@@ -82,6 +82,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `codebot_adapter.py` | ~220 | Self-hosting adapter: CodeBot manages its own repo via 26-role registry |
 | `model_router.py` | ~300 | Multi-provider model routing with automatic fallback and capability matching |
 | `pricing_table.py` | ~170 | Model pricing table for monetary cost calculation (tokens to USD conversion) |
+| `alignment_service.py` | ~250 | Decoupled alignment pipeline for reward scoring and prompt evolution |
 
 ### Capability Modules (CAP Pipeline)
 

@@ -2800,6 +2800,79 @@ def now_gate_logged(bot: BotState) -> bool:
     return False
 
 
+def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
+    """Enable or suppress bot spawns based on current ticket queue state.
+
+    Called every health-check tick before the spawn loop. Reads READY,
+    REVIEWING, VERIFYING, REWORK, and DISCOVERED counts from TicketStore
+    and adjusts bot.config.enabled so interval-based spawns only fire
+    when there is actual work for that role category.
+
+    Rules:
+    - Implementers suppressed when READY + REWORK == 0
+    - Reviewers suppressed when REVIEWING == 0
+    - Discovery suppressed when DISCOVERED > 50 (backlog too deep) or READY > backlog_high
+    - Control roles (scheduler, quality_gate, etc.) always allowed
+    - Running bots are never killed; suppression only prevents new spawns
+    """
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return
+
+    try:
+        ts = TicketStore(store_path)
+        ready_count = len(ts.list_by_state(TicketState.READY))
+        rework_count = len(ts.list_by_state(TicketState.REWORK))
+        reviewing_count = len(ts.list_by_state(TicketState.REVIEWING))
+        verifying_count = len(ts.list_by_state(TicketState.VERIFYING))
+        discovered_count = len(ts.list_by_state(TicketState.DISCOVERED))
+    except Exception:
+        return
+
+    actionable = ready_count + rework_count
+    backlog_high = 80
+
+    for name, bot in bots.items():
+        base_role = name.split("-")[0] if "-" in name else name
+
+        if base_role in IMPLEMENTER_ROLE_NAMES:
+            if actionable == 0 and bot.process is None:
+                if bot.config.enabled:
+                    bot.config.enabled = False
+                    logger.info(f"[queue-scale] Suppressed '{name}': no actionable tickets (ready={ready_count}, rework={rework_count})")
+            elif actionable > 0 and not bot.config.enabled:
+                bot.config.enabled = True
+                logger.info(f"[queue-scale] Enabled '{name}': {actionable} actionable tickets available")
+
+        elif base_role in REVIEWER_ROLE_NAMES:
+            if reviewing_count == 0 and bot.process is None:
+                if bot.config.enabled:
+                    bot.config.enabled = False
+                    logger.info(f"[queue-scale] Suppressed '{name}': no tickets in REVIEWING")
+            elif reviewing_count > 0 and not bot.config.enabled:
+                bot.config.enabled = True
+                logger.info(f"[queue-scale] Enabled '{name}': {reviewing_count} tickets awaiting review")
+
+        elif base_role in DISCOVERY_ROLE_NAMES:
+            if discovered_count > 50 and bot.process is None:
+                if bot.config.enabled:
+                    bot.config.enabled = False
+                    logger.info(f"[queue-scale] Suppressed '{name}': discovery backlog too deep ({discovered_count})")
+            elif ready_count > backlog_high and bot.process is None:
+                if bot.config.enabled:
+                    bot.config.enabled = False
+                    logger.info(f"[queue-scale] Suppressed '{name}': ready backlog full ({ready_count} > {backlog_high})")
+            elif discovered_count <= 50 and ready_count <= backlog_high and not bot.config.enabled:
+                bot.config.enabled = True
+
+
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
     now = time.time()
     due = [n for n, b in bots.items()
@@ -3789,6 +3862,11 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 update_bot_state(bot, "drained")
         return
     now = time.time()
+
+    try:
+        _dynamic_scale_bots(bots)
+    except Exception as e:
+        logger.warning(f"Dynamic scaling failed: {e}")
 
     for name, bot in bots.items():
         if not bot.config.enabled:
