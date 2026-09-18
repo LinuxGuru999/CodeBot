@@ -1149,8 +1149,7 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             print(f"  [{_severity_color(sev, enabled):<10s}] {_ticket_id(t):<18s}{rw_s} {_ticket_title(t)}")
             # strip ansi for width? ignore
     else:
-        # show READY first if any, then IMPLEMENTING, REVIEWING
-        for st in ["READY","IMPLEMENTING","REVIEWING","PLANNING","VERIFYING","REWORK","BLOCKED"]:
+        for st in ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]:
             subset = [t for t in tickets if _ticket_state(t).upper() == st]
             if not subset:
                 continue

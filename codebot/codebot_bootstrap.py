@@ -55,8 +55,6 @@ def discover_adapter_class(project_root: Path) -> Any | None:
         f"codebot.{project_name}_adapter",
         f"{project_name}_adapter",
     ]
-    if project_name == "monitor":
-        adapter_candidates.append("codebot.monitor_adapter")
     if project_name == "codebot" or (project_root / "codebot" / "roles").is_dir():
         if "codebot.codebot_adapter" not in adapter_candidates:
             adapter_candidates.insert(0, "codebot.codebot_adapter")
