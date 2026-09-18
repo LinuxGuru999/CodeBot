@@ -157,6 +157,7 @@ class AgentTask:
 
 STANDARD_TOOLS = frozenset({"read", "write", "edit", "grep", "glob", "bash"})
 READ_ONLY_TOOLS = frozenset({"read", "grep", "glob"})
+RESEARCH_TOOLS = frozenset({"read", "grep", "glob", "web_search", "web_fetch"})
 UX_AUDIT_TOOLS = frozenset({"read", "grep", "glob", "screenshot", "a11y_snapshot"})
 STANDARD_COMMANDS = frozenset({
     "python3", "pytest", "ls", "wc", "cat", "head", "tail",
@@ -171,7 +172,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         category=RoleCategory.DISCOVERY,
         description="Scans source code for logic errors, unhandled paths, race conditions",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
+        tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
         incentive="Find real bugs. Maximize true positives. Penalized for false reports.",
     ),
     AgentRole(
@@ -179,17 +180,17 @@ DISCOVERY_ROLES: list[AgentRole] = [
         category=RoleCategory.DISCOVERY,
         description="Identifies injection vulnerabilities, auth bypasses, secret leaks",
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND, security_review=True),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
+        tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
         incentive="Find exploitable vulnerabilities. Adversarial to implementers.",
-        adversarial_to=("backend_implementer", "frontend_implementer"),
+        adversarial_to=("backend_implementer", "frontend_implementer", "general_implementer"),
     ),
     AgentRole(
         name="architecture_auditor",
         category=RoleCategory.DISCOVERY,
         description="Detects coupling violations, boundary breaches, technical debt",
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find architectural violations. Adversarial to simplicity and implementers.",
+        tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
+        incentive="Find architectural violations. Adversarial to implementers who add complexity.",
         adversarial_to=("backend_implementer", "simplicity_reviewer"),
     ),
     AgentRole(
@@ -197,22 +198,22 @@ DISCOVERY_ROLES: list[AgentRole] = [
         category=RoleCategory.DISCOVERY,
         description="Identifies O(n²) patterns, unbounded allocations, hot-path waste",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find scalability regressions. Adversarial to implementers who add overhead.",
-        adversarial_to=("backend_implementer",),
+        tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
+        incentive="Find scalability regressions and resource waste. Adversarial to implementers who add overhead.",
+        adversarial_to=("backend_implementer", "general_implementer"),
     ),
     AgentRole(
         name="test_gap_auditor",
         category=RoleCategory.DISCOVERY,
         description="Identifies public functions and critical paths lacking test coverage",
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
+        tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
         incentive="Maximize coverage gap detection accuracy.",
     ),
     AgentRole(
         name="documentation_auditor",
         category=RoleCategory.DISCOVERY,
-        description="Detects stale docs, missing module docstrings, API contract drift",
+        description="Detects stale docs, missing docstrings, API contract drift",
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
         incentive="Find claims that are no longer true.",
@@ -223,7 +224,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         category=RoleCategory.DISCOVERY,
         description="Checks for CVEs, outdated packages, license violations",
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS | frozenset({"pip"}), "project_root", network_access=True),
+        tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS | frozenset({"pip"}), "project_root", network_access=True),
         incentive="Find supply chain risks.",
     ),
     AgentRole(

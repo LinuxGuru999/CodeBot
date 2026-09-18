@@ -119,7 +119,10 @@ def _common_contract(bot: str, heartbeat_file: str, ckpt_file: str, state_dir: s
 - Checkpoint: after every atomic task (and at startup) write <4KB JSON to {ckpt_file} via tmp+replace. Keys: bot, scan_iteration, current_task, completed_tasks, queue_remaining, findings_so_far, updated_at, reason. On startup resume current_task/queue_remaining, never redo completed_tasks; prefer an injected CHECKPOINT HANDOFF block over the file.
 - Alignment: on startup and clean exit read {align_scores} and {align_trigger}. Score 80+ clears stale triggers; score <60 with fresh trigger means PROMPT_OPTIMIZER will improve this bot's prompt. You do NOT self-evolve.
 - Research: prefer web_search/webfetch/context7/gh code search over guessing; verify, then write.
-- Bound: you are a bounded delegated task, not a daemon. Do atomic work, heartbeat, checkpoint, exit 0 on drain or SESSION_TIMEOUT."""
+- Bound: you are a bounded delegated task, not a daemon. Do atomic work, heartbeat, checkpoint, exit 0 on drain or SESSION_TIMEOUT.
+- Context compaction: if your conversation grows long, earlier messages may be summarized automatically. Always write critical state to your scratchpad file so it survives compaction.
+- Scratchpad handoff: if you hit timeout, rate limit, or fatal error, your scratchpad is preserved. Another worker will read it and resume from where you stopped. Always update your scratchpad after significant progress.
+- Web research: use `web_search` to look up documentation, CVEs, API references, or best practices before guessing. Use `web_fetch` to read specific URLs returned by search. Both are bounded and fail-open."""
 
 
 def build_message(

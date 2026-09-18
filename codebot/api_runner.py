@@ -412,6 +412,15 @@ except ImportError:
     except ImportError:
         _a11y_snapshot = None  # type: ignore[assignment]
 
+try:
+    from codebot.web_tools import web_search as _web_search, web_fetch as _web_fetch
+except ImportError:
+    try:
+        from web_tools import web_search as _web_search, web_fetch as _web_fetch
+    except ImportError:
+        _web_search = None  # type: ignore[assignment]
+        _web_fetch = None  # type: ignore[assignment]
+
 _TOOL_MAP = {
     "read": read,
     "write": write,
@@ -425,6 +434,10 @@ _TOOL_MAP = {
 if _a11y_snapshot is not None:
     _TOOL_MAP["screenshot"] = _a11y_snapshot
     _TOOL_MAP["a11y_snapshot"] = _a11y_snapshot
+if _web_search is not None:
+    _TOOL_MAP["web_search"] = _web_search
+if _web_fetch is not None:
+    _TOOL_MAP["web_fetch"] = _web_fetch
 
 
 def _resolve_api_key():
