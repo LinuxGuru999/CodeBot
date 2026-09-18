@@ -35,11 +35,11 @@ logger = logging.getLogger("codebot_bootstrap")
 
 # Core modules that accept adapter injection via set_project_adapter()
 _ADAPTER_MODULES = [
-    "bots.orchestrator",
-    "bots.api_runner",
-    "bots.rl_engine",
-    "bots.token_budget",
-    "bots.prompt_gateway",
+    "codebot.orchestrator",
+    "codebot.api_runner",
+    "codebot.rl_engine",
+    "codebot.token_budget",
+    "codebot.prompt_gateway",
 ]
 
 _wired = False
@@ -50,18 +50,59 @@ def discover_adapter_class(project_root: Path) -> Any | None:
     if not config_path.exists():
         logger.info("no .codebot/project.yaml found — using default paths")
         return None
-    adapter_module = "bots.monitor_adapter"
-    adapter_class_name = "MonitorAdapter"
-    try:
-        mod = importlib.import_module(adapter_module)
-        cls = getattr(mod, adapter_class_name, None)
-        if cls is not None:
-            return cls()
-    except ImportError as e:
-        logger.warning("adapter module %s not importable: %s", adapter_module, e)
-    except Exception as e:
-        logger.warning("failed to instantiate %s.%s: %s", adapter_module, adapter_class_name, e)
+    project_name = _read_project_name(config_path)
+    adapter_candidates = [
+        f"codebot.{project_name}_adapter",
+        f"{project_name}_adapter",
+        "codebot.monitor_adapter",
+    ]
+    for adapter_module in adapter_candidates:
+        class_name = "".join(w.capitalize() for w in adapter_module.rsplit(".", 1)[-1].replace("_", " ").split()).replace(" ", "")
+        if not class_name.endswith("Adapter"):
+            class_name += "Adapter"
+        try:
+            mod = importlib.import_module(adapter_module)
+            for attr_name in dir(mod):
+                attr = getattr(mod, attr_name)
+                if isinstance(attr, type) and attr_name != "ProjectAdapter":
+                    try:
+                        from codebot.project_adapter import ProjectAdapter
+                        if issubclass(attr, ProjectAdapter) and attr is not ProjectAdapter:
+                            instance = attr(project_root) if _accepts_root(attr) else attr()
+                            logger.info("loaded adapter %s.%s", adapter_module, attr_name)
+                            return instance
+                    except ImportError:
+                        pass
+        except ImportError:
+            continue
+        except Exception as e:
+            logger.debug("adapter candidate %s failed: %s", adapter_module, e)
+            continue
+    logger.info("no project adapter found for '%s' — using default paths", project_name)
     return None
+
+
+def _read_project_name(config_path: Path) -> str:
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("name:"):
+                val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                return val.replace("-", "_").replace(" ", "_").lower()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _accepts_root(cls: type) -> bool:
+    import inspect
+    try:
+        sig = inspect.signature(cls.__init__)
+        params = list(sig.parameters.keys())
+        return len(params) >= 2
+    except Exception:
+        return False
 
 
 def wire_adapter(adapter: Any) -> None:
