@@ -122,6 +122,7 @@ class CodeBotAdapter(ProjectAdapter):
 
     def bot_registry(self) -> list[dict[str, Any]]:
         from codebot.role_registry import ALL_ROLES
+        from codebot.orchestrator import WORKER_MODEL_CYCLE, _MODEL_FALLBACKS
         registry = []
         interval_map = {
             "discovery": 1800,
@@ -130,13 +131,35 @@ class CodeBotAdapter(ProjectAdapter):
             "review": 600,
             "control": 900,
         }
+        thinking_roles = frozenset({
+            "security_auditor", "architecture_auditor", "security_reviewer",
+            "architecture_reviewer", "correctness_reviewer",
+        })
+        thinking_models = (
+            "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
+            "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
+            "qwen-3.8-max-thinking",
+        )
+        impl_idx = 0
+        think_idx = 0
         for role in ALL_ROLES:
             interval = interval_map.get(role.category.value, 600)
+            if role.name in thinking_roles:
+                model = thinking_models[think_idx % len(thinking_models)]
+                think_idx += 1
+            elif role.category.value == "implementation":
+                model = WORKER_MODEL_CYCLE[impl_idx % len(WORKER_MODEL_CYCLE)]
+                impl_idx += 1
+            else:
+                model = WORKER_MODEL_CYCLE[(impl_idx + think_idx) % len(WORKER_MODEL_CYCLE)]
+                impl_idx += 1
+            fallback = _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
             registry.append({
                 "name": role.name,
                 "prompt": f"codebot/roles/{role.name}.md",
                 "interval": interval,
-                "model": "xiaomi-mimo-2.5",
+                "model": model,
+                "fallback_model": fallback,
                 "tier": 1 if role.category.value in ("discovery", "implementation") else 2,
                 "enabled": True,
                 "max_restarts": 5,
