@@ -96,18 +96,20 @@ try:
     from codebot.prompt_gateway import (
         build_message as _gateway_build_message,
         note_spawn as _gateway_note_spawn,
-        MAX_CONCURRENT as GATEWAY_MAX_CONCURRENT,
+        MAX_CONCURRENT as _PG_MAX_CONCURRENT,
         MIN_SPAWN_GAP as GATEWAY_MIN_SPAWN_GAP,
     )
     _GATEWAY = True
 except ImportError:
     _GATEWAY = False
-    GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "28"))
+    _PG_MAX_CONCURRENT = 10
     GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "20"))
+GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "28"))
 
 CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "30"))
 MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "10"))
 MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "8"))
+MAX_QWEN_38_CONCURRENT = int(os.getenv("CODEBOT_MAX_QWEN_38", "6"))
 MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "20"))
 MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "7"))
 MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "1"))
