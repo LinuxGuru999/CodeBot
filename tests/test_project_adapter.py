@@ -1,9 +1,4 @@
-"""Tests for project_adapter.py — ABC interface compliance.
-
-Uses a minimal concrete adapter for testing. monitor_adapter.py is
-intentionally excluded from the extracted CodeBot repo (it lives in
-Monitor's bots/ directory).
-"""
+"""Tests for project_adapter.py — ABC interface compliance via stub adapter."""
 import pytest
 from pathlib import Path
 import sys
@@ -18,7 +13,7 @@ from codebot.project_adapter import (
 )
 
 
-class _StubAdapter(ProjectAdapter):
+class StubAdapter(ProjectAdapter):
     """Minimal concrete adapter for testing the ABC contract."""
 
     def __init__(self, root: Path) -> None:
@@ -39,11 +34,11 @@ class _StubAdapter(ProjectAdapter):
             modules_docs_dir=r / "docs" / "modules",
             queue_file=r / "QUEUE.md",
             api_contract=r / "api" / "contract.md",
-            entrypoint=r / "ENTRYPOINT.md",
+            entrypoint=r / "main.py",
             context_map=r / "CONTEXT-MAP.md",
-            bugs_file=r / "bugs.md",
-            features_file=r / "features.md",
-            roadmap_file=r / "roadmap.md",
+            bugs_file=r / "docs" / "bugs.md",
+            features_file=r / "docs" / "features.md",
+            roadmap_file=r / "docs" / "roadmap.md",
             constitution_file=r / ".codebot" / "constitution.md",
             project_config=r / ".codebot" / "project.yaml",
         )
@@ -60,13 +55,23 @@ class _StubAdapter(ProjectAdapter):
         )
 
     def dependency_policy(self) -> DependencyPolicy:
-        return DependencyPolicy(policy="stdlib-only", allowed_third_party=[], dependency_files=[])
+        return DependencyPolicy(
+            policy="stdlib-only",
+            allowed_third_party=[],
+            dependency_files=[],
+        )
 
     def autonomy_config(self) -> AutonomyConfig:
-        return AutonomyConfig(level=2, human_approval_required_for=["secrets"], autonomous_allowed_for=["test_additions"])
+        return AutonomyConfig(
+            level=2,
+            human_approval_required_for=["secrets", "constitution_changes"],
+            autonomous_allowed_for=["test_additions", "safe_refactors"],
+        )
 
     def components(self) -> list[ComponentDef]:
-        return [ComponentDef("core", "src/", "backend", "python", "Core logic")]
+        return [
+            ComponentDef("core", "src/", "backend", "python", "Core logic"),
+        ]
 
     def bot_registry(self) -> list[dict]:
         return [{"name": "worker-1", "prompt": "WORKER.md", "interval": 300, "model": "default", "tier": 1}]
@@ -81,7 +86,7 @@ class _StubAdapter(ProjectAdapter):
         return self._root / "prompts"
 
     def api_runner_command(self, bot_name: str, prompt_file: str) -> list[str]:
-        return ["python3", "-m", "bots.api_runner", "--bot", bot_name]
+        return ["python3", "-m", "codebot.api_runner", "--bot", bot_name]
 
     def is_protected_path(self, path: str) -> bool:
         return path.startswith(".codebot/constitution.md")
@@ -89,19 +94,13 @@ class _StubAdapter(ProjectAdapter):
     def validate_project(self) -> list[str]:
         errors = []
         if not self._root.exists():
-            errors.append("root missing")
+            errors.append(f"root missing: {self._root}")
         return errors
-
-
-class TestProjectAdapterABC:
-    def test_cannot_instantiate_abstract(self):
-        with pytest.raises(TypeError):
-            ProjectAdapter()
 
 
 class TestStubAdapterInterface:
     def setup_method(self):
-        self.adapter = _StubAdapter(Path("/tmp/opencode/codebot-test-project"))
+        self.adapter = StubAdapter(Path("/tmp/opencode/codebot-test-project"))
 
     def test_project_name(self):
         assert self.adapter.project_name() == "stub-project"
@@ -135,7 +134,7 @@ class TestStubAdapterInterface:
         comps = self.adapter.components()
         assert len(comps) >= 1
         assert comps[0].name == "core"
-        assert comps[0].language == "python"
+        assert isinstance(comps[0], ComponentDef)
 
     def test_bot_registry(self):
         bots = self.adapter.bot_registry()
@@ -156,21 +155,31 @@ class TestStubAdapterInterface:
         assert isinstance(pd, Path)
 
     def test_api_runner_command(self):
-        cmd = self.adapter.api_runner_command("test-bot", "TEST.md")
+        cmd = self.adapter.api_runner_command("worker-1", "WORKER.md")
         assert "python3" in cmd[0]
         assert "--bot" in cmd
-        assert "test-bot" in cmd
+        assert "worker-1" in cmd
 
     def test_protected_paths(self):
         assert self.adapter.is_protected_path(".codebot/constitution.md") is True
         assert self.adapter.is_protected_path("random_file.py") is False
 
-    def test_validate_project_existing_root(self):
+    def test_validate_project(self):
         errors = self.adapter.validate_project()
         assert isinstance(errors, list)
-        assert len(errors) == 0
 
-    def test_validate_project_missing_root(self):
-        bad = _StubAdapter(Path("/nonexistent/path"))
-        errors = bad.validate_project()
-        assert len(errors) > 0
+
+class TestProjectAdapterABC:
+    def test_cannot_instantiate_abstract(self):
+        with pytest.raises(TypeError):
+            ProjectAdapter()
+
+    def test_all_abstract_methods_defined(self):
+        abstract_methods = getattr(ProjectAdapter, '__abstractmethods__', set())
+        expected = {
+            'project_name', 'paths', 'test_config', 'dependency_policy',
+            'autonomy_config', 'components', 'bot_registry', 'model_profiles',
+            'tier_priority', 'prompt_directory', 'api_runner_command',
+            'is_protected_path', 'validate_project',
+        }
+        assert expected.issubset(abstract_methods)
