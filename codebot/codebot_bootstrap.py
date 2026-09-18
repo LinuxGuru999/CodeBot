@@ -68,9 +68,10 @@ def discover_adapter_class(project_root: Path) -> Any | None:
                     try:
                         from codebot.project_adapter import ProjectAdapter
                         if issubclass(attr, ProjectAdapter) and attr is not ProjectAdapter:
-                            instance = attr(project_root) if _accepts_root(attr) else attr()
-                            logger.info("loaded adapter %s.%s", adapter_module, attr_name)
-                            return instance
+                            instance = _try_instantiate(attr, project_root)
+                            if instance is not None:
+                                logger.info("loaded adapter %s.%s", adapter_module, attr_name)
+                                return instance
                     except ImportError:
                         pass
         except ImportError:
@@ -95,14 +96,16 @@ def _read_project_name(config_path: Path) -> str:
     return "unknown"
 
 
-def _accepts_root(cls: type) -> bool:
-    import inspect
+def _try_instantiate(cls: type, project_root: Path) -> Any | None:
     try:
-        sig = inspect.signature(cls.__init__)
-        params = list(sig.parameters.keys())
-        return len(params) >= 2
-    except Exception:
-        return False
+        return cls(project_root)
+    except TypeError:
+        pass
+    try:
+        return cls()
+    except TypeError:
+        pass
+    return None
 
 
 def wire_adapter(adapter: Any) -> None:
