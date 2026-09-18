@@ -35,9 +35,9 @@ import urllib.request
 from pathlib import Path
 
 try:
-    from codebot.api_tools import bash, read, write, edit, grep, glob
+    from bots.api_tools import bash, read, write, edit, grep, glob
 except ImportError:
-    from api_tools import bash, read, write, edit, grep, glob
+    from codebot.api_tools import bash, read, write, edit, grep, glob
 
 
 def _log(msg: str) -> None:
@@ -216,7 +216,23 @@ def set_project_adapter(adapter: object) -> None:
 
 def get_adapter() -> object | None:
     return _adapter_instance
-API_URL = "https://dialagram.me/router/v1/chat/completions"
+# FIX-01: API URL resolved via adapter when available, fallback to default
+_DEFAULT_API_URL = "https://dialagram.me/router/v1/chat/completions"
+
+
+def _resolve_api_url() -> str:
+    if _adapter_instance is not None:
+        try:
+            cfg = _adapter_instance.model_profiles()  # type: ignore[union-attr]
+            url = cfg.get("api_url", "")
+            if url:
+                return url
+        except Exception:
+            pass
+    return _DEFAULT_API_URL
+
+
+API_URL = _DEFAULT_API_URL
 API_TIMEOUT = 120
 MAX_TOOL_ITERATIONS = 50
 MAX_RETRIES = 5

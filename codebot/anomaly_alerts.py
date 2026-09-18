@@ -89,7 +89,7 @@ def _queue_depth() -> int:
 
 def _approval_backlog_hours() -> float:
     try:
-        from readiness import load_approved_ids
+        from codebot.readiness import load_approved_ids
         approved = load_approved_ids(str(STATE_DIR))
         qp = BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md"
         if not qp.exists():

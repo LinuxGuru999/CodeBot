@@ -38,21 +38,23 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 # ---------------------------------------------------------------------------
-# Paths — resolved via ProjectAdapter when available, fallback to local dirs
+# Paths — resolved via ProjectAdapter; fallback to CODEBOT_PROJECT_ROOT env or cwd
 # ---------------------------------------------------------------------------
 
-BOTS_DIR = Path(__file__).parent
-STATE_DIR = BOTS_DIR / "state"
-LOGS_DIR = BOTS_DIR / "logs"
-BACKUP_DIR = BOTS_DIR / "state" / "backup"
+_CODEBOT_PKG_DIR = Path(__file__).parent
+_project_root = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
+
+BOTS_DIR = _project_root
+STATE_DIR = _project_root / "state"
+LOGS_DIR = _project_root / "logs"
+BACKUP_DIR = _project_root / "state" / "backup"
 _QUEUE_SNAPSHOT: tuple[Path, float, str] | None = None
 _MANIFEST_SNAPSHOT: tuple[Path, tuple[tuple[str, float], ...], dict[str, dict]] | None = None
 _CHECKPOINT_SNAPSHOTS: dict[Path, tuple[float, list[str] | int]] = {}
 ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
 
 # T4.3 incremental adapter seam: when a ProjectAdapter is provided, its paths
-# override the hardcoded defaults above. Existing callers without an adapter
-# continue to work identically.
+# override the defaults above.
 _adapter_instance: Any = None
 
 try:
@@ -62,11 +64,11 @@ except ImportError:
 
 
 def set_project_adapter(adapter: Any) -> None:
-    """Inject a ProjectAdapter; subsequent path resolutions use it."""
-    global _adapter_instance, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR, DRAIN_FILE, UPDATE_LOCK
+    global _adapter_instance, BOTS_DIR, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR, DRAIN_FILE, UPDATE_LOCK
     _adapter_instance = adapter
     try:
         p = adapter.paths()
+        BOTS_DIR = p.repository_root
         STATE_DIR = p.state_dir
         LOGS_DIR = p.logs_dir
         BACKUP_DIR = p.state_dir / "backup"
@@ -82,16 +84,16 @@ def get_adapter() -> Any:
 
 
 # Ensure directories exist
-STATE_DIR.mkdir(exist_ok=True)
-LOGS_DIR.mkdir(exist_ok=True)
-BACKUP_DIR.mkdir(exist_ok=True)
-ALIGNMENT_EVENTS_DIR.mkdir(exist_ok=True)
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+ALIGNMENT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 DRAIN_FILE = STATE_DIR / ".drain"
 UPDATE_LOCK = STATE_DIR / ".update_lock"
 
 try:
-    from prompt_gateway import (
+    from codebot.prompt_gateway import (
         build_message as _gateway_build_message,
         note_spawn as _gateway_note_spawn,
         MAX_CONCURRENT as GATEWAY_MAX_CONCURRENT,
@@ -100,13 +102,13 @@ try:
     _GATEWAY = True
 except ImportError:
     _GATEWAY = False
-    GATEWAY_MAX_CONCURRENT = int(os.getenv("BOTNET_MAX_CONCURRENT", "10"))
-    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", "20"))
+    GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "10"))
+    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "20"))
 
-BOTNET_MIN_MEMORY_MB = int(os.getenv("BOTNET_MIN_MEMORY_MB", "30"))
-MAX_THINKING_CONCURRENT = int(os.getenv("BOTNET_MAX_THINKING_CONCURRENT", "3"))
-MAX_QWEN_38_CONCURRENT = int(os.getenv("BOTNET_MAX_QWEN_38_CONCURRENT", "2"))
-USE_MANIFEST_SCHEDULER = os.getenv("USE_MANIFEST_SCHEDULER", "0") == "1"
+CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "30"))
+MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "3"))
+MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "2"))
+USE_MANIFEST_SCHEDULER = os.getenv("CODEBOT_MANIFEST_SCHEDULER", "0") == "1"
 
 
 def _get_available_memory_mb() -> float:
@@ -410,7 +412,7 @@ WORKER_FALLBACK_CYCLE = (
 
 
 def _count_actionable_queue_items() -> int:
-    queue_path = BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md"
+    queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
     try:
         content = queue_path.read_text(encoding="utf-8")
     except OSError:
@@ -1709,7 +1711,34 @@ def _manifest_resolve_file(rel_path: str) -> Path:
 
 
 def _manifest_load_queue_text() -> str:
-    """Load QUEUE.md text for readiness checks, filtering unapproved T4+ items."""
+    """Load queue text for readiness checks, filtering unapproved T4+ items.
+
+    WIRE-02: When ticket_engine is available, loads tickets from the normalized
+    TicketStore instead of parsing QUEUE.md markdown. Falls back to QUEUE.md
+    parsing when ticket_engine is unavailable or no ticket store exists yet.
+    """
+    # Try CodeBot ticket engine first (WIRE-02 incremental)
+    try:
+        from ticket_engine import TicketStore, TicketState
+        store_path = STATE_DIR / "codebot_tickets.json"
+        if store_path.exists():
+            ts = TicketStore(store_path)
+            ready = ts.list_ready()
+            if ready:
+                lines = []
+                for t in ready:
+                    lines.append(f"### [{t.id}] {t.title}")
+                    lines.append(f"   Complexity: {t.severity.value}")
+                    lines.append(f"   Status: {t.state.value}")
+                    if t.acceptance_criteria:
+                        lines.append(f"   Acceptance: {'; '.join(t.acceptance_criteria[:3])}")
+                    lines.append("")
+                return "\n".join(lines)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
     candidates = [
         BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md",
         BOTS_DIR / "QUEUE.md",
@@ -1733,7 +1762,7 @@ def _manifest_load_queue_text() -> str:
     if not raw:
         return raw
     try:
-        from readiness import load_approved_ids, filter_unapproved_items
+        from codebot.readiness import load_approved_ids, filter_unapproved_items
     except ImportError:
         try:
             from codebot.readiness import load_approved_ids, filter_unapproved_items
@@ -1920,7 +1949,7 @@ def _collect_manifest_readiness(
     # Lazy import readiness (keeps legacy import-free when flag off)
     try:
         try:
-            from readiness import is_due as _is_due, noop_ok as _noop_ok, ready as _ready, signals_ok as _signals_ok  # type: ignore
+            from codebot.readiness import is_due as _is_due, noop_ok as _noop_ok, ready as _ready, signals_ok as _signals_ok  # type: ignore
         except ImportError:
             from codebot.readiness import is_due as _is_due, noop_ok as _noop_ok, ready as _ready, signals_ok as _signals_ok  # type: ignore
     except Exception as e:
@@ -2020,7 +2049,7 @@ def _collect_manifest_readiness(
                     else:
                         # Check queue_has_work vs queue_remaining
                         try:
-                            from readiness import queue_has_work as _qhw  # type: ignore
+                            from codebot.readiness import queue_has_work as _qhw  # type: ignore
                         except ImportError:
                             from codebot.readiness import queue_has_work as _qhw  # type: ignore
                         try:
@@ -2053,7 +2082,7 @@ def _collect_manifest_readiness(
         if bot_model in MODEL_TIER_CHEAP or bot_model in MODEL_TIER_EXPENSIVE:
             try:
                 try:
-                    from readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
+                    from codebot.readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
                 except ImportError:
                     from codebot.readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
                 queue_complexities = _pqct(queue_text) if queue_text else {}
@@ -2868,6 +2897,21 @@ def main() -> None:
             time.sleep(2)
             print_status(bots)
             return
+
+    # WIRE-01: Bootstrap CodeBot core (incremental, fail-open).
+    # When codebot_bootstrap is available, injects ProjectAdapter into all
+    # core modules so path resolution goes through adapter instead of hardcoded
+    # defaults. If unavailable or fails, legacy paths remain active.
+    _codebot_adapter = None
+    try:
+        from codebot_bootstrap import bootstrap as _cb_bootstrap
+        _codebot_adapter = _cb_bootstrap(BOTS_DIR.parent)
+        if _codebot_adapter:
+            logger.info("CodeBot core bootstrapped: project=%s", _codebot_adapter.project_name())
+    except ImportError:
+        pass
+    except Exception as _cb_err:
+        logger.warning("CodeBot bootstrap failed (continuing with legacy): %s", _cb_err)
 
     def shutdown_handler(signum, frame):
         logger.info("Shutdown signal received")
