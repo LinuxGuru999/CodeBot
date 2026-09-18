@@ -1571,6 +1571,10 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                         _log(f"{bot_name}: tool '{name}' failed: {result.get('error', 'unknown')}")
                     if name in ("edit", "write") and args.get("path"):
                         files_touched.append(args["path"])
+                    if name == "create_ticket" and result.get("success"):
+                        _scratch_state.context_summary = (
+                            (_scratch_state.context_summary or "") + f"\nTICKET_CREATED: {result.get('output', '')}"
+                        ).strip()[:2000]
                     _write_bot_status(
                         bot_name, state_dir,
                         f"tool:{name}",
@@ -1615,6 +1619,19 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
             sys.exit(1)
     finally:
         _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reason)
+        discovery_roles = frozenset({
+            "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
+            "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
+        })
+        base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
+        if base_name in discovery_roles and _scratch_state is not None:
+            ctx = _scratch_state.context_summary or ""
+            if "TICKET_CREATED" not in ctx and exit_reason in ("completed", "iteration_limit", "drain"):
+                marker = state_dir / f"{bot_name}.no_tickets"
+                try:
+                    marker.write_text(str(time.time()), encoding="utf-8")
+                except OSError:
+                    pass
         # CAP-11: Finalize scratchpad state for handoff or completion record
         if _scratch_available and _scratch_state is not None:
             if exit_reason in ("timeout", "rate_limit", "fatal_error", "token_cap", "iteration_limit", "connection_error"):

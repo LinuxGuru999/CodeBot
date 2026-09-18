@@ -574,6 +574,21 @@ def score_event(event: dict[str, Any], bots_dir: Path | None = None) -> dict[str
 
     no_rebellion = 10 if rebellion_count == 0 else 0
 
+    discovery_roles = frozenset({
+        "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
+        "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
+    })
+    base_bot = bot.split("-")[0] if "-" in bot else bot
+    no_tickets_penalty = 0
+    if base_bot in discovery_roles:
+        no_tickets_marker = STATE_DIR / f"{bot}.no_tickets"
+        if no_tickets_marker.exists():
+            no_tickets_penalty = 15
+            try:
+                no_tickets_marker.unlink()
+            except OSError:
+                pass
+
     # --- metrics-derived signals (backprop ingress from bot_metrics.json) ---
     signals = _metrics_signals(bot, bd)
     efficiency = _metrics_efficiency_score(signals)
@@ -625,6 +640,7 @@ def score_event(event: dict[str, Any], bots_dir: Path | None = None) -> dict[str
     # metrics blend: efficiency + productivity each 0..10, scaled to 0..10 total
     metrics_blend = min(10, efficiency + productivity // 2)
     total = min(100, on_task + spec + infra + no_rebellion + metrics_blend)
+    total = max(0, total - no_tickets_penalty)
     # error penalty: cap at 100 then subtract small error tax (keeps 0..100)
     if error_lines > 20:
         total = max(0, total - 5)
@@ -635,7 +651,7 @@ def score_event(event: dict[str, Any], bots_dir: Path | None = None) -> dict[str
     evidence = (
         f"exit={exit_code} reason={exit_reason} dur={event.get('run_duration')}s "
         f"hb_age={hb_age} reb={rebellion_count} err={error_lines} ckpt={ckpt_path.exists()} "
-        f"eff={efficiency} prod={productivity}"
+        f"eff={efficiency} prod={productivity} no_tickets_pen={no_tickets_penalty}"
     )
 
     return {
