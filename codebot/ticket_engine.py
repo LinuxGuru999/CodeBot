@@ -300,7 +300,9 @@ def create_ticket(
 
 class TicketStore:
     def __init__(self, path: Path) -> None:
+        import threading
         self._path = path
+        self._lock = threading.Lock()
         self._tickets: dict[str, Ticket] = {}
         self._evidence_index: dict[str, str] = {}
         self._load()
