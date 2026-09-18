@@ -125,6 +125,19 @@ DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
     "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
 })
 
+TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
+    "bug": "general_implementer",
+    "feature": "general_implementer",
+    "refactor": "general_implementer",
+    "security": "backend_implementer",
+    "performance": "backend_implementer",
+    "architecture": "backend_implementer",
+    "test": "test_implementer",
+    "documentation": "documentation_implementer",
+    "dependency": "migration_implementer",
+    "infrastructure": "migration_implementer",
+}
+
 
 def _get_available_memory_mb() -> float:
     """Return available memory in MB from /proc/meminfo, or 0.0 if unavailable."""
@@ -674,6 +687,114 @@ def _sweep_orphan_claims(bots: dict[str, BotState]) -> int:
     return swept
 
 
+def _load_ticket_context(ticket_id: str) -> str:
+    try:
+        from codebot.ticket_engine import TicketStore
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
+        if not store_path.exists():
+            return ""
+        ts = TicketStore(store_path)
+        t = ts.get(ticket_id)
+        if t is None:
+            return ""
+        lines = [
+            f"--- ASSIGNED TICKET: {t.id} ---",
+            f"Title: {t.title}",
+            f"Class: {t.ticket_class.value}",
+            f"Severity: {t.severity.value}",
+            f"Problem: {t.problem_statement}",
+            f"Desired State: {t.desired_state}",
+        ]
+        if t.acceptance_criteria:
+            lines.append("Acceptance Criteria:")
+            for ac in t.acceptance_criteria:
+                lines.append(f"  - {ac}")
+        if t.affected_modules:
+            lines.append(f"Affected Modules: {', '.join(t.affected_modules)}")
+        lines.append("--- END TICKET CONTEXT ---")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+    ready = ts.list_ready()
+    if not ready:
+        return 0
+    claims_dir = STATE_DIR / "claims"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    active_claims: set[str] = set()
+    for p in claims_dir.glob("*.json"):
+        active_claims.add(p.stem.rsplit(".", 1)[0])
+    idle_impl = []
+    for name, bot in bots.items():
+        base_name = name.split("-")[0] if "-" in name else name
+        if base_name not in IMPLEMENTER_ROLE_NAMES:
+            continue
+        if bot.process is not None and bot.process.poll() is None:
+            continue
+        idle_impl.append((name, bot))
+    dispatched = 0
+    for ticket in ready:
+        if not idle_impl:
+            break
+        tid = getattr(ticket, 'id', '')
+        if tid in active_claims:
+            continue
+        tc = getattr(ticket, 'ticket_class', None)
+        tc_val = tc.value if hasattr(tc, 'value') else str(tc) if tc else "feature"
+        target_base = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
+        matched = None
+        for i, (name, bot) in enumerate(idle_impl):
+            base = name.split("-")[0] if "-" in name else name
+            if base == target_base:
+                matched = (i, name, bot)
+                break
+        if matched is None:
+            for i, (name, bot) in enumerate(idle_impl):
+                base = name.split("-")[0] if "-" in name else name
+                if base == "general_implementer":
+                    matched = (i, name, bot)
+                    break
+        if matched is None and idle_impl:
+            matched = (0, idle_impl[0][0], idle_impl[0][1])
+        if matched is None:
+            break
+        idx, bot_name, bot = matched
+        idle_impl.pop(idx)
+        claim_file = claims_dir / f"{tid}.{bot_name}.json"
+        try:
+            claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": tc_val}
+            tmp = claim_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
+            tmp.replace(claim_file)
+        except OSError:
+            continue
+        try:
+            ts.transition(tid, TicketState.IMPLEMENTING)
+        except Exception:
+            pass
+        bot._assigned_ticket_id = tid
+        dispatched += 1
+        logger.info(f"Dispatched ticket {tid} ({tc_val}) -> {bot_name}")
+    return dispatched
+
+
 _METRICS_PATH = STATE_DIR / "bot_metrics.json"
 _METRICS_WINDOW_DAYS = 7
 
@@ -1020,6 +1141,11 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
     bot.last_heartbeat = time.time()
 
     prompt_text = prompt_file.read_text()
+    assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+    if assigned_tid:
+        ticket_ctx = _load_ticket_context(assigned_tid)
+        if ticket_ctx:
+            prompt_text = f"{prompt_text}\n\n{ticket_ctx}"
     try:
         bot.prompt_mtime = prompt_file.stat().st_mtime
     except OSError:
@@ -2509,6 +2635,11 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
         _sweep_orphan_claims(bots)
     except Exception:
         pass
+    # Dispatch READY tickets to idle implementers by class
+    try:
+        _dispatch_tickets_to_implementers(bots)
+    except Exception as e:
+        logger.warning(f"Ticket dispatch failed: {e}")
     # Manifest readiness / ordering / packing / dispatch
     queue_text = _manifest_load_queue_text()
     ready, skipped, considered = _collect_manifest_readiness(bots, now, queue_text=queue_text)

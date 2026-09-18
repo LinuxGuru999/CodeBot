@@ -504,10 +504,18 @@ def _create_ticket_tool(
             pass
     if not store_path.is_absolute():
         store_path = (WORK_ROOT / store_path).resolve()
+    impl_map = {
+        "bug": "general_implementer", "feature": "general_implementer",
+        "refactor": "general_implementer", "security": "backend_implementer",
+        "performance": "backend_implementer", "architecture": "backend_implementer",
+        "test": "test_implementer", "documentation": "documentation_implementer",
+        "dependency": "migration_implementer", "infrastructure": "migration_implementer",
+    }
+    impl_type = impl_map.get(tc.value, "general_implementer")
     try:
         store = TicketStore(store_path)
         store.add(ticket)
-        return {"success": True, "output": f"Created ticket {ticket.id}: {ticket.title} (state={ticket.state.value})", "error": None}
+        return {"success": True, "output": f"Created ticket {ticket.id}: {ticket.title} (state={ticket.state.value}, implementer={impl_type})", "error": None}
     except ValueError as ve:
         return {"success": True, "output": f"Duplicate: {ve}", "error": None}
     except Exception as e:
