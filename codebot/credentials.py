@@ -8,9 +8,9 @@ variables, secret files, or adapter configuration. Never hardcodes secrets.
 
 Why
 ---
-CodeBot operates as a standalone entity outside Monitor's bots/ directory.
+CodeBot operates as a standalone entity managing its own repository.
 It needs its own credential resolution that works both locally (env vars)
-and in containers (Fly.io secrets mounted as env vars).
+and in containers (secrets mounted as env vars).
 
 Invariants
 ----------

@@ -1,9 +1,9 @@
-"""BotNet API Tools — minimal stdlib-only tools for the API runner.
+"""CodeBot API Tools — minimal stdlib-only tools for the API runner.
 
 Purpose
 -------
-Provides seven synchronous, fail-open tools (read, write, edit, bash, grep, glob,
-a11y_snapshot) for the BotNet API runner. Each tool returns a uniform dict
+Provides synchronous, fail-open tools (read, write, edit, bash, grep, glob,
+a11y_snapshot) for the CodeBot API runner. Each tool returns a uniform dict
 {success, output, error} so the runner loop never needs try/except. The a11y_snapshot
 tool extracts Playwright accessibility trees as structured text for UI verification.
 

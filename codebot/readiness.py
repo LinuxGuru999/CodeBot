@@ -20,7 +20,7 @@ Invariants
 - Stale threshold is 86400 seconds (24h) per plan — do not invent.
 - Effective timeout comes from manifest heartbeat_timeout; batch_ctx
   heartbeat_max_gap_s is a test override only, never production precedence.
-- _parse_queue_complexity logic is verbatim from bots/orchestrator.py:938-991.
+- _parse_queue_complexity logic adapted from orchestrator queue parser.
 """
 
 import time
@@ -29,17 +29,16 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
-# _parse_queue_complexity — verbatim from bots/orchestrator.py:928-980
-# with attribution. Original operates on a Path; this variant operates on
-# raw queue_text for pure-function testing. File-based wrapper retained.
-# Attribution: copied verbatim from bots/orchestrator.py _parse_queue_complexity
+# _parse_queue_complexity — adapted from orchestrator queue parser
+# Original operates on a Path; this variant operates on raw queue_text for pure-function testing.
+# Adapted from orchestrator queue parser
 # ---------------------------------------------------------------------------
 
 def _parse_queue_complexity_from_text(queue_text: str) -> dict[str, str]:
     """Parse QUEUE.md markdown text into {Q-id: complexity} for confirmed/approved.
 
-    Verbatim logic from bots/orchestrator.py _parse_queue_complexity,
-    adapted to accept queue_text string instead of Path to keep predicates pure.
+    Adapted from orchestrator queue parser to accept queue_text string
+    instead of Path to keep predicates pure.
     """
     result: dict[str, str] = {}
     if not queue_text:

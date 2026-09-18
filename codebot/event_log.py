@@ -1,4 +1,4 @@
-"""Store bounded versioned operational events for the BotNet control plane.
+"""Store bounded versioned operational events for the CodeBot control plane.
 
 Purpose
 -------

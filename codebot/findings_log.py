@@ -1,15 +1,15 @@
-"""Cross-bot findings log for shared context (E5).
+"""Cross-agent findings log for shared context.
 
 Purpose
 -------
-Append-only JSONL file where scanner bots record findings and
-GOAL_STEERING_BOT reads them to inform prioritization.
+Append-only JSONL file where discovery agents record findings and
+control agents read them to inform prioritization.
 
 Why
 ---
-Bots operate in isolation. A shared append-only log lets BUG_TRIAGE_BOT,
-CODE_QUALITY_BOT, and TEST_COVERAGE_BOT surface patterns that
-GOAL_STEERING_BOT can correlate without direct inter-bot communication.
+Agents operate in isolation. A shared append-only log lets discovery roles
+(bug_hunter, security_auditor, test_gap_auditor) surface patterns that
+scheduler and goal_steering can correlate without direct inter-agent communication.
 
 Invariants
 ----------

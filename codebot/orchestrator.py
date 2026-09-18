@@ -1110,7 +1110,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             for inp in mdata.get("input", []):
                 ipath = Path(inp.get("path", ""))
                 if not ipath.is_absolute():
-                    ipath = BOTS_DIR.parent / ipath
+                    ipath = BOTS_DIR / ipath
                 if ipath.exists() and ipath.stat().st_mtime > last_run_mtime:
                     inputs_changed = True
                     break
@@ -1120,10 +1120,12 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
     if prompt_path.exists() and prompt_path.stat().st_mtime > last_run_mtime:
         inputs_changed = True
     ALWAYS_RESPAWN = frozenset({
-        "github_bot", "issues", "features", "bug_triage",
-        "goal_steering", "ui_improve", "doc_sync", "test_coverage",
-        "code_quality", "prompt_opt", "dependency", "build",
-        "e2e_smoke", "security_auditor", "feature_decomposer",
+        "bug_hunter", "security_auditor", "architecture_auditor",
+        "performance_auditor", "test_gap_auditor", "documentation_auditor",
+        "dependency_auditor", "ux_auditor",
+        "general_implementer", "backend_implementer", "frontend_implementer",
+        "test_implementer", "migration_implementer", "documentation_implementer",
+        "scheduler", "quality_gate", "conflict_resolver", "budget_controller",
     })
     if not inputs_changed and last_run_mtime > 0 and bot.config.name not in WORKER_POOL and bot.config.name not in ALWAYS_RESPAWN:
         logger.info(f"Bot '{bot.config.name}' skipped — no input changes since last run")
@@ -1966,7 +1968,7 @@ def due_bots_first(bots: dict[str, BotState]) -> list[str]:
            if b.config.enabled and b.process is None
            and b.next_run_at and now >= b.next_run_at]
     due.sort(key=lambda n: (TIER_PRIORITY.get(n, 2), bots[n].next_run_at))
-    # Worker pool uses WORKER_BOT.md (homogeneous); complexity routing is soft
+    # Worker pool uses cloned implementer roles; complexity routing is soft
     # affinity in the prompt, not a hard scheduler gate.
     worker_pool = WORKER_POOL
     queue_path = Path(__file__).parent.parent / "docs" / "triage" / "QUEUE.md"
@@ -2003,10 +2005,10 @@ def _manifest_resolve_file(rel_path: str) -> Path:
     cand1 = BOTS_DIR / rel_path
     if cand1.exists():
         return cand1
-    cand2 = BOTS_DIR.parent / rel_path
+    cand2 = BOTS_DIR / rel_path
     if cand2.exists():
         return cand2
-    # Fallback to BOTS_DIR-relative (most common for bots/state/*)
+    # Fallback to BOTS_DIR-relative
     return cand1
 
 
@@ -2048,9 +2050,8 @@ def _manifest_load_queue_text() -> str:
         pass
 
     candidates = [
-        BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md",
-        BOTS_DIR / "QUEUE.md",
         BOTS_DIR / "docs" / "triage" / "QUEUE.md",
+        BOTS_DIR / "QUEUE.md",
         Path("docs/triage/QUEUE.md"),
     ]
     global _QUEUE_SNAPSHOT
@@ -2127,8 +2128,7 @@ def _manifest_read_queue_remaining(name: str) -> list[str] | int:
     """Read checkpoint queue_remaining for a manifest bot (injectable, no I/O inside predicates)."""
     # Why: readiness requires checkpoint's queue_remaining; orchestrator injects it.
     ckpt = STATE_DIR / f"{name}.checkpoint.json"
-    # Also probe parent state dir for cross-cwd runs
-    candidates = [ckpt, BOTS_DIR.parent / "state" / f"{name}.checkpoint.json"]
+    candidates = [ckpt, BOTS_DIR / "state" / f"{name}.checkpoint.json"]
     for p in candidates:
         try:
             if p.exists():
@@ -2220,10 +2220,7 @@ def _load_manifests_safe() -> dict[str, dict]:
         # Resolve via BOTS_DIR/manifests (cwd-relative, never absolute)
         mdir = BOTS_DIR / "manifests"
         if not mdir.exists():
-            # Fallback for Work cwd runs where import is bots.*
-            alt = BOTS_DIR.parent / "bots" / "manifests"
-            if alt.exists():
-                mdir = alt
+            mdir = BOTS_DIR / ".codebot" / "manifests"
         global _MANIFEST_SNAPSHOT
         fingerprint = tuple(sorted((path.name, path.stat().st_mtime) for path in mdir.glob("*.json")))
         if _MANIFEST_SNAPSHOT and _MANIFEST_SNAPSHOT[:2] == (mdir, fingerprint):
@@ -2490,7 +2487,7 @@ def _dispatch_manifest_batches(packed: dict, bots: dict[str, BotState]) -> None:
     except Exception:
         run_batch_fn = None
 
-    queue_path = BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md"
+    queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
     queue_items = _parse_queue_complexity(queue_path)
 
     for idx, batch in enumerate(batches):

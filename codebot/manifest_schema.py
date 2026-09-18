@@ -1,8 +1,8 @@
-"""Bot manifest validation and loading.
+"""Agent manifest validation and loading.
 
 Purpose
 -------
-Provides strict validation for bot manifests (bots/manifests/<name>.json)
+Provides strict validation for agent manifests (.codebot/manifests/<name>.json)
 and loading helpers used by the orchestrator and batch scheduler.
 Consumers call validate_manifest, load_manifest, or load_all_manifests.
 
@@ -315,7 +315,7 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
     return data
 
 
-def load_all_manifests(dir: str | Path = "bots/manifests") -> dict[str, dict[str, Any]]:
+def load_all_manifests(dir: str | Path = ".codebot/manifests") -> dict[str, dict[str, Any]]:
     """Load all manifests in a directory.
 
     Args:

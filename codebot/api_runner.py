@@ -109,7 +109,7 @@ def _queued_github_target(bot_name: str) -> tuple[str, int] | None:
     }.get(bot_name)
     if not complexity:
         return None
-    queue_path = BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md"
+    queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
     try:
         for line in queue_path.read_text(encoding="utf-8").splitlines():
             fields = [field.strip() for field in line.strip("|").split("|")]
@@ -227,7 +227,7 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> None:
 
 BOTS_DIR = Path(__file__).parent
 DRAIN_FILE = BOTS_DIR / "state" / ".drain"
-WORK_ROOT = BOTS_DIR.parent
+WORK_ROOT = BOTS_DIR
 
 # T4.3 incremental adapter seam
 _adapter_instance: object | None = None
