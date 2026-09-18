@@ -149,6 +149,77 @@ def _is_blocked_url(url: str) -> bool:
     return False
 
 
+class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that validates each hop's resolved IP against the SSRF blocklist.
+
+    Prevents DNS rebinding and redirect-based SSRF by resolving and validating
+    the target hostname before allowing urllib to follow the redirect.
+    """
+
+    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int,
+                         msg: str, headers: Any, newurl: str) -> urllib.request.Request | None:
+        """Override to validate redirect target before following."""
+        # Block via string patterns first (fast path)
+        try:
+            parsed = urllib.parse.urlparse(newurl)
+            host = (parsed.hostname or "").lower()
+        except Exception:
+            return None
+
+        if not host:
+            return None
+
+        for pattern in _BLOCKED_PATTERNS:
+            if host.startswith(pattern) or host == pattern.rstrip("."):
+                raise ValueError(
+                    f"SSRF: redirect to blocked host {host}"
+                )
+
+        # Resolve and validate actual IP (DNS rebinding defense)
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            _resolve_and_validate_host(host, port)
+        except ValueError as e:
+            raise ValueError(f"SSRF: redirect blocked - {e}") from e
+
+        # All checks passed — allow redirect
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_open_url(req: urllib.request.Request, timeout: float) -> Any:
+    """Open a URL with DNS validation and SSRF-safe redirect handling.
+
+    Steps:
+    1. Resolve and validate the target hostname's IP via _resolve_and_validate_host
+    2. Use a custom redirect handler that validates each redirect hop
+    3. Bounded reads enforced by caller
+
+    Args:
+        req: urllib Request object.
+        timeout: Connection/read timeout in seconds.
+
+    Returns:
+        urllib response object.
+
+    Raises:
+        ValueError: If DNS resolution fails or IP is blocked.
+        urllib.error.URLError: On network errors.
+    """
+    parsed = urllib.parse.urlparse(req.full_url)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    # Resolve and validate the IP before connecting (DNS rebinding defense)
+    try:
+        _resolve_and_validate_host(host, port)
+    except ValueError:
+        raise
+
+    # Build custom opener with SSRF redirect handler (replaces default redirect handler)
+    opener = urllib.request.build_opener(_SSRFRedirectHandler)
+    return opener.open(req, timeout=timeout)
+
+
 class _DDGParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -219,8 +290,13 @@ def web_search(query: str, max_results: int = MAX_RESULTS) -> dict[str, Any]:
     })
 
     try:
-        with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as resp:
+        resp = _safe_open_url(req, timeout=SEARCH_TIMEOUT)
+        try:
             raw = resp.read(MAX_SEARCH_BYTES).decode("utf-8", errors="replace")
+        finally:
+            resp.close()
+    except ValueError as e:
+        return {"success": False, "output": "", "error": f"SSRF blocked: {str(e)[:150]}"}
     except urllib.error.HTTPError as e:
         return {"success": False, "output": "", "error": f"HTTP {e.code}"}
     except urllib.error.URLError as e:
@@ -290,9 +366,14 @@ def web_fetch(url: str, max_bytes: int = MAX_FETCH_BYTES) -> dict[str, Any]:
     })
 
     try:
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+        resp = _safe_open_url(req, timeout=FETCH_TIMEOUT)
+        try:
             raw_bytes = resp.read(max_bytes)
             content_type = resp.headers.get("Content-Type", "")
+        finally:
+            resp.close()
+    except ValueError as e:
+        return {"success": False, "output": "", "error": f"SSRF blocked: {str(e)[:150]}"}
     except urllib.error.HTTPError as e:
         return {"success": False, "output": "", "error": f"HTTP {e.code}"}
     except urllib.error.URLError as e:

@@ -37,6 +37,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from codebot import alignment_service
+
 # ---------------------------------------------------------------------------
 # Paths — resolved via ProjectAdapter; fallback to CODEBOT_PROJECT_ROOT env or cwd
 # ---------------------------------------------------------------------------
