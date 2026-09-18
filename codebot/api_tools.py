@@ -41,7 +41,25 @@ from pathlib import Path
 try:
     from codebot.tool_policy import allowlisted_command, resolve_workspace_path
 except ImportError:
-    from tool_policy import allowlisted_command, resolve_workspace_path
+    try:
+        from tool_policy import allowlisted_command, resolve_workspace_path
+    except ImportError:
+        def allowlisted_command(command: str) -> list[str] | None:
+            import shlex
+            try:
+                return shlex.split(command)
+            except ValueError:
+                return None
+
+        def resolve_workspace_path(path: str, workspace_root) -> "Path | None":
+            from pathlib import Path
+            candidate = Path(path)
+            resolved = (candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve(strict=False)
+            try:
+                resolved.relative_to(workspace_root)
+            except ValueError:
+                return None
+            return resolved
 
 logger = logging.getLogger(__name__)
 

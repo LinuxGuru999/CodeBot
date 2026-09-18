@@ -2935,8 +2935,9 @@ def main() -> None:
     # SELF-01: Reload bot registry now that adapter is injected.
     # Module-level BOT_REGISTRY was built before bootstrap ran, so it used
     # the 3-bot fallback. Now that the adapter is wired, reload from it.
-    global BOT_REGISTRY
-    BOT_REGISTRY = _load_bot_registry()
+    import codebot.orchestrator as _self_mod
+    _self_mod.BOT_REGISTRY = _load_bot_registry()
+    BOT_REGISTRY = _self_mod.BOT_REGISTRY
     bots: dict[str, BotState] = {}
     for config in BOT_REGISTRY:
         bots[config.name] = BotState(config=config)
