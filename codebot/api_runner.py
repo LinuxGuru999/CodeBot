@@ -212,19 +212,20 @@ def set_project_adapter(adapter: object) -> None:
         WORK_ROOT = p.repository_root
     except Exception:
         pass
-
-
 def get_adapter() -> object | None:
     return _adapter_instance
-# FIX-01: API URL resolved via adapter when available, fallback to default
+
 _DEFAULT_API_URL = "https://dialagram.me/router/v1/chat/completions"
 
 
 def _resolve_api_url() -> str:
+    env_url = os.environ.get("CODEBOT_API_URL")
+    if env_url:
+        return env_url
     if _adapter_instance is not None:
         try:
-            cfg = _adapter_instance.model_profiles()  # type: ignore[union-attr]
-            url = cfg.get("api_url", "")
+            profiles = _adapter_instance.model_profiles()  # type: ignore[union-attr]
+            url = profiles.get("api_url", "")
             if url:
                 return url
         except Exception:
