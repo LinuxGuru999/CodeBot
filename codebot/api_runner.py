@@ -451,6 +451,69 @@ except ImportError:
         _web_search = None  # type: ignore[assignment]
         _web_fetch = None  # type: ignore[assignment]
 
+def _create_ticket_tool(
+    title: str,
+    ticket_class: str = "feature",
+    severity: str = "medium",
+    source: str = "agent",
+    evidence: str = "",
+    problem_statement: str = "",
+    desired_state: str = "",
+    acceptance_criteria: str = "",
+    affected_modules: str = "",
+    risk: str = "medium",
+) -> dict:
+    try:
+        from codebot.ticket_engine import (
+            create_ticket, TicketStore, TicketClass, Severity, RiskLevel,
+        )
+    except ImportError:
+        return {"success": False, "output": "", "error": "ticket_engine not available"}
+    class_map = {v.value: v for v in TicketClass}
+    sev_map = {v.value: v for v in Severity}
+    risk_map = {v.value: v for v in RiskLevel}
+    tc = class_map.get(ticket_class.lower(), TicketClass.FEATURE)
+    sv = sev_map.get(severity.lower(), Severity.MEDIUM)
+    rk = risk_map.get(risk.lower(), RiskLevel.MEDIUM)
+    ac_list = [c.strip() for c in acceptance_criteria.split(";") if c.strip()] if acceptance_criteria else [title]
+    modules = [m.strip() for m in affected_modules.split(",") if m.strip()] if affected_modules else []
+    if not problem_statement:
+        problem_statement = title
+    if not desired_state:
+        desired_state = f"Resolve: {title}"
+    try:
+        ticket = create_ticket(
+            title=title,
+            ticket_class=tc,
+            severity=sv,
+            source=source,
+            evidence=evidence or title,
+            problem_statement=problem_statement,
+            desired_state=desired_state,
+            acceptance_criteria=ac_list,
+            risk=rk,
+            affected_modules=modules,
+        )
+    except ValueError as ve:
+        return {"success": False, "output": "", "error": str(ve)}
+    store_path = Path(".codebot/state/tickets.json")
+    if _adapter_instance is not None:
+        try:
+            store_path = _adapter_instance.paths().state_dir / "tickets.json"  # type: ignore[union-attr]
+        except Exception:
+            pass
+    if not store_path.is_absolute():
+        store_path = (WORK_ROOT / store_path).resolve()
+    try:
+        store = TicketStore(store_path)
+        store.add(ticket)
+        return {"success": True, "output": f"Created ticket {ticket.id}: {ticket.title} (state={ticket.state.value})", "error": None}
+    except ValueError as ve:
+        return {"success": True, "output": f"Duplicate: {ve}", "error": None}
+    except Exception as e:
+        return {"success": False, "output": "", "error": f"store failed: {e}"}
+
+
 _TOOL_MAP = {
     "read": read,
     "write": write,
@@ -460,6 +523,7 @@ _TOOL_MAP = {
     "glob": glob,
     "file_read": read,
     "file_write": write,
+    "create_ticket": _create_ticket_tool,
 }
 if _a11y_snapshot is not None:
     _TOOL_MAP["screenshot"] = _a11y_snapshot

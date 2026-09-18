@@ -205,7 +205,7 @@ def _model_tier_for_complexity(model: str, complexity: str, queue_has_tier_work:
 
 
 def _build_worker_pool() -> frozenset[str]:
-    return frozenset(c.name for c in BOT_REGISTRY if c.name.startswith("worker-"))
+    return frozenset(c.name for c in BOT_REGISTRY if c.name in IMPLEMENTER_ROLE_NAMES or any(c.name.startswith(f"{r}-") for r in IMPLEMENTER_ROLE_NAMES))
 
 
 MIN_ROTATING_SLOTS = 28
@@ -446,11 +446,21 @@ WORKER_FALLBACK_CYCLE = (
 
 
 def _count_actionable_queue_items() -> int:
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
+        if store_path.exists():
+            ts = TicketStore(store_path)
+            return max(len(ts.list_ready()), 0)
+    except Exception:
+        pass
     queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
     try:
         content = queue_path.read_text(encoding="utf-8")
     except OSError:
-        return 6
+        return 0
     count = 0
     for line in content.splitlines():
         if not line.startswith("|") or line.startswith("|---") or line.startswith("| ID "):
@@ -458,27 +468,38 @@ def _count_actionable_queue_items() -> int:
         parts = [p.strip().lower() for p in line.split("|")[1:-1]]
         if any(s in parts for s in ("confirmed", "approved")):
             count += 1
-    return max(count, 6)
+    return count
 
 
 def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> list[BotConfig]:
-    existing_workers = sum(1 for c in registry if c.name.startswith("worker-"))
     demand = _count_actionable_queue_items()
-    rotating_reserve = 4
-    ceiling = max(0, max_concurrent - rotating_reserve)
-    target_workers = ceiling if demand > 0 else existing_workers
-    out = list(registry)
-    for i in range(existing_workers + 1, target_workers + 1):
-        idx = (i - 1) % len(WORKER_MODEL_CYCLE)
-        interval = 600 + (i % 6) * 60
-        timeout = min(interval * 4, 7200)
-        tier = 13 if WORKER_MODEL_CYCLE[idx] in MODEL_TIER_EXPENSIVE or "thinking" in WORKER_MODEL_CYCLE[idx] else 12
-        out.append(BotConfig(
-            f"worker-{i}", "WORKER_BOT.md", interval, timeout,
-            WORKER_MODEL_CYCLE[idx], fallback_model=WORKER_FALLBACK_CYCLE[idx],
-            clean_exit_wait=False, runner_mode="api", tier=tier,
-        ))
-        TIER_PRIORITY[f"worker-{i}"] = tier
+    base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
+    non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES]
+    if not base_impl:
+        return registry
+    target = min(demand, MAX_IMPLEMENTER_SLOTS, max_concurrent - len(non_impl))
+    target = max(target, len(base_impl))
+    out = list(non_impl)
+    clones_per_role = max(1, target // len(base_impl))
+    remainder = target % len(base_impl)
+    added = 0
+    for role in base_impl:
+        copies = clones_per_role + (1 if remainder > 0 else 0)
+        remainder = max(0, remainder - 1)
+        for i in range(copies):
+            idx = added % len(WORKER_MODEL_CYCLE)
+            model = WORKER_MODEL_CYCLE[idx]
+            fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+            name = role.name if i == 0 else f"{role.name}-{i+1}"
+            tier = 13 if model in MODEL_TIER_EXPENSIVE or "thinking" in model else 12
+            out.append(BotConfig(
+                name, role.prompt_file, role.interval_seconds, role.heartbeat_timeout,
+                model, fallback_model=fb,
+                clean_exit_wait=False, runner_mode="api", tier=tier,
+                max_restarts=role.max_restarts,
+            ))
+            TIER_PRIORITY[name] = tier
+            added += 1
     return out
 
 
@@ -525,6 +546,15 @@ def _next_worker_model() -> tuple[str, str]:
 
 BOT_REGISTRY = _scale_workers_to_demand(BOT_REGISTRY, GATEWAY_MAX_CONCURRENT)
 WORKER_POOL = _build_worker_pool()
+
+
+def _rescale_registry() -> None:
+    global BOT_REGISTRY, WORKER_POOL
+    import codebot.orchestrator as _self_mod
+    scaled = _scale_workers_to_demand(list(_self_mod.BOT_REGISTRY), GATEWAY_MAX_CONCURRENT)
+    _self_mod.BOT_REGISTRY = scaled
+    BOT_REGISTRY = scaled
+    WORKER_POOL = _build_worker_pool()
 
 # ---------------------------------------------------------------------------
 # Heartbeat Protocol
@@ -3008,6 +3038,7 @@ def main() -> None:
     # the 3-bot fallback. Now that the adapter is wired, reload from it.
     import codebot.orchestrator as _self_mod
     _self_mod.BOT_REGISTRY = _load_bot_registry()
+    _rescale_registry()
     bots: dict[str, BotState] = {}
     for config in _self_mod.BOT_REGISTRY:
         bots[config.name] = BotState(config=config)
