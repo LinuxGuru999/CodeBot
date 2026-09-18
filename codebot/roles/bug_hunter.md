@@ -22,7 +22,8 @@ Read `.codebot/project.yaml` at startup. It defines:
 Read `.codebot/constitution.md` for protected invariants you must never suggest weakening.
 
 ## Tool Constraints
-- **Allowed tools**: `read`, `grep`, `glob` (READ-ONLY)
+- **Allowed tools**: `read`, `grep`, `glob`, `create_ticket`
+- **Primary output tool**: `create_ticket` — this is how you deliver findings
 - **Filesystem scope**: `project_root` only
 - **Network access**: None
 - **Git write**: No
