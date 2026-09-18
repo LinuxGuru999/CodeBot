@@ -742,16 +742,20 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
     for p in claims_dir.glob("*.json"):
         active_claims.add(p.stem.rsplit(".", 1)[0])
     idle_impl = []
+    unassigned_running = []
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name
         if base_name not in IMPLEMENTER_ROLE_NAMES:
             continue
         if bot.process is not None and bot.process.poll() is None:
-            continue
-        idle_impl.append((name, bot))
+            if not getattr(bot, '_assigned_ticket_id', ''):
+                unassigned_running.append((name, bot))
+        else:
+            idle_impl.append((name, bot))
+    available = idle_impl + unassigned_running
     dispatched = 0
     for ticket in ready:
-        if not idle_impl:
+        if not available:
             break
         tid = getattr(ticket, 'id', '')
         if tid in active_claims:
@@ -760,23 +764,23 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         tc_val = tc.value if hasattr(tc, 'value') else str(tc) if tc else "feature"
         target_base = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
         matched = None
-        for i, (name, bot) in enumerate(idle_impl):
+        for i, (name, bot) in enumerate(available):
             base = name.split("-")[0] if "-" in name else name
             if base == target_base:
                 matched = (i, name, bot)
                 break
         if matched is None:
-            for i, (name, bot) in enumerate(idle_impl):
+            for i, (name, bot) in enumerate(available):
                 base = name.split("-")[0] if "-" in name else name
                 if base == "general_implementer":
                     matched = (i, name, bot)
                     break
-        if matched is None and idle_impl:
-            matched = (0, idle_impl[0][0], idle_impl[0][1])
+        if matched is None and available:
+            matched = (0, available[0][0], available[0][1])
         if matched is None:
             break
         idx, bot_name, bot = matched
-        idle_impl.pop(idx)
+        available.pop(idx)
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
             claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": tc_val}
