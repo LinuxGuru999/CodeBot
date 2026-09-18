@@ -30,6 +30,7 @@ import re
 import signal
 import sys
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -671,6 +672,28 @@ def _write_heartbeat(heartbeat_file):
         pass
 
 
+def _start_heartbeat_thread(heartbeat_file: str, interval: int = 30) -> threading.Thread:
+    stop_event = threading.Event()
+
+    def _beat():
+        while not stop_event.is_set():
+            _write_heartbeat(heartbeat_file)
+            stop_event.wait(interval)
+
+    t = threading.Thread(target=_beat, daemon=True, name="heartbeat-writer")
+    t._stop_event = stop_event  # type: ignore[attr-defined]
+    t.start()
+    return t
+
+
+def _stop_heartbeat_thread(t: threading.Thread | None) -> None:
+    if t is not None:
+        try:
+            t._stop_event.set()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def _write_checkpoint(ckpt_file, bot_name, reason):
     """Write <4 KB JSON checkpoint atomically via tmp+replace."""
     try:
@@ -722,13 +745,12 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
 
 def _contract(heartbeat_file, ckpt_file):
     """Minimal shared-infra contract (<800 chars) without importing prompt_gateway."""
-    # Inlined to avoid prompt_gateway side effects; keep only drain/heartbeat/checkpoint/bound
     return (
         "[SHARED INFRA CONTRACT]\n"
         f"- Drain: check `state/.drain` or `state/.drain_<bot_name>` via `read` tool before each task. If either exists, exit 0 cleanly.\n"
-        f"- Heartbeat: write float(time.time()) to {heartbeat_file} at startup and after each task; never exceed 120s gap. Use the `write` tool with just the timestamp string.\n"
+        f"- Heartbeat: a background thread writes your heartbeat every 30s automatically. You do NOT need to write heartbeat files manually. Focus entirely on your task.\n"
         f"- Checkpoint: after each task write <4KB JSON to {ckpt_file} using the `write` tool. Keys: bot, updated_at, reason.\n"
-        "- Bound: bounded delegated task, not a daemon. Do atomic work, heartbeat, checkpoint, exit 0 on drain or completion."
+        "- Bound: bounded delegated task, not a daemon. Do atomic work, checkpoint, exit 0 on drain or completion."
     )
 
 
@@ -1487,6 +1509,8 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     )
 
     messages = [{"role": "user", "content": full_message}]
+    _write_heartbeat(heartbeat_file)
+    hb_thread = _start_heartbeat_thread(heartbeat_file, interval=30)
     github_target = _github_issue_target(bot_name, mission_prompt) or _queued_github_target(bot_name)
     if github_target:
         _update_github_progress(github_target, bot_name, 0, "claimed by implementer")
@@ -1735,6 +1759,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
             exit_reason = "no_content"
             sys.exit(1)
     finally:
+        _stop_heartbeat_thread(hb_thread)
         _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reason)
         discovery_roles = frozenset({
             "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
