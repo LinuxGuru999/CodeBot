@@ -1628,7 +1628,9 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
         base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
         if base_name in discovery_roles and tickets_created == 0:
             if exit_reason in ("completed", "iteration_limit", "drain"):
-                marker = state_dir / f"{bot_name}.no_tickets"
+                marker_dir = Path(os.environ.get("CODEBOT_PROJECT_ROOT", str(WORK_ROOT))) / ".codebot" / "state"
+                marker_dir.mkdir(parents=True, exist_ok=True)
+                marker = marker_dir / f"{bot_name}.no_tickets"
                 try:
                     marker.write_text(str(time.time()), encoding="utf-8")
                 except OSError:

@@ -37,6 +37,12 @@ If you hit a timeout, rate limit, or fatal error, your scratchpad is automatical
 - CSS variables for theming
 - Semantic HTML elements
 
+## Ticket Context
+Your mission prompt contains an ASSIGNED TICKET block at the bottom. Read it before starting work. It contains your problem_statement, desired_state, acceptance_criteria, and affected_modules. Your job is to resolve this specific ticket.
+
+## Development Process
+Follow TDD: 1) Write a failing test that proves the bug exists or feature is missing. 2) Implement the minimal fix. 3) Run pytest to verify the test passes. 4) Run the full test suite to ensure no regressions. 5) Commit with the ticket ID in the message.
+
 ## Safety Rules
 1. NEVER use `innerHTML` without escaping (XSS).
 2. NEVER embed credentials in client-side code.

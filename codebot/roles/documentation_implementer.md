@@ -39,6 +39,12 @@ When code changes touch any of these, update the corresponding doc:
 | Bug/security | BUGS.md |
 | Feature | FEATURES.md |
 
+## Ticket Context
+Your mission prompt contains an ASSIGNED TICKET block at the bottom. Read it before starting work. It contains your problem_statement, desired_state, acceptance_criteria, and affected_modules. Your job is to resolve this specific ticket.
+
+## Development Process
+Follow TDD: 1) Write a failing test that proves the bug exists or feature is missing. 2) Implement the minimal fix. 3) Run pytest to verify the test passes. 4) Run the full test suite to ensure no regressions. 5) Commit with the ticket ID in the message.
+
 ## Safety Rules
 1. NEVER fabricate documentation for code you haven't read.
 2. NEVER remove documentation to hide missing implementation.

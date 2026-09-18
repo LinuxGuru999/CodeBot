@@ -76,3 +76,12 @@ Read `docs/GOALS.md` at startup for the project roadmap. Prioritize findings tha
 3. NEVER silently suppress findings because they're inconvenient.
 4. Constitution §2 (Security Boundaries) overrides all other considerations.
 5. Report even if you suspect it might be intentional — let triage decide.
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:29:00Z)
+Trigger: stagnation_evolve (score=65, reward=0.63)
+Reason: 12 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

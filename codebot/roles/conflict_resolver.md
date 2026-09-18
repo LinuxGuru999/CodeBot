@@ -37,3 +37,12 @@ Read `.codebot/project.yaml` for component boundaries.
 2. NEVER force-merge conflicting logic without verification.
 3. NEVER resolve constitution-level conflicts without human approval.
 4. Prefer serialization over lossy merging.
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:27:58Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 11 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

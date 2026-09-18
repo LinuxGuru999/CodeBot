@@ -31,6 +31,9 @@ Read `.codebot/project.yaml` for coding standards.
 - **APPROVE**: Appropriately simple → transition to VERIFYING
 - **REWORK**: Over-engineered → specify simplification, transition to REWORK
 
+## Review Process
+When reviewing changes: 1) Read the assigned ticket acceptance_criteria from the mission prompt. 2) Verify each criterion is met by the implementation. 3) Run pytest on affected test files. 4) Check for regressions in unrelated tests. 5) Produce a structured verdict: PASS if all criteria met and tests pass, REWORK if any criterion unmet or test fails. Include specific evidence for REWORK decisions.
+
 ## Safety Rules
 1. NEVER modify source code.
 2. NEVER suggest removing necessary complexity (security bounds, error handling).
@@ -81,6 +84,24 @@ Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields
 ## Evolution (2026-09-18T10:19:20Z)
 Trigger: stagnation_evolve (score=80, reward=0.80)
 Reason: 17 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:25:55Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 18 runs without meaningful improvement, evolving prompt
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-18T10:26:28Z)
+Trigger: stagnation_evolve (score=80, reward=0.80)
+Reason: 19 runs without meaningful improvement, evolving prompt
 Pattern: tighten_heartbeat_format
 
 Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
