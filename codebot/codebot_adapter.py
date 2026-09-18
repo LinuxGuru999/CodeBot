@@ -137,22 +137,22 @@ class CodeBotAdapter(ProjectAdapter):
         })
         thinking_models = (
             "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
-            "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
-            "qwen-3.8-max-thinking",
         )
-        impl_idx = 0
+        non_thinking_cycle = (
+            "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.8-max",
+            "qwen-3.6-plus", "qwen-3.5-plus", "meta-muse-spark-1.3",
+            "meta-muse-spark-1.2",
+        )
+        cycle_idx = 0
         think_idx = 0
         for role in ALL_ROLES:
             interval = interval_map.get(role.category.value, 600)
             if role.name in thinking_roles:
                 model = thinking_models[think_idx % len(thinking_models)]
                 think_idx += 1
-            elif role.category.value == "implementation":
-                model = WORKER_MODEL_CYCLE[impl_idx % len(WORKER_MODEL_CYCLE)]
-                impl_idx += 1
             else:
-                model = WORKER_MODEL_CYCLE[(impl_idx + think_idx) % len(WORKER_MODEL_CYCLE)]
-                impl_idx += 1
+                model = non_thinking_cycle[cycle_idx % len(non_thinking_cycle)]
+                cycle_idx += 1
             fallback = _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
             registry.append({
                 "name": role.name,
