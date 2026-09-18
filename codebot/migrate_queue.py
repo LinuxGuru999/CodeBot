@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from ticket_engine import create_ticket, TicketClass, Severity, RiskLevel, TicketStore, TicketState
+from codebot.ticket_engine import create_ticket, TicketClass, Severity, RiskLevel, TicketStore, TicketState
 
 
 SEVERITY_MAP = {

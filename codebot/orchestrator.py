@@ -373,28 +373,45 @@ class BotState:
     prompt_mtime: float = 0.0
 
 
-# All bots the orchestrator can manage (20 total, 19 enabled)
-# fallback_model: used by api_runner when primary model returns fatal HTTP/timeout errors
-BOT_REGISTRY = [
-    BotConfig("github_bot", "GITHUB_BOT.md",                 300,   900, "qwen-3.5-omni-plus", fallback_model="qwen-3.6-plus", clean_exit_wait=False, runner_mode="api"),
-    BotConfig("issues",          "ISSUES_BOT.md",            1800,  3600, "qwen-3.6-plus-thinking", fallback_model="qwen-3.7-plus", clean_exit_wait=False),
-    BotConfig("features",        "FEATURE_BOT.md",           3600,  7200, "qwen-3.5-plus-thinking", fallback_model="qwen-3.7-max-thinking", clean_exit_wait=True),
-    BotConfig("bug_triage",      "BUG_TRIAGE_BOT.md",        1800,  3600, "qwen-3.6-plus", fallback_model="qwen-3.7-plus", clean_exit_wait=False),
-    BotConfig("goal_steering",   "GOAL_STEERING_BOT.md",     3600,  7200, "qwen-3.8-max-thinking", fallback_model="qwen-3.7-max-thinking", clean_exit_wait=True),
-    BotConfig("ui_improve",      "UI_IMPROVE_BOT.md",        3600,  7200, "meta-muse-spark-1.2", fallback_model="meta-muse-spark-1.3", clean_exit_wait=True),
-    BotConfig("doc_sync",        "DOC_SYNC_BOT.md",          3600,  7200, "meta-muse-spark-1.3", fallback_model="meta-muse-spark-1.2", clean_exit_wait=True),
-    BotConfig("test_coverage",   "TEST_COVERAGE_BOT.md",     3600,  7200, "qwen-3.5-plus-thinking", fallback_model="qwen-3.7-max-thinking", clean_exit_wait=True),
-    BotConfig("code_quality",    "CODE_QUALITY_BOT.md",      3600,  7200, "qwen-3.7-max-thinking", fallback_model="qwen-3.8-max-thinking", clean_exit_wait=True),
-    BotConfig("prompt_opt",      "PROMPT_OPTIMIZER.md",      3600,  7200, "meta-muse-spark-1.3", fallback_model="qwen-3.6-plus", clean_exit_wait=True),
-    BotConfig("dependency",      "DEPENDENCY_BOT.md",        7200, 14400, "qwen-3.5-omni-plus", fallback_model="qwen-3.6-plus", clean_exit_wait=True),
-    BotConfig("build",           "BUILD_BOT.md",             1800,  3600, "qwen-3.8-max", fallback_model="qwen-3.7-plus", clean_exit_wait=True),
-    BotConfig("e2e_smoke",       "E2E_SMOKE_BOT.md",         1800,  3600, "qwen-3.5-omni-plus", fallback_model="qwen-3.6-plus", clean_exit_wait=True),
-    BotConfig("security_auditor","SECURITY_AUDITOR_BOT.md",  3600,  7200, "qwen-3.8-max-thinking", fallback_model="qwen-3.7-max-thinking", clean_exit_wait=True),
-    BotConfig("feature_decomposer","FEATURE_DECOMPOSER_BOT.md", 3600, 7200, "qwen-3.7-max-thinking", fallback_model="qwen-3.8-max-thinking", clean_exit_wait=True),
-    BotConfig("release",         "RELEASE_BOT.md",           7200, 14400, "meta-muse-spark-1.3", fallback_model="qwen-3.6-plus", clean_exit_wait=True, enabled=False),  # Disabled: 3/37 gates RED, blocked
-    # NOTE: alignment and prompt_opt are NOT in the normal queue.
-    # They are triggered synchronously after each bot exit via _run_alignment_pipeline().
-]
+def _load_bot_registry() -> list["BotConfig"]:
+    """Load bot registry from ProjectAdapter if available, else use minimal defaults.
+
+    SELF-01: When codebot_adapter is loaded, this returns all 26 roles from
+    role_registry.py mapped to BotConfig entries. Without an adapter, falls
+    back to a minimal 3-bot set for backward compatibility.
+    """
+    if _adapter_instance is not None:
+        try:
+            entries = _adapter_instance.bot_registry()
+            configs = []
+            for e in entries:
+                configs.append(BotConfig(
+                    name=e["name"],
+                    prompt_file=e.get("prompt", f"{e['name']}.md"),
+                    interval_seconds=e.get("interval", 600),
+                    heartbeat_timeout=e.get("interval", 600) * 2,
+                    model=e.get("model", "default"),
+                    fallback_model=e.get("fallback_model", ""),
+                    enabled=e.get("enabled", True),
+                    max_restarts=e.get("max_restarts", 5),
+                    clean_exit_wait=e.get("clean_exit_wait", True),
+                    tier=e.get("tier", 2),
+                    runner_mode=e.get("runner_mode", "api"),
+                    max_tokens_per_run=e.get("max_tokens_per_run", 0),
+                ))
+            if configs:
+                logger.info("Loaded %d roles from project adapter", len(configs))
+                return configs
+        except Exception as e:
+            logger.warning("Failed to load registry from adapter: %s", e)
+    return [
+        BotConfig("discovery", "bug_hunter.md", 1800, 3600, "default", clean_exit_wait=True),
+        BotConfig("implementer", "general_implementer.md", 300, 750, "default", clean_exit_wait=True),
+        BotConfig("reviewer", "correctness_reviewer.md", 600, 1500, "default", clean_exit_wait=True),
+    ]
+
+
+BOT_REGISTRY = _load_bot_registry()
 
 WORKER_MODEL_CYCLE = (
     "xiaomi-mimo-2.5", "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.7-plus",
@@ -2779,6 +2796,8 @@ def main() -> None:
         _preview_manifest_batches()
         return
 
+    # Note: bots dict is populated after bootstrap in main loop below
+    # For early-exit commands (--status, --drain, etc.), build from module-level registry
     bots: dict[str, BotState] = {}
     for config in BOT_REGISTRY:
         bots[config.name] = BotState(config=config)
@@ -2904,7 +2923,7 @@ def main() -> None:
     # defaults. If unavailable or fails, legacy paths remain active.
     _codebot_adapter = None
     try:
-        from codebot_bootstrap import bootstrap as _cb_bootstrap
+        from codebot.codebot_bootstrap import bootstrap as _cb_bootstrap
         _codebot_adapter = _cb_bootstrap(BOTS_DIR.parent)
         if _codebot_adapter:
             logger.info("CodeBot core bootstrapped: project=%s", _codebot_adapter.project_name())
@@ -2912,6 +2931,15 @@ def main() -> None:
         pass
     except Exception as _cb_err:
         logger.warning("CodeBot bootstrap failed (continuing with legacy): %s", _cb_err)
+
+    # SELF-01: Reload bot registry now that adapter is injected.
+    # Module-level BOT_REGISTRY was built before bootstrap ran, so it used
+    # the 3-bot fallback. Now that the adapter is wired, reload from it.
+    global BOT_REGISTRY
+    BOT_REGISTRY = _load_bot_registry()
+    bots: dict[str, BotState] = {}
+    for config in BOT_REGISTRY:
+        bots[config.name] = BotState(config=config)
 
     def shutdown_handler(signum, frame):
         logger.info("Shutdown signal received")
