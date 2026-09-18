@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from codebot.codebot_bootstrap import discover_adapter_class, wire_adapter, bootstrap, _ADAPTER_MODULES
+from codebot_bootstrap import discover_adapter_class, wire_adapter, bootstrap, _ADAPTER_MODULES
 
 
 class TestDiscoverAdapter:
