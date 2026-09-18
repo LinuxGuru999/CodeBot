@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 """Control client for the Fly-hosted botnet control_server.py.
 
+Purpose
+-------
+Provides a lightweight HTTP client for communicating with the control_server
+endpoints. Used by botop CLI and external tooling to query agent status,
+trigger restarts, and manage drain state remotely.
+
+Why
+---
+The control server exposes a REST-like API over HTTP. External tools and
+the botop CLI need a dependency-free way to call these endpoints without
+pulling in requests or aiohttp.
+
+Invariants
+----------
+- stdlib-only (http.client, json, urllib.parse)
+- All requests are synchronous blocking calls
+- Connection errors fail open (return None, never raise)
+
 Usage:
   CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py status
   CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py logs issues --lines 200

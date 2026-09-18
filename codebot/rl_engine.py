@@ -850,6 +850,7 @@ def write_trigger(
     breakdown: dict[str, int],
     event: dict[str, Any],
     bot_state: dict[str, Any],
+    reviewer_feedback: list[dict] | None = None,
 ) -> Path:
     """Write state/alignment_triggers/<bot>.evolve.json; returns path."""
     triggers_dir = STATE_DIR / "alignment_triggers"
@@ -914,6 +915,8 @@ def write_trigger(
         },
         "escalate": escalate,
     }
+    if reviewer_feedback:
+        payload["reviewer_feedback"] = reviewer_feedback
     target = triggers_dir / f"{bot_name}.evolve.json"
     _write_json_atomic(target, payload)
     return target

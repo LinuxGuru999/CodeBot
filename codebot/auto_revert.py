@@ -14,6 +14,26 @@ from __future__ import annotations
 
 import json
 import re
+"""Automatic rollback on build gate failure.
+
+Purpose
+-------
+Reverts git commits that cause build or test gate failures. When a quality
+gate rejects a change, this module identifies the offending commit and
+executes a safe rollback to restore the last known-good state.
+
+Why
+---
+Autonomous agents will occasionally produce changes that break the build.
+Without automatic rollback, a single bad commit blocks the entire pipeline.
+Auto-revert ensures the main branch stays green without human intervention.
+
+Invariants
+----------
+- Only reverts commits made by CodeBot agents (identified by commit metadata)
+- Never force-pushes; uses safe revert commits
+- Preserves the failing commit in history for post-mortem analysis
+"""
 import subprocess
 import time
 from pathlib import Path

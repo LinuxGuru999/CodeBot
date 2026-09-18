@@ -31,4 +31,8 @@ echo "[codebot] State dir: $STATE_DIR"
 echo "[codebot] Logs dir: $LOGS_DIR"
 echo "[codebot] Dry run: ${GITHUB_DRY_RUN:-1}"
 
+python3 -m codebot.control_server &
+CONTROL_PID=$!
+echo "[codebot] Control server started (PID $CONTROL_PID)"
+
 exec python3 -m codebot serve --project "$PROJECT_ROOT"

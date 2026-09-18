@@ -1,6 +1,7 @@
 """Tests for ticket_engine.py — schema, state machine, dedup, TicketStore CRUD."""
 
 import json
+import time
 import pytest
 from pathlib import Path
 
@@ -307,3 +308,273 @@ class TestTicketStore:
         path.write_text("not valid json{{{")
         store = TicketStore(path)
         assert store.count() == 0
+
+
+class TestGatekeeperEnforcement:
+    """Tests for VERIFYING -> COMPLETE requiring gatekeeper approval (CB-3814750-10D2)."""
+
+    def _make_store(self, tmp_path):
+        return TicketStore(tmp_path / "tickets.json")
+
+    def _add_ticket(self, store, risk=RiskLevel.LOW):
+        t = create_ticket(
+            title="Test ticket",
+            ticket_class=TicketClass.BUG,
+            severity=Severity.MEDIUM,
+            source="test",
+            evidence="evidence",
+            problem_statement="problem",
+            desired_state="desired",
+            acceptance_criteria=["ac"],
+            risk=risk,
+        )
+        store.add(t)
+        return t
+
+    def _move_to_verifying(self, store, ticket_id):
+        """Move a ticket through states to VERIFYING."""
+        store.transition(ticket_id, TicketState.VALIDATING)
+        store.transition(ticket_id, TicketState.TRIAGED)
+        store.transition(ticket_id, TicketState.READY)
+        store.transition(ticket_id, TicketState.IMPLEMENTING)
+        store.transition(ticket_id, TicketState.REVIEWING)
+        store.transition(ticket_id, TicketState.VERIFYING)
+
+    def _write_gate_pass(self, state_dir, ticket_id):
+        """Write a passing gate result for the given ticket."""
+        import os
+        gate_path = state_dir / "gate_results.jsonl"
+        record = {
+            "ticket_id": ticket_id,
+            "passed": True,
+            "timestamp": time.time(),
+            "gates": [],
+        }
+        line = json.dumps(record) + "\n"
+        fd = os.open(str(gate_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+
+    def _write_gate_fail(self, state_dir, ticket_id):
+        """Write a failing gate result for the given ticket."""
+        import os
+        gate_path = state_dir / "gate_results.jsonl"
+        record = {
+            "ticket_id": ticket_id,
+            "passed": False,
+            "timestamp": time.time(),
+            "gates": [{"gate_name": "test", "result": "fail"}],
+        }
+        line = json.dumps(record) + "\n"
+        fd = os.open(str(gate_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+
+    def test_verifying_to_complete_blocked_without_gate(self, tmp_path):
+        """VERIFYING -> COMPLETE is blocked without gatekeeper approval."""
+        store = self._make_store(tmp_path)
+        t = self._add_ticket(store)
+        self._move_to_verifying(store, t.id)
+
+        # No gate_results.jsonl exists -> should raise
+        with pytest.raises(ValueError, match="gatekeeper"):
+            store.transition(t.id, TicketState.COMPLETE)
+
+    def test_verifying_to_complete_allowed_with_gate_pass(self, tmp_path):
+        """VERIFYING -> COMPLETE is allowed with passing gate result."""
+        store = self._make_store(tmp_path)
+        t = self._add_ticket(store)
+        self._move_to_verifying(store, t.id)
+        self._write_gate_pass(tmp_path, t.id)
+
+        updated = store.transition(t.id, TicketState.COMPLETE)
+        assert updated.state == TicketState.COMPLETE
+
+    def test_verifying_to_complete_blocked_with_gate_fail(self, tmp_path):
+        """VERIFYING -> COMPLETE is blocked with failing gate result."""
+        store = self._make_store(tmp_path)
+        t = self._add_ticket(store)
+        self._move_to_verifying(store, t.id)
+        self._write_gate_fail(tmp_path, t.id)
+
+        with pytest.raises(ValueError, match="gatekeeper"):
+            store.transition(t.id, TicketState.COMPLETE)
+
+    def test_verifying_to_rework_allowed_without_gate(self, tmp_path):
+        """VERIFYING -> REWORK is allowed even without gatekeeper approval."""
+        store = self._make_store(tmp_path)
+        t = self._add_ticket(store)
+        self._move_to_verifying(store, t.id)
+
+        # REWORK should be allowed without gate
+        updated = store.transition(t.id, TicketState.REWORK)
+        assert updated.state == TicketState.REWORK
+
+    def test_rework_to_implementing_not_gated(self, tmp_path):
+        """REWORK -> IMPLEMENTING is not affected by gatekeeper enforcement."""
+        store = self._make_store(tmp_path)
+        t = self._add_ticket(store)
+        self._move_to_verifying(store, t.id)
+        store.transition(t.id, TicketState.REWORK)
+
+        updated = store.transition(t.id, TicketState.IMPLEMENTING)
+        assert updated.state == TicketState.IMPLEMENTING
+
+
+class TestPlanningPrerequisite:
+    """Tests for enforcing implementation plan prerequisite before IMPLEMENTING state."""
+
+    def _make_store(self, tmp_path):
+        return TicketStore(tmp_path / "tickets.json")
+
+    def _add_medium_risk_ticket(self, store):
+        t = create_ticket(
+            title="Medium risk ticket",
+            ticket_class=TicketClass.FEATURE,
+            severity=Severity.MEDIUM,
+            source="test",
+            evidence="evidence",
+            problem_statement="problem",
+            desired_state="desired",
+            acceptance_criteria=["ac"],
+            risk=RiskLevel.MEDIUM,
+        )
+        store.add(t)
+        return t
+
+    def _add_low_risk_ticket(self, store):
+        t = create_ticket(
+            title="Low risk ticket",
+            ticket_class=TicketClass.BUG,
+            severity=Severity.LOW,
+            source="test",
+            evidence="evidence",
+            problem_statement="problem",
+            desired_state="desired",
+            acceptance_criteria=["ac"],
+            risk=RiskLevel.LOW,
+        )
+        store.add(t)
+        return t
+
+    def _move_to_ready(self, store, ticket_id):
+        """Move a ticket through states to READY."""
+        store.transition(ticket_id, TicketState.VALIDATING)
+        store.transition(ticket_id, TicketState.TRIAGED)
+        store.transition(ticket_id, TicketState.READY)
+
+    def test_medium_risk_requires_plan_before_implementing(self, tmp_path):
+        """Medium risk tickets cannot transition to IMPLEMENTING without a plan."""
+        store = self._make_store(tmp_path)
+        t = self._add_medium_risk_ticket(store)
+        self._move_to_ready(store, t.id)
+
+        with pytest.raises(ValueError, match="requires.*implementation plan"):
+            store.transition(t.id, TicketState.IMPLEMENTING)
+
+    def test_high_risk_requires_plan_before_implementing(self, tmp_path):
+        """High risk tickets cannot transition to IMPLEMENTING without a plan."""
+        store = self._make_store(tmp_path)
+        t = create_ticket(
+            title="High risk ticket",
+            ticket_class=TicketClass.SECURITY,
+            severity=Severity.HIGH,
+            source="test",
+            evidence="evidence",
+            problem_statement="problem",
+            desired_state="desired",
+            acceptance_criteria=["ac"],
+            risk=RiskLevel.HIGH,
+        )
+        store.add(t)
+        self._move_to_ready(store, t.id)
+
+        with pytest.raises(ValueError, match="requires.*implementation plan"):
+            store.transition(t.id, TicketState.IMPLEMENTING)
+
+    def test_critical_risk_requires_plan_before_implementing(self, tmp_path):
+        """Critical risk tickets cannot transition to IMPLEMENTING without a plan."""
+        store = self._make_store(tmp_path)
+        t = create_ticket(
+            title="Critical risk ticket",
+            ticket_class=TicketClass.SECURITY,
+            severity=Severity.CRITICAL,
+            source="test",
+            evidence="evidence",
+            problem_statement="problem",
+            desired_state="desired",
+            acceptance_criteria=["ac"],
+            risk=RiskLevel.CRITICAL,
+        )
+        store.add(t)
+        self._move_to_ready(store, t.id)
+
+        with pytest.raises(ValueError, match="requires.*implementation plan"):
+            store.transition(t.id, TicketState.IMPLEMENTING)
+
+    def test_low_risk_allows_implementing_without_plan(self, tmp_path):
+        """Low risk tickets can transition to IMPLEMENTING without a plan."""
+        store = self._make_store(tmp_path)
+        t = self._add_low_risk_ticket(store)
+        self._move_to_ready(store, t.id)
+
+        # Should not raise
+        updated = store.transition(t.id, TicketState.IMPLEMENTING)
+        assert updated.state == TicketState.IMPLEMENTING
+
+    def test_medium_risk_with_plan_allows_implementing(self, tmp_path):
+        """Medium risk tickets with a plan can transition to IMPLEMENTING."""
+        from codebot.implementation_planner import PlanStore
+
+        store = self._make_store(tmp_path)
+        t = self._add_medium_risk_ticket(store)
+        self._move_to_ready(store, t.id)
+
+        # Create a plan
+        plans_dir = tmp_path / "plans"
+        plan_store = PlanStore(tmp_path)
+        plan_store.save(t.id, {"steps": ["step1", "step2"]})
+
+        # Should not raise
+        updated = store.transition(t.id, TicketState.IMPLEMENTING)
+        assert updated.state == TicketState.IMPLEMENTING
+
+    def test_transition_from_other_states_not_enforced(self, tmp_path):
+        """Planning prerequisite only enforced for READY -> IMPLEMENTING."""
+        store = self._make_store(tmp_path)
+        t = self._add_medium_risk_ticket(store)
+        store.transition(t.id, TicketState.VALIDATING)
+        store.transition(t.id, TicketState.TRIAGED)
+        store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.PLANNING)
+
+        # From PLANNING -> IMPLEMENTING should work without external plan file
+        # (the act of being in PLANNING implies plan generation)
+        updated = store.transition(t.id, TicketState.IMPLEMENTING)
+        assert updated.state == TicketState.IMPLEMENTING
+
+    def test_rework_to_implementing_not_enforced(self, tmp_path):
+        """REWORK -> IMPLEMENTING transition is not subject to planning check."""
+        from codebot.implementation_planner import PlanStore
+
+        store = self._make_store(tmp_path)
+        t = self._add_medium_risk_ticket(store)
+        self._move_to_ready(store, t.id)
+
+        # Create plan to get past first gate
+        plan_store = PlanStore(tmp_path)
+        plan_store.save(t.id, {"steps": ["step1"]})
+        store.transition(t.id, TicketState.IMPLEMENTING)
+        store.transition(t.id, TicketState.REVIEWING)
+        store.transition(t.id, TicketState.REWORK)
+
+        # Delete the plan to simulate it being removed
+        plan_store.delete(t.id)
+
+        # REWORK -> IMPLEMENTING should work without plan
+        updated = store.transition(t.id, TicketState.IMPLEMENTING)
+        assert updated.state == TicketState.IMPLEMENTING

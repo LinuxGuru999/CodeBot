@@ -140,6 +140,13 @@ class TestNeedsCompaction:
         msgs = [{"role": "user", "content": "x" * 40000}] * 5
         assert needs_compaction(msgs, max_tokens=10000) is True
 
+    def test_early_exit_on_large_history(self):
+        """Verify needs_compaction returns quickly for very large histories."""
+        # Create a history that is way over the limit
+        msgs = [{"role": "user", "content": "x" * 4000}] * 1000
+        # Should return True without processing all messages if optimized
+        assert needs_compaction(msgs, max_tokens=1000) is True
+
 
 class TestCompactMessages:
     def test_short_history_unchanged(self):

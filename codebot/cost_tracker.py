@@ -82,6 +82,7 @@ class CostTracker:
             attempts=max(1, attempts),
         )
         self._append(entry)
+        self.rotate()
         return entry
 
     def _append(self, entry: TicketCost) -> None:
@@ -93,7 +94,7 @@ class CostTracker:
         finally:
             os.close(fd)
 
-    def get_ticket_total(self, ticket_id: str) -> dict[str, int]:
+    def get_ticket_total(self, ticket_id: str) -> dict[str, object]:
         total_prompt = 0
         total_completion = 0
         total_tokens = 0
@@ -111,24 +112,42 @@ class CostTracker:
             "by_phase": phases,
         }
 
+    MAX_COST_LINES = 20000
+    MAX_COST_READ = 10000
+
+    def _read_recent_lines(self, limit: int | None = None) -> list[str]:
+        limit = self.MAX_COST_READ if limit is None else limit
+        try:
+            lines = self._costs_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return []
+        return lines[-limit:]
+
+    def rotate(self, max_lines: int | None = None) -> None:
+        max_lines = self.MAX_COST_LINES if max_lines is None else max_lines
+        try:
+            if not self._costs_path.exists():
+                return
+            lines = self._costs_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if len(lines) > max_lines:
+                self._costs_path.write_text("\n".join(lines[-max_lines:]) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
     def _iter_entries(self, ticket_id: str) -> list[dict[str, Any]]:
         if not self._costs_path.exists():
             return []
         results = []
-        try:
-            with open(self._costs_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if entry.get("ticket_id") == ticket_id:
-                            results.append(entry)
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            return []
+        for raw in self._read_recent_lines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("ticket_id") == ticket_id:
+                    results.append(entry)
+            except json.JSONDecodeError:
+                continue
         return results
 
     def build_summary(self) -> dict[str, Any]:
@@ -136,37 +155,36 @@ class CostTracker:
         if not self._costs_path.exists():
             return {"tickets": {}, "fleet_totals": {}}
         try:
-            with open(self._costs_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    tid = entry.get("ticket_id", "unknown")
-                    if tid not in summary:
-                        summary[tid] = {
-                            "total_tokens": 0,
-                            "prompt_tokens": 0,
-                            "completion_tokens": 0,
-                            "phases": {},
-                            "agents": set(),
-                            "models": set(),
-                            "attempts": 0,
-                            "wall_clock_total": 0.0,
-                        }
-                    s = summary[tid]
-                    s["total_tokens"] += entry.get("total_tokens", 0)
-                    s["prompt_tokens"] += entry.get("prompt_tokens", 0)
-                    s["completion_tokens"] += entry.get("completion_tokens", 0)
-                    phase = entry.get("phase", "unknown")
-                    s["phases"][phase] = s["phases"].get(phase, 0) + entry.get("total_tokens", 0)
-                    s["agents"].add(entry.get("agent", "unknown"))
-                    s["models"].add(entry.get("model", "unknown"))
-                    s["attempts"] = max(s["attempts"], entry.get("attempts", 1))
-                    s["wall_clock_total"] += entry.get("wall_clock_seconds", 0.0)
+            for raw in self._read_recent_lines():
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tid = entry.get("ticket_id", "unknown")
+                if tid not in summary:
+                    summary[tid] = {
+                        "total_tokens": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "phases": {},
+                        "agents": set(),
+                        "models": set(),
+                        "attempts": 0,
+                        "wall_clock_total": 0.0,
+                    }
+                s = summary[tid]
+                s["total_tokens"] += entry.get("total_tokens", 0)
+                s["prompt_tokens"] += entry.get("prompt_tokens", 0)
+                s["completion_tokens"] += entry.get("completion_tokens", 0)
+                phase = entry.get("phase", "unknown")
+                s["phases"][phase] = s["phases"].get(phase, 0) + entry.get("total_tokens", 0)
+                s["agents"].add(entry.get("agent", "unknown"))
+                s["models"].add(entry.get("model", "unknown"))
+                s["attempts"] = max(s["attempts"], entry.get("attempts", 1))
+                s["wall_clock_total"] += entry.get("wall_clock_seconds", 0.0)
         except OSError:
             pass
         serializable = {}

@@ -140,10 +140,10 @@ def order_by_tier(
 
 def pack_batches(
     ready: list[dict[str, Any]],
-    max_per_batch: int = 5,
-    max_batches: int = 2,
+    max_per_batch: int = 8,
+    max_batches: int = 3,
     budget_state: str | None = None,
-    stagger_s: int = 20,
+    stagger_s: int = 5,
 ) -> dict[str, Any]:
     """Group ready manifests into batches, consulting budget first.
 
@@ -163,6 +163,9 @@ def pack_batches(
           warning: str|None — warn state annotation
           staggers: list[int] — stagger per batch index (i*stagger_s)
           stagger_s: int — echo of param
+
+    Thresholds: 8 manifests per batch, up to 3 batches (24/tick),
+    inter-batch stagger 5s. Keep in sync with orchestrator._plan_manifest_batches.
     """
     if ready is None:
         ready = []
@@ -226,37 +229,6 @@ def pack_batches(
             "stagger_s": stagger_s,
         }
 
-    # Preserve tier order with deterministic tie-breaks.
-    # Sort by tier_priority asc, then model asc, then name asc.
-    try:
-        ready_sorted = sorted(
-            ready,
-            key=lambda m: (
-                int(m.get("tier_priority", 999)) if isinstance(m.get("tier_priority"), (int, float, str)) and str(m.get("tier_priority")).lstrip("-").isdigit() else 999,
-                str(m.get("model", "")) if isinstance(m, dict) else "",
-                str(m.get("name", "")) if isinstance(m, dict) else "",
-            ),
-        )
-    except Exception:
-        # fallback simple tier sort
-        def _tier(m: Any) -> int:
-            try:
-                return int(m.get("tier_priority", 999))
-            except Exception:
-                return 999
-        ready_sorted = sorted(ready, key=_tier)
-
-    # More robust sort handling int types properly
-    # Re-sort with proper int handling if fallback needed above missed float cases
-    try:
-        # Validate sort actually used int tier; if not, redo with proper conversion
-        # Check that numeric tiers sorted correctly
-        pass
-    except Exception:
-        pass
-
-    # Ensure proper tier int sort if earlier heuristic lost precision for non-digit strings
-    # Re-apply precise sort
     def _sort_key(m: dict[str, Any]) -> tuple[int, str, str]:
         tp = m.get("tier_priority", 999)
         try:
@@ -268,9 +240,9 @@ def pack_batches(
         return (ti, mod, nm)
 
     try:
-        ready_sorted = sorted(ready_sorted, key=_sort_key)
+        ready_sorted = sorted(ready, key=_sort_key)
     except Exception:
-        pass
+        ready_sorted = list(ready)
 
     try:
         batch_size = max(1, int(max_per_batch))

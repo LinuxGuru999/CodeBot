@@ -109,7 +109,100 @@ class Gatekeeper:
         }
 
         self._log_decision(result)
+        self._transition_ticket(ticket_id, decision, failed_gates)
         return result
+
+    def _transition_ticket(self, ticket_id: str, decision: str, failed_gates: list[str] | None = None) -> None:
+        try:
+            from codebot.ticket_engine import TicketStore, TicketState
+
+            store_path = self._state_dir / "tickets.json"
+            if not store_path.exists():
+                for alt in [
+                    Path(".codebot/state/tickets.json"),
+                    self._state_dir.parent / "tickets.json",
+                ]:
+                    if alt.exists():
+                        store_path = alt
+                        break
+
+            if not store_path.exists():
+                logger.warning("tickets.json not found for ticket %s", ticket_id)
+                return
+
+            store = TicketStore(store_path)
+            ticket = store.get(ticket_id)
+
+            if ticket is None:
+                logger.warning("ticket %s not found in store", ticket_id)
+                return
+
+            if decision == "COMPLETE":
+                if ticket.state == TicketState.VERIFYING:
+                    store.transition(ticket_id, TicketState.COMPLETE)
+                    logger.info("ticket %s transitioned to COMPLETE", ticket_id)
+                else:
+                    logger.info(
+                        "ticket %s in state %s — skipping COMPLETE transition",
+                        ticket_id, ticket.state.value,
+                    )
+            elif decision == "REWORK":
+                if ticket.state in (TicketState.REVIEWING, TicketState.VERIFYING):
+                    reviewer_feedback = self._collect_reviewer_feedback(ticket_id, failed_gates)
+                    store.transition(ticket_id, TicketState.REWORK, reviewer_feedback)
+                    logger.info("ticket %s transitioned to REWORK with %d feedback items", ticket_id, len(reviewer_feedback))
+                else:
+                    logger.info(
+                        "ticket %s in state %s — skipping REWORK transition",
+                        ticket_id, ticket.state.value,
+                    )
+        except Exception as e:
+            logger.error("failed to transition ticket %s: %s", ticket_id, e)
+
+    def _collect_reviewer_feedback(self, ticket_id: str, failed_gates: list[str] | None = None) -> list[dict]:
+        feedback = []
+        review_patterns = [
+            "correctness_review.json",
+            "security_review.json",
+            "architecture_review.json",
+            "performance_review.json",
+            "simplicity_review.json",
+            "test_review.json",
+            "documentation_review.json",
+        ]
+        for pattern in review_patterns:
+            review_path = self._state_dir / pattern
+            if not review_path.exists():
+                for alt in [
+                    Path(".codebot/state") / pattern,
+                    self._state_dir.parent / pattern,
+                ]:
+                    if alt.exists():
+                        review_path = alt
+                        break
+            if not review_path.exists():
+                continue
+            try:
+                import json
+                raw = review_path.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                if isinstance(data, dict) and data.get("verdict") == "REWORK":
+                    findings = data.get("findings", [])
+                    reviewer = data.get("reviewer", pattern.replace("_review.json", ""))
+                    for finding in findings:
+                        if isinstance(finding, dict):
+                            feedback.append({
+                                "reviewer": reviewer,
+                                "file": finding.get("file", ""),
+                                "severity": finding.get("severity", "medium"),
+                                "category": finding.get("category", ""),
+                                "description": finding.get("description", ""),
+                                "recommendation": finding.get("recommendation", ""),
+                                "timestamp": data.get("review_completed_at", ""),
+                            })
+            except Exception as e:
+                logger.debug("failed to read review file %s: %s", review_path, e)
+        return feedback
 
     def _log_decision(self, result: dict[str, Any]) -> None:
         line = json.dumps(result) + "\n"

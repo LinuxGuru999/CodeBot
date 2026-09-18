@@ -45,6 +45,7 @@ STATE_DIR = BOTS_DIR / "state"
 LOGS_DIR = BOTS_DIR / "logs"
 METRICS_FILE = STATE_DIR / "bot_metrics.json"
 HISTORY_FILE = STATE_DIR / "bot_metrics_history.jsonl"
+MAX_HISTORY_LINES = 5000
 
 _NON_WORKER_BOTS = [
     "issues", "features", "bug_triage",
@@ -64,6 +65,19 @@ def _read_json(path: Path) -> dict | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def _get_bots_with_fresh_heartbeats(max_age_s: int = 300) -> list[str]:
+    """Return bots with heartbeat file modified within max_age_s (default 5 min)."""
+    now = time.time()
+    fresh: list[str] = []
+    for hp in STATE_DIR.glob("*.heartbeat"):
+        try:
+            if hp.stat().st_mtime > now - max_age_s:
+                fresh.append(hp.stem)
+        except OSError:
+            pass
+    return fresh
 
 
 def _discover_workers() -> list[str]:
@@ -532,15 +546,20 @@ def _collect_scrutiny() -> dict[str, Any]:
     }
 
 
-def collect_all() -> dict[str, Any]:
-    """Build full per-bot snapshot across all 11 dimensions."""
+def collect_all(only_fresh: bool = False) -> dict[str, Any]:
     now = time.time()
     measurements = _read_json(STATE_DIR / "measurements.json")
     ledger = _read_json(STATE_DIR / "token_ledger.json")
     fleet_tokens = _collect_tokens(ledger)
     bots: dict[str, Any] = {}
     active = idle = stale = erroring = improving = regressing = 0
+    if only_fresh:
+        targets = set(KNOWN_BOTS) & set(_get_bots_with_fresh_heartbeats()) or set(KNOWN_BOTS)
+    else:
+        targets = set(KNOWN_BOTS)
     for bot in KNOWN_BOTS:
+        if bot not in targets:
+            continue
         exe = _collect_execution(bot)
         ali = _collect_alignment(bot)
         pro = _collect_progress(bot, now)
@@ -608,11 +627,18 @@ def save_snapshot(snapshot: dict[str, Any]) -> None:
     tmp.replace(METRICS_FILE)
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(snapshot) + "\n")
+    try:
+        lines = HISTORY_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if len(lines) > MAX_HISTORY_LINES:
+            HISTORY_FILE.write_text("\n".join(lines[-MAX_HISTORY_LINES:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def main() -> None:
-    """Collect, save, and print summary."""
-    snap = collect_all()
+    import sys
+    only_fresh = "--incremental" in sys.argv or "--only-fresh" in sys.argv
+    snap = collect_all(only_fresh=only_fresh)
     save_snapshot(snap)
     s = snap["summary"]
     print(f"=== Bot Metrics @ {snap['timestamp_human']} ===")

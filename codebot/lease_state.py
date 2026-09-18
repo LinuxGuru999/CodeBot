@@ -32,16 +32,18 @@ def _locked_state(state_dir: Path) -> Iterator[dict]:
     lock_path = state_dir / "leases.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        state_path = state_dir / "leases.json"
-        if state_path.exists():
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        else:
-            state = {"leases": {}, "attempts": {}, "dead_letters": []}
-        yield state
-        temporary_path = state_path.with_name(f"{state_path.name}.{os.getpid()}.tmp")
-        temporary_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
-        temporary_path.replace(state_path)
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        try:
+            state_path = state_dir / "leases.json"
+            if state_path.exists():
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            else:
+                state = {"leases": {}, "attempts": {}, "dead_letters": []}
+            yield state
+            temporary_path = state_path.with_name(f"{state_path.name}.{os.getpid()}.tmp")
+            temporary_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            temporary_path.replace(state_path)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def acquire(state_dir: Path, item_id: str, owner: str, *, now: float, lease_seconds: int, max_attempts: int = 3) -> dict:

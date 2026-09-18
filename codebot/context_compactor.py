@@ -42,19 +42,28 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // CHARS_PER_TOKEN)
 
 
-def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
+def estimate_messages_tokens(messages: list[dict[str, Any]], limit: int | None = None) -> int:
+    """Estimate total tokens for a list of messages.
+
+    If *limit* is provided, stops counting once the total exceeds *limit*
+    and returns the partial total (which will be > limit). This enables
+    early-exit optimization in callers like ``needs_compaction``.
+    """
     total = 0
+    _estimate_tokens = estimate_tokens  # local binding for speed
     for msg in messages:
         content = msg.get("content", "")
         if isinstance(content, str):
-            total += estimate_tokens(content)
+            total += _estimate_tokens(content)
         elif isinstance(content, list):
             for part in content:
                 if isinstance(part, dict):
-                    total += estimate_tokens(part.get("text", ""))
+                    total += _estimate_tokens(part.get("text", ""))
                 elif isinstance(part, str):
-                    total += estimate_tokens(part)
+                    total += _estimate_tokens(part)
         total += 4
+        if limit is not None and total > limit:
+            return total
     return total
 
 
@@ -62,8 +71,9 @@ def needs_compaction(
     messages: list[dict[str, Any]],
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> bool:
-    current = estimate_messages_tokens(messages)
     threshold = int(max_tokens * SAFETY_MARGIN)
+    # Early exit: stop counting as soon as we exceed the threshold
+    current = estimate_messages_tokens(messages, limit=threshold)
     return current >= threshold
 
 

@@ -44,6 +44,7 @@ Stdlib-only, single file, no deps beyond orchestrator.py model profiles.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -66,8 +67,11 @@ SAFE_UPDATE = BOTS_DIR / "safe_update.sh"
 CONTROL_TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", os.environ.get("CONTROL_PORT", "8081")))
 MAX_LOG_LINES = 2_000
-MAX_REQUEST_BYTES = 16_384
+MAX_REQUEST_BYTES = 65_536
 REQUEST_TIMEOUT_SECONDS = 15
+
+# Telemetry token from environment; empty means reject all telemetry requests
+TELEMETRY_TOKEN = os.environ.get("CODEBOT_TELEMETRY_TOKEN", "").strip()
 
 # Import orchestrator model profiles without starting it
 try:
@@ -361,7 +365,8 @@ class Handler(BaseHTTPRequestHandler):
         if not CONTROL_TOKEN:
             return True
         auth = self.headers.get("Authorization", "")
-        return auth.strip() == f"Bearer {CONTROL_TOKEN}"
+        expected = f"Bearer {CONTROL_TOKEN}"
+        return hmac.compare_digest(auth.strip(), expected)
 
     def _json(self, code: int, obj: dict | list) -> None:
         body = json.dumps(obj).encode()
@@ -511,6 +516,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, bot_status(name))
             return
 
+        # Delegate telemetry health check to TelemetryHandler logic
+        if path in ("/telemetry/health", "/api/telemetry/health"):
+            self._json(200, {"status": "ok", "time": time.time()})
+            return
+
         if path in ("/state", "/api/state"):
             try:
                 files = []
@@ -630,6 +640,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
+        # POST /telemetry — production telemetry ingestion
+        if path in ("/telemetry", "/api/telemetry"):
+            self._handle_telemetry(body)
+            return
+
         m = re.match(r"^/(?:api/)?scheduler/dead-letters/(Q-\d+)/retry$", path)
         if m:
             result = retry_dead_letter(m.group(1))
@@ -637,6 +652,86 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._json(404, {"error": "not found"})
+
+    def _handle_telemetry(self, body: dict) -> None:
+        """Handle POST /telemetry — ingest production telemetry signals.
+
+        Validates the signal, creates a ticket candidate in DISCOVERED state,
+        stores the event for trend analysis, and triggers anomaly detection.
+        """
+        # Check telemetry-specific auth
+        if TELEMETRY_TOKEN:
+            auth = self.headers.get("Authorization", "")
+            if auth.strip() != f"Bearer {TELEMETRY_TOKEN}":
+                self._json(401, {"error": "unauthorized"})
+                return
+        elif not CONTROL_TOKEN:
+            # If neither token is set, reject telemetry (safer default)
+            self._json(401, {"error": "telemetry token not configured"})
+            return
+
+        # Import telemetry validation and ticket creation
+        try:
+            from codebot.telemetry import (
+                _validate_signal,
+                _create_ticket_from_signal,
+                detect_anomalies,
+            )
+            from codebot.event_log import append_event
+        except ImportError as e:
+            logger.error("Failed to import telemetry modules: %s", e)
+            self._json(500, {"error": "telemetry subsystem unavailable"})
+            return
+
+        # Validate input at trust boundary
+        is_valid, error_msg = _validate_signal(body)
+        if not is_valid:
+            self._json(400, {"error": error_msg})
+            return
+
+        # Store telemetry event for trend analysis
+        try:
+            append_event(STATE_DIR, "telemetry", body)
+        except Exception as e:
+            logger.warning("Failed to append telemetry event: %s", e)
+
+        # Create ticket candidate
+        result = _create_ticket_from_signal(body, STATE_DIR)
+
+        if result.get("success"):
+            response = {
+                "ok": True,
+                "ticket_id": result.get("ticket_id"),
+                "message": "signal accepted, ticket candidate created (requires human triage)",
+            }
+            if result.get("duplicate"):
+                response["message"] = "signal already tracked (duplicate)"
+
+            # Anomaly detection: read recent telemetry events and check for spikes
+            try:
+                from codebot.event_log import read_events
+                recent_events = read_events(STATE_DIR, limit=50)
+                telemetry_signals = [
+                    e.get("data", {}) for e in recent_events
+                    if e.get("type") == "telemetry"
+                ]
+                # Baseline: assume 2 errors per window is normal
+                baseline_rate = 2.0
+                anomalies = detect_anomalies(telemetry_signals, baseline_rate)
+                if anomalies:
+                    for anomaly in anomalies:
+                        append_event(STATE_DIR, "discovery-trigger", anomaly)
+                    response["anomalies_detected"] = len(anomalies)
+                    logger.info(
+                        "Telemetry anomaly detected: %d anomalies, discovery triggered",
+                        len(anomalies),
+                    )
+            except Exception as e:
+                logger.warning("Anomaly detection failed: %s", e)
+
+            self._json(201, response)
+        else:
+            self._json(500, {"error": result.get("error", "internal error")})
 
     def log_message(self, format, *args):  # noqa: A002
         # quiet except errors; fly logs capture stdout

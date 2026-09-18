@@ -1,7 +1,23 @@
 """Per-model success/cost statistics collection.
 
-Provides persistent tracking of API call outcomes per model and task type.
-Data persists across restarts via atomic JSON file writes.
+Purpose
+-------
+Tracks success rates, costs, and token usage per model provider to inform
+adaptive model routing decisions. Records outcomes of every LLM API call
+so the scheduler can learn which models perform best for which task classes.
+
+Why
+---
+Spec section 29 requires the scheduler to route based on historical results.
+Without per-model statistics, model selection is blind. This module provides
+the telemetry foundation for cost-aware scheduling.
+
+Invariants
+----------
+- stdlib-only (json, time, pathlib)
+- Append-only records; never mutates historical data
+- Missing fields degrade gracefully to zero counts
+- Data persists across restarts via atomic JSON file writes
 """
 import json
 import os

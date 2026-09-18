@@ -110,7 +110,24 @@ class CodeBotAdapter(ProjectAdapter):
 
     def bot_registry(self) -> list[dict[str, Any]]:
         from codebot.role_registry import ALL_ROLES
-        from codebot.orchestrator import WORKER_MODEL_CYCLE, _MODEL_FALLBACKS
+        try:
+            from codebot.orchestrator import _MODEL_FALLBACKS
+        except ImportError:
+            _MODEL_FALLBACKS = {
+                "xiaomi-mimo-2.5": "qwen-3.5-plus",
+                "qwen-3.5-plus": "xiaomi-mimo-2.5",
+                "qwen-3.6-plus": "xiaomi-mimo-2.5",
+                "qwen-3.7-plus": "qwen-3.6-plus",
+                "qwen-3.7-max": "qwen-3.8-max",
+                "qwen-3.8-max": "qwen-3.7-plus",
+                "meta-muse-spark-1.2": "qwen-3.5-plus",
+                "meta-muse-spark-1.3": "qwen-3.6-plus",
+                "qwen-3.5-plus-thinking": "qwen-3.7-max-thinking",
+                "qwen-3.6-plus-thinking": "qwen-3.7-max-thinking",
+                "qwen-3.7-max-thinking": "qwen-3.8-max-thinking",
+                "qwen-3.8-max-thinking": "qwen-3.7-max-thinking",
+                "qwen-3.5-omni-plus": "xiaomi-mimo-2.5",
+            }
         registry = []
         interval_map = {
             "discovery": 1800,

@@ -12,11 +12,10 @@ tool output, or unbounded logs through the control plane.
 Invariants
 ----------
 - Every event has a version, type, and structured data payload.
-- One advisory lock serializes concurrent appends.
+- Appends are atomic O_APPEND writes, safe for concurrent writers.
 - Readers return at most the requested bounded tail.
 """
 
-import fcntl
 import json
 import time
 from pathlib import Path
@@ -40,6 +39,8 @@ ALLOWED_EVENT_TYPES = frozenset(
         "dead-letter-retry",
         "state-corruption",
         "rollback",
+        "telemetry",
+        "discovery-trigger",
     }
 )
 
@@ -111,8 +112,8 @@ def sanitize_data(data: dict) -> dict:
 
 
 def append_event(state_dir: Path, event_type: str, data: dict) -> None:
+    import os
     state_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = state_dir / "events.lock"
     event_path = state_dir / "events.jsonl"
     safe_data = sanitize_data(data if isinstance(data, dict) else {})
     record = {
@@ -121,11 +122,12 @@ def append_event(state_dir: Path, event_type: str, data: dict) -> None:
         "ts": time.time(),
         "data": safe_data,
     }
-    with lock_path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        with event_path.open("a", encoding="utf-8") as events:
-            events.write(json.dumps(record, sort_keys=True) + "\n")
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    line = json.dumps(record, sort_keys=True) + "\n"
+    fd = os.open(str(event_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
 
 
 def read_events(state_dir: Path, *, limit: int = MAX_EVENTS) -> list[dict]:

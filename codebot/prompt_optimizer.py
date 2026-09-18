@@ -36,6 +36,7 @@ from typing import Any
 logger = logging.getLogger("prompt_optimizer")
 
 MAX_EVOLUTIONS_PER_PROMPT = 5
+MAX_PROMPT_CHARS = 15000
 EVOLUTION_HEADER = "<!-- CODEBOT EVOLUTION -->"
 
 PATTERN_HINTS: dict[str, str] = {
@@ -121,11 +122,15 @@ def consume_triggers(
         q_values = data.get("rl", {}).get("q_values", {})
         if not q_values:
             q_values = data.get("q_values", {})
+        reviewer_feedback = data.get("reviewer_feedback", [])
         best_pattern = _select_best_pattern(q_values, prompt_path)
-        if not best_pattern:
+        if not best_pattern and not reviewer_feedback:
             trigger_file.unlink(missing_ok=True)
             continue
-        hint = PATTERN_HINTS.get(best_pattern, "")
+        if reviewer_feedback:
+            hint = _generate_feedback_hint(reviewer_feedback)
+        else:
+            hint = PATTERN_HINTS.get(best_pattern, "")
         if not hint:
             trigger_file.unlink(missing_ok=True)
             continue
@@ -133,12 +138,32 @@ def consume_triggers(
         reason = data.get("reason", "stagnation detected")
         score = data.get("score", 0)
         reward = data.get("reward", 0.0)
-        applied = _append_evolution(prompt_path, best_pattern, hint, verdict, reason, score, reward)
+        applied = _append_evolution(prompt_path, best_pattern or "reviewer_feedback", hint, verdict, reason, score, reward)
         if applied:
             consumed += 1
-            logger.info("evolved %s prompt: pattern=%s verdict=%s", bot_name, best_pattern, verdict)
+            logger.info("evolved %s prompt: pattern=%s verdict=%s feedback_items=%d", bot_name, best_pattern or "reviewer_feedback", verdict, len(reviewer_feedback))
         trigger_file.unlink(missing_ok=True)
     return consumed
+
+
+def _generate_feedback_hint(reviewer_feedback: list[dict]) -> str:
+    if not reviewer_feedback:
+        return ""
+    issues = []
+    for fb in reviewer_feedback[:5]:
+        desc = fb.get("description", "")
+        rec = fb.get("recommendation", "")
+        if desc:
+            issues.append(f"- {desc[:200]}")
+        if rec:
+            issues.append(f"  Fix: {rec[:200]}")
+    if not issues:
+        return ""
+    return (
+        "Address these specific reviewer findings from recent rework cycles:\n"
+        + "\n".join(issues)
+        + "\nVerify each issue is resolved before marking complete."
+    )
 
 
 def _select_best_pattern(q_values: dict[str, float], prompt_path: Path) -> str | None:
@@ -172,7 +197,7 @@ def _append_evolution(
     reward: float,
 ) -> bool:
     existing = prompt_path.read_text(encoding="utf-8")
-    if f"pattern: {pattern}" in existing:
+    if f"Pattern: {pattern}" in existing or f"pattern: {pattern}" in existing:
         return False
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     section = (
@@ -184,6 +209,9 @@ def _append_evolution(
         f"{hint}\n"
         f"<!-- END EVOLUTION -->\n"
     )
+    if len(existing) + len(section) > MAX_PROMPT_CHARS:
+        logger.warning("prompt for %s would exceed %d chars (%d), skipping evolution", prompt_path.stem, MAX_PROMPT_CHARS, len(existing) + len(section))
+        return False
     tmp = prompt_path.with_suffix(".md.tmp")
     tmp.write_text(existing + section, encoding="utf-8")
     tmp.replace(prompt_path)

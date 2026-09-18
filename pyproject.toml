@@ -24,4 +24,4 @@ markers = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["bots*"]
+include = ["codebot*"]

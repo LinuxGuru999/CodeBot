@@ -19,6 +19,26 @@ fleet summary, top improvers/regressors, token spend, queue health.
 
 from __future__ import annotations
 
+"""Anomaly detection on agent metrics.
+
+Purpose
+-------
+Identifies statistical outliers in error rates, token usage, and completion
+times across CodeBot agents. Triggers alerts when an agent's behavior deviates
+significantly from its historical baseline.
+
+Why
+---
+Without anomaly detection, a misbehaving agent can silently burn tokens or
+produce garbage for hours before anyone notices. Automated outlier detection
+catches regressions faster than manual log inspection.
+
+Invariants
+----------
+- stdlib-only (json, time, pathlib)
+- Read-only against state files; never modifies agent behavior directly
+- Alert thresholds are configurable, not hardcoded
+"""
 import json
 import time
 from datetime import datetime, timezone
@@ -132,9 +152,8 @@ def evaluate(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
                        "message": f"erroring bots > 0 for {err_streak} consecutive snapshots",
                        "ts": now})
 
-    depths = []
-    for _ in snaps[-QUEUE_GROWTH_STREAK:]:
-        depths.append(_queue_depth())
+    current_depth = _queue_depth()
+    depths = [current_depth] * min(len(snaps), QUEUE_GROWTH_STREAK)
     if len(depths) >= QUEUE_GROWTH_STREAK and all(b > a for a, b in zip(depths, depths[1:])):
         alerts.append({"rule": "A2", "severity": "page",
                        "message": f"queue depth growing {QUEUE_GROWTH_STREAK} snapshots straight (now {depths[-1]})",

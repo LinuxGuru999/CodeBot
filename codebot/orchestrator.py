@@ -1353,6 +1353,96 @@ def _gatekeeper_verify_tickets() -> int:
     return advanced
 
 
+_LAST_PUSH_TIME: float = 0.0
+_PUSH_COOLDOWN_SECONDS: int = 300
+
+
+def _auto_push_to_master() -> None:
+    """Commit and push local changes to master when tickets reach READY.
+
+    Runs at most once per PUSH_COOLDOWN_SECONDS to avoid flooding the remote.
+    Only pushes if there are actual uncommitted changes in the working tree.
+    """
+    global _LAST_PUSH_TIME
+    now = time.time()
+    if now - _LAST_PUSH_TIME < _PUSH_COOLDOWN_SECONDS:
+        return
+
+    project_root = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
+
+    try:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, cwd=str(project_root), timeout=10,
+        )
+        if status_result.returncode != 0:
+            return
+        dirty_lines = [l for l in status_result.stdout.strip().splitlines() if l.strip()]
+        if not dirty_lines:
+            return
+
+        changed_files = []
+        for line in dirty_lines[:20]:
+            path = line[3:].strip() if len(line) > 3 else ""
+            if path:
+                changed_files.append(path)
+
+        try:
+            from codebot.ticket_engine import TicketStore, TicketState
+            store_path = STATE_DIR / "tickets.json"
+            if not store_path.exists():
+                store_path = Path(".codebot/state/tickets.json")
+            ready_count = 0
+            if store_path.exists():
+                ts = TicketStore(store_path)
+                ready_count = len(ts.list_ready())
+        except Exception:
+            ready_count = 0
+
+        msg_parts = [f"auto-sync: {len(dirty_lines)} file(s) changed"]
+        if ready_count > 0:
+            msg_parts.append(f"{ready_count} tickets READY")
+        if changed_files:
+            top_files = changed_files[:5]
+            msg_parts.append(", ".join(top_files))
+            if len(changed_files) > 5:
+                msg_parts[-1] += f" +{len(changed_files)-5} more"
+        commit_msg = " | ".join(msg_parts)
+
+        add_result = subprocess.run(
+            ["git", "add", "-A"],
+            capture_output=True, text=True, cwd=str(project_root), timeout=15,
+        )
+        if add_result.returncode != 0:
+            logger.warning(f"Auto-push: git add failed: {add_result.stderr[:200]}")
+            return
+
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            capture_output=True, text=True, cwd=str(project_root), timeout=15,
+        )
+        if commit_result.returncode != 0:
+            if "nothing to commit" in commit_result.stdout.lower():
+                return
+            logger.warning(f"Auto-push: git commit failed: {commit_result.stderr[:200]}")
+            return
+
+        push_result = subprocess.run(
+            ["git", "push", "origin", "master"],
+            capture_output=True, text=True, cwd=str(project_root), timeout=30,
+        )
+        if push_result.returncode == 0:
+            _LAST_PUSH_TIME = now
+            logger.info(f"Auto-push: committed and pushed to master ({commit_msg})")
+        else:
+            logger.warning(f"Auto-push: git push failed: {push_result.stderr[:200]}")
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Auto-push: git operation timed out")
+    except Exception as e:
+        logger.warning(f"Auto-push failed: {e}")
+
+
 MIN_READY_BACKLOG = 5
 
 
@@ -1393,6 +1483,92 @@ def _auto_triage_backlog() -> int:
             except ValueError:
                 pass
     return advanced
+
+
+_AUTOPUSH_COOLDOWN_SECONDS = 300
+_last_autopush_time: float = 0.0
+
+
+def _autopush_to_master() -> bool:
+    """Commit and push local changes to master to keep remote in sync.
+
+    Runs after auto-triage advances tickets to READY. Only pushes if there
+    are actual uncommitted changes and enough time has passed since the
+    last push (cooldown prevents commit spam).
+
+    Returns True if a push was performed.
+    """
+    global _last_autopush_time
+    now = time.time()
+    if now - _last_autopush_time < _AUTOPUSH_COOLDOWN_SECONDS:
+        return False
+
+    project_root = Path(os.environ.get("CODEBOT_PROJECT_ROOT", BOTS_DIR))
+    try:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, cwd=str(project_root), timeout=10,
+        )
+        if status_result.returncode != 0 or not status_result.stdout.strip():
+            return False
+
+        changed_files = []
+        for line in status_result.stdout.strip().splitlines():
+            if len(line) > 3:
+                changed_files.append(line[3:].strip())
+
+        try:
+            from codebot.ticket_engine import TicketStore, TicketState
+            store_path = STATE_DIR / "tickets.json"
+            if not store_path.exists():
+                store_path = Path(".codebot/state/tickets.json")
+            ready_ids = []
+            if store_path.exists():
+                ts = TicketStore(store_path)
+                ready_ids = [t.id for t in ts.list_by_state(TicketState.READY)[:5]]
+        except Exception:
+            ready_ids = []
+
+        if ready_ids:
+            msg = f"auto: sync local changes ({len(changed_files)} files) — READY tickets: {', '.join(ready_ids)}"
+        else:
+            msg = f"auto: sync local changes ({len(changed_files)} files)"
+
+        add_result = subprocess.run(
+            ["git", "add", "-A"],
+            capture_output=True, text=True, cwd=str(project_root), timeout=15,
+        )
+        if add_result.returncode != 0:
+            logger.warning(f"Auto-push: git add failed: {add_result.stderr[:200]}")
+            return False
+
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", msg],
+            capture_output=True, text=True, cwd=str(project_root), timeout=15,
+        )
+        if commit_result.returncode != 0:
+            if "nothing to commit" in commit_result.stdout.lower():
+                return False
+            logger.warning(f"Auto-push: git commit failed: {commit_result.stderr[:200]}")
+            return False
+
+        push_result = subprocess.run(
+            ["git", "push", "origin", "master"],
+            capture_output=True, text=True, cwd=str(project_root), timeout=30,
+        )
+        if push_result.returncode != 0:
+            logger.warning(f"Auto-push: git push failed: {push_result.stderr[:200]}")
+            return False
+
+        _last_autopush_time = now
+        logger.info(f"Auto-pushed to master: {msg}")
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("Auto-push: git command timed out")
+        return False
+    except Exception as e:
+        logger.warning(f"Auto-push failed: {e}")
+        return False
 
 
 _METRICS_PATH = STATE_DIR / "bot_metrics.json"
@@ -3823,6 +3999,10 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         _auto_triage_backlog()
     except Exception as e:
         logger.warning(f"Auto-triage failed: {e}")
+    try:
+        _auto_push_to_master()
+    except Exception as e:
+        logger.warning(f"Auto-push failed: {e}")
     try:
         _adaptive_schedule_gate(bots)
     except Exception as e:

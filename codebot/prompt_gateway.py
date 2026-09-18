@@ -32,8 +32,8 @@ from pathlib import Path
 
 logger = logging.getLogger("prompt_gateway")
 
-MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "28")))
-MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", "20"))
+MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "22")))
+MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", os.getenv("CODEBOT_MIN_SPAWN_GAP", "8")))
 
 _last_spawn_ts = 0.0
 
@@ -54,10 +54,17 @@ _STRIP_PREFIXES = (
     "Safe-Update Protocol",
     "Heartbeat Protocol",
     "Checkpoint Store",
+    "Checkpoint Protocol",
+    "Claim Protocol",
+    "Auto-Commit Protocol",
     "Alignment Reward",
     "Self-Evolution",
     "Web Search",
     "Documentation Structure",
+    "Tool Usage Examples",
+    "Tool Constraints",
+    "Heartbeat Protocol",
+    "Evolution",
 )
 
 

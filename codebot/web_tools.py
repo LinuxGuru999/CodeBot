@@ -27,7 +27,10 @@ Invariants
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,6 +51,88 @@ _BLOCKED_PATTERNS = (
     "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
     "172.30.", "172.31.", "192.168.",
 )
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """Check if an IP address is private, loopback, link-local, or otherwise unsafe.
+
+    Uses ipaddress module for accurate RFC-compliant checks.
+    Blocks: loopback, private, link-local, multicast, unspecified, reserved.
+
+    Args:
+        ip_str: IP address string (IPv4 or IPv6).
+
+    Returns:
+        True if the IP should be blocked, False if safe for outbound connections.
+    """
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        # Invalid IP format - block it to be safe
+        return True
+
+    # Block all non-global (private/reserved) addresses
+    # is_global returns False for: loopback, private, link-local,
+    # multicast, unspecified, reserved, and other special-use ranges
+    if not addr.is_global:
+        return True
+
+    # Additionally block IPv6 unique local addresses (fc00::/7)
+    # which may not be caught by is_global in some Python versions
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.is_private:
+            return True
+
+    return False
+
+
+def _resolve_and_validate_host(host: str, port: int) -> tuple[str, int, int]:
+    """Resolve hostname to IP and validate against SSRF blocklist.
+
+    Prevents DNS rebinding attacks by resolving the hostname and checking
+    the actual IP address before any connection is made.
+
+    Args:
+        host: Hostname or IP address string.
+        port: Target port number.
+
+    Returns:
+        Tuple of (resolved_ip, port, address_family).
+
+    Raises:
+        ValueError: If DNS resolution fails or resolved IP is blocked.
+    """
+    # Check if host is already an IP address
+    try:
+        addr = ipaddress.ip_address(host)
+        if _is_blocked_ip(str(addr)):
+            raise ValueError(f"resolves to blocked IP: {host}")
+        family = socket.AF_INET6 if isinstance(addr, ipaddress.IPv6Address) else socket.AF_INET
+        return (str(addr), port, family)
+    except ValueError as e:
+        if "blocked IP" in str(e):
+            raise
+        # Not an IP address, proceed with DNS resolution
+
+    # Resolve hostname via DNS
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"DNS resolution failed for {host}: {e}") from e
+
+    if not infos:
+        raise ValueError(f"DNS resolution returned no results for {host}")
+
+    # Validate ALL resolved IPs - block if any resolve to private/range
+    for info in infos:
+        family, socktype, proto, canonname, sockaddr = info
+        resolved_ip = sockaddr[0]
+        if _is_blocked_ip(resolved_ip):
+            raise ValueError(f"{host} resolves to blocked IP: {resolved_ip}")
+
+    # Return first valid resolution
+    family, socktype, proto, canonname, sockaddr = infos[0]
+    return (sockaddr[0], port, family)
 
 
 def _is_blocked_url(url: str) -> bool:

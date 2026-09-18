@@ -30,54 +30,14 @@ def forward(store):
 
 
 def rollback(store):
-    """Remove email_notifications column from agents table."""
-    # SQLite doesn't support DROP COLUMN directly in older versions
-    # We need to recreate the table without the column
-    
-    # Create backup of current data (excluding email_notifications)
-    store.execute_sql("""
-        CREATE TABLE agents_backup AS 
-        SELECT id, name, status, created_at, company_id FROM agents
-    """)
-    
-    # Drop the original table
+    columns = store.get_table_columns('agents')
+    keep_cols = [c for c in columns if c != 'email_notifications']
+    cols_csv = ', '.join(keep_cols)
+    store.execute_sql(f"CREATE TABLE agents_backup AS SELECT {cols_csv} FROM agents")
     store.execute_sql("DROP TABLE agents")
-    
-    # Recreate the table without email_notifications
-    # Check if company_id exists to determine schema
-    backup_columns = store.get_table_columns('agents_backup')
-    
-    if 'company_id' in backup_columns:
-        store.execute_sql("""
-            CREATE TABLE agents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                status TEXT DEFAULT 'active',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                company_id TEXT DEFAULT 'default'
-            )
-        """)
-    else:
-        store.execute_sql("""
-            CREATE TABLE agents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                status TEXT DEFAULT 'active',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-    
-    # Restore data from backup
-    if 'company_id' in backup_columns:
-        store.execute_sql("""
-            INSERT INTO agents (id, name, status, created_at, company_id)
-            SELECT id, name, status, created_at, company_id FROM agents_backup
-        """)
-    else:
-        store.execute_sql("""
-            INSERT INTO agents (id, name, status, created_at)
-            SELECT id, name, status, created_at FROM agents_backup
-        """)
-    
-    # Drop the backup table
+    col_defs = ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'name TEXT NOT NULL', "status TEXT DEFAULT 'active'", 'created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP']
+    if 'company_id' in keep_cols:
+        col_defs.append("company_id TEXT DEFAULT 'default'")
+    store.execute_sql(f"CREATE TABLE agents ({', '.join(col_defs)})")
+    store.execute_sql(f"INSERT INTO agents ({cols_csv}) SELECT {cols_csv} FROM agents_backup")
     store.execute_sql("DROP TABLE agents_backup")

@@ -87,6 +87,10 @@ def _new_ledger(day_utc: str) -> dict[str, Any]:
     return {"day_utc": day_utc, "by_model": {}, "total_actual": 0}
 
 
+_FLUSH_AFTER_WRITES = max(1, int(os.getenv("CODEBOT_LEDGER_FLUSH_EVERY", "1")))
+_pending_writes = 0
+
+
 def record_usage(
     day_utc: str,
     model: str,
@@ -98,6 +102,42 @@ def record_usage(
     completion_estimated: int = 0,
 ) -> dict[str, Any]:
     """Add provider-reported actual usage for one model and UTC day."""
+    if prompt_tokens < 0 or completion_tokens < 0:
+        raise ValueError("actual token counts must be non-negative")
+    ledger_path = _ledger_path(path)
+    global _pending_writes
+    _pending_writes += 1
+    if _pending_writes < _FLUSH_AFTER_WRITES:
+        ledger: dict[str, Any] = _new_ledger(day_utc)
+        try:
+            ledger = _read(ledger_path) if ledger_path.exists() else _new_ledger(day_utc)
+            if ledger.get("day_utc") != day_utc:
+                ledger = _new_ledger(day_utc)
+            row = ledger["by_model"].setdefault(model, {})
+            row["prompt_actual"] = int(row.get("prompt_actual", 0)) + prompt_tokens
+            row["completion_actual"] = int(row.get("completion_actual", 0)) + completion_tokens
+            row["prompt_estimated"] = int(row.get("prompt_estimated", 0)) + max(0, int(prompt_estimated))
+            row["completion_estimated"] = int(row.get("completion_estimated", 0)) + max(0, int(completion_estimated))
+            ledger["total_actual"] = int(ledger.get("total_actual", 0)) + prompt_tokens + completion_tokens
+            _write(ledger_path, ledger)
+        except Exception:
+            pass
+        return ledger
+    _pending_writes = 0
+    return record_usage_locked(day_utc, model, prompt_tokens, completion_tokens, path=path, prompt_estimated=prompt_estimated, completion_estimated=completion_estimated)
+
+
+def record_usage_locked(
+    day_utc: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    path: str | os.PathLike[str] | None = None,
+    prompt_estimated: int = 0,
+    completion_estimated: int = 0,
+) -> dict[str, Any]:
+    """Locked ledger write; merges the accumulated pending in-memory delta."""
     if prompt_tokens < 0 or completion_tokens < 0:
         raise ValueError("actual token counts must be non-negative")
     ledger_path = _ledger_path(path)
