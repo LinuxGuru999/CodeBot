@@ -2730,7 +2730,7 @@ def _preview_manifest_batches() -> dict:
     manifests = _load_manifests_safe()
     # Surface load error without crash
     if not manifests:
-        print("manifest scheduler preview: no manifests loaded (check bots/manifests/*.json)")
+        print("manifest scheduler preview: no manifests loaded (check .codebot/manifests/*.json)")
         print("batches: 0")
         print(f"considered: 0 ready: 0 batched: 0 skipped: []")
         return {"batches": [], "dropped": [], "considered": 0, "ready": [], "skipped": []}
@@ -3100,7 +3100,7 @@ def main() -> None:
     parser.add_argument("--drain", action="store_true", help="Alias for --safe-stop")
     parser.add_argument("--clear-drain", action="store_true", help="Clear drain flag so bots may respawn")
     parser.add_argument("--drain-status", action="store_true", help="Show drain/update-lock status")
-    parser.add_argument("--update", nargs="*", metavar="PATH", help="Safe update: drain, apply file(s)/dir to ~/Work/bots/, verify, restart (or rollback)")
+    parser.add_argument("--update", nargs="*", metavar="PATH", help="Safe update: drain, apply file(s)/dir to project root, verify, restart (or rollback)")
     parser.add_argument("--rollback", type=str, default=None, metavar="BACKUP_DIR", help="Rollback botnet from a backup dir under state/backup/")
     parser.add_argument("--start", nargs="*", help="Start specific bots (or all if none specified)")
     parser.add_argument("--preview-batch", action="store_true", help="Dry-run: print batch plan (manifest, tier, reason) without spawning")
