@@ -55,7 +55,6 @@ class TicketState(str, Enum):
     REJECTED = "REJECTED"
     DUPLICATE = "DUPLICATE"
     DEFERRED = "DEFERRED"
-    HUMAN_REQUIRED = "HUMAN_REQUIRED"
 
 
 class TicketClass(str, Enum):
@@ -101,7 +100,6 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.READY,
         TicketState.DEFERRED,
         TicketState.REJECTED,
-        TicketState.HUMAN_REQUIRED,
     }),
     TicketState.READY: frozenset({
         TicketState.PLANNING,
@@ -117,12 +115,10 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.REVIEWING,
         TicketState.REWORK,
         TicketState.BLOCKED,
-        TicketState.HUMAN_REQUIRED,
     }),
     TicketState.REVIEWING: frozenset({
         TicketState.VERIFYING,
         TicketState.REWORK,
-        TicketState.HUMAN_REQUIRED,
     }),
     TicketState.VERIFYING: frozenset({
         TicketState.COMPLETE,
@@ -142,11 +138,6 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     TicketState.DEFERRED: frozenset({
         TicketState.READY,
         TicketState.TRIAGED,
-    }),
-    TicketState.HUMAN_REQUIRED: frozenset({
-        TicketState.READY,
-        TicketState.IMPLEMENTING,
-        TicketState.REJECTED,
     }),
     # Terminal states
     TicketState.COMPLETE: frozenset(),

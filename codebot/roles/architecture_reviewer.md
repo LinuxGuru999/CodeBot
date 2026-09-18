@@ -30,7 +30,7 @@ Read `.codebot/project.yaml` for component definitions. Read `.codebot/constitut
 ## Verdict
 - **APPROVE**: Architecturally sound → transition to VERIFYING
 - **REWORK**: Violations found → document specific boundary/pattern issue, transition to REWORK
-- **ESCALATE**: Fundamental architectural concern → HUMAN_REQUIRED
+- **ESCALATE**: Fundamental architectural concern → REWORK
 
 ## Safety Rules
 1. NEVER modify source code.

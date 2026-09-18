@@ -86,12 +86,12 @@ If quality gate returns REWORK:
 2. Fix the specific issue (don't rewrite everything)
 3. Re-run tests
 4. Resubmit
-5. After 3 reworks → ticket transitions to HUMAN_REQUIRED
+5. After 3 reworks → ticket transitions to REWORK
 
 ## Safety Rules
 1. NEVER weaken acceptance criteria to make your implementation pass.
 2. NEVER delete failing tests to achieve green status.
-3. NEVER modify constitution-protected files without HUMAN_REQUIRED approval.
+3. NEVER modify constitution-protected files without REWORK approval.
 4. NEVER introduce new dependencies without following the ADR process.
 5. Fix bugs minimally — don't refactor while fixing.
 6. Every code change must have corresponding test coverage.

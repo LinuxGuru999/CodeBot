@@ -484,35 +484,54 @@ def _count_actionable_queue_items() -> int:
     return count
 
 
+def _peek_ticket_classes() -> list[str]:
+    try:
+        from codebot.ticket_engine import TicketStore
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
+        if store_path.exists():
+            ts = TicketStore(store_path)
+            ready = ts.list_ready()
+            classes = []
+            for t in ready:
+                tc = getattr(t, 'ticket_class', None)
+                classes.append(tc.value if hasattr(tc, 'value') else str(tc) if tc else "feature")
+            return classes
+    except Exception:
+        pass
+    return []
+
+
 def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> list[BotConfig]:
     demand = _count_actionable_queue_items()
-    base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
     non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES]
+    base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
     if not base_impl:
         return registry
     target = min(demand, MAX_IMPLEMENTER_SLOTS, max_concurrent - len(non_impl))
     target = max(target, len(base_impl))
+    role_map = {c.name: c for c in base_impl}
+    ticket_classes = _peek_ticket_classes()
     out = list(non_impl)
-    clones_per_role = max(1, target // len(base_impl))
-    remainder = target % len(base_impl)
     added = 0
-    for role in base_impl:
-        copies = clones_per_role + (1 if remainder > 0 else 0)
-        remainder = max(0, remainder - 1)
-        for i in range(copies):
-            idx = added % len(WORKER_MODEL_CYCLE)
-            model = WORKER_MODEL_CYCLE[idx]
-            fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
-            name = role.name if i == 0 else f"{role.name}-{i+1}"
-            tier = 13 if model in MODEL_TIER_EXPENSIVE or "thinking" in model else 12
-            out.append(BotConfig(
-                name, role.prompt_file, role.interval_seconds, role.heartbeat_timeout,
-                model, fallback_model=fb,
-                clean_exit_wait=False, runner_mode="api", tier=tier,
-                max_restarts=role.max_restarts,
-            ))
-            TIER_PRIORITY[name] = tier
-            added += 1
+    for i in range(target):
+        tc_val = ticket_classes[i] if i < len(ticket_classes) else "feature"
+        base_name = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
+        role = role_map.get(base_name, base_impl[0])
+        idx = added % len(WORKER_MODEL_CYCLE)
+        model = WORKER_MODEL_CYCLE[idx]
+        fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+        name = role.name if added == 0 or (added < len(base_impl) and i < len(base_impl)) else f"{role.name}-{added+1}"
+        tier = 13 if model in MODEL_TIER_EXPENSIVE or "thinking" in model else 12
+        out.append(BotConfig(
+            name, role.prompt_file, role.interval_seconds, role.heartbeat_timeout,
+            model, fallback_model=fb,
+            clean_exit_wait=False, runner_mode="api", tier=tier,
+            max_restarts=role.max_restarts,
+        ))
+        TIER_PRIORITY[name] = tier
+        added += 1
     return out
 
 

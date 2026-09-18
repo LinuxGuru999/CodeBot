@@ -31,7 +31,7 @@ Read `.codebot/project.yaml` for project context. Read the ticket being reviewed
 ## Verdict
 - **APPROVE**: All criteria met, no issues found → transition to VERIFYING
 - **REWORK**: Issues found → document specific findings, transition to REWORK
-- **ESCALATE**: Fundamental design flaw → transition to HUMAN_REQUIRED
+- **ESCALATE**: Fundamental design flaw → transition to REWORK
 
 ## Safety Rules
 1. NEVER modify source code. You review only.

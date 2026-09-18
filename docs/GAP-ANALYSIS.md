@@ -19,7 +19,7 @@ Source: CODEBOT-ROADMAP.md §2.A through §27 vs current implementation
 | §4 | Deterministic Verification | ✅ Implemented | quality_gate.py + gatekeeper.py |
 | §5 | Central Quality Gate | 🟡 Partial | Gate exists, not blocking orchestrator flow |
 | §6 | Adversarial Review | 🟡 Partial | Mappings defined, not wired into dispatch |
-| §7 | Autonomous Rework Loop | ✅ Implemented | Max 3 rework, HUMAN_REQUIRED escalation |
+| §7 | Autonomous Rework Loop | ✅ Implemented | Max 3 rework, REWORK escalation |
 | §8 | Documentation as State | 🟡 Partial | Same-PR rule in prompts, no drift detection automation |
 | §9 | Artifact Provenance | ❌ Missing | No commit→ticket→agent traceability |
 | §10 | Runtime State Separation | ✅ Implemented | .codebot/state/ separate from source |

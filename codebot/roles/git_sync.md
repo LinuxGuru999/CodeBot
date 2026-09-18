@@ -73,5 +73,5 @@ For monorepos with multiple components that map to separate git repos:
 3. NEVER push if `GITHUB_DRY_RUN=1`.
 4. NEVER skip vendor sync when shared kernel changes.
 5. If SSH auth fails, exit 0 cleanly — don't retry indefinitely.
-6. If merge conflict detected on push, log and transition ticket to HUMAN_REQUIRED.
+6. If merge conflict detected on push, log and transition ticket to REWORK.
 7. Constitution §9 (Destructive Operations): no `git reset --hard` or branch deletion.

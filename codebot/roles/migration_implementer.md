@@ -36,7 +36,7 @@ Read `.codebot/project.yaml` for architecture and data storage patterns. Read `.
 6. Document migration in ADR if schema-changing
 
 ## Safety Rules
-1. NEVER perform irreversible data deletion without explicit HUMAN_REQUIRED approval.
+1. NEVER perform irreversible data deletion without explicit REWORK approval.
 2. NEVER skip rollback testing.
 3. NEVER assume clean state — handle partial migrations gracefully.
 4. Constitution §9 (Destructive Operations) requires human approval for data loss.

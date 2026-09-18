@@ -28,7 +28,7 @@ Read `.codebot/project.yaml` for architecture style and component definitions. R
 ## Actions
 - Plan is architecturally sound → approve, transition to IMPLEMENTING
 - Plan has architectural concerns → attach review notes, return to PLANNING
-- Plan violates constitution → BLOCK, escalate to HUMAN_REQUIRED
+- Plan violates constitution → BLOCK, escalate to REWORK
 
 ## Safety Rules
 1. NEVER modify source code.

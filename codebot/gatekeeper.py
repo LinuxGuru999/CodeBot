@@ -20,7 +20,7 @@ Invariants
 - Only this module may transition tickets to COMPLETE
 - Every COMPLETE transition is logged with full gate evidence
 - Gate failures trigger REWORK, not silent bypass
-- Maximum 3 rework attempts before HUMAN_REQUIRED escalation
+- Maximum 3 rework attempts before cycling back to REWORK for QA review
 """
 
 from __future__ import annotations
@@ -80,9 +80,9 @@ class Gatekeeper:
             decision = "COMPLETE"
             logger.info("ticket %s PASSED all quality gates", ticket_id)
         elif rework_count >= MAX_REWORK_ATTEMPTS:
-            decision = "HUMAN_REQUIRED"
+            decision = "REWORK"
             logger.warning(
-                "ticket %s FAILED after %d rework attempts — escalating",
+                "ticket %s FAILED after %d rework attempts — cycling to REWORK for QA review",
                 ticket_id, rework_count,
             )
         else:

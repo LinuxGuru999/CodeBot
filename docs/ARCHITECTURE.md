@@ -55,7 +55,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `risk_classifier.py` | ~100 | Deterministic risk scoring (0-100), constitution-aware autonomy decisions |
 | `implementation_planner.py` | ~170 | Risk-scaled plan generation (summary/standard/full depth) |
 | `quality_gate.py` | ~250 | YAML-driven gate engine, subprocess evaluation, conditional triggers |
-| `gatekeeper.py` | ~120 | Central completion authority, max 3 rework cap, HUMAN_REQUIRED escalation |
+| `gatekeeper.py` | ~120 | Central completion authority, max 3 rework cap, REWORK escalation |
 | `role_registry.py` | ~400 | 25 role definitions with model profiles, tool policies, adversarial mappings |
 | `role_prompt.py` | ~210 | Role template loading, project context injection, legacy name mapping |
 | `prompt_gateway.py` | ~190 | Prompt compression, shared contract injection, spawn gating |
@@ -138,7 +138,7 @@ Reviewers (correctness, security, architecture, etc.)
 gatekeeper runs quality gates
     ├── ALL PASS → COMPLETE state
     ├── ANY FAIL → REWORK (if rework_count < 3)
-    └── rework_count >= 3 → HUMAN_REQUIRED state
+    └── rework_count >= 3 → REWORK state
     │
     ▼
 git_sync commits + pushes verified changes

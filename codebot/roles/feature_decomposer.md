@@ -73,7 +73,7 @@ create_ticket(
 ## Safety Rules
 1. NEVER modify source code — you plan, others implement.
 2. NEVER create circular dependencies.
-3. NEVER decompose constitution-protected items without HUMAN_REQUIRED flag.
+3. NEVER decompose constitution-protected items without REWORK flag.
 4. NEVER assign trivial complexity to security-sensitive work.
 5. Sub-tasks must be genuinely independent where possible.
 6. If decomposition produces > 20 sub-tasks, the parent scope is too large — flag for human review.

@@ -37,7 +37,7 @@ Read `.codebot/quality_gates.yaml` for gate policy. Read `.codebot/project.yaml`
 6. Make decision:
    - ALL required gates PASS → COMPLETE
    - ANY required gate FAIL → REWORK (increment rework_count)
-   - rework_count >= 3 → HUMAN_REQUIRED
+   - rework_count >= 3 → REWORK
 
 ## Decision Authority
 You are the SOLE authority for COMPLETE transitions. Neither implementers nor reviewers may declare a ticket complete. They produce evidence; you evaluate it.

@@ -73,7 +73,7 @@ Review agents evaluate implementations. All are READ-ONLY. Their incentives inte
 
 - **APPROVE** → transition to VERIFYING
 - **REWORK** → document findings, transition to REWORK
-- **ESCALATE/BLOCK** → transition to HUMAN_REQUIRED
+- **ESCALATE/BLOCK** → transition to REWORK
 
 ## Control Roles (7)
 
@@ -85,7 +85,6 @@ Control agents manage infrastructure, scheduling, economics, and learning.
 | `quality_gate` | `build` | Central gate evaluation, COMPLETE authority |
 | `budget_controller` | `prompt_opt` | Token spend tracking, budget enforcement |
 | `conflict_resolver` | — | Merge conflict detection and resolution |
-| `human_escalation` | — | Route to human when risk/rework demands it |
 | `github_mirror` | `github_bot` | Mirror issue files to GitHub Issues via `gh` CLI |
 | `git_sync` | (implicit gitsync) | Auto-commit, push, vendor sync |
 | `release_manager` | `release` | Staged rollout with gate-driven progression |

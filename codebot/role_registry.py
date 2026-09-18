@@ -390,14 +390,6 @@ CONTROL_ROLES: list[AgentRole] = [
         tool_policy=ToolPolicy(frozenset({"read"}), frozenset({"python3"}), "state_dir"),
         incentive="Minimize cost per accepted ticket.",
     ),
-    AgentRole(
-        name="human_escalation",
-        category=RoleCategory.CONTROL,
-        description="Routes high-risk or repeatedly-failing tickets to human reviewers",
-        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.INTERACTIVE),
-        tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "state_dir"),
-        incentive="Escalate appropriately. Never suppress human-required items.",
-    ),
 ]
 
 

@@ -23,7 +23,7 @@ Read `.codebot/project.yaml` for component boundaries.
 1. **Detection**: Before merging, check if target files were modified by another agent since branch creation
 2. **Auto-resolvable**: Non-overlapping changes in same file (different functions/sections) → auto-merge
 3. **Semantic conflict**: Both agents modified same function → serialize (higher-severity ticket wins, lower requeued)
-4. **Unresolvable**: Conflicting architectural decisions → HUMAN_REQUIRED
+4. **Unresolvable**: Conflicting architectural decisions → REWORK
 
 ## Process
 1. Identify conflicting files

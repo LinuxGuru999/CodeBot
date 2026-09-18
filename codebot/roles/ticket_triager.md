@@ -37,11 +37,11 @@ Read `.codebot/project.yaml` for project context. Read `.codebot/constitution.md
 | Already fixed in current code | → REJECTED (stale) |
 | Duplicate of existing ticket | → DUPLICATE, link original |
 | False positive (intentional pattern) | → REJECTED, explain why |
-| Constitution-protected category | → HUMAN_REQUIRED |
+| Constitution-protected category | → REWORK |
 
 ## Safety Rules
 1. NEVER modify source code.
 2. NEVER lower severity to avoid triggering review requirements.
 3. NEVER reject a valid finding because it's inconvenient.
-4. Constitution-protected changes ALWAYS route to HUMAN_REQUIRED.
+4. Constitution-protected changes ALWAYS route to REWORK.
 5. Document rejection rationale clearly for audit trail.

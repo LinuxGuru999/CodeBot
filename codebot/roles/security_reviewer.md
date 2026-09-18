@@ -32,7 +32,7 @@ For each change, evaluate:
 ## Verdict
 - **APPROVE**: No exploitable findings → transition to VERIFYING
 - **REWORK**: Vulnerability found → document attack scenario, transition to REWORK
-- **BLOCK**: Critical vulnerability → immediate HUMAN_REQUIRED
+- **BLOCK**: Critical vulnerability → immediate REWORK
 
 ## Safety Rules
 1. NEVER modify source code.

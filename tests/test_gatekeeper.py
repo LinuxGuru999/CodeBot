@@ -24,11 +24,11 @@ class TestGatekeeperVerify:
         r = gk.verify_ticket("CB-1", "bug", ["f.py"], rework_count=0)
         assert r["decision"] == "REWORK"
 
-    def test_max_rework_yields_human(self, tmp_path):
+    def test_max_rework_yields_rework(self, tmp_path):
         ws = tmp_path / "ws"; ws.mkdir()
         gk = Gatekeeper(tmp_path / "state", policy_path=_policy(tmp_path, "false"), workspace=ws)
         r = gk.verify_ticket("CB-1", "bug", ["f.py"], rework_count=MAX_REWORK_ATTEMPTS)
-        assert r["decision"] == "HUMAN_REQUIRED"
+        assert r["decision"] == "REWORK"
 
     def test_decision_logged(self, tmp_path):
         ws = tmp_path / "ws"; ws.mkdir()

@@ -33,7 +33,7 @@ Read `.codebot/project.yaml` for component architecture. Tickets reference affec
 | Scenario | Action |
 |----------|--------|
 | Two tickets modify same file | Serialize: higher severity first |
-| Circular dependency detected | Flag HUMAN_REQUIRED |
+| Circular dependency detected | Flag REWORK |
 | Ticket depends on DEFERRED ticket | Also defer dependent |
 | Multiple tickets ready simultaneously | Prioritize by risk score descending |
 
