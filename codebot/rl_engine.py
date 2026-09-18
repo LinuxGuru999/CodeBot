@@ -710,17 +710,19 @@ def decay_epsilon(
     observed_reward: float,
     prev_reward: float | None,
 ) -> float:
-    """Decay or boost epsilon based on delta; returns new epsilon."""
-    if prev_reward is None:
-        return float(bot_state.get("epsilon", DEFAULT_EPSILON))
-    delta = float(observed_reward) - float(prev_reward)
     eps = float(bot_state.get("epsilon", DEFAULT_EPSILON))
     eps_min = float(bot_state.get("epsilon_min", DEFAULT_EPSILON_MIN))
     decay = float(bot_state.get("epsilon_decay", DEFAULT_EPSILON_DECAY))
+    if prev_reward is None:
+        bot_state["epsilon"] = round(eps, 4)
+        return eps
+    delta = float(observed_reward) - float(prev_reward)
     if delta > 0.05:
         eps = max(eps_min, eps * decay)
     elif delta < -0.1:
         eps = min(0.5, eps * 1.05)
+    else:
+        eps = max(eps_min, eps * (1 - (1 - decay) * 0.1))
     bot_state["epsilon"] = round(eps, 4)
     return eps
 

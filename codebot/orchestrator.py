@@ -1772,6 +1772,29 @@ def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
             )
             return True
 
+        total_runs = int(bot_state.get("total_runs", 0))
+        last_improvement = float(bot_state.get("last_improvement", 0))
+        stagnation_threshold = 5
+        if total_runs >= stagnation_threshold and last_improvement > 0:
+            runs_since_improve = total_runs - int(bot_state.get("_runs_at_last_improvement", 0))
+            if runs_since_improve >= stagnation_threshold or (total_runs >= stagnation_threshold and not bot_state.get("_stagnation_triggered")):
+                write_trigger(
+                    bot_name, score_result["score"], reward,
+                    "stagnation_evolve",
+                    f"{total_runs} runs without meaningful improvement, evolving prompt",
+                    score_result.get("breakdown", {}),
+                    event, bot_state,
+                )
+                bot_state["_stagnation_triggered"] = True
+                logger.info(f"Alignment pipeline: {bot_name} stagnation after {total_runs} runs, prompt evolution triggered")
+                mark_event_processed(
+                    event_file, event,
+                    score_result["score"], reward,
+                    "stagnation_evolve",
+                )
+                save_rl_state(rl)
+                return True
+
         mark_event_processed(
             event_file, event,
             score_result["score"], reward,
