@@ -340,8 +340,9 @@ class TicketStore:
                 raise ValueError(
                     f"duplicate ticket: evidence matches {existing_id}"
                 )
-        self._tickets[ticket.id] = ticket
-        self._evidence_index[eh] = ticket.id
+        with self._lock:
+            self._tickets[ticket.id] = ticket
+            self._evidence_index[eh] = ticket.id
         self._save()
         return ticket
 

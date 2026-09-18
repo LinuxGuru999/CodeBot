@@ -164,9 +164,10 @@ def evaluate_gate(
     command = command_template.replace("{file}", file_context).replace("{test_dirs}", test_dirs)
     start = time.monotonic()
     try:
+        argv = command.split() if isinstance(command, str) else command
         proc = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=False,
             cwd=str(workspace),
             capture_output=True,
             text=True,
