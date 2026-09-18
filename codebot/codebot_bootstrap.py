@@ -55,10 +55,11 @@ def discover_adapter_class(project_root: Path) -> Any | None:
         f"codebot.{project_name}_adapter",
         f"{project_name}_adapter",
     ]
+    # Always try codebot_adapter first when running from within the CodeBot repo
+    if "codebot.codebot_adapter" not in adapter_candidates:
+        adapter_candidates.insert(0, "codebot.codebot_adapter")
     if project_name == "monitor":
         adapter_candidates.append("codebot.monitor_adapter")
-    if project_name == "codebot":
-        adapter_candidates.insert(0, "codebot.codebot_adapter")
     for adapter_module in adapter_candidates:
         try:
             mod = importlib.import_module(adapter_module)
