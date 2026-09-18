@@ -31,7 +31,6 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # _parse_queue_complexity — adapted from orchestrator queue parser
 # Original operates on a Path; this variant operates on raw queue_text for pure-function testing.
-# Adapted from orchestrator queue parser
 # ---------------------------------------------------------------------------
 
 def _parse_queue_complexity_from_text(queue_text: str) -> dict[str, str]:

@@ -100,50 +100,47 @@ DEFAULT_Q_VALUES: dict[str, float] = {
 }
 
 _STATIC_BOT_PROMPT_MAP: dict[str, str] = {
-    "issues": "ISSUES_BOT.md",
-    "features": "FEATURE_BOT.md",
-    "bug_triage": "BUG_TRIAGE_BOT.md",
-    "worker-1": "WORKER_BOT.md",
-    "worker-2": "WORKER_BOT.md",
-    "worker-3": "WORKER_BOT.md",
-    "worker-4": "WORKER_BOT.md",
-    "worker-5": "WORKER_BOT.md",
-    "worker-6": "WORKER_BOT.md",
-    "worker-7": "WORKER_BOT.md",
-    "worker-8": "WORKER_BOT.md",
-    "worker-9": "WORKER_BOT.md",
-    "worker-10": "WORKER_BOT.md",
-    "worker-11": "WORKER_BOT.md",
-    "worker-12": "WORKER_BOT.md",
-    "goal_steering": "GOAL_STEERING_BOT.md",
-    "ui_improve": "UI_IMPROVE_BOT.md",
-    "doc_sync": "DOC_SYNC_BOT.md",
-    "test_coverage": "TEST_COVERAGE_BOT.md",
-    "code_quality": "CODE_QUALITY_BOT.md",
-    "prompt_opt": "PROMPT_OPTIMIZER.md",
-    "dependency": "DEPENDENCY_BOT.md",
-    "gitsync": "GITSYNC_BOT.md",
-    "github_issues": "GITHUB_ISSUES_BOT.md",
-    "build": "BUILD_BOT.md",
-    "e2e_smoke": "E2E_SMOKE_BOT.md",
-    "security_auditor": "SECURITY_AUDITOR_BOT.md",
-    "release": "RELEASE_BOT.md",
-    "alignment": "ALIGNMENT_BOT.md",
+    "bug_hunter": "codebot/roles/bug_hunter.md",
+    "security_auditor": "codebot/roles/security_auditor.md",
+    "architecture_auditor": "codebot/roles/architecture_auditor.md",
+    "performance_auditor": "codebot/roles/performance_auditor.md",
+    "test_gap_auditor": "codebot/roles/test_gap_auditor.md",
+    "documentation_auditor": "codebot/roles/documentation_auditor.md",
+    "dependency_auditor": "codebot/roles/dependency_auditor.md",
+    "ux_auditor": "codebot/roles/ux_auditor.md",
+    "general_implementer": "codebot/roles/general_implementer.md",
+    "backend_implementer": "codebot/roles/backend_implementer.md",
+    "frontend_implementer": "codebot/roles/frontend_implementer.md",
+    "test_implementer": "codebot/roles/test_implementer.md",
+    "migration_implementer": "codebot/roles/migration_implementer.md",
+    "documentation_implementer": "codebot/roles/documentation_implementer.md",
+    "correctness_reviewer": "codebot/roles/correctness_reviewer.md",
+    "security_reviewer": "codebot/roles/security_reviewer.md",
+    "architecture_reviewer": "codebot/roles/architecture_reviewer.md",
+    "test_reviewer": "codebot/roles/test_reviewer.md",
+    "performance_reviewer": "codebot/roles/performance_reviewer.md",
+    "simplicity_reviewer": "codebot/roles/simplicity_reviewer.md",
+    "documentation_reviewer": "codebot/roles/documentation_reviewer.md",
+    "scheduler": "codebot/roles/scheduler.md",
+    "quality_gate": "codebot/roles/quality_gate.md",
+    "conflict_resolver": "codebot/roles/conflict_resolver.md",
+    "budget_controller": "codebot/roles/budget_controller.md",
 }
 
 
 def _get_prompt_file(bot_name: str) -> str:
     if bot_name in _STATIC_BOT_PROMPT_MAP:
         return _STATIC_BOT_PROMPT_MAP[bot_name]
-    if bot_name.startswith("worker-"):
-        return "WORKER_BOT.md"
-    return f"{bot_name.upper()}_BOT.md"
+    base = bot_name.split("-")[0] if "-" in bot_name else bot_name
+    if base in _STATIC_BOT_PROMPT_MAP:
+        return _STATIC_BOT_PROMPT_MAP[base]
+    return f"codebot/roles/{bot_name}.md"
 
 
 BOT_PROMPT_MAP = _STATIC_BOT_PROMPT_MAP
 
-SELF_BOT = "prompt_opt"
-SELF_PROMPTS = {"PROMPT_OPTIMIZER.md", "prompt_opt"}
+SELF_BOT = "prompt_optimizer"
+SELF_PROMPTS = {"codebot/roles/prompt_optimizer.md", "prompt_optimizer"}
 
 # Rebellion detection (mirrors ALIGNMENT_BOT.md)
 _REBELLION_RE = re.compile(
