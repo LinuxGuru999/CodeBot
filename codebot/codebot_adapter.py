@@ -134,7 +134,7 @@ class CodeBotAdapter(ProjectAdapter):
             interval = interval_map.get(role.category.value, 600)
             registry.append({
                 "name": role.name,
-                "prompt": f"{role.name}.md",
+                "prompt": f"codebot/roles/{role.name}.md",
                 "interval": interval,
                 "model": "default",
                 "tier": 1 if role.category.value in ("discovery", "implementation") else 2,
