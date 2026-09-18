@@ -404,6 +404,14 @@ TOOL_SCHEMAS = [
     },
 ]
 
+try:
+    from codebot.api_tools import a11y_snapshot as _a11y_snapshot
+except ImportError:
+    try:
+        from api_tools import a11y_snapshot as _a11y_snapshot
+    except ImportError:
+        _a11y_snapshot = None  # type: ignore[assignment]
+
 _TOOL_MAP = {
     "read": read,
     "write": write,
@@ -414,6 +422,9 @@ _TOOL_MAP = {
     "file_read": read,
     "file_write": write,
 }
+if _a11y_snapshot is not None:
+    _TOOL_MAP["screenshot"] = _a11y_snapshot
+    _TOOL_MAP["a11y_snapshot"] = _a11y_snapshot
 
 
 def _resolve_api_key():
