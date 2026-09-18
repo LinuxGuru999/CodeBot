@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from gatekeeper import Gatekeeper, MAX_REWORK_ATTEMPTS
+from codebot.gatekeeper import Gatekeeper, MAX_REWORK_ATTEMPTS
 
 def _policy(tmp_path, cmd):
     p = tmp_path / "gates.yaml"

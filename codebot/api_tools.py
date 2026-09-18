@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 
 try:
-    from bots.tool_policy import allowlisted_command, resolve_workspace_path
+    from codebot.tool_policy import allowlisted_command, resolve_workspace_path
 except ImportError:
     from tool_policy import allowlisted_command, resolve_workspace_path
 

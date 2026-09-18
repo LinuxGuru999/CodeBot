@@ -35,7 +35,7 @@ import urllib.request
 from pathlib import Path
 
 try:
-    from bots.api_tools import bash, read, write, edit, grep, glob
+    from codebot.api_tools import bash, read, write, edit, grep, glob
 except ImportError:
     from api_tools import bash, read, write, edit, grep, glob
 

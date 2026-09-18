@@ -177,7 +177,7 @@ def scheduler_status() -> dict:
         try:
             from token_budget import current_day_utc, day_total, get_budget_state
         except ImportError:
-            from bots.token_budget import current_day_utc, day_total, get_budget_state
+            from codebot.token_budget import current_day_utc, day_total, get_budget_state
         day = current_day_utc()
         budget_day = day
         ledger_path = STATE_DIR / "token_ledger.json"
@@ -229,7 +229,7 @@ def scheduler_status() -> dict:
         try:
             from lease_state import dead_letters
         except ImportError:
-            from bots.lease_state import dead_letters
+            from codebot.lease_state import dead_letters
         letters = dead_letters(STATE_DIR)
         if isinstance(letters, list):
             dead_letter_count = len(letters)
@@ -296,7 +296,7 @@ def scheduler_status() -> dict:
                                 try:
                                     from event_log import sanitize_data as _san
                                 except ImportError:
-                                    from bots.event_log import sanitize_data as _san
+                                    from codebot.event_log import sanitize_data as _san
                                 clean = _san({"reason": reason_txt})
                                 reason_txt = str(clean.get("reason", reason_txt))[:256]
                             except Exception:
@@ -340,14 +340,14 @@ def retry_dead_letter(item_id: str) -> dict:
         try:
             from lease_state import retry_dead_letter as retry
         except ImportError:
-            from bots.lease_state import retry_dead_letter as retry
+            from codebot.lease_state import retry_dead_letter as retry
         result = retry(STATE_DIR, item_id)
         if result["status"] == "retried":
             try:
                 try:
                     from event_log import append_event
                 except ImportError:
-                    from bots.event_log import append_event
+                    from codebot.event_log import append_event
                 append_event(STATE_DIR, "dead-letter-retry", {"id": item_id})
             except (ImportError, OSError, ValueError):
                 pass
@@ -441,7 +441,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     from event_log import MAX_EVENTS as _MAX_EVENTS, read_events, sanitize_data
                 except ImportError:
-                    from bots.event_log import MAX_EVENTS as _MAX_EVENTS, read_events, sanitize_data
+                    from codebot.event_log import MAX_EVENTS as _MAX_EVENTS, read_events, sanitize_data
                 bounded = max(1, min(limit, _MAX_EVENTS))
                 if event_type:
                     records = read_events(STATE_DIR, limit=_MAX_EVENTS)
@@ -475,7 +475,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     from lease_state import dead_letters
                 except ImportError:
-                    from bots.lease_state import dead_letters
+                    from codebot.lease_state import dead_letters
                 letters = dead_letters(STATE_DIR)
                 safe = [
                     {"id": str(item.get("id", ""))[:64], "reason": str(item.get("reason", ""))[:256]}

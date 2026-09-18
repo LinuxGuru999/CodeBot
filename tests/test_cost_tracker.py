@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from cost_tracker import CostTracker, TicketCost
+from codebot.cost_tracker import CostTracker, TicketCost
 
 class TestRecordPhaseCost:
     def test_record_creates_entry(self, tmp_path):

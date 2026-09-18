@@ -1736,7 +1736,7 @@ def _manifest_load_queue_text() -> str:
         from readiness import load_approved_ids, filter_unapproved_items
     except ImportError:
         try:
-            from bots.readiness import load_approved_ids, filter_unapproved_items
+            from codebot.readiness import load_approved_ids, filter_unapproved_items
         except ImportError:
             return raw
     approved = load_approved_ids(str(STATE_DIR))
@@ -1879,7 +1879,7 @@ def _load_manifests_safe() -> dict[str, dict]:
         try:
             from manifest_schema import load_all_manifests as _lam  # type: ignore
         except ImportError:
-            from bots.manifest_schema import load_all_manifests as _lam  # type: ignore
+            from codebot.manifest_schema import load_all_manifests as _lam  # type: ignore
         # Resolve via BOTS_DIR/manifests (cwd-relative, never absolute)
         mdir = BOTS_DIR / "manifests"
         if not mdir.exists():
@@ -1922,7 +1922,7 @@ def _collect_manifest_readiness(
         try:
             from readiness import is_due as _is_due, noop_ok as _noop_ok, ready as _ready, signals_ok as _signals_ok  # type: ignore
         except ImportError:
-            from bots.readiness import is_due as _is_due, noop_ok as _noop_ok, ready as _ready, signals_ok as _signals_ok  # type: ignore
+            from codebot.readiness import is_due as _is_due, noop_ok as _noop_ok, ready as _ready, signals_ok as _signals_ok  # type: ignore
     except Exception as e:
         logger.warning(f"readiness import failed: {e}")
         return [], [(n, "readiness-import-failed") for n in manifests], considered
@@ -2022,7 +2022,7 @@ def _collect_manifest_readiness(
                         try:
                             from readiness import queue_has_work as _qhw  # type: ignore
                         except ImportError:
-                            from bots.readiness import queue_has_work as _qhw  # type: ignore
+                            from codebot.readiness import queue_has_work as _qhw  # type: ignore
                         try:
                             has_work = _qhw(manifest.get("kind", ""), manifest.get("complexity_filter"), queue_text)
                         except Exception:
@@ -2055,7 +2055,7 @@ def _collect_manifest_readiness(
                 try:
                     from readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
                 except ImportError:
-                    from bots.readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
+                    from codebot.readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
                 queue_complexities = _pqct(queue_text) if queue_text else {}
             except Exception:
                 queue_complexities = {}
@@ -2095,7 +2095,7 @@ def _plan_manifest_batches(
         try:
             from batch_scheduler import order_by_tier as _obt, pack_batches as _pb, apply_caps as _ac  # type: ignore
         except ImportError:
-            from bots.batch_scheduler import order_by_tier as _obt, pack_batches as _pb, apply_caps as _ac  # type: ignore
+            from codebot.batch_scheduler import order_by_tier as _obt, pack_batches as _pb, apply_caps as _ac  # type: ignore
     except Exception as e:
         logger.warning(f"batch_scheduler import failed: {e}")
         return {"batches": [ready], "dropped": [], "reason": None, "warning": None, "staggers": [0], "stagger_s": 20}
@@ -2148,7 +2148,7 @@ def _dispatch_manifest_batches(packed: dict, bots: dict[str, BotState]) -> None:
             from api_runner import run_batch as _rb  # type: ignore
             run_batch_fn = _rb
         except ImportError:
-            from bots.api_runner import run_batch as _rb  # type: ignore
+            from codebot.api_runner import run_batch as _rb  # type: ignore
             run_batch_fn = _rb
     except Exception:
         run_batch_fn = None
@@ -2177,7 +2177,7 @@ def _dispatch_manifest_batches(packed: dict, bots: dict[str, BotState]) -> None:
                 try:
                     from lease_state import acquire as acquire_lease  # type: ignore
                 except ImportError:
-                    from bots.lease_state import acquire as acquire_lease  # type: ignore
+                    from codebot.lease_state import acquire as acquire_lease  # type: ignore
                 lease = acquire_lease(STATE_DIR, work_item_id, str(manifest.get("name", "")), now=time.time(), lease_seconds=int(manifest.get("session_timeout", 300)))
             except Exception as exc:
                 logger.warning("queue manifest %s skipped: lease unavailable: %s", manifest.get("name", "?"), exc)
@@ -2215,7 +2215,7 @@ def _dispatch_manifest_batches(packed: dict, bots: dict[str, BotState]) -> None:
                     try:
                         from lease_state import release as release_lease  # type: ignore
                     except ImportError:
-                        from bots.lease_state import release as release_lease  # type: ignore
+                        from codebot.lease_state import release as release_lease  # type: ignore
                     for manifest in api_manifests:
                         work_item_id = manifest.get("work_item_id")
                         name = manifest.get("name")

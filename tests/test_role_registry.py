@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from role_registry import (
+from codebot.role_registry import (
     ModelProfile,
     ToolPolicy,
     AgentRole,

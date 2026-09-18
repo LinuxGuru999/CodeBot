@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from risk_classifier import classify_risk, autonomy_level_for_risk, is_autonomous_allowed, CONSTITUTION_CATEGORIES
+from codebot.risk_classifier import classify_risk, autonomy_level_for_risk, is_autonomous_allowed, CONSTITUTION_CATEGORIES
 
 class TestClassifyRisk:
     def test_low_risk_documentation(self):

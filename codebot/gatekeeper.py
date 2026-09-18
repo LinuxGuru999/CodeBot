@@ -58,7 +58,7 @@ class Gatekeeper:
         conditions: list[str] | None = None,
         rework_count: int = 0,
     ) -> dict[str, Any]:
-        from bots.quality_gate import (
+        from codebot.quality_gate import (
             load_policy,
             run_quality_gates,
             record_gate_results,

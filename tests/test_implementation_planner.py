@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from implementation_planner import generate_plan, PlanDepth, determine_plan_depth, PlanStore
+from codebot.implementation_planner import generate_plan, PlanDepth, determine_plan_depth, PlanStore
 
 class TestPlanDepth:
     def test_low_risk_summary(self):
@@ -47,7 +47,7 @@ class TestGeneratePlan:
     def test_serialization_roundtrip(self):
         plan = generate_plan("CB-5", "low", ["a.py"], [], ["ok"])
         raw = plan.to_json()
-        from implementation_planner import ImplementationPlan
+        from codebot.implementation_planner import ImplementationPlan
         p2 = ImplementationPlan.from_dict(json.loads(raw))
         assert p2.ticket_id == "CB-5"
 

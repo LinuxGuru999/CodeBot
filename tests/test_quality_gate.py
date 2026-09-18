@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from quality_gate import QualityGatePolicy, GateResult, load_policy, evaluate_gate, run_quality_gates, record_gate_results
+from codebot.quality_gate import QualityGatePolicy, GateResult, load_policy, evaluate_gate, run_quality_gates, record_gate_results
 
 class TestQualityGatePolicy:
     def test_default_has_required(self):
@@ -53,7 +53,7 @@ class TestRunQualityGates:
 
 class TestRecordGateResults:
     def test_appends_jsonl(self, tmp_path):
-        from quality_gate import GateEvaluation
+        from codebot.quality_gate import GateEvaluation
         evals = [GateEvaluation("t", GateResult.PASS, "echo", "ok", 0.1, True)]
         record_gate_results(tmp_path, "CB-1", True, evals)
         lines = (tmp_path / "gate_results.jsonl").read_text().strip().split("\n")

@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from dependency_graph import DependencyGraph, CyclicDependencyError
+from codebot.dependency_graph import DependencyGraph, CyclicDependencyError
 
 class TestAddAndQuery:
     def test_add_ticket(self):
