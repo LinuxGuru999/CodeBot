@@ -311,13 +311,27 @@ def create_ticket(
     )
 
 
+def _normalize_title_words(title: str) -> frozenset[str]:
+    """Return a frozenset of normalized lowercase words from a title.
+
+    Used by TicketStore for O(1)-amortized title-similarity dedup via an
+    inverted word index.  Stop-words shorter than 3 characters are excluded
+    to improve signal-to-noise ratio.
+    """
+    return frozenset(w for w in title.lower().split() if len(w) >= 3)
+
+
 class TicketStore:
+    SIMILARITY_THRESHOLD = 0.8  # Jaccard threshold for "similar" titles
+
     def __init__(self, path: Path) -> None:
         import threading
         self._path = path
         self._lock = threading.RLock()
         self._tickets: dict[str, Ticket] = {}
         self._evidence_index: dict[str, str] = {}
+        # Word inverted index: word -> set of ticket IDs whose title contains it
+        self._word_index: dict[str, set[str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -329,9 +343,33 @@ class TicketStore:
                 t = Ticket.from_dict(entry)
                 self._tickets[t.id] = t
                 self._evidence_index[t.evidence_hash()] = t.id
+                self._index_title(t)
         except (json.JSONDecodeError, KeyError, ValueError):
             self._tickets = {}
             self._evidence_index = {}
+            self._word_index = {}
+
+    def _index_title(self, ticket: Ticket) -> None:
+        """Add ticket title words to the inverted index."""
+        for word in _normalize_title_words(ticket.title):
+            self._word_index.setdefault(word, set()).add(ticket.id)
+
+    def _unindex_title(self, ticket: Ticket) -> None:
+        """Remove ticket title words from the inverted index."""
+        for word in _normalize_title_words(ticket.title):
+            bucket = self._word_index.get(word)
+            if bucket:
+                bucket.discard(ticket.id)
+                if not bucket:
+                    del self._word_index[word]
+
+    def _jaccard_similarity(self, s1: frozenset[str], s2: frozenset[str]) -> float:
+        """Compute Jaccard index between two word sets.  O(min(|s1|, |s2|))."""
+        if not s1 and not s2:
+            return 1.0
+        intersection = len(s1 & s2)
+        union = len(s1 | s2)
+        return intersection / union if union else 0.0
 
     def _save(self) -> None:
         payload = {

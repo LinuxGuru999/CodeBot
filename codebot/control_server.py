@@ -38,7 +38,9 @@ Auth
 ----
 If CONTROL_TOKEN env is set, require `Authorization: Bearer <token>`.
 Fly sets this via `fly secrets set CONTROL_TOKEN=...`.
-Locally unset → allow all (convenience for testing).
+If CONTROL_TOKEN is unset/empty, the server still rejects all authenticated
+endpoints with 401 (fail-closed per Constitution §2).
+To test locally, set CONTROL_TOKEN to any value and pass it in requests.
 
 Stdlib-only, single file, no deps beyond orchestrator.py model profiles.
 """
@@ -362,17 +364,31 @@ def retry_dead_letter(item_id: str) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     def _auth(self) -> bool:
+        """Validate Bearer token via Authorization header.
+
+        Fail-closed: when CONTROL_TOKEN is unset/empty, reject all requests
+        (Constitution §2: no implicit trust at auth boundaries).
+        """
         if not CONTROL_TOKEN:
-            return True
+            logger.warning(
+                "CONTROL_TOKEN is not set — all authenticated requests are rejected "
+                "(set CONTROL_TOKEN env var to enable API access)"
+            )
+            return False
         auth = self.headers.get("Authorization", "")
         expected = f"Bearer {CONTROL_TOKEN}"
         return hmac.compare_digest(auth.strip(), expected)
 
     def _json(self, code: int, obj: dict | list) -> None:
+        """Send JSON response with security headers (Constitution §2)."""
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        # Security headers per Constitution §2
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
