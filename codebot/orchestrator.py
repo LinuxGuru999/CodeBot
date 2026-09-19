@@ -3595,7 +3595,6 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 logger.info(f"Dequeuing '{name}' — slot available")
                 update_bot_state(bot, "starting")
                 start_bot(bot, bots=bots)
-    # Zombie cleanup: process=None but status.json still shows "starting" or heartbeat is stale
     for name, bot in list(bots.items()):
         if not bot.config.enabled or bot.process is not None:
             continue
@@ -3604,10 +3603,9 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
             try:
                 sdata = json.loads(status_file.read_text())
                 if isinstance(sdata, dict) and sdata.get("current_task") in ("starting", ""):
-                    logger.info(f"Zombie '{name}' — process dead, status='{sdata.get('current_task')}' — resetting to waiting")
-                    update_bot_state(bot, "waiting")
-                    bot.restart_count = 0
-                    bot.consecutive_errors = 0
+                    sdata["current_task"] = "idle"
+                    sdata["task_description"] = "process exited"
+                    _write_json_atomic(status_file, sdata)
             except Exception:
                 pass
     # Exit + stuck handling for all bots (before manifest scheduling)

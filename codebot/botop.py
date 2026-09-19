@@ -1444,7 +1444,7 @@ def cmd_gatekeeper(project_root: Path, json_out: bool = False) -> int:
         tid = e.get("ticket_id","?")
         dec = e.get("decision","?")
         col = "green" if dec=="COMPLETE" else "red" if dec=="REWORK" else "yellow"
-        print(f"{dt}  {tid:<18s} {_c(dec, col, enabled):<18s} rework={e.get('rework_count',0)}  failed={','.join(e.get('failed_gates',[]) or [])[:40]}")
+        print(f"{dt}  {tid:<18s} {_ansi_pad(_c(dec, col, enabled), 18)} rework={e.get('rework_count',0)}  failed={','.join(e.get('failed_gates',[]) or [])[:40]}")
     return 0
 
 
