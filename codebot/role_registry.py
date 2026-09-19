@@ -390,6 +390,14 @@ CONTROL_ROLES: list[AgentRole] = [
         tool_policy=ToolPolicy(frozenset({"read"}), frozenset({"python3"}), "state_dir"),
         incentive="Minimize cost per accepted ticket.",
     ),
+    AgentRole(
+        name="ticket_decomposer",
+        category=RoleCategory.CONTROL,
+        description="Breaks down complex rework tickets into atomic sub-tickets",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
+        incentive="Reduce rework by breaking complex tickets into smaller, completable pieces.",
+    ),
 ]
 
 

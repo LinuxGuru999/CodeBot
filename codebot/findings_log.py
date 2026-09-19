@@ -30,7 +30,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 BOTS_DIR = Path(__file__).parent
-STATE_DIR = BOTS_DIR / "state"
+PROJECT_ROOT = BOTS_DIR.parent
+STATE_DIR = PROJECT_ROOT / ".codebot" / "state"
 DEFAULT_FINDINGS_PATH = STATE_DIR / "findings.jsonl"
 
 FINDINGS_SCHEMA_KEYS = frozenset({"ts", "bot", "type", "module", "finding", "severity"})
