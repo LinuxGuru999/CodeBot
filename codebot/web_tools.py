@@ -519,6 +519,7 @@ def _extract_text_from_html(html: str) -> str:
         pass
 
     # Try lxml directly if bs4 failed but lxml is present (less likely if bs4 isn't there, but possible)
+    doc = None
     try:
         from lxml import etree, html as lh
         doc = lh.fromstring(html.encode('utf-8'))
@@ -535,6 +536,11 @@ def _extract_text_from_html(html: str) -> str:
         return '\n'.join(lines)
     except ImportError:
         pass
+    finally:
+        # Explicitly free the document tree to prevent memory leaks on large inputs
+        # or if an exception occurred during processing.
+        if doc is not None:
+            del doc
 
     # Fallback to stdlib regex-based parsing
     for tag in ("script", "style", "nav", "footer", "header", "aside"):
