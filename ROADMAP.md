@@ -714,7 +714,7 @@ The roadmap must include:
 * protected project constitution
 * signed or auditable artifacts where justified
 * immutable audit history
-* human approval for dangerous actions
+* QA-stage recommendations for dangerous actions (resolved autonomously)
 * environment isolation between projects
 
 CodeBot should assume that source repositories may contain untrusted instructions or malicious dependencies.
@@ -748,14 +748,14 @@ Risk policy must override autonomy level when necessary.
 
 ---
 
-<!-- DELIVERABLE: id=14 status=PLANNED tier=T2 modules= -->
-# 14. Human Approval Model
+<!-- DELIVERABLE: id=14 status=PLANNED tier=T2 modules=quality_gate.py,gatekeeper.py -->
+# 14. QA-Stage Recommendation Model
 
-Do not require humans for ordinary low-risk work.
+No human escalation. All changes flow through the autonomous pipeline. Sensitive changes generate structured QA-stage recommendations that agents resolve through the normal adversarial review and rework loop.
 
-Use risk-based escalation.
+Use risk-based QA recommendations.
 
-Examples of potentially autonomous work:
+Examples of fully autonomous work:
 
 * documentation corrections
 * test additions
@@ -764,19 +764,21 @@ Examples of potentially autonomous work:
 * known bug fixes
 * low-risk UI corrections
 
-Examples requiring stronger review or humans:
+Examples requiring QA-stage recommendations (resolved autonomously, never escalated to humans):
 
-* authentication architecture
-* authorization boundaries
-* cryptography
-* destructive migrations
-* billing
-* secrets
-* licensing
-* security-policy relaxation
-* project constitution changes
-* major architecture changes
-* irreversible production actions
+* authentication architecture → adversarial auth review recommendation
+* authorization boundaries → access control verification recommendation
+* cryptography → security hardening recommendation with threat assessment
+* destructive migrations → migration safety recommendation with rollback plan
+* billing → payment flow verification recommendation
+* secrets → credential rotation recommendation
+* licensing → dependency license audit recommendation
+* security-policy relaxation → adversarial security review recommendation
+* project constitution changes → architecture review swarm recommendation
+* major architecture changes → ADR generation recommendation with alternatives
+* irreversible production actions → staged rollout recommendation with health checks
+
+QA recommendations are generated as tickets (type=recommendation) and processed through the normal pipeline. Resolution produces either: code change, ADR, or requirement clarification. No recommendation requires human intervention.
 
 ---
 
@@ -1222,7 +1224,7 @@ Provide metrics for:
 * provider failures
 * cost
 * quality-gate failures
-* human escalations
+* QA-stage recommendation volume
 * merge conflicts
 * review findings
 * regression rate
@@ -3377,10 +3379,10 @@ Structured management of long-term codebase health.
 
 ---
 
-<!-- DELIVERABLE: id=84 status=PLANNED tier=T1 modules=role_registry.py,adaptive_scheduler.py -->
-# 84. Review Swarm, Disagreement Resolution, and Human Escalation
+<!-- DELIVERABLE: id=84 status=PLANNED tier=T1 modules=role_registry.py,adaptive_scheduler.py,quality_gate.py -->
+# 84. Review Swarm, Disagreement Resolution, and QA-Stage Recommendations
 
-Coordinated multi-reviewer verification with explicit conflict resolution.
+Coordinated multi-reviewer verification with explicit conflict resolution. No human escalation — all issues surface as QA-stage recommendations resolved through the normal pipeline.
 
 ### §84.A — Full Application Review Swarm
 
@@ -3400,35 +3402,44 @@ For releases, coordinate relevant reviewers:
 
 - Store: reviewer, finding, severity, evidence, disagreement, resolution
 - Conflicting reviews explicitly resolved (not silently dropped)
-- Resolution authority: human for high-severity conflicts, senior reviewer for low
-- Disagreement history informs reviewer calibration
+- Resolution authority: adversarial review swarm votes; senior reviewer role breaks ties
+- Disagreement history informs reviewer calibration via RL reward shaping
+- No human arbitration; conflicts resolve through structured adversarial process
 
 **Exit Criteria:**
 
 - [ ] Zero unresolved review conflicts at completion time
 - [ ] Disagreement resolution recorded with rationale
 - [ ] Repeated false-positive reviewers have findings deprioritized
+- [ ] Conflict resolution completes within review cycle (no indefinite blocking)
 
-### §84.C — Human Escalation
+### §84.C — QA-Stage Recommendations
 
-Clearly defined escalation for:
+Sensitive or ambiguous issues surface as structured recommendations during QA review, not as human escalations.
 
-- Unresolved requirement ambiguity
-- Conflicting business rules
-- Major architectural tradeoffs
-- Irreversible migrations
-- High-risk security design
-- Legal/compliance uncertainty
-- Expensive infrastructure changes
-- Unclear product direction
+Recommendation triggers:
 
-Do NOT escalate routine implementation decisions.
+- Unresolved requirement ambiguity → recommendation ticket with options and tradeoff analysis
+- Conflicting business rules → recommendation ticket with conflict evidence and proposed resolution
+- Major architectural tradeoffs → ADR recommendation with alternatives evaluated
+- Irreversible migrations → migration safety recommendation with rollback plan requirement
+- High-risk security design → adversarial security review recommendation with threat assessment
+- Unclear product direction → requirement clarification recommendation with evidence from existing patterns
+
+Recommendations are processed through the normal ticket pipeline:
+
+1. QA stage generates recommendation as a ticket (type=recommendation)
+2. Recommendation assigned to appropriate reviewer/planning role
+3. Resolution produces either: code change, ADR, or requirement clarification
+4. Original ticket unblocked after recommendation resolved
+5. All recommendations tracked with resolution status
 
 **Exit Criteria:**
 
-- [ ] Escalation triggers defined and enforced
-- [ ] Escalated items block progress until resolved
-- [ ] Escalation rate decreasing over time (agents learning to resolve)
+- [ ] Recommendation tickets generated automatically by QA stage
+- [ ] Zero recommendations require human intervention to resolve
+- [ ] Recommendation resolution time tracked and trending downward
+- [ ] All sensitive-area changes produce recommendations (never silently passed)
 
 ---
 

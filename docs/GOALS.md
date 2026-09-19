@@ -15,6 +15,10 @@ CodeBot's first managed project is **itself**. Before operating on external repo
 The long-term purpose:
 
 > Given a software repository plus a structured project contract and engineering constitution, autonomously understand the system, discover necessary work, create evidence-backed tickets, prioritize and plan changes, implement them, test them, attack them, review them, update documentation, verify acceptance criteria, and continuously maintain the application with minimal human engineering effort.
+>
+> The target is not merely functional code. The target is production-quality software that is intentionally designed, secure, reliable, maintainable, accessible, performant, documented, testable, operable, and pleasant to use. Software quality is multidimensional: correctness alone is insufficient. CodeBot must perform the work of an excellent product engineer, software architect, frontend engineer, backend engineer, database engineer, UX designer, UI designer, security engineer, QA engineer, accessibility specialist, performance engineer, DevOps engineer, SRE, technical writer, API designer, integration engineer, and release engineer — using coordinated autonomous agents, deterministic tools, structured project knowledge, and enforceable quality gates.
+>
+> "Bug-free" means: no known critical defects, strong automated regression protection, aggressive defect discovery, measurable reliability, and rapid detection/repair of escaped defects. Not literally zero bugs.
 
 ---
 
@@ -41,6 +45,34 @@ CodeBot core contains zero project-specific business logic. All project knowledg
 
 ---
 
+## Software Quality Definition
+
+Software quality is multidimensional. Correctness alone is insufficient.
+
+CodeBot's long-term goal explicitly includes the ability to create:
+
+> Production-quality software that is not merely functional, but intentionally designed, secure, reliable, maintainable, accessible, performant, documented, testable, operable, and pleasant to use.
+
+Quality dimensions:
+
+```text
+FUNCTION        — Does it do what requirements specify?
+DESIGN          — Does it look deliberately designed?
+USABILITY       — Is it intuitive and pleasant to use?
+SECURITY        — Does it resist attack by default?
+RELIABILITY     — Does it survive failures gracefully?
+PERFORMANCE     — Is it fast within defined budgets?
+ACCESSIBILITY   — Can everyone use it?
+MAINTAINABILITY — Can a new engineer understand and extend it?
+OPERABILITY     — Can operators diagnose and fix production issues?
+TESTABILITY     — Is it comprehensively verified at every layer?
+DOCUMENTATION   — Does documentation reflect actual system state?
+```
+
+"Bug-free" means: no known critical defects, strong automated regression protection, aggressive defect discovery, measurable reliability, and rapid detection/repair of escaped defects. Not literally zero bugs.
+
+---
+
 ## Success Criteria
 
 ### For Autonomous Engineering
@@ -48,7 +80,7 @@ CodeBot core contains zero project-specific business logic. All project knowledg
 |--------|---------|---------------|
 | Autonomous completion rate | ~0% (manual orchestration) | >80% |
 | First-pass quality-gate success | N/A | >70% |
-| Human intervention rate | 100% | <20% |
+| Human intervention rate | 100% | 0% (QA recommendations only) |
 | Escaped regression rate | Unknown | <5% |
 | Mean accepted-ticket cost | Unknown | Measured & improving |
 | Documentation drift rate | High | <10% |
@@ -68,7 +100,7 @@ CodeBot core contains zero project-specific business logic. All project knowledg
 |--------|--------|
 | Self-modification safeguards | Stronger than any normal project |
 | Bootstrap recovery | Always possible |
-| Constitution weakening | Never without explicit human approval |
+| Constitution weakening | Never without adversarial review swarm + QA recommendation resolution |
 | Control removal | Impossible (hardcoded guard) |
 
 ---
@@ -201,6 +233,318 @@ Internationalization, containerization, CI/CD pipelines, code quality enforcemen
 **Current state**: Dockerfile exists. CI/CD partially configured (Fly.io). Linting configured per-project.
 **Gap**: No i18n extraction, no CI/CD pipeline generation, no OpenAPI spec generation, no structured data/SEO scaffolding, no database migration safety patterns.
 
+### Goal 22: Product Requirements Engineering (ROADMAP §59)
+CodeBot must transform vague product ideas into structured, implementable requirements before any code is written. Requirements must be traceable, versioned, and conflict-free.
+
+**Current state**: No requirements extraction role. No requirements schema. No traceability system. feature_decomposer breaks epics into tickets but doesn't extract requirements from product descriptions.
+**Gap**: Need requirements_engineer role, requirements schema with traceability IDs, conflict detection, MVP scope identification, and requirements-driven ticket generation.
+
+### Goal 23: UX Design and Information Architecture (ROADMAP §60)
+Applications must be intuitive and pleasant to use. Every view must handle empty, loading, error, and success states. Navigation must be designed before implementation.
+
+**Current state**: ux_auditor role exists with screenshot/a11y tools but isn't wired into ticket pipeline or quality gates. No UX design phase in pipeline.
+**Gap**: Need ux_architect role for pre-implementation design, state design enforcement in quality gates, onboarding flow generation, and UX review as conditional gate for user-facing changes.
+
+### Goal 24: Professional UI Design and Design Systems (ROADMAP §61)
+Generated interfaces must look deliberately designed. Design systems with tokens, component libraries, and theme support are required.
+
+**Current state**: No design system infrastructure. No design token schema. No component library generation. frontend_implementer role exists but has no design system context.
+**Gap**: Need design_system_engineer role, design token schema and enforcement, component library generation, dark/light theme support, and data visualization patterns.
+
+### Goal 25: UI Quality Review and Visual Regression Testing (ROADMAP §62)
+UI quality must be verified deterministically via screenshots, visual diffs, and browser rendering — not text-only reasoning.
+
+**Current state**: ux_auditor has screenshot tool defined in tool policy but no implementation. No visual diff tooling. No screenshot baseline storage.
+**Gap**: Need ui_reviewer role with browser/screenshot access, visual regression infrastructure (baselines, diffs, viewport matrix), and visual quality gate.
+
+### Goal 26: Browser E2E Testing (ROADMAP §63)
+CodeBot must open the actual application and test it like a user through real browser interaction.
+
+**Current state**: No Playwright integration. No E2E test infrastructure. No browser automation in tool surface.
+**Gap**: Need Playwright integration, E2E test generation from user stories, page object model generation, flaky test detection, and E2E quality gate.
+
+### Goal 27: Multi-Tenancy and Organization Management (ROADMAP §64)
+Applications serving multiple organizations must enforce strict tenant isolation with automated cross-tenant testing.
+
+**Current state**: No multi-tenancy patterns. No tenant isolation testing. No tenant-scoped query enforcement.
+**Gap**: Need tenant architecture patterns, tenant isolation tests, cross-tenant attack testing, quota enforcement, and tenant_isolation_reviewer role.
+
+### Goal 28: Security Toolchain and Adversarial Review (ROADMAP §65)
+Security verification must combine SAST, DAST, dependency scanning, secret scanning with adversarial review roles that attempt exploitation.
+
+**Current state**: security_auditor and security_reviewer roles exist. dependency_auditor checks CVEs. No SAST/DAST integration. No secret scanning. No specialized auth/tenant/input/secrets reviewers.
+**Gap**: Need SAST/DAST integration in quality gates, secret scanning, adversarial reviewer roles (auth_reviewer, tenant_isolation_reviewer, input_validation_reviewer, secrets_reviewer), and security regression tests.
+
+### Goal 29: Advanced Testing Architecture (ROADMAP §66)
+Testing must go beyond coverage: property-based testing, fuzz testing, contract testing, and test quality evaluation.
+
+**Current state**: test_implementer and test_gap_auditor exist. pytest configured. coverage_bridge generates tickets. No property-based testing, no contract testing, no test quality evaluation.
+**Gap**: Need property-based test generation, fuzz testing infrastructure, API contract tests, test quality reviewer role, and flaky test detection/quarantine.
+
+### Goal 30: Performance Budgets and Load Testing (ROADMAP §67)
+Performance must be engineered proactively with measurable budgets enforced in CI.
+
+**Current state**: performance_auditor and performance_reviewer roles exist. No budget enforcement. No load testing infrastructure.
+**Gap**: Need performance budget configuration in project contract, budget enforcement in quality gates, load/stress test generation, and benchmark comparison for performance-sensitive tickets.
+
+### Goal 31: Reliability Engineering (ROADMAP §68)
+Applications must survive failures gracefully with retry, timeout, circuit breaker, and idempotency patterns.
+
+**Current state**: auto_revert.py handles build gate failures. No retry/backoff scaffolding. No circuit breaker patterns. No idempotency enforcement.
+**Gap**: Need reliability pattern library, retry/timeout/circuit breaker generation, idempotency key enforcement, failure isolation testing, and recovery verification.
+
+### Goal 32: Observability and Operational Diagnostics (ROADMAP §69)
+Production applications must be diagnosable with structured logging, metrics, tracing, and health endpoints.
+
+**Current state**: telemetry.py exists but not wired to production sources. metrics_collector.py tracks agent telemetry. No application-level observability generation.
+**Gap**: Need structured logging generation, metrics endpoint scaffolding, health endpoint generation, correlation ID propagation, and alerting rule generation.
+
+### Goal 33: Release Engineering and Configuration Management (ROADMAP §70-§71)
+Releases must be reproducible, validated, and reversible. Configuration must be externalized with secrets never in source.
+
+**Current state**: release_manager role prompt exists but not wired into pipeline. credentials.py resolves secrets from env. No changelog generation. No staged deployment.
+**Gap**: Need release process automation, changelog generation, staged deployment support, rollback testing, configuration validation, and secret rotation support.
+
+### Goal 34: Third-Party Integrations and Domain Services (ROADMAP §72-§73)
+External integrations must be resilient. Domain capabilities (billing, email, search, files, time) need reusable patterns.
+
+**Current state**: No integration engineer role. No billing/payment patterns. No email infrastructure. No search patterns. No file handling patterns.
+**Gap**: Need integration_engineer role, integration resilience patterns (retry/timeout/circuit breaker), billing via established providers, email template system, search patterns, file upload validation, and timezone-correct time handling.
+
+### Goal 35: Privacy, Auditability, and Compliance (ROADMAP §74)
+Applications handling user data must respect privacy and maintain audit trails.
+
+**Current state**: No privacy patterns. No audit logging infrastructure. No data retention automation.
+**Gap**: Need privacy-by-design patterns, sensitive data classification, retention/deletion automation, audit logging with actor/action/resource/timestamp, and logging redaction.
+
+### Goal 36: Backup, DR, Admin, and Feature Flags (ROADMAP §75-§76)
+Data durability, operational tooling, and safe feature rollout.
+
+**Current state**: No backup/restore automation. No admin interface patterns. No feature flag system.
+**Gap**: Need backup scheduling and restore testing, data import/export patterns, admin interface generation with audit logging, and feature flag system with staged rollout and cleanup.
+
+### Goal 37: Framework Knowledge and Stack Selection (ROADMAP §77)
+CodeBot must understand idiomatic framework patterns and select stacks based on requirements, not habit.
+
+**Current state**: No stack-specific adapters. No framework pattern libraries. No stack selection reasoning.
+**Gap**: Need framework-specific pattern libraries for 2-3 primary stacks, stack selection ADR process, and framework convention enforcement in quality gates.
+
+### Goal 38: Existing Application Ingestion and Legacy Support (ROADMAP §78)
+CodeBot must work with existing codebases through automated ingestion and safe incremental modernization.
+
+**Current state**: No ingestion pipeline. No architecture reconstruction. No legacy pattern recognition.
+**Gap**: Need repository inventory automation, architecture reconstruction, risk identification, documentation reconstruction, and incremental modernization patterns.
+
+### Goal 39: Browser/Device Matrix and Quality Gate Expansion (ROADMAP §79-§80)
+Applications must work across target browsers/devices. Quality gates must expand to cover web-app-specific verification.
+
+**Current state**: No browser matrix configuration. Quality gates have 2 required + 5 conditional types. Missing: frontend_change, accessibility_scan, visual_regression, e2e_browser, deployment_smoke, ui_review.
+**Gap**: Need browser matrix in project contract, cross-platform testing, and 9+ new conditional gate types with change-type detection.
+
+### Goal 40: Specialized Agent Roles (ROADMAP §81)
+12 new roles needed: requirements_engineer, ux_architect, design_system_engineer, ui_reviewer, e2e_test_engineer, auth_reviewer, tenant_isolation_reviewer, devops_engineer, sre_reviewer, integration_engineer, database_engineer, api_architect.
+
+**Current state**: 28 roles defined. All 12 new roles are MISSING from role_registry.py and codebot/roles/.
+**Gap**: Register all 12 roles with tool policies, model profiles, adversarial mappings, and prompt templates. Integrate with adaptive scheduler slot allocation.
+
+### Goal 41: Application Acceptance and Production Readiness (ROADMAP §82)
+Beyond individual tickets, complete applications must pass holistic acceptance verification before release.
+
+**Current state**: No acceptance testing pipeline. No polish pass process. No production readiness gate.
+**Gap**: Need acceptance checklist per project, product polish pass, production readiness gate (automated, not manual), and release-blocking criteria.
+
+### Goal 42: Technical Debt, ADRs, and Decision Records (ROADMAP §83)
+Technical debt must be tracked and compete rationally with features. Major decisions need ADRs.
+
+**Current state**: docs/adr/ directory configured. No ADR enforcement. No debt tracking. No PDR system.
+**Gap**: Need structured debt registry, ADR template enforcement, agent respect for accepted ADRs, and product decision records.
+
+### Goal 43: Review Swarm and QA-Stage Recommendations (ROADMAP §84)
+Coordinated multi-reviewer verification with explicit conflict resolution. No human escalation — all issues surface as QA-stage recommendations.
+
+**Current state**: Adversarial review mappings defined. No coordinated review orchestration. No disagreement resolution. Human escalation replaced with QA recommendations per user directive.
+**Gap**: Need review swarm orchestration (parallel, change-type-aware), disagreement resolution via adversarial voting, and QA-stage recommendation ticket generation.
+
+### Goal 44: Benchmark Applications and Capability Matrix (ROADMAP §85)
+Measurable verification via 7 benchmark levels and machine-readable capability matrix.
+
+**Current state**: §39 defines levels A-G (generic). No web-app-specific benchmark classes. No capability matrix.
+**Gap**: Need 7 web-app benchmark levels (CRUD → Legacy), capability matrix in machine-readable format, and autonomous success tracking per level.
+
+### Goal 45: Maintainability After CodeBot and Architecture Diversity (ROADMAP §86)
+Generated software must outlive CodeBot. No architecture monoculture.
+
+**Current state**: No maintainability verification. No architecture diversity enforcement.
+**Gap**: Need maintainability checklist (conventional structures, standard frameworks, reproducible builds), architecture diversity enforcement, and anti-monoculture principles.
+
+### Goal 22: Product Requirements Engineering (ROADMAP §59)
+CodeBot must transform vague product ideas into structured, traceable requirements before implementation begins.
+
+**Current state**: feature_decomposer role exists for breaking epics into tickets. No requirements extraction, no persona/story generation, no traceability system.
+**Gap**: No requirements_engineer role. No requirement schema. No traceability links. No scope management. No conflict detection between requirements.
+
+### Goal 23: UX Design and Information Architecture (ROADMAP §60)
+Applications must be intuitive and pleasant to use. UX quality is a first-class engineering concern.
+
+**Current state**: ux_auditor role exists with screenshot/a11y tools but isn't wired into pipeline. No information architecture design step.
+**Gap**: No UX architect role. No user journey mapping. No state design enforcement (empty/loading/error/success). No onboarding flow generation. No progressive disclosure patterns.
+
+### Goal 24: Professional UI Design and Design Systems (ROADMAP §61)
+Generated interfaces must look deliberately designed with enforceable design systems.
+
+**Current state**: frontend_implementer role exists. No design system engineering. No design token enforcement.
+**Gap**: No design_system_engineer role. No token schema. No component library generation. No visual hierarchy enforcement. No data visualization patterns.
+
+### Goal 25: UI Quality Review and Visual Regression (ROADMAP §62)
+UI quality must be verified deterministically via screenshots and visual diffs.
+
+**Current state**: ux_auditor has screenshot tool defined but no implementation. No visual regression infrastructure.
+**Gap**: No UI reviewer role with browser rendering. No screenshot baseline system. No visual diff tooling. No viewport matrix testing.
+
+### Goal 26: Browser E2E Testing (ROADMAP §63)
+CodeBot must open the actual application and test it like a user through real browser interaction.
+
+**Current state**: No Playwright integration. No E2E test infrastructure. No browser automation tools.
+**Gap**: No Playwright/Cypress integration. No user journey test generation. No cross-browser testing. No mobile viewport testing. No flaky test detection for E2E.
+
+### Goal 27: Multi-Tenancy and Organization Management (ROADMAP §64)
+Applications serving multiple organizations must enforce strict tenant isolation.
+
+**Current state**: No multi-tenancy patterns. No tenant isolation testing.
+**Gap**: No tenant architecture patterns. No tenant-scoped query enforcement. No cross-tenant attack testing. No tenant_isolation_reviewer role.
+
+### Goal 28: Security Toolchain and Adversarial Review (ROADMAP §65)
+Security verification must combine automated scanning with adversarial review roles.
+
+**Current state**: security_auditor and security_reviewer roles exist. dependency_auditor checks CVEs. No SAST/DAST integration. No secret scanning.
+**Gap**: No SAST integration. No secret scanning in quality gates. No adversarial auth reviewer. No input_validation_reviewer. No secrets_reviewer. Security review is adversarial but not generative.
+
+### Goal 29: Advanced Testing Architecture (ROADMAP §66)
+Testing must go beyond coverage to include property-based, fuzz, contract, and quality evaluation.
+
+**Current state**: test_implementer and test_gap_auditor exist. pytest configured. coverage_bridge generates tickets.
+**Gap**: No property-based testing. No fuzz testing. No contract testing. No test quality evaluation. No component testing infrastructure.
+
+### Goal 30: Performance Budgets and Load Testing (ROADMAP §67)
+Performance must be engineered proactively with measurable budgets enforced in CI.
+
+**Current state**: performance_auditor and performance_reviewer roles exist. No budget enforcement.
+**Gap**: No performance budget configuration. No budget enforcement in quality gates. No load testing infrastructure. No stress testing. No benchmark comparison for performance-sensitive tickets.
+
+### Goal 31: Reliability Engineering (ROADMAP §68)
+Applications must survive failures gracefully with retry, circuit breaker, and idempotency patterns.
+
+**Current state**: auto_revert.py handles build gate failures. No reliability pattern library.
+**Gap**: No retry/backoff scaffolding. No circuit breaker patterns. No idempotency key generation. No failure isolation testing. No graceful degradation patterns.
+
+### Goal 32: Observability and Operational Diagnostics (ROADMAP §69)
+Production applications must be diagnosable with structured logging, metrics, and tracing.
+
+**Current state**: telemetry.py exists for signal ingestion. metrics_collector.py tracks agent telemetry. No application-level observability generation.
+**Gap**: No structured logging generation. No correlation ID implementation. No metrics endpoint generation. No distributed tracing. No alerting rule generation.
+
+### Goal 33: Release Engineering and Configuration Management (ROADMAP §70)
+Releases must be reproducible, validated, and reversible with proper configuration management.
+
+**Current state**: release_manager role prompt exists. No release pipeline. No configuration validation.
+**Gap**: No semantic versioning enforcement. No changelog generation. No staged deployment. No rollback testing. No environment configuration validation.
+
+### Goal 34: Secrets Management (ROADMAP §71)
+Secrets must never be in source code, with injection, rotation, and scoping support.
+
+**Current state**: credentials.py resolves secrets from env vars. No secret scanning. No rotation support.
+**Gap**: No secret scanning in quality gates. No rotation automation. No scoped credential enforcement. No environment isolation verification.
+
+### Goal 35: Third-Party Integrations (ROADMAP §72)
+External service integrations must be resilient with retry, webhook verification, and contract tests.
+
+**Current state**: No integration engineer role. No integration patterns.
+**Gap**: No integration resilience patterns. No webhook signature verification. No integration contract tests. No sandbox/test mode support. No API version pinning.
+
+### Goal 36: Domain Capabilities: Billing, Email, Search, Files, Time (ROADMAP §73)
+Common application capabilities need reusable, well-tested patterns selected by project need.
+
+**Current state**: No domain service patterns. No billing integration. No email infrastructure.
+**Gap**: No payment provider integration patterns. No email template system. No search patterns. No file handling patterns. No timezone correctness testing.
+
+### Goal 37: Privacy, Auditability, and Compliance (ROADMAP §74)
+Applications handling user data must respect privacy and maintain audit trails.
+
+**Current state**: No privacy patterns. No audit logging infrastructure.
+**Gap**: No data classification. No retention policies. No deletion automation. No consent management. No audit log generation. No logging redaction.
+
+### Goal 38: Backup, Disaster Recovery, and Data Lifecycle (ROADMAP §75)
+Data durability is non-negotiable with tested backup/restore and import/export.
+
+**Current state**: No backup patterns. No import/export infrastructure.
+**Gap**: No backup schedule generation. No restore testing. No point-in-time recovery. No CSV/JSON import validation. No data lifecycle management.
+
+### Goal 39: Admin Interfaces and Feature Flags (ROADMAP §76)
+Operational tooling for application management with safe feature rollout.
+
+**Current state**: No admin interface patterns. No feature flag system.
+**Gap**: No admin UI generation. No feature flag infrastructure. No staged rollout. No flag cleanup detection.
+
+### Goal 40: Framework Knowledge and Stack Selection (ROADMAP §77)
+CodeBot must understand idiomatic framework patterns and select stacks based on requirements.
+
+**Current state**: No framework-specific adapters. No stack selection reasoning. Generic patterns only.
+**Gap**: No framework pattern libraries. No stack-specific quality gates. No structured stack selection. No framework convention enforcement.
+
+### Goal 41: Existing Application Ingestion and Legacy Support (ROADMAP §78)
+CodeBot must work with existing codebases through ingestion and incremental modernization.
+
+**Current state**: project_adapter.py provides interface. No automated ingestion pipeline.
+**Gap**: No repository inventory automation. No architecture reconstruction. No risk identification. No legacy pattern recognition. No safe modernization patterns.
+
+### Goal 42: Browser/Device Matrix and Cross-Platform (ROADMAP §79)
+Applications must work across target browsers, devices, and operating systems.
+
+**Current state**: No browser matrix configuration. No cross-platform testing.
+**Gap**: No browser compatibility matrix. No device testing. No touch behavior verification. No high-DPI testing. No cross-OS backend testing.
+
+### Goal 43: Quality Gate Expansion (ROADMAP §80)
+Quality gates must support conditional, change-type-aware verification for web applications.
+
+**Current state**: quality_gate.py supports required + conditional gates with 5 conditions. Missing web-app-specific gates.
+**Gap**: No frontend_change gate. No accessibility gate. No visual_regression gate. No e2e gate. No deployment_smoke gate. No ui_review gate. No tenant_isolation gate.
+
+### Goal 44: Specialized Agent Roles for Web Applications (ROADMAP §81)
+New roles required: product_analyst, ux_architect, ui_designer, design_system_engineer, database_engineer, api_architect, e2e_test_engineer, integration_engineer, devops_engineer, sre_reviewer, auth_reviewer, tenant_isolation_reviewer, accessibility_reviewer, performance_engineer.
+
+**Current state**: 28 roles defined covering discovery, implementation, review, control, planning.
+**Gap**: 14 new roles needed for complete web application lifecycle coverage. Each must have tool policy, model profile, and adversarial mappings.
+
+### Goal 45: Application Acceptance and Production Readiness (ROADMAP §82)
+Complete application verification before release, including acceptance testing, polish pass, and readiness gate.
+
+**Current state**: No acceptance testing pipeline. No polish pass. No production readiness gate.
+**Gap**: No application-level acceptance checklist. No product polish review. No automated production readiness verification.
+
+### Goal 46: Technical Debt, ADRs, and Decision Records (ROADMAP §83)
+Structured debt tracking and architecture/product decision records that agents respect.
+
+**Current state**: docs/adr/ directory configured. No ADR enforcement. No debt tracking.
+**Gap**: No debt registry. No ADR template enforcement. No agent ADR respect mechanism. No product decision records.
+
+### Goal 47: Review Swarm, Disagreement Resolution, and QA Recommendations (ROADMAP §84)
+Coordinated multi-reviewer verification with explicit conflict resolution. No human escalation — all issues resolved through QA-stage recommendations.
+
+**Current state**: Adversarial review mappings defined. No coordinated review orchestration. No disagreement resolution.
+**Gap**: No review swarm orchestration. No disagreement resolution process. No QA-stage recommendation generation. No recommendation ticket type.
+
+### Goal 48: Benchmark Applications and Capability Matrix (ROADMAP §85)
+Measurable verification through progressively harder benchmark applications and machine-readable capability tracking.
+
+**Current state**: §39 defines benchmark levels A-G (ticket difficulty). No web-app-specific benchmarks. No capability matrix.
+**Gap**: No 7-level web application benchmark classes. No capability matrix storage. No autonomous success tracking per level. No metric collection infrastructure.
+
+### Goal 49: Maintainability After CodeBot and Architecture Diversity (ROADMAP §86)
+Generated software must be maintainable without CodeBot and avoid architecture monoculture.
+
+**Current state**: No maintainability verification. No architecture diversity enforcement.
+**Gap**: No maintainability checklist. No CodeBot-specific construct detection. No stack diversity tracking. No "simplest architecture" enforcement.
+
 ---
 
 ## Version Milestones
@@ -282,6 +626,7 @@ Software Factory
 16. Documentation must describe actual system state.
 17. CodeBot must remain functional when individual AI providers are unavailable.
 18. CodeBot may improve itself only under stronger controls than normal projects.
+19. No human escalation: sensitive changes surface as QA-stage recommendations resolved autonomously through the adversarial review pipeline.
 
 ---
 

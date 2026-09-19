@@ -87,8 +87,9 @@ security:
   tls_verification_default: true
 
 autonomy:
-  level: 2
-  human_approval_required_for:
+  level: 3
+  escalation_model: "qa_recommendations"
+  qa_recommendation_required_for:
     - "authentication_architecture"
     - "authorization_boundaries"
     - "cryptography"

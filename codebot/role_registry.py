@@ -206,7 +206,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         name="test_gap_auditor",
         category=RoleCategory.DISCOVERY,
         description="Identifies public functions and critical paths lacking test coverage",
-        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
         incentive="Maximize coverage gap detection accuracy.",
     ),
@@ -259,9 +259,10 @@ IMPLEMENTATION_ROLES: list[AgentRole] = [
         name="frontend_implementer",
         category=RoleCategory.IMPLEMENTATION,
         description="Implements UI components, styling, client-side logic",
-        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.ADVANCED, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Implement frontend changes. Defended against by UX reviewer.",
+        adversarial_to=("ux_auditor",),
     ),
     AgentRole(
         name="test_implementer",
@@ -283,8 +284,8 @@ IMPLEMENTATION_ROLES: list[AgentRole] = [
         name="documentation_implementer",
         category=RoleCategory.IMPLEMENTATION,
         description="Updates module docs, API contracts, READMEs, ADRs",
-        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS - frozenset({"pytest"}), "project_root", git_write=True),
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.SMALL, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Accurate documentation matching actual system state.",
     ),
 ]
@@ -354,6 +355,15 @@ REVIEW_ROLES: list[AgentRole] = [
         incentive="Find claims that are no longer true.",
         adversarial_to=("documentation_implementer",),
     ),
+    AgentRole(
+        name="ux_reviewer",
+        category=RoleCategory.REVIEW,
+        description="Evaluates UI implementations for usability, accessibility (WCAG), visual consistency, and workflow friction",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node"}), "project_root", network_access=True),
+        incentive="Find usability issues, accessibility violations, and visual regressions introduced by implementation.",
+        adversarial_to=("frontend_implementer", "general_implementer"),
+    ),
 ]
 
 
@@ -365,6 +375,14 @@ CONTROL_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.INTERACTIVE),
         tool_policy=ToolPolicy(frozenset({"read"}), frozenset({"python3"}), "state_dir"),
         incentive="Optimize throughput within budget constraints.",
+    ),
+    AgentRole(
+        name="ticket_triager",
+        category=RoleCategory.CONTROL,
+        description="Validates incoming tickets: checks completeness, deduplicates via SHA-256, assigns severity, and routes to ready queue",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
+        incentive="Maximize valid ticket throughput. Reject incomplete or duplicate tickets early.",
     ),
     AgentRole(
         name="quality_gate",
@@ -379,16 +397,16 @@ CONTROL_ROLES: list[AgentRole] = [
         category=RoleCategory.CONTROL,
         description="Detects and resolves merge conflicts between concurrent agents",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
+        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS | frozenset({"git"}), "project_root", git_write=True),
         incentive="Resolve conflicts with minimal information loss.",
     ),
     AgentRole(
         name="budget_controller",
         category=RoleCategory.CONTROL,
-        description="Tracks token spend, enforces per-ticket and fleet-wide budgets",
+        description="Tracks token spend, enforces per-ticket and fleet-wide budgets, can pause agents exceeding limits",
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.INTERACTIVE),
-        tool_policy=ToolPolicy(frozenset({"read"}), frozenset({"python3"}), "state_dir"),
-        incentive="Minimize cost per accepted ticket.",
+        tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "state_dir"),
+        incentive="Minimize cost per accepted ticket. Pause runaway agents.",
     ),
     AgentRole(
         name="ticket_decomposer",

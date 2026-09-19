@@ -349,12 +349,12 @@ class TicketStore:
         try:
             lock_path = self._path.with_suffix(".lock")
             lock_path.touch(exist_ok=True)
-            with open(lock_path, "r") as lock_fd:
-                fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            with open(lock_path, "a+") as lock_fd:
+                flock(lock_fd, LOCK_SH)
                 try:
                     data = json.loads(self._path.read_text(encoding="utf-8"))
                 finally:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    flock(lock_fd, LOCK_UN)
             for entry in data.get("tickets", []):
                 t = Ticket.from_dict(entry)
                 self._tickets[t.id] = t
