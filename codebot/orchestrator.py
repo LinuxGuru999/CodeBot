@@ -103,41 +103,10 @@ except ImportError:
     _GATEWAY = False
     _PG_MAX_CONCURRENT = 10
     GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "3"))
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "45"))
+GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "30"))
 
 CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "60"))
-MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "9"))
-MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "9"))
-MAX_QWEN_38_CONCURRENT = int(os.getenv("CODEBOT_MAX_QWEN_38", "9"))
-MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "36"))
-MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "3"))
-MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "3"))
-MAX_REVIEWER_SLOTS = int(os.getenv("CODEBOT_MAX_REVIEWERS", "3"))
 USE_MANIFEST_SCHEDULER = os.getenv("CODEBOT_MANIFEST_SCHEDULER", "0") == "1"
-
-# Model-based rate limiting: max spawns per model within a time window
-MODEL_RATE_LIMITS: dict[str, dict[str, int]] = {
-    # High-risk models: lower limits to avoid rate limits
-    "qwen-3.8-max-thinking": {"limit": 2, "window": 60},
-    "qwen-3.7-max-thinking": {"limit": 2, "window": 60},
-    "qwen-3.6-plus-thinking": {"limit": 3, "window": 60},
-    "qwen-3.5-plus-thinking": {"limit": 3, "window": 60},
-    # Medium-risk models: moderate limits
-    "qwen-3.8-max": {"limit": 3, "window": 60},
-    "qwen-3.7-plus": {"limit": 4, "window": 60},
-    "qwen-3.6-plus": {"limit": 4, "window": 60},
-    "qwen-3.5-plus": {"limit": 5, "window": 60},
-    "qwen-3.5-omni-plus": {"limit": 5, "window": 60},
-    "meta-muse-spark-1.3": {"limit": 4, "window": 60},
-    "meta-muse-spark-1.2": {"limit": 5, "window": 60},
-    # Fast models: higher limits
-    "xiaomi-mimo-2.5": {"limit": 6, "window": 60},
-}
-# Default limit for unknown models
-MODEL_RATE_LIMIT_DEFAULT = {"limit": 4, "window": 60}
-
-# Track recent spawns per model: model -> list of timestamps
-_model_spawn_history: dict[str, list[float]] = {}
 
 IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
     "general_implementer", "backend_implementer", "frontend_implementer",
@@ -157,6 +126,11 @@ REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
 PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
     "feature_decomposer",
 })
+
+MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "12"))
+MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "6"))
+MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "8"))
+MAX_REVIEWER_SLOTS = int(os.getenv("CODEBOT_MAX_REVIEWERS", "6"))
 
 MAX_DISCOVERY_NO_TICKET_RUNS = 10
 RATE_LIMIT_REQUEUE_S = int(os.getenv("CODEBOT_RATE_LIMIT_REQUEUE_S", "300"))
@@ -487,6 +461,13 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         log_stall_seconds=180,
         restart_cooldown=7,
         description="Strong code gen; can hang on large edits / multi-file rewrites",
+    ),
+    "qwen-3.7-max": ModelProfile(
+        lockup_risk="medium",
+        heartbeat_multiplier=1.9,
+        log_stall_seconds=175,
+        restart_cooldown=6,
+        description="Strong code gen; balanced performance, occasional stall on complex reasoning",
     ),
     "qwen-3.7-plus": ModelProfile(
         lockup_risk="medium",
@@ -1738,38 +1719,8 @@ def is_stuck(bot: BotState) -> bool:
     return True
 
 # ---------------------------------------------------------------------------
-# Model Rate Tracking
+# Bot Recovery
 # ---------------------------------------------------------------------------
-
-def _record_model_spawn(model: str) -> None:
-    now = time.time()
-    if model not in _model_spawn_history:
-        _model_spawn_history[model] = []
-    _model_spawn_history[model].append(now)
-
-def _can_spawn_model(model: str) -> tuple[bool, str]:
-    now = time.time()
-    limits = MODEL_RATE_LIMITS.get(model, MODEL_RATE_LIMIT_DEFAULT)
-    limit = limits["limit"]
-    window = limits["window"]
-    
-    if model not in _model_spawn_history:
-        return True, "no history"
-    
-    cutoff = now - window
-    recent = [t for t in _model_spawn_history[model] if t > cutoff]
-    _model_spawn_history[model] = recent
-    
-    if len(recent) >= limit:
-        return False, f"model rate limit {len(recent)}/{limit} in {window}s"
-    return True, "ok"
-
-def _cleanup_model_history() -> None:
-    now = time.time()
-    for model in list(_model_spawn_history.keys()):
-        _model_spawn_history[model] = [t for t in _model_spawn_history[model] if t > now - 120]
-        if not _model_spawn_history[model]:
-            del _model_spawn_history[model]
 
 def _is_disabled_too_long(bot: BotState, threshold: float = 10.0) -> bool:
     state_file = STATE_DIR / f"{bot.config.name}.state.json"
@@ -1928,54 +1879,16 @@ def _count_running_by_category(bots: dict[str, BotState] | None) -> tuple[int, i
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False, runner_mode: str = "api", bot_model: str = "", bot_name: str = "", is_overture: bool = False) -> tuple[bool, str]:
     now = time.time()
     running = _count_api_runner_processes()
-    if bots is not None and bot_model:
-        model_counts = _count_running_by_model(bots)
-        if "thinking" in bot_model:
-            thinking_count = sum(count for model, count in model_counts.items() if "thinking" in model)
-            if thinking_count >= MAX_THINKING_CONCURRENT:
-                return False, f"thinking cap {thinking_count}/{MAX_THINKING_CONCURRENT}"
-        if bot_model == "qwen-3.8-max":
-            if model_counts.get("qwen-3.8-max", 0) >= MAX_QWEN_38_CONCURRENT:
-                return False, f"qwen-3.8-max cap {model_counts['qwen-3.8-max']}/{MAX_QWEN_38_CONCURRENT}"
-        if bot_model:
-            can_spawn, rate_msg = _can_spawn_model(bot_model)
-            if not can_spawn:
-                return False, rate_msg
-    base_role = bot_name.split("-")[0] if "-" in bot_name else bot_name
-    if bot_name in WORKER_POOL:
-        reserved = worker_reserved_slots(GATEWAY_MAX_CONCURRENT)
-        if _count_running_workers(bots) >= reserved:
-            return False, f"worker pool full ({reserved}/{reserved})"
-    elif base_role in PLANNING_ROLE_NAMES:
-        pass
-    elif bots is not None:
-        non_workers = {n: b for n, b in bots.items() if n not in WORKER_POOL and n.split("-")[0] not in PLANNING_ROLE_NAMES}
-        running_non = sum(1 for b in non_workers.values()
-                          if b.process is not None and b.process.poll() is None)
-        slots = rotating_slots(GATEWAY_MAX_CONCURRENT)
-        if running_non >= slots:
-            return False, f"rotating slots full ({slots}/{slots})"
-    impl_running, discovery_running, reviewer_running, other_running = _count_running_by_category(bots)
-    if base_role in IMPLEMENTER_ROLE_NAMES:
-        eff_cap = _effective_max_implementers()
-        if impl_running >= eff_cap:
-            return False, f"implementer slots full ({impl_running}/{eff_cap})"
-    elif base_role in DISCOVERY_ROLE_NAMES:
-        if discovery_running >= MAX_DISCOVERY_SLOTS:
-            return False, f"discovery slots full ({discovery_running}/{MAX_DISCOVERY_SLOTS})"
-    elif base_role in REVIEWER_ROLE_NAMES:
-        if reviewer_running >= MAX_REVIEWER_SLOTS:
-            return False, f"reviewer slots full ({reviewer_running}/{MAX_REVIEWER_SLOTS})"
-    else:
-        if other_running >= MAX_NON_IMPLEMENTER_SLOTS:
-            return False, f"non-implementer slots full ({other_running}/{MAX_NON_IMPLEMENTER_SLOTS})"
+    
     cap = GATEWAY_MAX_CONCURRENT
     if running >= cap:
         return False, f"cap {running}/{cap} running"
+    
     if runner_mode == "api":
         available = _get_available_memory_mb()
         if available < CODEBOT_MIN_MEMORY_MB:
             return False, f"memory {available:.0f}MB < {CODEBOT_MIN_MEMORY_MB}MB"
+    
     marker = STATE_DIR / ".last_spawn"
     try:
         last = float(marker.read_text().strip().split()[0]) if marker.exists() else 0.0
