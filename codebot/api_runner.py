@@ -1825,14 +1825,30 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     return _call_api(msgs, active_model, api_key)
                 except urllib.error.HTTPError as exc:
                     if exc.code == 429:
-                        _log(f"{bot_name}: 429 rate-limited, yielding slot for requeue")
+                        if total_retries < MAX_429_RETRIES:
+                            delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
+                            delay = min(delay, MAX_BACKOFF)
+                            _log(f"{bot_name}: 429 rate-limited, retrying in {delay}s ({total_retries+1}/{MAX_429_RETRIES})")
+                            _write_heartbeat(heartbeat_file)
+                            time.sleep(delay)
+                            total_retries += 1
+                            continue
+                        _log(f"{bot_name}: 429 rate-limited after {total_retries} retries, yielding slot for requeue")
                         _write_heartbeat(heartbeat_file)
                         exit_reason = "rate_limited_yield"
                         sys.exit(3)
                     try:
                         body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
                         if "429" in body or "rate" in body.lower():
-                            _log(f"{bot_name}: rate-limited (body), yielding slot for requeue")
+                            if total_retries < MAX_429_RETRIES:
+                                delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
+                                delay = min(delay, MAX_BACKOFF)
+                                _log(f"{bot_name}: rate-limited (body), retrying in {delay}s ({total_retries+1}/{MAX_429_RETRIES})")
+                                _write_heartbeat(heartbeat_file)
+                                time.sleep(delay)
+                                total_retries += 1
+                                continue
+                            _log(f"{bot_name}: rate-limited (body) after {total_retries} retries, yielding slot for requeue")
                             _write_heartbeat(heartbeat_file)
                             exit_reason = "rate_limited_yield"
                             sys.exit(3)
