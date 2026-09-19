@@ -238,7 +238,7 @@ PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
 MAX_DISCOVERY_NO_TICKET_RUNS = 10
 RATE_LIMIT_REQUEUE_S = int(os.getenv("CODEBOT_RATE_LIMIT_REQUEUE_S", "300"))
 RATE_LIMIT_BACKOFF_MAX = int(os.getenv("CODEBOT_RATE_LIMIT_BACKOFF_MAX", "3600"))
-RATE_LIMIT_DISABLE_AFTER = int(os.getenv("CODEBOT_RATE_LIMIT_DISABLE_AFTER", "5"))
+RATE_LIMIT_DISABLE_AFTER = int(os.getenv("CODEBOT_RATE_LIMIT_DISABLE_AFTER", "20"))
 _metrics_tick = 0
 
 ALWAYS_RESPAWN = frozenset({
@@ -364,26 +364,45 @@ def _get_code_mtimes() -> dict[str, float]:
     return mtimes
 
 
+_GLOBAL_CODE_MTIMES: dict[str, float] = {}
+
+
 def _check_code_changes(bots: dict[str, BotState]) -> None:
+    """Check for code changes in O(M+B) time.
+
+    Uses a global mtime cache to avoid O(M*B) nested loops. Since all bots
+    are restarted together when any module changes, per-bot granularity is
+    unnecessary for detection. Each bot's last_code_mtimes is still updated
+    to maintain compatibility with other subsystems.
+    """
+    global _GLOBAL_CODE_MTIMES
     current_mtimes = _get_code_mtimes()
     if not current_mtimes:
         return
+
+    # O(M): detect changed modules against global baseline
     changed_modules: list[str] = []
     for mod_name, mtime in current_mtimes.items():
-        for bot in bots.values():
-            prev = bot.last_code_mtimes.get(mod_name, 0.0)
-            if prev > 0 and mtime > prev:
-                changed_modules.append(mod_name)
-                break
+        prev = _GLOBAL_CODE_MTIMES.get(mod_name, 0.0)
+        if prev > 0 and mtime > prev:
+            changed_modules.append(mod_name)
+
+    # O(B): update all bots' mtimes (always needed for convergence)
+    for bot in bots.values():
+        if not bot.last_code_mtimes:
+            bot.last_code_mtimes = dict(current_mtimes)
+        else:
+            bot.last_code_mtimes.update(current_mtimes)
+
     if not changed_modules:
-        for bot in bots.values():
-            if not bot.last_code_mtimes:
-                bot.last_code_mtimes = dict(current_mtimes)
-            else:
-                bot.last_code_mtimes.update(current_mtimes)
+        # Update global baseline even if no changes detected
+        _GLOBAL_CODE_MTIMES.update(current_mtimes)
         return
+
     unique_changed = sorted(set(changed_modules))
     logger.info(f"Code change detected in {unique_changed} — respawning active bots")
+
+    # O(B): restart active bots
     for name, bot in bots.items():
         if not bot.config.enabled:
             continue
@@ -391,7 +410,9 @@ def _check_code_changes(bots: dict[str, BotState]) -> None:
         if alive:
             stop_bot(bot, f"code-hot-reload:{','.join(unique_changed)}")
             bot.next_run_at = time.time()
-        bot.last_code_mtimes = dict(current_mtimes)
+
+    # Update global baseline after handling changes
+    _GLOBAL_CODE_MTIMES = dict(current_mtimes)
 
 
 def _check_config_changes(bots: dict[str, BotState]) -> None:
