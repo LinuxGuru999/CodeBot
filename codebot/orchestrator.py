@@ -151,7 +151,7 @@ try:
 except ImportError:
     _GATEWAY = False
     _PG_MAX_CONCURRENT = 10
-    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "8"))
+    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "20"))
 GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "30"))
 
 CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "60"))
@@ -904,6 +904,8 @@ def log_mtime(bot_name: str) -> float:
 
 
 CLAIM_TTL_SECONDS = 1800
+SWEEP_INTERVAL = 300  # Seconds between full orphan claim sweeps to reduce I/O
+_last_sweep_time: float = 0.0
 
 
 def _reap_expired_claims(bot_name: str) -> int:
@@ -956,13 +958,20 @@ def _sweep_orphan_claims(bots: dict[str, BotState]) -> int:
     """Delete claim files whose owning bot process is dead or timed out.
 
     Prevents permanently locked QUEUE items when a worker crashes mid-task
-    without releasing its claim. Runs once per health-check cycle.
+    without releasing its claim. Runs periodically to reduce I/O overhead.
     """
+    global _last_sweep_time
+    now = time.time()
+    
+    # Skip full sweep if performed recently (reduces I/O/CPU overhead)
+    if now - _last_sweep_time < SWEEP_INTERVAL:
+        return 0
+    
     swept = 0
     claims_dir = STATE_DIR / "claims"
     if not claims_dir.exists():
         return 0
-    now = time.time()
+    
     alive_bots = {name for name, bot in bots.items() if bot.process is not None and bot.process.poll() is None}
     for p in claims_dir.glob("*.json"):
         try:
