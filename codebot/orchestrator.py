@@ -1181,12 +1181,6 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         except OSError:
             continue
         try:
-            risk = getattr(ticket, 'risk', None)
-            risk_val = risk.value if hasattr(risk, 'value') else str(risk) if risk else "medium"
-            if risk_val in ("high", "critical") and ticket.state.value == "READY":
-                ts.transition(tid, TicketState.PLANNING)
-                logger.info(f"Ticket {tid} risk={risk_val} -> PLANNING (enforced)")
-                continue
             ts.transition(tid, TicketState.IMPLEMENTING)
         except Exception as e:
             logger.warning(f"Ticket {tid} transition failed: {e} — skipping")

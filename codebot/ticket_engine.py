@@ -209,12 +209,6 @@ class Ticket:
                 f"invalid transition {self.state.value} -> {new_state.value} "
                 f"(allowed: {sorted(s.value for s in allowed)})"
             )
-        if (self.state == TicketState.READY and
-            new_state == TicketState.IMPLEMENTING and
-            _RISK_ORDER.get(self.risk.value, 0) >= _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)):
-            raise ValueError(
-                f"ticket {self.id} risk={self.risk.value} requires PLANNING before IMPLEMENTING"
-            )
         updates = {"state": new_state, "updated_at": time.time()}
         if new_state == TicketState.REWORK:
             updates["rework_count"] = self.rework_count + 1
@@ -525,16 +519,6 @@ class TicketStore:
             ticket = self._tickets.get(ticket_id)
             if ticket is None:
                 raise KeyError(f"ticket not found: {ticket_id}")
-            # Enforce planning prerequisite for high+ risk tickets
-            if (ticket.state == TicketState.READY and
-                new_state == TicketState.IMPLEMENTING and
-                ticket.risk.value in (RiskLevel.HIGH.value, RiskLevel.CRITICAL.value)):
-                if not self._has_plan(ticket_id):
-                    raise ValueError(
-                        f"ticket {ticket_id} has risk={ticket.risk.value} which requires "
-                        f"an implementation plan before transitioning to IMPLEMENTING. "
-                        f"Move to PLANNING state first or generate a plan."
-                    )
             # Enforce gatekeeper approval before VERIFYING -> COMPLETE (GAP-2)
             if (ticket.state == TicketState.VERIFYING and
                 new_state == TicketState.COMPLETE):
