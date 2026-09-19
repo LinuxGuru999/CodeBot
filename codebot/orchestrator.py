@@ -3118,10 +3118,6 @@ def _advance_ready_to_planning() -> int:
     ready = ts.list_by_state(TicketState.READY)
     advanced = 0
     for ticket in ready:
-        risk_order = _RISK_ORDER.get(ticket.risk.value, 0)
-        threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
-        if risk_order < threshold_order:
-            continue
         plan_file = plans_dir / f"{ticket.id}.plan.json"
         if plan_file.exists():
             try:
@@ -4452,6 +4448,12 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         _recover_stuck_planning_tickets()
     except Exception as e:
         logger.warning(f"Planning recovery failed: {e}")
+    try:
+        n = _advance_ready_to_planning()
+        if n:
+            logger.info(f"Advanced {n} READY tickets to PLANNING (plan exists)")
+    except Exception as e:
+        logger.warning(f"Ready->Planning advance failed: {e}")
 
     for name, bot in bots.items():
         if not bot.config.enabled:
