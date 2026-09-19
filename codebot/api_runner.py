@@ -40,9 +40,9 @@ from typing import Any
 from codebot.file_lock import flock, LOCK_EX, LOCK_UN, LOCK_NB
 
 try:
-    from bots.api_tools import bash, read, write, edit, grep, glob
+    from bots.api_tools import bash, read, write, edit, grep, glob, batch_read, batch_grep
 except ImportError:
-    from codebot.api_tools import bash, read, write, edit, grep, glob
+    from codebot.api_tools import bash, read, write, edit, grep, glob, batch_read, batch_grep
 
 try:
     from codebot.adaptive_rate_limiter import rate_limiter as _rate_limiter
@@ -450,7 +450,7 @@ API_TIMEOUT = 30
 
 API_URL = _DEFAULT_API_URL
 API_TIMEOUT = 30
-MAX_TOOL_ITERATIONS = 150
+MAX_TOOL_ITERATIONS = 200
 MAX_RETRIES = 5
 MAX_TIMEOUT_RETRIES = 3
 BACKOFFS = [2, 4, 8, 16, 32]
@@ -637,6 +637,38 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "batch_read",
+            "description": "Read multiple files in one call. More efficient than multiple read calls.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "List of file paths to read"},
+                    "limit_per_file": {"type": "integer", "description": "Max lines per file (default 200)"},
+                },
+                "required": ["paths"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "batch_grep",
+            "description": "Search multiple regex patterns in one call. More efficient than multiple grep calls.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patterns": {"type": "array", "items": {"type": "string"}, "description": "List of regex patterns to search"},
+                    "path": {"type": "string", "description": "Directory or file to search in"},
+                    "include": {"type": "string", "description": "File pattern to include (e.g., '*.py')"},
+                    "limit_per_pattern": {"type": "integer", "description": "Max matches per pattern (default 50)"},
+                },
+                "required": ["patterns", "path"],
+            },
+        },
+    },
 ]
 
 try:
@@ -744,6 +776,8 @@ _TOOL_MAP = {
     "file_read": read,
     "file_write": write,
     "create_ticket": _create_ticket_tool,
+    "batch_read": batch_read,
+    "batch_grep": batch_grep,
 }
 if _a11y_snapshot is not None:
     _TOOL_MAP["screenshot"] = _a11y_snapshot

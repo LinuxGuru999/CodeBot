@@ -141,8 +141,8 @@ class CodeBotAdapter(ProjectAdapter):
             "architecture_reviewer", "correctness_reviewer", "ux_reviewer",
         })
         thinking_models = (
-            "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
-            "qwen-3.6-plus-thinking", "qwen-3.5-plus-thinking",
+            "qwen-3.8-max", "qwen-3.7-max",
+            "qwen-3.6-plus", "qwen-3.5-plus",
         )
         non_thinking_cycle = (
             "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.8-max",

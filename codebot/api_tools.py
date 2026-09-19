@@ -387,6 +387,85 @@ def a11y_snapshot(url, output_path=None, viewport_width=1280, viewport_height=90
         return {"success": False, "output": "", "error": str(exc)}
 
 
+def batch_read(paths: list[str], limit_per_file: int = 200) -> dict:
+    """Read multiple files in one call. Returns combined output."""
+    results = []
+    total_bytes = 0
+    MAX_TOTAL = 500_000
+
+    for path in paths:
+        if total_bytes >= MAX_TOTAL:
+            results.append(f"\n--- {path} ---\n[truncated: total limit reached]")
+            break
+        try:
+            p = _resolve(path)
+            if not p.exists():
+                results.append(f"\n--- {path} ---\n[not found]")
+                continue
+            if not p.is_file():
+                results.append(f"\n--- {path} ---\n[not a file]")
+                continue
+            txt = p.read_text(encoding="utf-8", errors="replace")
+            lines = txt.splitlines()
+            if len(lines) > limit_per_file:
+                txt = "\n".join(lines[:limit_per_file]) + f"\n... ({len(lines)} total lines)"
+            total_bytes += len(txt.encode("utf-8"))
+            results.append(f"\n--- {path} ---\n{txt}")
+        except Exception as e:
+            results.append(f"\n--- {path} ---\n[error: {e}]")
+
+    combined = "".join(results)
+    if len(combined.encode("utf-8")) > MAX_TOTAL:
+        combined = combined[:MAX_TOTAL] + "\n[truncated]"
+
+    return {"success": True, "output": combined, "error": None}
+
+
+def batch_grep(patterns: list[str], path: str = ".", include: str = "", limit_per_pattern: int = 50) -> dict:
+    """Search multiple patterns in one call. Returns combined matches."""
+    import glob as _glob
+    results = []
+    total_matches = 0
+
+    for pat in patterns:
+        try:
+            regex = re.compile(pat, re.IGNORECASE)
+        except re.error:
+            results.append(f"\n--- pattern: {pat} ---\n[invalid regex]")
+            continue
+
+        matches = []
+        search_path = _resolve(path)
+        if search_path.is_file():
+            file_list = [search_path]
+        else:
+            pattern = str(search_path / "**" / (include or "*"))
+            file_list = [Path(f) for f in _glob.glob(pattern, recursive=True) if Path(f).is_file()]
+
+        for fp in file_list[:200]:
+            try:
+                txt = fp.read_text(encoding="utf-8", errors="replace")
+                for i, line in enumerate(txt.splitlines(), 1):
+                    if regex.search(line):
+                        matches.append(f"{fp}:{i}: {line.strip()[:200]}")
+                        if len(matches) >= limit_per_pattern:
+                            break
+            except Exception:
+                continue
+            if len(matches) >= limit_per_pattern:
+                break
+
+        total_matches += len(matches)
+        results.append(f"\n--- pattern: {pat} ({len(matches)} matches) ---")
+        results.extend(matches[:limit_per_pattern])
+
+    combined = "\n".join(results)
+    if len(combined.encode("utf-8")) > 200_000:
+        combined = combined[:200_000] + "\n[truncated]"
+
+    return {"success": True, "output": combined, "error": None}
+
+
 # Aliases: bots call these "read" and "write", keep old names for backward compat
 file_read = read
 file_write = write
