@@ -38,7 +38,7 @@ LEGACY_ROLE_MAP: dict[str, str] = {
     "issues": "bug_hunter",
     "bug_triage": "ticket_triager",
     "features": "architecture_auditor",
-    "feature_decomposer": "feature_decomposer",
+    "decomposer": "decomposer",
     "code_quality": "simplicity_reviewer",
     "security_auditor": "security_auditor",
     "test_coverage": "test_gap_auditor",

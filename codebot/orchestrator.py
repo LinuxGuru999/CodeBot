@@ -231,7 +231,7 @@ REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
     "documentation_reviewer",
 })
 PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
-    "feature_decomposer",
+    "decomposer",
     "implementation_planner",
 })
 
@@ -504,7 +504,7 @@ def rotating_slots(max_concurrent: int) -> int:
 # With 10 slots: 6 tier-1, 3 tier-2, 1 tier-3 max.
 TIER_PRIORITY: dict[str, int] = {
     # Tier 1.1 — critical path (must never starve)
-    "issues": 11, "bug_triage": 11, "build": 11, "github_bot": 11, "feature_decomposer": 11,
+    "issues": 11, "bug_triage": 11, "build": 11, "github_bot": 11, "decomposer": 11,
     # Tier 1.2 — secondary core (rotate by queue depth)
     "gitsync": 12,
     "worker-1": 12, "worker-2": 12, "worker-3": 12, "worker-4": 12,
@@ -2621,7 +2621,7 @@ def _escalate_failure(name: str, bot: BotState, exit_code: int | None, bots: dic
         else:
             logger.info(f"Escalation L2 for '{name}': no fallback model, retry same")
     elif n == 3:
-        logger.info(f"Escalation L3 for '{name}': requesting task split via feature_decomposer")
+        logger.info(f"Escalation L3 for '{name}': requesting task split via decomposer")
         _request_task_split(name)
 
 
@@ -3114,40 +3114,6 @@ def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
     return recovered
 
 
-def _advance_ready_to_planning() -> int:
-    """Move READY tickets with plans to PLANNING state."""
-    try:
-        from codebot.ticket_engine import TicketStore, TicketState
-    except ImportError:
-        return 0
-
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
-        return 0
-
-    plans_dir = STATE_DIR / "plans"
-    if not plans_dir.exists():
-        return 0
-
-    ready = ts.list_by_state(TicketState.READY)
-    advanced = 0
-    for ticket in ready:
-        plan_file = plans_dir / f"{ticket.id}.plan.json"
-        if plan_file.exists():
-            try:
-                ts.transition(ticket.id, TicketState.PLANNING)
-                logger.info(f"Advanced {ticket.id} READY -> PLANNING (plan exists)")
-                advanced += 1
-            except Exception as e:
-                logger.debug(f"Failed to advance {ticket.id} to PLANNING: {e}")
-    return advanced
-
-
 def _route_ready_tickets() -> int:
     """Route all READY tickets into DECOMPOSE for breakdown before planning."""
     try:
@@ -3184,7 +3150,7 @@ def _route_ready_tickets() -> int:
 
 
 DECOMPOSER_ROLE_NAMES: frozenset[str] = frozenset({
-    "feature_decomposer", "ticket_decomposer",
+    "decomposer",
 })
 
 
@@ -3382,43 +3348,6 @@ def _dispatch_planning_agents(bots: dict[str, BotState]) -> int:
     return dispatched
 
 
-def _recover_stuck_planning_tickets() -> int:
-    """Advance PLANNING tickets that have been stuck too long."""
-    try:
-        from codebot.ticket_engine import TicketStore, TicketState
-    except ImportError:
-        return 0
-
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
-        return 0
-
-    planning = ts.list_by_state(TicketState.PLANNING)
-    if not planning:
-        return 0
-
-    now = time.time()
-    recovered = 0
-    for ticket in planning:
-        age_minutes = (now - ticket.updated_at) / 60
-        if age_minutes > 30:
-            try:
-                ts.transition(ticket.id, TicketState.READY)
-                logger.info(f"Recovered stuck planning ticket {ticket.id}: PLANNING -> READY (stuck {age_minutes:.0f}m)")
-                recovered += 1
-            except ValueError:
-                pass
-
-    return recovered
-
-
 def _process_rework_tickets(bots: dict[str, BotState]) -> int:
     store_path = STATE_DIR / "tickets.json"
     if not store_path.exists():
@@ -3564,7 +3493,7 @@ def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
     reviewing = pipeline.get("REVIEWING", 0)
     planning = pipeline.get("PLANNING", 0)
 
-    always_on = {"scheduler", "conflict_resolver", "budget_controller", "feature_decomposer"}
+    always_on = {"scheduler", "conflict_resolver", "budget_controller"}
     if name in always_on:
         return True
     if name in {"implementation_planner", "implementation_planner-2",
@@ -3613,8 +3542,7 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
                        "performance_auditor", "test_gap_auditor",
                        "documentation_auditor", "dependency_auditor",
                        "ux_auditor", "feature_hunter"}
-    always_on = {"scheduler", "conflict_resolver", "budget_controller",
-                 "feature_decomposer"}
+    always_on = {"scheduler", "conflict_resolver", "budget_controller"}
 
     for name, bot in bots.items():
         if not bot.config.enabled:
@@ -5424,7 +5352,7 @@ def main() -> None:
             key=lambda b: (dynamic.get(b.config.name, TIER_PRIORITY.get(b.config.name, 2)), b.config.interval_seconds),
         )
         needed = []
-        always_on = {"scheduler", "conflict_resolver", "budget_controller", "feature_decomposer"}
+        always_on = {"scheduler", "conflict_resolver", "budget_controller"}
         for bot in order:
             name = bot.config.name
             if name in always_on:

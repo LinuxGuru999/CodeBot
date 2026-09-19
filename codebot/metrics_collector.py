@@ -53,7 +53,7 @@ _NON_WORKER_BOTS = [
     "doc_sync", "test_coverage", "code_quality", "prompt_opt", "dependency",
     "github_bot", "build",
     "e2e_smoke", "security_auditor", "release", "alignment",
-    "feature_decomposer",
+    "decomposer",
 ]
 
 

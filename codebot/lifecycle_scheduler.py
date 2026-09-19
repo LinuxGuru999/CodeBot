@@ -75,7 +75,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
     LifecycleDispatchEntry(
         phase=LifecyclePhase.DECOMPOSE,
         ticket_states=("DECOMPOSE",),
-        agent_roles=("feature_decomposer", "ticket_decomposer"),
+        agent_roles=("decomposer",),
         handler_name="_dispatch_decompose_agents",
         requires_bots=True,
         description="Decompose tickets into sub-tickets, advance to PLANNING when done",

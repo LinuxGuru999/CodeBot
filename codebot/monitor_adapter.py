@@ -140,7 +140,7 @@ class MonitorAdapter(ProjectAdapter):
             {"name": "doc_sync", "prompt": "DOC_SYNC_BOT.md", "interval": 900, "model": "xiaomi-mimo-2.5", "tier": 3},
             {"name": "dependency", "prompt": "DEPENDENCY_BOT.md", "interval": 3600, "model": "xiaomi-mimo-2.5", "tier": 3},
             {"name": "features", "prompt": "FEATURE_BOT.md", "interval": 600, "model": "qwen-3.7-plus", "tier": 2},
-            {"name": "feature_decomposer", "prompt": "FEATURE_DECOMPOSER_BOT.md", "interval": 300, "model": "xiaomi-mimo-2.5", "tier": 1},
+            {"name": "decomposer", "prompt": "FEATURE_DECOMPOSER_BOT.md", "interval": 300, "model": "xiaomi-mimo-2.5", "tier": 1},
             {"name": "goal_steering", "prompt": "GOAL_STEERING_BOT.md", "interval": 600, "model": "qwen-3.8-max", "tier": 2},
             {"name": "ui_improve", "prompt": "UI_IMPROVE_BOT.md", "interval": 600, "model": "qwen-3.7-plus", "tier": 2},
             {"name": "release", "prompt": "RELEASE_BOT.md", "interval": 3600, "model": "qwen-3.8-max", "tier": 3, "enabled": False},
@@ -174,7 +174,7 @@ class MonitorAdapter(ProjectAdapter):
 
     def tier_priority(self) -> dict[str, int]:
         return {
-            "issues": 11, "bug_triage": 11, "build": 11, "github_bot": 11, "feature_decomposer": 11,
+            "issues": 11, "bug_triage": 11, "build": 11, "github_bot": 11, "decomposer": 11,
             "gitsync": 12,
             "worker-1": 12, "worker-2": 12, "worker-3": 12, "worker-4": 12, "worker-7": 12, "worker-8": 12,
             "worker-5": 13, "worker-6": 13, "worker-9": 13, "worker-10": 13, "worker-11": 13, "worker-12": 13,

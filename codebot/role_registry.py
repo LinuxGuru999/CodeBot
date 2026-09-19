@@ -423,25 +423,17 @@ CONTROL_ROLES: list[AgentRole] = [
         tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "state_dir"),
         incentive="Minimize cost per accepted ticket. Pause runaway agents.",
     ),
-    AgentRole(
-        name="ticket_decomposer",
-        category=RoleCategory.CONTROL,
-        description="Breaks down complex rework tickets into atomic sub-tickets",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
-        incentive="Reduce rework by breaking complex tickets into smaller, completable pieces.",
-    ),
 ]
 
 
 PLANNING_ROLES: list[AgentRole] = [
     AgentRole(
-        name="feature_decomposer",
+        name="decomposer",
         category=RoleCategory.PLANNING,
-        description="Decomposes roadmap items and epic tickets into atomic implementable work items",
+        description="Breaks down tickets into atomic implementable sub-tickets for planning",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
-        incentive="Break mountains into climbable steps. Every plan you make is actionable by someone else.",
+        incentive="Break tickets into atomic, implementable pieces. Every decomposition feeds planning.",
     ),
     AgentRole(
         name="implementation_planner",
