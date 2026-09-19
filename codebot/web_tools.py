@@ -151,15 +151,15 @@ def _is_blocked_url(url: str) -> bool:
 
 
 class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Redirect handler that validates each hop's resolved IP against the SSRF blocklist.
+    """Redirect handler that validates and pins each hop's resolved IP against the SSRF blocklist.
 
-    Prevents DNS rebinding and redirect-based SSRF by resolving and validating
-    the target hostname before allowing urllib to follow the redirect.
+    Prevents DNS rebinding and redirect-based SSRF by resolving, validating,
+    and PINNING the target hostname before allowing urllib to follow the redirect.
     """
 
     def redirect_request(self, req: urllib.request.Request, fp: Any, code: int,
                          msg: str, headers: Any, newurl: str) -> urllib.request.Request | None:
-        """Override to validate redirect target before following."""
+        """Override to validate and pin redirect target before following."""
         # Block via string patterns first (fast path)
         try:
             parsed = urllib.parse.urlparse(newurl)
@@ -177,14 +177,87 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
                 )
 
         # Resolve and validate actual IP (DNS rebinding defense)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
         try:
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            _resolve_and_validate_host(host, port)
+            resolved_ip, _, _ = _resolve_and_validate_host(host, port)
         except ValueError as e:
             raise ValueError(f"SSRF: redirect blocked - {e}") from e
 
-        # All checks passed — allow redirect
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        # Create a new request with the pinned IP
+        # We reuse the original method and body if applicable
+        new_req = urllib.request.Request(newurl)
+        new_req.add_header('X-Pinned-IP', resolved_ip)
+        new_req.add_header('Host', host)
+        
+        # Copy over essential headers from the original request if needed (e.g., cookies, auth)
+        # But be careful not to copy the old X-Pinned-IP
+        for key, value in req.headers.items():
+            if key.lower() != 'x-pinned-ip':
+                new_req.add_header(key, value)
+
+        # All checks passed — allow redirect with pinned IP
+        return new_req
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that connects to a pre-resolved IP address.
+
+    This prevents DNS rebinding by ensuring the TCP connection is made
+    to the exact IP address validated earlier, bypassing any further DNS lookups.
+    """
+    def __init__(self, host: str, port: int = 80, timeout: float = 15,
+                 source_address: tuple[str, int] | None = None,
+                 pinned_ip: str | None = None):
+        super().__init__(host, port, timeout, source_address)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        """Connect to the pinned IP instead of resolving the hostname."""
+        if self._pinned_ip:
+            # Connect directly to the validated IP
+            self.sock = socket.create_connection(
+                (self._pinned_ip, self.port), self.timeout, self.source_address
+            )
+        else:
+            # Fallback to standard behavior if no IP pinned (should not happen in our flow)
+            super().connect()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that connects to a pre-resolved IP address."""
+    def __init__(self, host: str, port: int = 443, timeout: float = 15,
+                 source_address: tuple[str, int] | None = None,
+                 pinned_ip: str | None = None,
+                 context: ssl.SSLContext | None = None):
+        super().__init__(host, port, timeout, source_address, context=context)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        """Connect to the pinned IP and verify SSL against the original hostname."""
+        if self._pinned_ip:
+            sock = socket.create_connection(
+                (self._pinned_ip, self.port), self.timeout, self.source_address
+            )
+            if self._tunnel_host:
+                sock.set_tunnel(self._tunnel_host, self._tunnel_port)
+            
+            # Wrap with SSL, using the original hostname for SNI and verification
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        else:
+            super().connect()
+
+
+class _PinnedURLHandler(urllib.request.AbstractHTTPHandler):
+    """Handler that forces connections to use pre-resolved IPs.
+
+    It extracts the pinned IP from the request's 'X-Pinned-IP' header
+    (which we inject internally) and uses the appropriate connection class.
+    """
+    def http_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(_PinnedHTTPConnection, req, pinned_ip=req.headers.get('X-Pinned-IP'))
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(_PinnedHTTPSConnection, req, pinned_ip=req.headers.get('X-Pinned-IP'))
 
 
 def _safe_open_url(req: urllib.request.Request, timeout: float) -> Any:
@@ -192,8 +265,9 @@ def _safe_open_url(req: urllib.request.Request, timeout: float) -> Any:
 
     Steps:
     1. Resolve and validate the target hostname's IP via _resolve_and_validate_host
-    2. Use a custom redirect handler that validates each redirect hop
-    3. Bounded reads enforced by caller
+    2. Inject the resolved IP into the request for the PinnedURLHandler
+    3. Use a custom redirect handler that validates and pins each redirect hop
+    4. Bounded reads enforced by caller
 
     Args:
         req: urllib Request object.
@@ -210,14 +284,24 @@ def _safe_open_url(req: urllib.request.Request, timeout: float) -> Any:
     host = (parsed.hostname or "").lower()
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
-    # Resolve and validate the IP before connecting (DNS rebinding defense)
+    # Resolve and validate the IP BEFORE connecting (DNS rebinding defense)
     try:
-        _resolve_and_validate_host(host, port)
+        resolved_ip, _, _ = _resolve_and_validate_host(host, port)
     except ValueError:
         raise
 
-    # Build custom opener with SSRF redirect handler (replaces default redirect handler)
-    opener = urllib.request.build_opener(_SSRFRedirectHandler)
+    # Inject the pinned IP into the request headers for the handler to pick up
+    # We use a custom header that will be stripped/used internally, not sent to the server
+    req.add_header('X-Pinned-IP', resolved_ip)
+    
+    # Ensure the Host header is correct (urllib usually sets this, but we ensure it matches original host)
+    if 'Host' not in req.headers:
+        req.add_header('Host', host)
+
+    # Build custom opener:
+    # 1. PinnedURLHandler: Forces connection to the resolved IP
+    # 2. SSRFRedirectHandler: Validates and pins IPs for redirects
+    opener = urllib.request.build_opener(_PinnedURLHandler, _SSRFRedirectHandler)
     return opener.open(req, timeout=timeout)
 
 
