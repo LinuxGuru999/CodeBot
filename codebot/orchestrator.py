@@ -4692,9 +4692,14 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 
             # Immediate alignment pipeline attempted above; periodic sweep remains as idempotent backstop
             if exit_code == 0 and bot.config.clean_exit_wait:
-                bot.next_run_at = now + bot.config.interval_seconds
-                logger.info(f"Bot '{name}' completed cleanly — next run in {bot.config.interval_seconds}s")
-                update_bot_state(bot, "waiting")
+                pipeline = _get_pipeline_state()
+                if _is_needed_bot(name, pipeline):
+                    bot.next_run_at = now + bot.config.interval_seconds
+                    logger.info(f"Bot '{name}' completed cleanly — next run in {bot.config.interval_seconds}s")
+                    update_bot_state(bot, "waiting")
+                else:
+                    logger.info(f"Bot '{name}' completed cleanly — not needed, staying idle")
+                    update_bot_state(bot, "waiting")
             else:
                 pipeline = _get_pipeline_state()
                 if _is_needed_bot(name, pipeline):

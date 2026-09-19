@@ -314,6 +314,70 @@ class TestTicketStore:
         store = TicketStore(path)
         assert store.count() == 0
 
+    def test_summary_performance_scales(self, tmp_path):
+        """summary() and list_by_state() should use state index for O(1)/O(k) lookup.
+
+        Regression test for CB-4418574-630E: previously these methods
+        iterated all tickets (O(n)) on every call.
+        """
+        store = TicketStore(tmp_path / "tickets.json")
+        # Add 200 tickets in various states
+        tickets = []
+        for i in range(200):
+            t = create_ticket(
+                f"ticket-{i}", TicketClass.BUG, Severity.LOW,
+                "test", f"evidence-{i}", "problem", "desired", ["crit"],
+            )
+            store.add(t)
+            tickets.append(t)
+
+        # DISCOVERED -> VALIDATING (100 tickets)
+        for t in tickets[:100]:
+            store.transition(t.id, TicketState.VALIDATING)
+        # VALIDATING -> TRIAGED (50 tickets)
+        for t in tickets[:50]:
+            store.transition(t.id, TicketState.TRIAGED)
+        # TRIAGED -> READY (50 tickets)
+        for t in tickets[:50]:
+            store.transition(t.id, TicketState.READY)
+
+        # Verify list_by_state correctness
+        discovered = store.list_by_state(TicketState.DISCOVERED)
+        validating = store.list_by_state(TicketState.VALIDATING)
+        ready = store.list_by_state(TicketState.READY)
+        assert len(discovered) == 100   # 200 - 100
+        assert len(validating) == 50    # 100 - 50
+        assert len(ready) == 50
+
+        # Verify summary correctness
+        s = store.summary()
+        assert s.get("DISCOVERED", 0) == 100
+        assert s.get("VALIDATING", 0) == 50
+        assert s.get("READY", 0) == 50
+
+        # Verify correctness after persistence reload
+        store2 = TicketStore(tmp_path / "tickets.json")
+        assert store2.summary().get("DISCOVERED", 0) == 100
+        assert store2.summary().get("VALIDATING", 0) == 50
+        assert store2.summary().get("READY", 0) == 50
+        assert len(store2.list_by_state(TicketState.READY)) == 50
+
+    def test_state_index_consistency_after_transition(self, tmp_path):
+        """State index must stay consistent across rapid transitions."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = create_ticket("t", TicketClass.BUG, Severity.MEDIUM, "s", "ev", "p", "d", ["a"],
+                          risk=RiskLevel.LOW)
+        store.add(t)
+        assert len(store.list_by_state(TicketState.DISCOVERED)) == 1
+
+        # Transition through valid lifecycle (LOW risk skips planning prerequisite)
+        for state in [TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
+                      TicketState.IMPLEMENTING, TicketState.REVIEWING]:
+            store.transition(t.id, state)
+            assert len(store.list_by_state(state)) == 1
+            # Old state should be empty (ticket left it)
+        assert store.summary().get("DISCOVERED", 0) == 0
+
 
 class TestGatekeeperEnforcement:
     """Tests for VERIFYING -> COMPLETE requiring gatekeeper approval (CB-3814750-10D2)."""

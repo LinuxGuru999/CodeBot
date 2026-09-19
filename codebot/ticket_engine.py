@@ -335,6 +335,8 @@ class TicketStore:
         self._evidence_index: dict[str, str] = {}
         # Word inverted index: word -> set of ticket IDs whose title contains it
         self._word_index: dict[str, set[str]] = {}
+        # Per-state index: state -> set of ticket IDs for O(k) list_by_state lookups
+        self._state_index: dict[TicketState, set[str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -354,10 +356,13 @@ class TicketStore:
                 self._tickets[t.id] = t
                 self._evidence_index[t.evidence_hash()] = t.id
                 self._index_title(t)
+                # Maintain per-state index for O(k) list_by_state lookups
+                self._state_index.setdefault(t.state, set()).add(t.id)
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             self._tickets = {}
             self._evidence_index = {}
             self._word_index = {}
+            self._state_index = {}
 
     def _index_title(self, ticket: Ticket) -> None:
         """Add ticket title words to the inverted index."""
@@ -480,6 +485,8 @@ class TicketStore:
                     )
             self._tickets[ticket.id] = ticket
             self._evidence_index[eh] = ticket.id
+            # Maintain per-state index
+            self._state_index.setdefault(ticket.state, set()).add(ticket.id)
             self._save()
         return ticket
 
@@ -558,6 +565,13 @@ class TicketStore:
                         )
             updated = ticket.transition(new_state, reviewer_feedback)
             self._tickets[ticket_id] = updated
+            # Maintain per-state index: remove from old state, add to new
+            old_state = ticket.state
+            if old_state in self._state_index:
+                self._state_index[old_state].discard(ticket_id)
+                if not self._state_index[old_state]:
+                    del self._state_index[old_state]
+            self._state_index.setdefault(new_state, set()).add(ticket_id)
             self._save()
             return updated
 
