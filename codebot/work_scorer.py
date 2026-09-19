@@ -63,10 +63,7 @@ class ScoredWorkItem:
 
     @property
     def total_score(self) -> float:
-        return self.score
-
-    @property
-    def total_score(self) -> float:
+        """Return the computed utility score for this work item."""
         return self.score
 
     @property

@@ -867,29 +867,29 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
         return 0
     # header
     if verbose:
-        print(f"{'Agent':<24s} {'Status':<10s} {'HB':>8s} {'LOG':>8s} {'ITER':>5s} {'TASK':<20s} {'PID':>7s} {'RST':>4s} {'ERR':>4s} {'MODEL':<14s}")
-        print("-" * 110)
+        print(f"{'Agent':<24s} {'Status':<10s} {'HB':>8s} {'LOG':>8s} {'ITER':>5s} {'TASK':<20s} {'PID':>7s} {'RST':>4s} {'ERR':>4s} {'MODEL':<20s}")
+        print("-" * 116)
         for a in agents:
             hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
             loga = _age_str(a["log_age"], enabled) if a["log_age"] is not None else _c("-", "gray", enabled)
             bucket = _bucket_color(a["bucket"], enabled)
             pid_s = str(a["pid"]) if a["pid"] else "-"
             task = (a["current_task"] or "")[:20]
-            model = a["model"] or "-"
+            model = (a["model"] or "-")[:20]
             rst = str(a["restart_count"]) if a["restart_count"] is not None else "-"
             err = str(a["consecutive_errors"]) if a["consecutive_errors"] is not None else "-"
-            print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {str(a['iteration']):>5s} {task:<20s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<14s}")
+            print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {str(a['iteration']):>5s} {task:<20s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<20s}")
     else:
-        print(f"{'Agent':<24s} {'Status':<10s} {'HB Age':>8s} {'PID':>7s} {'ITER':>5s} {'TASK':<20s} {'MODEL':<14s}")
-        print("-" * 95)
+        print(f"{'Agent':<24s} {'Status':<10s} {'HB Age':>8s} {'PID':>7s} {'ITER':>5s} {'TASK':<20s} {'MODEL':<20s}")
+        print("-" * 101)
         for a in agents:
             bucket = _bucket_color(a["bucket"], enabled)
             pid_s = str(a["pid"]) if a["pid"] else "-"
             task = (a["current_task"] or "")[:20]
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
             hb_c = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("?", "gray", enabled)
-            model = a["model"] or "-"
-            print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb_c, 8, 'right')} {pid_s:>7s} {iter_s:>5s} {task:<20s} {model:<14s}")
+            model = (a["model"] or "-")[:20]
+            print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb_c, 8, 'right')} {pid_s:>7s} {iter_s:>5s} {task:<20s} {model:<20s}")
     # summary
     cnt = Counter(a["bucket"] for a in agents)
     print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
@@ -1678,8 +1678,8 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     if not agents:
         lines.append("│ No agents found.")
     else:
-        lines.append(f"│ {'Agent':<24s} {'State':<10s} {'HB':>8s} {'LOG':>8s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s} {'MODEL':<14s}")
-        lines.append(_c("│ " + "─"*95, "dim", enabled))
+        lines.append(f"│ {'Agent':<24s} {'State':<10s} {'HB':>8s} {'LOG':>8s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s} {'MODEL':<20s}")
+        lines.append(_c("│ " + "─"*101, "dim", enabled))
         for a in agents[:20]:
             bucket = _bucket_color(a["bucket"], enabled)
             hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
@@ -1689,11 +1689,11 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
             err = str(a["consecutive_errors"]) if a.get("consecutive_errors") not in (None, "") else "-"
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
             name = a["name"][:24]
-            model = a["model"] or "-"
-            lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s} {model:<14s}")
+            model = (a["model"] or "-")[:20]
+            lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s} {model:<20s}")
         if len(agents) > 32:
             lines.append(f"│ ... +{len(agents)-20} more (use botop status --verbose)")
-    lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
+    lines.append(_c("└──────────────────────────────────────────────────────────────────────────", "dim", enabled))
 
     # tickets
     lines.append(_c(f"┌─ Tickets — total {thr['total']} ────────────────────────────────────────────────", "bold", enabled))
@@ -1788,9 +1788,8 @@ def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_c
     while True:
         ticker += 1
         frame = _render_live_snapshot(project_root, enabled, ticker, interval)
-        # clear screen (scroll-safe: omit \033[2J to preserve scrollback/screen-reader buffer)
         if sys.stdout.isatty():
-            sys.stdout.write("\033[H")  # Move cursor home, but do not clear screen buffer
+            sys.stdout.write("\033[2J\033[H")
         else:
             sys.stdout.write("\n" + "="*80 + "\n")
         sys.stdout.write(frame + "\n")

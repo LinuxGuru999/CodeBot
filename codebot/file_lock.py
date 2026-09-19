@@ -88,10 +88,23 @@ def flock(fd: int | TextIO, operation: int) -> None:
                 # Save and restore position since locking affects it
                 pos = os.lseek(fd, 0, os.SEEK_CUR)
                 os.lseek(fd, 0, os.SEEK_SET)
-                mode = _msvcrt.LK_NBLCK if non_blocking else _msvcrt.LK_LOCK  # type: ignore[union-attr]
-                # Lock a large region (up to 1GB) to simulate whole-file lock
-                _msvcrt.locking(fd, mode, 0x3FFFFFFF)  # type: ignore[union-attr]
-                os.lseek(fd, pos, os.SEEK_SET)
+                try:
+                    # Use LK_LOCK for exclusive lock. msvcrt does not have a separate
+                    # non-blocking constant like LK_NBLCK. Instead, LK_LOCK raises
+                    # OSError (errno 36, EDEADLOCK) if the lock would block.
+                    # We rely on this exception to implement non-blocking semantics.
+                    _msvcrt.locking(fd, _msvcrt.LK_LOCK, 0x3FFFFFFF)  # type: ignore[union-attr]
+                except OSError:
+                    # If non-blocking was requested and we got an error (lock held),
+                    # re-raise to match fcntl.flock(LOCK_NB) behavior.
+                    if non_blocking:
+                        raise
+                    # If blocking was requested, we might need to retry or handle differently,
+                    # but msvcrt.locking with LK_LOCK blocks by default until success or error.
+                    # If it raised here, it's a real error (e.g., invalid fd), so re-raise.
+                    raise
+                finally:
+                    os.lseek(fd, pos, os.SEEK_SET)
         except OSError:
             raise
     else:
