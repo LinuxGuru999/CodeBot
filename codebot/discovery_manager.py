@@ -46,11 +46,7 @@ DISCOVERY_ROLES: tuple[str, ...] = (
 )
 
 # Roles that use cheap models (§28)
-CHEAP_DISCOVERY_ROLES: frozenset[str] = frozenset({
-    "test_gap_auditor",
-    "documentation_auditor",
-    "dependency_auditor",
-})
+CHEAP_DISCOVERY_ROLES: frozenset[str] = frozenset()
 
 # Roles that need premium models
 PREMIUM_DISCOVERY_ROLES: frozenset[str] = frozenset({

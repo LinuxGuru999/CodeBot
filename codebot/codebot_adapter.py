@@ -105,7 +105,7 @@ class CodeBotAdapter(ProjectAdapter):
             ComponentDef("core", "codebot/", "backend", "python", "All portable CodeBot modules"),
             ComponentDef("tests", "tests/", "test", "python", "Unit and integration tests"),
             ComponentDef("docs", "docs/", "documentation", "markdown", "Architecture, API, deployment docs"),
-            ComponentDef("roles", "codebot/roles/", "configuration", "markdown", "37 agent role prompt templates"),
+            ComponentDef("roles", "codebot/roles/", "configuration", "markdown", "29 agent role prompt templates"),
         ]
 
     def bot_registry(self) -> list[dict[str, Any]]:
@@ -138,7 +138,7 @@ class CodeBotAdapter(ProjectAdapter):
         }
         thinking_roles = frozenset({
             "security_auditor", "architecture_auditor", "security_reviewer",
-            "architecture_reviewer", "correctness_reviewer",
+            "architecture_reviewer", "correctness_reviewer", "ux_reviewer",
         })
         thinking_models = (
             "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",

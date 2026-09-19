@@ -3173,6 +3173,31 @@ def _process_rework_tickets(bots: dict[str, BotState]) -> int:
     return advanced
 
 
+def _recover_deferred_tickets() -> int:
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+        ts = TicketStore(store_path)
+        deferred = ts.list_by_state(TicketState.DEFERRED)
+    except Exception:
+        return 0
+    if not deferred:
+        return 0
+    recovered = 0
+    for ticket in deferred:
+        try:
+            ts.transition(ticket.id, TicketState.READY)
+            logger.info(f"Recovered deferred ticket {ticket.id} -> READY")
+            recovered += 1
+        except ValueError as e:
+            logger.warning(f"Deferred ticket {ticket.id} recovery failed: {e}")
+    return recovered
+
+
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
     now = time.time()
     due = [n for n, b in bots.items()
@@ -4545,6 +4570,10 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         _process_rework_tickets(bots)
     except Exception as e:
         logger.warning(f"Rework processing failed: {e}")
+    try:
+        _recover_deferred_tickets()
+    except Exception as e:
+        logger.warning(f"Deferred recovery failed: {e}")
     try:
         from codebot.prompt_optimizer import consume_triggers
         triggers_dir = STATE_DIR / "alignment_triggers"

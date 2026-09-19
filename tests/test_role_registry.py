@@ -274,3 +274,18 @@ class TestAdversarialReviewExtended:
                 assert ref in ROLE_REGISTRY, (
                     f"{role.name}.adversarial_to references '{ref}' which does not exist in ROLE_REGISTRY"
                 )
+
+    def test_no_role_is_cheap_with_advanced_coding(self):
+        """CHEAP cost class should only be used with BASIC coding level."""
+        for role in ALL_ROLES:
+            if role.required_model.cost_class == CostClass.CHEAP:
+                assert role.required_model.coding == CodingLevel.BASIC, (
+                    f"{role.name} has CHEAP cost but ADVANCED coding — mismatch"
+                )
+
+    def test_all_discovery_roles_are_standard_or_premium(self):
+        """All discovery roles should use STANDARD or PREMIUM models (no CHEAP)."""
+        for role in DISCOVERY_ROLES:
+            assert role.required_model.cost_class in (CostClass.STANDARD, CostClass.PREMIUM), (
+                f"Discovery role {role.name} has {role.required_model.cost_class.value} cost — expected STANDARD or PREMIUM"
+            )
