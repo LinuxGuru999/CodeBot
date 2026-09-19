@@ -87,3 +87,67 @@ def test_live_once_still_works():
         f"botop live --once exited {result.returncode}. stderr: {result.stderr[:500]}"
     )
     assert len(result.stdout) > 0, "botop live --once produced no output"
+
+
+def test_live_view_agents_only():
+    """`botop live --once --view agents` should show agents but not tickets."""
+    result = subprocess.run(
+        [*BOTOP, "live", "--once", "--view", "agents"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert result.returncode == 0, (
+        f"botop live --view agents exited {result.returncode}. stderr: {result.stderr[:500]}"
+    )
+    assert "Agents" in result.stdout, "agents view should contain 'Agents'"
+    assert "Tickets" not in result.stdout, "agents view should NOT contain 'Tickets'"
+
+
+def test_live_view_tickets_only():
+    """`botop live --once --view tickets` should show tickets but not agents."""
+    result = subprocess.run(
+        [*BOTOP, "live", "--once", "--view", "tickets"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert result.returncode == 0, (
+        f"botop live --view tickets exited {result.returncode}. stderr: {result.stderr[:500]}"
+    )
+    assert "Tickets" in result.stdout, "tickets view should contain 'Tickets'"
+    assert "Agents" not in result.stdout, "tickets view should NOT contain 'Agents'"
+
+
+def test_live_view_both_default():
+    """`botop live --once` default view should contain both Agents and Tickets."""
+    result = subprocess.run(
+        [*BOTOP, "live", "--once"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert result.returncode == 0, (
+        f"botop live --once exited {result.returncode}. stderr: {result.stderr[:500]}"
+    )
+    assert "Agents" in result.stdout, "default view should contain 'Agents'"
+    assert "Tickets" in result.stdout, "default view should contain 'Tickets'"
+
+
+def test_live_view_footer_shows_toggle_hints():
+    """Dashboard footer should mention 1/2/3 key toggle shortcuts."""
+    result = subprocess.run(
+        [*BOTOP, "live", "--once"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert result.returncode == 0
+    combined = result.stdout + result.stderr
+    assert "1 agents" in combined.lower() or "1=agents" in combined.lower() or "1 agents" in combined, (
+        f"footer missing view toggle hints: {combined[-300:]}"
+    )

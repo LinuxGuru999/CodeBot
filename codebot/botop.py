@@ -1775,25 +1775,24 @@ def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_c
     enabled = _supports_color(no_color)
     ticker = 0
     interval = max(0.5, float(interval))
+    current_view = view
     # If stdout is not a TTY (piped), automatically behave like --once to prevent unbounded output
     if not sys.stdout.isatty():
         once = True
     if once:
-        frame = _render_live_snapshot(project_root, enabled, ticker, interval)
+        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view)
         # don't clear screen in once mode
         print(frame)
         return 0
 
     # live loop
-    # setup terminal raw mode for q detection? keep simple: blocking sleep with KeyboardInterrupt handling
-    # Use select for non-blocking input if tty
     import select
 
     print(_c("Starting live dashboard — Ctrl-C or 'q' to quit", "dim", enabled), file=sys.stderr)
     time.sleep(0.2)
     while True:
         ticker += 1
-        frame = _render_live_snapshot(project_root, enabled, ticker, interval)
+        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view)
         if sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
         else:
@@ -1801,11 +1800,9 @@ def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_c
         sys.stdout.write(frame + "\n")
         sys.stdout.flush()
 
-        # wait interval with input poll for quit
         deadline = time.time() + interval
         while time.time() < deadline:
             if sys.stdin.isatty():
-                # non-blocking check for 'q' + enter
                 try:
                     rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
                     if rlist:
@@ -1817,18 +1814,21 @@ def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_c
                             if s in ("q", "quit", "exit"):
                                 print(_c("\nQuit live", "dim", enabled))
                                 return 0
-                            # any enter forces immediate refresh
+                            elif s in ("1", "a", "agents"):
+                                current_view = "agents"
+                            elif s in ("2", "t", "tickets"):
+                                current_view = "tickets"
+                            elif s in ("3", "b", "both"):
+                                current_view = "both"
                             break
                 except Exception:
                     time.sleep(0.2)
             else:
                 time.sleep(0.2)
                 break
-            # if not tty, just sleep interval once
             if not sys.stdin.isatty():
                 time.sleep(max(0, deadline - time.time()))
                 break
-        # loop continues — brief check for interrupt will be caught outer
 
 
 def cmd_term(project_root: Path, no_color: bool = False) -> int:
@@ -1926,11 +1926,11 @@ botop term — interactive
         # dispatch
         try:
             if cmd in ("live", "watch", "top", "dash"):
-                # parse live args inline
                 iv = 2.0
                 once = False
                 jout = False
                 nc = no_color
+                vw = "both"
                 i = 0
                 while i < len(args):
                     if args[i] in ("--interval", "-i") and i+1 < len(args):
@@ -1943,9 +1943,11 @@ botop term — interactive
                         jout=True; i+=1
                     elif args[i] == "--no-color":
                         nc=True; i+=1
+                    elif args[i] == "--view" and i+1 < len(args):
+                        vw = args[i+1]; i+=2
                     else:
                         i+=1
-                cmd_live(project_root, interval=iv, once=once, no_color=nc, json_out=jout)
+                cmd_live(project_root, interval=iv, once=once, no_color=nc, json_out=jout, view=vw)
             elif cmd == "status":
                 verbose = "--verbose" in args or "-v" in args
                 jout = "--json" in args
@@ -2180,12 +2182,14 @@ def main() -> None:
     p_live.add_argument("--once", action="store_true", help="Single snapshot, no loop")
     p_live.add_argument("--json", action="store_true", help="JSON snapshot, no UI")
     p_live.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+    p_live.add_argument("--view", choices=["both", "agents", "tickets"], default="both", help="Initial view (or use 1/2/3 keys to toggle)")
     for alias in ("watch", "top", "dash", "dashboard"):
         pa = sub.add_parser(alias, help=f"Alias for live")
         pa.add_argument("--interval", type=float, default=2.0, help="Refresh seconds")
         pa.add_argument("--once", action="store_true", help="Single snapshot")
         pa.add_argument("--json", action="store_true", help="JSON snapshot")
         pa.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+        pa.add_argument("--view", choices=["both", "agents", "tickets"], default="both", help="Initial view (or use 1/2/3 keys to toggle)")
 
     # terminal
     for tname in ("term", "terminal", "shell", "repl", "interactive"):
@@ -2252,7 +2256,7 @@ def main() -> None:
     elif cmd in ("health", "doctor", "diagnostics", "diag"):
         sys.exit(cmd_health(project_root, json_out=getattr(args, "json", False)))
     elif cmd in ("live", "watch", "top", "dash", "dashboard"):
-        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 2.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False)))
+        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 2.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both")))
     elif cmd in ("term", "terminal", "shell", "repl", "interactive"):
         sys.exit(cmd_term(project_root, no_color=getattr(args, "no_color", False)))
     else:
