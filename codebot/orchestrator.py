@@ -208,7 +208,7 @@ try:
 except ImportError:
     _GATEWAY = False
     _PG_MAX_CONCURRENT = 10
-    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "20"))
+    GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "25"))
 GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "30"))
 
 CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "60"))

@@ -34,7 +34,7 @@ from typing import Optional
 logger = logging.getLogger("prompt_gateway")
 
 MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "30")))
-MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", os.getenv("CODEBOT_MIN_SPAWN_GAP", "8")))
+MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", os.getenv("CODEBOT_MIN_SPAWN_GAP", "15")))
 
 try:
     from codebot.adaptive_rate_limiter import rate_limiter

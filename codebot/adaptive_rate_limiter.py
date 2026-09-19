@@ -77,7 +77,7 @@ class ModelRateState:
         if self.consecutive_rate_limits > 0:
             self.consecutive_rate_limits = max(0, self.consecutive_rate_limits - 1)
             if self.consecutive_rate_limits == 0:
-                self.min_interval = max(0.5, self.min_interval * 0.9)
+                self.min_interval = max(0.5, self.min_interval * 0.8)
                 self.learned_rpm = 60.0 / self.min_interval
 
 
