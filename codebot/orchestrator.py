@@ -2108,10 +2108,9 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
     if running >= cap:
         return False, f"cap {running}/{cap} running"
 
-    if not is_overture:
-        since_last = now - _last_spawn_time
-        if since_last < _SPAWN_STAGGER_SECONDS:
-            return False, f"stagger {since_last:.1f}s < {_SPAWN_STAGGER_SECONDS}s"
+    since_last = now - _last_spawn_time
+    if since_last < _SPAWN_STAGGER_SECONDS:
+        return False, f"stagger {since_last:.1f}s < {_SPAWN_STAGGER_SECONDS}s"
 
     if runner_mode == "api":
         available = _get_available_memory_mb()
@@ -5055,9 +5054,10 @@ def main() -> None:
             [b for b in bots.values() if b.config.enabled],
             key=lambda b: (TIER_PRIORITY.get(b.config.name, 2), b.config.interval_seconds),
         )
-        logger.info(f"Overture: {len(order)} bots tier-ordered, immediate start")
+        logger.info(f"Overture: {len(order)} bots tier-ordered, staggered start ({_SPAWN_STAGGER_SECONDS}s interval)")
         for bot in order:
             start_bot(bot, bots=bots, is_overture=True)
+            time.sleep(_SPAWN_STAGGER_SECONDS)
 
     logger.info("Orchestrator starting")
     logger.info(f"Health check every {args.check_interval}s")
