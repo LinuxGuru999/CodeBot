@@ -1,19 +1,21 @@
 # Task: Build the Authoritative CodeBot Development Roadmap
 
 <!--
-ROADMAP_SCHEMA: v2.0
+ROADMAP_SCHEMA: v2.1
 MACHINE_READABLE: true
 PARSER_INSTRUCTIONS:
-  - Each deliverable is marked with <!-- DELIVERABLE: id=X status=Y tier=Z -->
+  - Each deliverable is marked with <!-- DELIVERABLE: id=X status=Y tier=Z modules=... -->
   - Status values: DONE, IN_PROGRESS, PLANNED, BLOCKED
   - Tier values: T0 (critical), T1 (core), T2 (important), T3 (enhancement), T4+ (future)
   - Feature decomposer agents: parse DELIVERABLE comments, skip DONE items, create tickets for IN_PROGRESS/PLANNED
+  - Section format: "# N. Title" with subsections "### §N.A — Subtitle"
+  - Machine-readable index: .codebot/roadmap_index.json (compact, pre-parsed)
   - Human readers: ignore HTML comments, read prose normally
 LAST_AUDITED: 2026-09-18
-TOTAL_DELIVERABLES: 52
-DONE: 28
-IN_PROGRESS: 14
-PLANNED: 10
+TOTAL_DELIVERABLES: 94
+DONE: 8
+IN_PROGRESS: 17
+PLANNED: 68
 -->
 
 Create or completely rewrite `ROADMAP.md` for **CodeBot**, an autonomous software-engineering platform.

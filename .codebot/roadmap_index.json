@@ -1,0 +1,868 @@
+{
+  "schema_version": "2.1",
+  "generated": "2026-09-18",
+  "total_deliverables": 94,
+  "status_counts": {
+    "DONE": 8,
+    "IN_PROGRESS": 17,
+    "PLANNED": 68,
+    "BLOCKED": 0
+  },
+  "tier_counts": {
+    "T0": 16,
+    "T1": 38,
+    "T2": 28,
+    "T3": 7,
+    "T4": 4
+  },
+  "actionable": [
+    {
+      "id": "2.A",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Portable Project Understanding",
+      "modules": [
+        "project_adapter.py",
+        "codebot_bootstrap.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "2.D",
+      "status": "IN_PROGRESS",
+      "tier": "T0",
+      "title": "Ticket-Centered Autonomous Development",
+      "modules": [
+        "ticket_engine.py",
+        "migrate_queue.py",
+        "gatekeeper.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "2.E",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Discovery Agents",
+      "modules": [
+        "role_registry.py",
+        "findings_log.py",
+        "discovery_manager.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "2.F",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Ticket Deduplication",
+      "modules": [
+        "ticket_engine.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "2.G",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Planning Pipeline",
+      "modules": [
+        "implementation_planner.py",
+        "feature_decomposer"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "3",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Model Independence",
+      "modules": [
+        "role_registry.py",
+        "orchestrator.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "4",
+      "status": "IN_PROGRESS",
+      "tier": "T0",
+      "title": "Deterministic Verification",
+      "modules": [
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "5",
+      "status": "IN_PROGRESS",
+      "tier": "T0",
+      "title": "Central Quality Gate",
+      "modules": [
+        "gatekeeper.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "6",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Adversarial Multi-Agent Review",
+      "modules": [
+        "role_registry.py",
+        "adaptive_scheduler.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "7",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Autonomous Rework Loop",
+      "modules": [
+        "ticket_engine.py",
+        "adaptive_scheduler.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "8",
+      "status": "IN_PROGRESS",
+      "tier": "T2",
+      "title": "Documentation as Operational Memory",
+      "modules": [
+        "docs/",
+        "documentation_auditor"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "9",
+      "status": "IN_PROGRESS",
+      "tier": "T2",
+      "title": "Artifact Provenance",
+      "modules": [
+        "event_log.py",
+        "cost_tracker.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "11",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Concurrency and Safe Parallel Development",
+      "modules": [
+        "dependency_graph.py",
+        "conflict_detector.py",
+        "adaptive_scheduler.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "12",
+      "status": "IN_PROGRESS",
+      "tier": "T0",
+      "title": "Security Model",
+      "modules": [
+        "tool_policy.py",
+        "web_tools.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "15",
+      "status": "IN_PROGRESS",
+      "tier": "T2",
+      "title": "Economics Engine",
+      "modules": [
+        "cost_tracker.py",
+        "token_budget.py",
+        "scheduler_metrics.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "16",
+      "status": "IN_PROGRESS",
+      "tier": "T2",
+      "title": "Learning and Outcome Feedback",
+      "modules": [
+        "rl_engine.py",
+        "metrics_collector.py",
+        "prompt_optimizer.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "17",
+      "status": "IN_PROGRESS",
+      "tier": "T1",
+      "title": "Self-Improvement",
+      "modules": [
+        "codebot_adapter.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "14",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "QA-Stage Recommendation Model",
+      "modules": [
+        "quality_gate.py",
+        "gatekeeper.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "19",
+      "status": "PLANNED",
+      "tier": "T3",
+      "title": "Second-Project Validation",
+      "modules": [],
+      "severity": "medium"
+    },
+    {
+      "id": "20",
+      "status": "PLANNED",
+      "tier": "T3",
+      "title": "Deep Application Validation",
+      "modules": [],
+      "severity": "medium"
+    },
+    {
+      "id": "21",
+      "status": "PLANNED",
+      "tier": "T4",
+      "title": "Application Bootstrap / Greenfield Development",
+      "modules": [],
+      "severity": "low"
+    },
+    {
+      "id": "22",
+      "status": "PLANNED",
+      "tier": "T3",
+      "title": "Production Feedback Loop",
+      "modules": [
+        "telemetry.py"
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "23",
+      "status": "PLANNED",
+      "tier": "T4",
+      "title": "Business-App Factory Capability",
+      "modules": [],
+      "severity": "low"
+    },
+    {
+      "id": "24",
+      "status": "PLANNED",
+      "tier": "T4",
+      "title": "Customer Development / Agency Workflow",
+      "modules": [],
+      "severity": "low"
+    },
+    {
+      "id": "27",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Reliability Requirements",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "28",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Observability",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "29",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Success Metrics",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "30",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Roadmap Structure",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "31",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Every Roadmap Item Must Include",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "32",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Standard Status Vocabulary",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "33",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Tier Exit Criteria",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "34",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Version Milestones",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "35",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Dependency Graph",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "36",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Explicit Non-Goals",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "37",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Architectural Principles",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "38",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Security-Sensitive Rule",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "39",
+      "status": "PLANNED",
+      "tier": "T3",
+      "title": "Autonomous Development Benchmark",
+      "modules": [],
+      "severity": "medium"
+    },
+    {
+      "id": "40",
+      "status": "PLANNED",
+      "tier": "T3",
+      "title": "Major Milestone Before Extraction",
+      "modules": [],
+      "severity": "medium"
+    },
+    {
+      "id": "41",
+      "status": "PLANNED",
+      "tier": "T3",
+      "title": "Major Milestone for Portable CodeBot",
+      "modules": [],
+      "severity": "medium"
+    },
+    {
+      "id": "42",
+      "status": "PLANNED",
+      "tier": "T3",
+      "title": "Major Milestone for Production CodeBot",
+      "modules": [],
+      "severity": "medium"
+    },
+    {
+      "id": "43",
+      "status": "PLANNED",
+      "tier": "T4",
+      "title": "Software Factory End State",
+      "modules": [],
+      "severity": "low"
+    },
+    {
+      "id": "44",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Required Output",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "45",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Final Roadmap Philosophy",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "46",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Frontend Architecture and UI Engineering",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "47",
+      "status": "PLANNED",
+      "tier": "T0",
+      "title": "Accessibility (a11y) Engineering",
+      "modules": [
+        "role_registry.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "48",
+      "status": "PLANNED",
+      "tier": "T0",
+      "title": "Web Security Hardening",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "49",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "API Design and Backend Engineering",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "50",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Testing Strategy for Web Applications",
+      "modules": [
+        "role_registry.py",
+        "quality_gate.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "51",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Performance Optimization",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "52",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "State Management and Data Flow",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "53",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Error Handling and Resilience",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "54",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Internationalization (i18n) and Localization (l10n)",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "55",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Deployment, CI/CD, and DevOps",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "56",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Developer Experience (DX) and Code Quality",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "57",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "SEO and Discoverability",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "58",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Data Layer Engineering",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "59",
+      "status": "PLANNED",
+      "tier": "T0",
+      "title": "Product Requirements Engineering",
+      "modules": [
+        "role_registry.py",
+        "implementation_planner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "60",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "UX Design and Information Architecture",
+      "modules": [
+        "role_registry.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "61",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Professional UI Design and Design Systems",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "62",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "UI Quality Review and Visual Regression Testing",
+      "modules": [
+        "quality_gate.py",
+        "role_registry.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "63",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Browser E2E Testing",
+      "modules": [
+        "quality_gate.py",
+        "role_registry.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "64",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Multi-Tenancy and Organization Management",
+      "modules": [
+        "role_registry.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "65",
+      "status": "PLANNED",
+      "tier": "T0",
+      "title": "Security Toolchain and Adversarial Review",
+      "modules": [
+        "role_registry.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "66",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Advanced Testing: Property-Based, Fuzz, Contract, and Test Quality",
+      "modules": [
+        "quality_gate.py",
+        "role_registry.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "67",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Performance Budgets and Load Testing",
+      "modules": [
+        "quality_gate.py",
+        "role_registry.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "68",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Reliability Engineering",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "69",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Observability and Operational Diagnostics",
+      "modules": [
+        "quality_gate.py",
+        "role_registry.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "70",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Release Engineering and Configuration Management",
+      "modules": [
+        "role_registry.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "71",
+      "status": "PLANNED",
+      "tier": "T0",
+      "title": "Secrets Management",
+      "modules": [
+        "tool_policy.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "72",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Third-Party Integrations",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "73",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Domain Capabilities: Billing, Email, Search, Files, Time",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "74",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Privacy, Auditability, and Compliance",
+      "modules": [
+        "quality_gate.py",
+        "role_registry.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "75",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Backup, Disaster Recovery, and Data Lifecycle",
+      "modules": [
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "76",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Admin Interfaces and Feature Flags",
+      "modules": [
+        "role_registry.py",
+        "api_runner.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "77",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Framework Knowledge and Stack Selection",
+      "modules": [
+        "role_registry.py",
+        "project_adapter.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "78",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Existing Application Ingestion and Legacy Support",
+      "modules": [
+        "role_registry.py",
+        "project_adapter.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "79",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Browser/Device Matrix and Cross-Platform",
+      "modules": [
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "80",
+      "status": "PLANNED",
+      "tier": "T0",
+      "title": "Quality Gate Expansion",
+      "modules": [
+        "quality_gate.py",
+        "gatekeeper.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "81",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Specialized Agent Roles for Web Applications",
+      "modules": [
+        "role_registry.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "82",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Application Acceptance and Production Readiness",
+      "modules": [
+        "quality_gate.py",
+        "gatekeeper.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "83",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Technical Debt, ADRs, and Decision Records",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "84",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Review Swarm, Disagreement Resolution, and QA-Stage Recommendations",
+      "modules": [
+        "role_registry.py",
+        "adaptive_scheduler.py",
+        "quality_gate.py"
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "85",
+      "status": "PLANNED",
+      "tier": "T2",
+      "title": "Benchmark Applications and Capability Matrix",
+      "modules": [],
+      "severity": "high"
+    },
+    {
+      "id": "86",
+      "status": "PLANNED",
+      "tier": "T1",
+      "title": "Maintainability After CodeBot and Architecture Diversity",
+      "modules": [],
+      "severity": "high"
+    }
+  ]
+}
