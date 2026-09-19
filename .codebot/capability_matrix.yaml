@@ -1,0 +1,354 @@
+# CodeBot Capability Matrix (ROADMAP §85.B)
+#
+# Machine-readable record of what CodeBot can actually do.
+# Statuses are grounded in source + tests, not documentation claims.
+# Agents MUST consult this matrix before claiming a capability.
+#
+# Status vocabulary:
+#   EXISTS            - implemented and verified by tests
+#   PARTIALLY_EXISTS  - implemented but with verified limitations
+#   PLANNED           - designed in ROADMAP, not yet implemented
+#   MISSING           - no implementation exists
+#
+# Last audited: 2026-09-18 (direct source inspection, 63 modules, 54 test files, 28 roles)
+
+schema_version: "1.0"
+
+capabilities:
+
+  # ── Core orchestration ──────────────────────────────────────────────
+
+  - capability: ticket_lifecycle
+    status: EXISTS
+    evidence:
+      modules: [ticket_engine.py]
+      tests: [tests/test_ticket_engine.py]
+    agents: [ticket_triager]
+    quality_gates: []
+    roadmap_id: "2.D"
+    limitations: >
+      14-state machine with SHA-256 dedup verified. Concurrent agent changes
+      introduced a PLANNING prerequisite whose tests were failing at audit time;
+      see test_ticket_engine.py failures before relying on transition behavior.
+
+  - capability: dependency_ordering
+    status: EXISTS
+    evidence:
+      modules: [dependency_graph.py]
+      tests: [tests/test_dependency_graph.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "11"
+    limitations: Cycle detection works; cycles still require manual resolution.
+
+  - capability: risk_classification
+    status: EXISTS
+    evidence:
+      modules: [risk_classifier.py]
+      tests: [tests/test_risk_classifier.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "13"
+    limitations: High-risk scores now route to QA-stage recommendations, not human approval.
+
+  - capability: implementation_planning
+    status: EXISTS
+    evidence:
+      modules: [implementation_planner.py]
+      tests: [tests/test_implementation_planner.py]
+    agents: [feature_decomposer]
+    quality_gates: []
+    roadmap_id: "2.G"
+    limitations: Plans generated; enforcement as IMPLEMENTING prerequisite partial.
+
+  - capability: quality_gates
+    status: EXISTS
+    evidence:
+      modules: [quality_gate.py, gatekeeper.py]
+      tests: [tests/test_quality_gate.py, tests/test_gatekeeper.py, tests/test_gate_enforcement.py]
+    agents: [quality_gate]
+    quality_gates: [build, unit_tests]
+    roadmap_id: "4, 5"
+    limitations: >
+      Only 5 conditional gate types implemented (security_boundary, api_change,
+      data_migration, performance_sensitive, documentation_impact). Web-app gates
+      from §80 (frontend_change, accessibility, visual_regression, e2e,
+      deployment_smoke, ui_review, auth_security_review, tenant_scope_change) MISSING.
+
+  - capability: role_system
+    status: EXISTS
+    evidence:
+      modules: [role_registry.py, role_prompt.py]
+      tests: [tests/test_role_registry.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "2.H"
+    limitations: >
+      28 roles registered across 5 categories. The 12 web-application roles from
+      §81 (requirements_engineer, ux_architect, design_system_engineer, ui_reviewer,
+      e2e_test_engineer, auth_reviewer, tenant_isolation_reviewer, devops_engineer,
+      sre_reviewer, integration_engineer, database_engineer, api_architect) MISSING.
+
+  - capability: adversarial_review
+    status: EXISTS
+    evidence:
+      modules: [role_registry.py]
+      tests: [tests/test_role_registry.py]
+    agents: [correctness_reviewer, security_reviewer, architecture_reviewer, test_reviewer, performance_reviewer, simplicity_reviewer, documentation_reviewer, ux_reviewer]
+    quality_gates: []
+    roadmap_id: "6"
+    limitations: Adversarial mappings defined; coordinated review swarm (§84.A) not orchestrated yet.
+
+  - capability: adaptive_scheduling
+    status: EXISTS
+    evidence:
+      modules: [adaptive_scheduler.py, scheduler_config.py, pipeline_state.py, queue_pressure.py, work_scorer.py, discovery_manager.py, conflict_detector.py, scheduler_metrics.py]
+      tests: [tests/test_adaptive_scheduler.py, tests/test_scheduler_simulation.py]
+    agents: [scheduler]
+    quality_gates: []
+    roadmap_id: "25"
+    limitations: 30-slot pool verified by unit tests + 1000-ticket simulation.
+
+  - capability: model_routing
+    status: EXISTS
+    evidence:
+      modules: [model_router.py, pricing_table.py]
+      tests: [tests/test_model_router.py, tests/test_pricing_table.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "3"
+    limitations: Single provider configured; multi-provider fallback chains unverified.
+
+  - capability: economics
+    status: EXISTS
+    evidence:
+      modules: [cost_tracker.py, token_budget.py]
+      tests: [tests/test_cost_tracker.py]
+    agents: [budget_controller]
+    quality_gates: []
+    roadmap_id: "15"
+    limitations: Token accounting verified; predictive cost estimation MISSING.
+
+  - capability: tool_sandbox
+    status: EXISTS
+    evidence:
+      modules: [tool_policy.py, api_tools.py]
+      tests: [tests/test_infra_modules.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "12"
+    limitations: Command allowlisting + path scoping verified; no filesystem chroot isolation.
+
+  - capability: web_research_with_ssrf_guard
+    status: EXISTS
+    evidence:
+      modules: [web_tools.py]
+      tests: [tests/test_web_tools.py, tests/test_capabilities.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "12"
+    limitations: Private-IP blocking verified by tests.
+
+  - capability: context_management
+    status: EXISTS
+    evidence:
+      modules: [context_compactor.py, scratchpad.py, task_splitter.py]
+      tests: [tests/test_context_compactor.py, tests/test_scratchpad.py, tests/test_capabilities.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "10"
+    limitations: ""
+
+  - capability: coverage_driven_test_generation
+    status: EXISTS
+    evidence:
+      modules: [coverage_runner.py, coverage_bridge.py]
+      tests: [tests/test_coverage_runner.py, tests/test_coverage_bridge.py]
+    agents: [test_gap_auditor, test_implementer]
+    quality_gates: [unit_tests]
+    roadmap_id: "2.E"
+    limitations: Generates tickets from measured gaps; pytest only.
+
+  # ── Partially verified ──────────────────────────────────────────────
+
+  - capability: telemetry_ingestion
+    status: PARTIALLY_EXISTS
+    evidence:
+      modules: [telemetry.py]
+      tests: [tests/test_telemetry.py, tests/test_telemetry_endpoint.py, tests/test_telemetry_integration.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "22"
+    limitations: HTTP ingestion endpoint tested; not wired to any production signal source.
+
+  - capability: rl_alignment_learning
+    status: PARTIALLY_EXISTS
+    evidence:
+      modules: [rl_engine.py, alignment_service.py, alignment_events.py]
+      tests: [tests/test_alignment_service.py]
+    agents: [prompt_optimizer]
+    quality_gates: []
+    roadmap_id: "16"
+    limitations: Bandit + reward pipeline exist; not connected to live agent exit events. prompt_optimizer role unscheduled.
+
+  - capability: control_plane
+    status: PARTIALLY_EXISTS
+    evidence:
+      modules: [control_server.py, control_client.py, botop.py]
+      tests: [tests/test_control_server.py, tests/test_control_server_auth.py, tests/test_control_server_rate_limiting.py, tests/test_botop_cli_contract.py]
+    agents: []
+    quality_gates: []
+    roadmap_id: "26"
+    limitations: HTTP control plane tested; see docs/API.md for endpoint contract.
+
+  # ── Planned / designed only ─────────────────────────────────────────
+
+  - capability: greenfield_application_bootstrap
+    status: PLANNED
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "21"
+    limitations: Design exists in ROADMAP §21; no implementation.
+
+  - capability: production_feedback_loop
+    status: PLANNED
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "22"
+    limitations: Architecture designed; no ingestion wiring.
+
+  - capability: worktree_isolation
+    status: PLANNED
+    evidence: {modules: [conflict_detector.py], tests: [tests/test_conflict_detector.py]}
+    agents: [conflict_resolver]
+    quality_gates: []
+    roadmap_id: "11"
+    limitations: Conflict detection exists; physical worktree/branch isolation not implemented.
+
+  # ── Missing (web application capability gaps) ──────────────────────
+
+  - capability: frontend_engineering
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: [frontend_implementer]
+    quality_gates: []
+    roadmap_id: "46"
+    limitations: frontend_implementer role exists; no design-system, component, or framework tooling.
+
+  - capability: design_system_enforcement
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "46.B, 61"
+    limitations: No design token schema, no drift detection.
+
+  - capability: accessibility_scanning
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: [ux_auditor, ux_reviewer]
+    quality_gates: []
+    roadmap_id: "47"
+    limitations: ux_auditor/ux_reviewer roles define a11y_snapshot tool; no scanner implementation or gate.
+
+  - capability: visual_regression_testing
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "62"
+    limitations: No screenshot baselines, no diff tooling.
+
+  - capability: browser_e2e_testing
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "50.C, 63"
+    limitations: No Playwright/Cypress integration anywhere in codebot/.
+
+  - capability: multi_tenancy
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "64"
+    limitations: No tenant patterns, no isolation tests, no tenant_isolation_reviewer role.
+
+  - capability: security_toolchain
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: [security_auditor, security_reviewer, dependency_auditor]
+    quality_gates: [security_boundary]
+    roadmap_id: "65"
+    limitations: >
+      Adversarial review roles exist. No SAST/DAST integration, no secret scanning,
+      no dependency-CVE gate. dependency_auditor role checks CVEs via prompt only.
+
+  - capability: authentication_authorization_roles
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "63, 81"
+    limitations: No auth_reviewer or tenant_isolation_reviewer roles; no auth scaffolding.
+
+  - capability: performance_budgets
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: [performance_auditor, performance_reviewer]
+    quality_gates: [performance_sensitive]
+    roadmap_id: "51, 67"
+    limitations: Auditor/reviewer roles exist; no budget config, no enforcement, no load testing.
+
+  - capability: release_engineering
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: [release_manager]
+    quality_gates: []
+    roadmap_id: "70"
+    limitations: release_manager role prompt exists but is unscheduled; no changelog/versioning automation.
+
+  - capability: internationalization
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "54"
+    limitations: ""
+
+  - capability: observability_generation
+    status: MISSING
+    evidence: {modules: [metrics_collector.py, anomaly_alerts.py], tests: [tests/test_anomaly_alerts.py]}
+    agents: []
+    quality_gates: []
+    roadmap_id: "69"
+    limitations: CodeBot-internal telemetry exists; generation of app-level observability MISSING.
+
+  - capability: legacy_application_ingestion
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "78"
+    limitations: No ingestion pipeline; project_adapter covers configured projects only.
+
+  - capability: benchmark_applications
+    status: MISSING
+    evidence: {modules: [], tests: []}
+    agents: []
+    quality_gates: []
+    roadmap_id: "85.A"
+    limitations: No web-app benchmark levels 1-7 implemented.
+
+  - capability: capability_tracking
+    status: EXISTS
+    evidence:
+      modules: []
+      tests: []
+    agents: []
+    quality_gates: []
+    roadmap_id: "85.B"
+    limitations: This file. Update on every capability change; status claims require evidence.
