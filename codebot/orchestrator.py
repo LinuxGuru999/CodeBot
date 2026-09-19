@@ -3928,15 +3928,10 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
         _adaptive_schedule_gate(bots)
     except Exception as e:
         logger.warning(f"Adaptive schedule gate failed: {e}")
-    # Dispatch READY tickets to idle implementers by class
     try:
-        _dispatch_tickets_to_reviewers(bots)
+        _dispatch_tickets_to_implementers(bots)
     except Exception as e:
-        logger.warning(f"Review dispatch failed: {e}")
-    try:
-        _advance_reviewed_tickets(bots)
-    except Exception as e:
-        logger.warning(f"Review advance failed: {e}")
+        logger.warning(f"Ticket dispatch failed: {e}")
     try:
         _dispatch_tickets_to_reviewers(bots)
     except Exception as e:
@@ -3949,6 +3944,10 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
         _gatekeeper_verify_tickets()
     except Exception as e:
         logger.warning(f"Gatekeeper verify failed: {e}")
+    try:
+        _process_verifying_tickets()
+    except Exception as e:
+        logger.warning(f"VERIFYING ticket processing failed: {e}")
     # Manifest readiness / ordering / packing / dispatch
     queue_text = _manifest_load_queue_text()
     ready, skipped, considered = _collect_manifest_readiness(bots, now, queue_text=queue_text)
@@ -4103,6 +4102,13 @@ def _preview_manifest_batches() -> dict:
 
 
 def _process_verifying_tickets() -> None:
+    """Process VERIFYING tickets through the Gatekeeper.
+
+    The Gatekeeper handles its own state transitions internally via
+    _transition_ticket(). We just call verify_ticket() and log the result.
+    Tickets with no changed_files skip quality gates entirely since there's
+    nothing to compile or test.
+    """
     try:
         from codebot.ticket_engine import TicketStore, TicketState
         from codebot.gatekeeper import Gatekeeper
@@ -4123,14 +4129,25 @@ def _process_verifying_tickets() -> None:
 
         for ticket in verifying:
             try:
+                changed_files = ticket.affected_modules if ticket.affected_modules else []
+                ticket_class = ticket.ticket_class.value if hasattr(ticket.ticket_class, 'value') else str(ticket.ticket_class)
+
+                if not changed_files:
+                    try:
+                        ts_fresh = TicketStore(store_path)
+                        t = ts_fresh.get(ticket.id)
+                        if t and t.state == TicketState.VERIFYING:
+                            ts_fresh.transition(ticket.id, TicketState.COMPLETE)
+                            logger.info(f"Gatekeeper: {ticket.id} -> COMPLETE (no files to verify)")
+                    except ValueError:
+                        pass
+                    continue
+
                 gk = Gatekeeper(
                     state_dir=STATE_DIR,
                     policy_path=STATE_DIR.parent / "quality_gates.yaml" if (STATE_DIR.parent / "quality_gates.yaml").exists() else None,
                     workspace=BOTS_DIR,
                 )
-
-                ticket_class = ticket.ticket_class.value if hasattr(ticket.ticket_class, 'value') else str(ticket.ticket_class)
-                changed_files = ticket.affected_modules if ticket.affected_modules else []
 
                 result = gk.verify_ticket(
                     ticket_id=ticket.id,
@@ -4140,42 +4157,7 @@ def _process_verifying_tickets() -> None:
                 )
 
                 decision = result.get('decision', '')
-                if decision == 'COMPLETE' or result.get('passed'):
-                    try:
-                        from codebot.ticket_engine import TicketState as TS
-                        ts_obj = TicketStore(store_path)
-                        t = ts_obj.get(ticket.id)
-                        if t and t.state == TicketState.VERIFYING:
-                            ts_obj.transition(ticket.id, TS.COMPLETE)
-                            logger.info(f"Gatekeeper: {ticket.id} -> COMPLETE")
-                    except Exception as e:
-                        logger.warning(f"Gatekeeper transition failed for {ticket.id}: {e}")
-                elif decision == 'REWORK':
-                    rework_count = ticket.rework_count
-                    if rework_count < 3:
-                        try:
-                            from codebot.ticket_engine import TicketState as TS
-                            ts_obj = TicketStore(store_path)
-                            t = ts_obj.get(ticket.id)
-                            if t and t.state == TicketState.VERIFYING:
-                                ts_obj.transition(ticket.id, TS.REWORK)
-                                logger.info(f"Gatekeeper: {ticket.id} -> REWORK (attempt {rework_count + 1})")
-                        except Exception as e:
-                            logger.warning(f"Gatekeeper rework transition failed for {ticket.id}: {e}")
-                    else:
-                        logger.warning(f"Gatekeeper: {ticket.id} exceeded max reworks ({rework_count})")
-                else:
-                    logger.info(f"Gatekeeper: {ticket.id} verdict={decision}, advancing to COMPLETE")
-                    try:
-                        from codebot.ticket_engine import TicketState as TS
-                        ts_obj = TicketStore(store_path)
-                        t = ts_obj.get(ticket.id)
-                        if t and t.state == TicketState.VERIFYING:
-                            ts_obj.transition(ticket.id, TS.COMPLETE)
-                    except Exception:
-                        pass
-
-                logger.info(f"Gatekeeper decision for {ticket.id}: {decision}")
+                logger.info(f"Gatekeeper: {ticket.id} -> {decision}")
 
             except Exception as e:
                 logger.error(f"Failed to process VERIFYING ticket {ticket.id}: {e}")

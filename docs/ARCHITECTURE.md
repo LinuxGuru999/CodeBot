@@ -83,6 +83,8 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `model_router.py` | ~300 | Multi-provider model routing with automatic fallback and capability matching |
 | `pricing_table.py` | ~170 | Model pricing table for monetary cost calculation (tokens to USD conversion) |
 | `alignment_service.py` | ~250 | Decoupled alignment pipeline for reward scoring and prompt evolution |
+| `integration_queue.py` | ~220 | Integration queue with dependency-aware merge ordering |
+| `stale_branch_detector.py` | ~240 | Stale branch detection and cleanup mechanism |
 
 ### Capability Modules (CAP Pipeline)
 
