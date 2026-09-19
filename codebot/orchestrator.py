@@ -89,9 +89,9 @@ _CODEBOT_PKG_DIR = Path(__file__).parent
 _project_root = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
 
 BOTS_DIR = _project_root
-STATE_DIR = _project_root / "state"
-LOGS_DIR = _project_root / "logs"
-BACKUP_DIR = _project_root / "state" / "backup"
+STATE_DIR = _project_root / ".codebot" / "state"
+LOGS_DIR = _project_root / ".codebot" / "logs"
+BACKUP_DIR = _project_root / ".codebot" / "state" / "backup"
 _QUEUE_SNAPSHOT: tuple[Path, float, str] | None = None
 _MANIFEST_SNAPSHOT: tuple[Path, tuple[tuple[str, float], ...], dict[str, dict]] | None = None
 _CHECKPOINT_SNAPSHOTS: dict[Path, tuple[float, list[str] | int]] = {}
@@ -2871,7 +2871,7 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
                 bot.config.enabled = True
                 logger.info(f"[queue-scale] Enabled '{name}': {reviewing_count} tickets awaiting review")
 
-        elif base_role in DISCOVERY_ROLE_NAMES:
+        elif base_role in DISCOVERY_ROLE_NAMES | PLANNING_ROLE_NAMES:
             if discovered_count > 50 and bot.process is None:
                 if bot.config.enabled:
                     bot.config.enabled = False
@@ -4155,7 +4155,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if not alive and bot.process is not None:
             exit_code = bot.process.returncode
             base_role = name.split("-")[0] if "-" in name else name
-            if base_role in DISCOVERY_ROLE_NAMES:
+            if base_role in DISCOVERY_ROLE_NAMES | PLANNING_ROLE_NAMES:
                 stream_path = LOGS_DIR / f"{name}.stream.json"
                 created_ticket = False
                 if stream_path.exists():
@@ -4266,7 +4266,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                     except Exception as te:
                         logger.warning(f"Ticket transition failed for {assigned_tid}: {te}")
                     bot._assigned_ticket_id = ''
-                if base_role in DISCOVERY_ROLE_NAMES:
+                if base_role in DISCOVERY_ROLE_NAMES | PLANNING_ROLE_NAMES:
                     stream_path = LOGS_DIR / f"{name}.stream.json"
                     created_ticket = False
                     if stream_path.exists():
