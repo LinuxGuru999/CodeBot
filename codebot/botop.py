@@ -1169,9 +1169,12 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
     else:
         for st in ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]:
             subset = [t for t in tickets if _ticket_state(t).upper() == st]
-            if not subset:
+            count = len(subset)
+            if count == 0:
+                print(f"\n{st} (0):")
+                print("  (empty)")
                 continue
-            print(f"\n{st} ({len(subset)}):")
+            print(f"\n{st} ({count}):")
             # sort READY by severity
             if st == "READY":
                 sev_order = {"critical":0,"high":1,"medium":2,"low":3}

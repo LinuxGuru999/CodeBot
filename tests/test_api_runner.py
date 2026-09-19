@@ -33,6 +33,7 @@ from codebot.api_runner import (
     _token_gate_allows,
     _extract_provider_usage,
     _write_bot_status,
+    _auto_commit,
     HIGH_RISK_TOKEN_MANIFESTS,
 )
 

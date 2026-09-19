@@ -385,6 +385,50 @@ class TicketStore:
         union = len(s1 | s2)
         return intersection / union if union else 0.0
 
+    def _backup(self) -> None:
+        backup_dir = self._path.parent / "ticket_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        backup_path = backup_dir / f"tickets-{ts}.json"
+        try:
+            backup_path.write_text(self._path.read_text(encoding="utf-8"), encoding="utf-8")
+            self._prune_backups(backup_dir)
+        except OSError:
+            pass
+
+    def _prune_backups(self, backup_dir: Path, keep: int = 20) -> None:
+        backups = sorted(backup_dir.glob("tickets-*.json"), key=lambda p: p.stat().st_mtime)
+        for old in backups[:-keep]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    def restore_latest_backup(self) -> bool:
+        backup_dir = self._path.parent / "ticket_backups"
+        if not backup_dir.exists():
+            return False
+        backups = sorted(backup_dir.glob("tickets-*.json"), key=lambda p: p.stat().st_mtime)
+        if not backups:
+            return False
+        latest = backups[-1]
+        try:
+            data = json.loads(latest.read_text(encoding="utf-8"))
+            if "tickets" not in data:
+                return False
+            self._tickets = {}
+            self._evidence_index = {}
+            self._word_index = {}
+            for entry in data["tickets"]:
+                t = Ticket.from_dict(entry)
+                self._tickets[t.id] = t
+                self._evidence_index[t.evidence_hash()] = t.id
+                self._index_title(t)
+            self._save()
+            return True
+        except Exception:
+            return False
+
     def _save(self) -> None:
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -396,12 +440,14 @@ class TicketStore:
             with open(lock_path, "w") as lock_fd:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
                 try:
+                    self._backup()
                     tmp = self._path.with_suffix(".tmp")
                     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                     tmp.replace(self._path)
                 finally:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
         except OSError:
+            self._backup()
             tmp = self._path.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             tmp.replace(self._path)
