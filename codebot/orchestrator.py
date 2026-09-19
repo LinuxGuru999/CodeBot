@@ -232,6 +232,7 @@ REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
 })
 PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
     "feature_decomposer",
+    "implementation_planner",
 })
 
 MAX_DISCOVERY_NO_TICKET_RUNS = 10
@@ -251,6 +252,7 @@ ALWAYS_RESPAWN = frozenset({
     "test_reviewer", "performance_reviewer", "simplicity_reviewer",
     "documentation_reviewer",
     "feature_decomposer",
+    "implementation_planner",
 })
 
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {

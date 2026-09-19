@@ -443,6 +443,14 @@ PLANNING_ROLES: list[AgentRole] = [
         tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
         incentive="Break mountains into climbable steps. Every plan you make is actionable by someone else.",
     ),
+    AgentRole(
+        name="implementation_planner",
+        category=RoleCategory.PLANNING,
+        description="Generates implementation plans for medium+ risk tickets, enabling READY -> IMPLEMENTING transitions",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
+        incentive="Unblock the implementer fleet by generating plans for every eligible READY ticket.",
+    ),
 ]
 
 
