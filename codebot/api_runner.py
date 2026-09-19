@@ -846,7 +846,7 @@ def _contract(heartbeat_file, ckpt_file):
     """Minimal shared-infra contract (<800 chars) without importing prompt_gateway."""
     return (
         "[SHARED INFRA CONTRACT]\n"
-        f"- Drain: run `bash` with `test -f state/.drain || test -f state/.drain_<bot_name> && echo DRAIN` before each task. If output contains DRAIN, exit 0 cleanly. Do NOT use the `read` tool for drain checks.\n"
+        f"- Drain: run `bash` with `python3 -c \"import os,sys; sys.exit(0 if os.path.exists('state/.drain') else 1)\"` before each task. If exit code is 0, exit 0 cleanly. Do NOT use the `read` tool for drain checks.\n"
         f"- Heartbeat: a background thread writes your heartbeat every 30s automatically. You do NOT need to write heartbeat files manually. Focus entirely on your task.\n"
         f"- Checkpoint: after each task write <4KB JSON to {ckpt_file} using the `write` tool. Keys: bot, updated_at, reason.\n"
         "- Bound: bounded delegated task, not a daemon. Do atomic work, checkpoint, exit 0 on drain or completion."
