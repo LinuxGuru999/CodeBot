@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from codebot import alignment_service
+from typing import Protocol, Any
 
 # ---------------------------------------------------------------------------
 # Cross-platform file locking
@@ -100,6 +100,7 @@ ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
 # T4.3 incremental adapter seam: when a ProjectAdapter is provided, its paths
 # override the defaults above.
 _adapter_instance: Any = None
+_alignment_service_instance: Any = None
 
 try:
     from codebot.adaptive_rate_limiter import rate_limiter
@@ -107,6 +108,53 @@ try:
 except ImportError:
     _HAS_RATE_LIMITER = False
     rate_limiter = None
+
+
+class AlignmentServiceProtocol(Protocol):
+    """Interface for alignment service to decouple orchestrator from implementation."""
+    def run_alignment_pipeline(self, bot_name: str, timeout: int = ...) -> bool: ...
+    def run_alignment_pipeline_for_all(self) -> None: ...
+
+
+class DefaultAlignmentService:
+    """Default implementation that lazily imports alignment_service."""
+    def run_alignment_pipeline(self, bot_name: str, timeout: int = 120) -> bool:
+        try:
+            from codebot import alignment_service
+            return alignment_service.run_alignment_pipeline(bot_name, timeout)
+        except ImportError:
+            try:
+                import alignment_service
+                return alignment_service.run_alignment_pipeline(bot_name, timeout)
+            except ImportError:
+                logger.warning("alignment_service not available, skipping alignment pipeline")
+                return False
+
+    def run_alignment_pipeline_for_all(self) -> None:
+        try:
+            from codebot import alignment_service
+            alignment_service.run_alignment_pipeline_for_all()
+        except ImportError:
+            try:
+                import alignment_service
+                alignment_service.run_alignment_pipeline_for_all()
+            except ImportError:
+                logger.warning("alignment_service not available, skipping alignment sweep")
+                return
+
+
+def get_alignment_service() -> AlignmentServiceProtocol:
+    """Get the current alignment service instance, creating default if none set."""
+    global _alignment_service_instance
+    if _alignment_service_instance is None:
+        _alignment_service_instance = DefaultAlignmentService()
+    return _alignment_service_instance
+
+
+def set_alignment_service(service: AlignmentServiceProtocol) -> None:
+    """Inject a custom alignment service implementation (for testing or overrides)."""
+    global _alignment_service_instance
+    _alignment_service_instance = service
 
 
 def set_project_adapter(adapter: Any) -> None:

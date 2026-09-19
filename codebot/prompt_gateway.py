@@ -142,7 +142,7 @@ def _common_contract(bot: str, heartbeat_file: str, ckpt_file: str, state_dir: s
     align_scores = sd / "alignment_scores.json"
     align_trigger = sd / "alignment_triggers" / f"{bot}.evolve.json"
     return f"""[SHARED INFRA CONTRACT — identical for every bot]
-- Drain: before startup and between atomic tasks, check `{drain}` or `{update_lock}` via `read` tool. If either exists, exit 0 cleanly; you will be respawned.
+- Drain: before startup and between atomic tasks, run `bash` with `test -f {drain} || test -f {update_lock} && echo DRAIN` to check for drain. If output contains DRAIN, exit 0 cleanly; you will be respawned. Do NOT use the `read` tool for drain checks.
 - Heartbeat: write float Unix time to {heartbeat_file} at startup, after every atomic task, and every 60s while waiting on subagents. Never exceed 120s gap or you are restarted. Use the `write` tool with just the timestamp string.
 - Checkpoint: after every atomic task (and at startup) write <4KB JSON to {ckpt_file} via tmp+replace. Keys: bot, scan_iteration, current_task, completed_tasks, queue_remaining, findings_so_far, updated_at, reason. On startup resume current_task/queue_remaining, never redo completed_tasks; prefer an injected CHECKPOINT HANDOFF block over the file.
 - Alignment: on startup and clean exit read {align_scores} and {align_trigger}. Score 80+ clears stale triggers; score <60 with fresh trigger means prompt evolution will improve this agent's prompt. You do NOT self-evolve.
