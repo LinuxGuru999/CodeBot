@@ -152,14 +152,11 @@ class CodeBotAdapter(ProjectAdapter):
         model_overrides = {
             "feature_hunter": "qwen-3.7-plus",
             "feature_decomposer": "xiaomi-mimo-2.5",
-            "implementation_planner": "qwen-3.7-plus",
-            "implementation_planner-2": "qwen-3.8-max",
-            "implementation_planner-3": "qwen-3.6-plus",
-            "implementation_planner-4": "xiaomi-mimo-2.5",
             "bug_hunter": "qwen-3.7-max",
         }
         cycle_idx = 0
         think_idx = 0
+        planner_idx = 0
         for role in ALL_ROLES:
             interval = interval_map.get(role.category.value, 600)
             if role.name in thinking_roles:
@@ -168,6 +165,9 @@ class CodeBotAdapter(ProjectAdapter):
             elif role.name in model_overrides:
                 model = model_overrides[role.name]
                 cycle_idx += 1
+            elif role.name.startswith("implementation_planner"):
+                model = non_thinking_cycle[planner_idx % len(non_thinking_cycle)]
+                planner_idx += 1
             else:
                 model = non_thinking_cycle[cycle_idx % len(non_thinking_cycle)]
                 cycle_idx += 1
@@ -188,7 +188,8 @@ class CodeBotAdapter(ProjectAdapter):
             if role.name == "implementation_planner":
                 for i in range(2, 5):
                     planner_name = f"implementation_planner-{i}"
-                    planner_model = model_overrides.get(planner_name, model)
+                    planner_model = non_thinking_cycle[planner_idx % len(non_thinking_cycle)]
+                    planner_idx += 1
                     planner_fallback = _MODEL_FALLBACKS.get(planner_model, "xiaomi-mimo-2.5")
                     registry.append({
                         "name": planner_name,
