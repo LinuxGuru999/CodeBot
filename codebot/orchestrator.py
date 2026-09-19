@@ -1208,14 +1208,33 @@ def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
         snapshot_time=now,
     )
 
+    try:
+        ready_tickets = ts.list_by_state(TicketState.READY)
+        review_tickets = ts.list_by_state(TicketState.REVIEWING)
+        verify_tickets = ts.list_by_state(TicketState.VERIFYING)
+        rework_tickets = ts.list_by_state(TicketState.REWORK)
+        planning_tickets = ts.list_by_state(TicketState.PLANNING)
+        candidate_tickets = (
+            ts.list_by_state(TicketState.DISCOVERED)
+            + ts.list_by_state(TicketState.VALIDATING)
+            + ts.list_by_state(TicketState.TRIAGED)
+        )
+    except Exception:
+        ready_tickets = []
+        review_tickets = []
+        verify_tickets = []
+        rework_tickets = []
+        planning_tickets = []
+        candidate_tickets = []
+
     _ADAPTIVE_SCHEDULER.tick(
         pipeline=ps,
-        ready_tickets=[],
-        review_tickets=[],
-        verify_tickets=[],
-        rework_tickets=[],
-        planning_tickets=[],
-        candidate_tickets=[],
+        ready_tickets=ready_tickets,
+        review_tickets=review_tickets,
+        verify_tickets=verify_tickets,
+        rework_tickets=rework_tickets,
+        planning_tickets=planning_tickets,
+        candidate_tickets=candidate_tickets,
         now=now,
     )
 
@@ -4472,9 +4491,14 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if _is_queued(bot):
             ok, why = _spawn_gate(bots=bots, is_queued=True)
             if ok:
-                logger.info(f"Dequeuing '{name}' — slot available")
-                update_bot_state(bot, "starting")
-                start_bot(bot, bots=bots)
+                pipeline = _get_pipeline_state()
+                if _is_needed_bot(name, pipeline):
+                    logger.info(f"Dequeuing '{name}' — slot available")
+                    update_bot_state(bot, "starting")
+                    start_bot(bot, bots=bots)
+                else:
+                    logger.info(f"Dequeuing '{name}' — not needed, staying idle")
+                    update_bot_state(bot, "waiting")
 
     for name, bot in list(bots.items()):
         if not bot.config.enabled or bot.process is not None:

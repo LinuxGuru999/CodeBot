@@ -117,6 +117,11 @@ def calculate_pressure(
     planning_count: int | None = None,
     candidate_count: int | None = None,
     integration_queue_count: int | None = None,
+    discovered_count: int | None = None,
+    validating_count: int | None = None,
+    triaged_count: int | None = None,
+    blocked_count: int | None = None,
+    deferred_count: int | None = None,
     active_by_role: dict[str, int] | None = None,
     total_slots: int | None = None,
     backlog_low_watermark: int = 20,
@@ -132,6 +137,11 @@ def calculate_pressure(
         rework_count = ps.rework_count
         planning_count = ps.planning_count
         candidate_count = ps.candidate_count
+        discovered_count = getattr(ps, "discovered_count", 0)
+        validating_count = getattr(ps, "validating_count", 0)
+        triaged_count = getattr(ps, "triaged_count", 0)
+        blocked_count = getattr(ps, "blocked_count", 0)
+        deferred_count = getattr(ps, "deferred_count", 0)
         integration_queue_count = getattr(ps, "integration_queue_depth", getattr(ps, "integration_queue_count", 0))
         total_slots = getattr(ps, "total_slots", getattr(ps, "max_slots", 30))
         cats = ps.workers_by_category() if callable(getattr(ps, "workers_by_category", None)) else getattr(ps, "workers_by_category", {})
@@ -150,6 +160,11 @@ def calculate_pressure(
     rework_count = rework_count or 0
     planning_count = planning_count or 0
     candidate_count = candidate_count or 0
+    discovered_count = discovered_count or 0
+    validating_count = validating_count or 0
+    triaged_count = triaged_count or 0
+    blocked_count = blocked_count or 0
+    deferred_count = deferred_count or 0
     integration_queue_count = integration_queue_count or 0
     active_by_role = active_by_role or {}
     total = max(total_slots or 30, 1)
@@ -180,12 +195,40 @@ def calculate_pressure(
     planning_capacity = max(planning_active + free, 1)
     planning_pressure = planning_demand / planning_capacity if planning_demand > 0 else 0.0
 
+    # Discovery gate: only start discovery when ALL non-complete queues are drained.
+    # Every lifecycle stage works tickets immediately upon entry — discovery is
+    # the last resort when there is genuinely nothing left to do.
+    non_complete_total = (
+        discovered_count
+        + validating_count
+        + triaged_count
+        + ready_count
+        + planning_count
+        + implementing_count
+        + reviewing_count
+        + verifying_count
+        + rework_count
+        + blocked_count
+        + deferred_count
+        + candidate_count
+    )
     backlog = ready_count + planning_count
     low = backlog_low_watermark
     target = backlog_target
     high = backlog_high_watermark
 
-    if backlog >= high:
+    if non_complete_total > 0:
+        # Pipeline still has work — suppress discovery entirely
+        discovery_pressure = 0.0
+        if backlog >= high:
+            backlog_ratio = 1.0
+        elif backlog >= target:
+            backlog_ratio = (backlog - target) / max(high - target, 1)
+        elif backlog >= low:
+            backlog_ratio = (backlog - low) / max(target - low, 1) * 0.5
+        else:
+            backlog_ratio = backlog / max(low, 1) * 0.25 if low > 0 else 0.0
+    elif backlog >= high:
         discovery_pressure = 0.0
         backlog_ratio = 1.0
     elif backlog >= target:

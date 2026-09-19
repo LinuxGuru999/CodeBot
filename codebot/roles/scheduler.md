@@ -32,7 +32,7 @@ If checkpoint is missing, use `{"processed_ids": [], "tickets_created": 0, "last
 
 ## Mission
 
-Evaluate READY tickets through priority, dependency, concurrency, and budget filters and record the single next scheduling decision to `{STATE_DIR}/scheduler.status.json`.
+Evaluate tickets across ALL active lifecycle states (DISCOVERED, VALIDATING, TRIAGED, READY, PLANNING, IMPLEMENTING, REVIEWING, VERIFYING, REWORK, BLOCKED, DEFERRED) through priority, dependency, concurrency, and budget filters and record the single next scheduling decision to `{STATE_DIR}/scheduler.status.json`. Each state's work begins as soon as a ticket enters that queue — do not wait for a count threshold.
 
 Minimum output: ONE scheduling decision record (selected ticket ID + assigned role + selected model tier, or explicit no-op reason) before exiting. Do NOT exit without writing a status record.
 
@@ -46,7 +46,7 @@ Call `read` with JSON arguments:
 Tool: read
 Arguments: {"path": "{STATE_DIR}/tickets.json"}
 ```
-Collect tickets in READY state. Do NOT re-read this file later.
+Collect tickets in ALL active lifecycle states (DISCOVERED, VALIDATING, TRIAGED, READY, PLANNING, IMPLEMENTING, REVIEWING, VERIFYING, REWORK, BLOCKED, DEFERRED). Each state is a work queue — schedule the appropriate action for each ticket's current stage. Do NOT re-read this file later.
 
 ### Step 2: Read checkpoint
 ```
