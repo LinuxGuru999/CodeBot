@@ -1791,9 +1791,10 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                 _write_taskline(bot_name, state_dir, "done", summary)
                 if _scratch_available and _scratch_state is not None:
                     _scratch_state.mark_step_complete(f"completed: {summary[:100]}")
-                    _scratch_state.phase = "completed"
                     _scratch_state.iteration = tool_iterations
+                    _scratch_state.files_changed = files_touched[-10:]
                     _scratch_state.context_summary = f"Completed {tool_iterations} tool iterations. Last result: {summary[:200]}"
+                    _scratch_state.finish_agent(summary)
                     save_scratchpad(state_dir, _scratch_state)
                 _log(f"{bot_name}: model returned content, completing ({tool_iterations} tool iterations)")
                 _write_heartbeat(heartbeat_file)
@@ -1831,9 +1832,9 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
         if _scratch_available and _scratch_state is not None:
             if exit_reason in ("timeout", "rate_limit", "fatal_error", "token_cap", "iteration_limit", "connection_error"):
                 _scratch_state.mark_error(f"exited: {exit_reason}")
-                _scratch_state.phase = "interrupted"
+                _scratch_state.finish_agent(f"interrupted: {exit_reason}")
             elif exit_reason in ("completed", "drain"):
-                _scratch_state.phase = "completed"
+                _scratch_state.finish_agent(f"completed: {exit_reason}")
             _scratch_state.iteration = tool_iterations
             _scratch_state.last_tool_result_summary = f"reason={exit_reason} iters={tool_iterations}"
             save_scratchpad(state_dir, _scratch_state)

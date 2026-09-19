@@ -1433,10 +1433,7 @@ def _gatekeeper_verify_tickets() -> int:
                 logger.info(f"Gatekeeper: {tid} -> COMPLETE (all gates passed)")
                 try:
                     from codebot.scratchpad import clear_scratchpad
-                    for name in bots:
-                        base = name.split("-")[0] if "-" in name else name
-                        if base in IMPLEMENTER_ROLE_NAMES:
-                            clear_scratchpad(STATE_DIR, name)
+                    clear_scratchpad(STATE_DIR, tid)
                 except Exception:
                     pass
                 advanced += 1
@@ -2074,10 +2071,11 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             prompt_text = f"{prompt_text}\n\n{ticket_ctx}"
     try:
         from codebot.scratchpad import load_scratchpad, create_handoff_note
-        scratch_state = load_scratchpad(STATE_DIR, bot.config.name)
-        if scratch_state.ticket_id == assigned_tid and scratch_state.completed_steps:
-            handoff = create_handoff_note(scratch_state)
-            prompt_text = f"{prompt_text}\n\n{handoff}\nResume from where the previous agent left off. Do NOT redo completed work."
+        if assigned_tid:
+            scratch_state = load_scratchpad(STATE_DIR, assigned_tid)
+            if scratch_state.agent_history or scratch_state.completed_steps:
+                handoff = create_handoff_note(scratch_state)
+                prompt_text = f"{prompt_text}\n\n{handoff}\nResume from where the previous agent left off. Do NOT redo completed work."
     except Exception:
         pass
     try:
@@ -3721,6 +3719,16 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 bot.next_run_at = now + backoff + jitter
                 update_bot_state(bot, "waiting")
                 _rotate_model_on_error(bot, bots)
+                try:
+                    from codebot.scratchpad import load_scratchpad, save_scratchpad
+                    assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+                    if assigned_tid:
+                        scratch = load_scratchpad(STATE_DIR, assigned_tid)
+                        scratch.mark_error(f"rate-limited (exit 3), backoff {backoff+jitter}s")
+                        scratch.finish_agent(f"rate-limited")
+                        save_scratchpad(STATE_DIR, scratch)
+                except Exception:
+                    pass
                 if bot.consecutive_errors >= RATE_LIMIT_DISABLE_AFTER:
                     logger.warning(f"Bot '{name}' rate-limited {bot.consecutive_errors}x — rotated to {bot.config.model}, continuing")
                     bot.consecutive_errors = 0
@@ -4141,10 +4149,12 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 update_bot_state(bot, "waiting")
                 try:
                     from codebot.scratchpad import load_scratchpad, save_scratchpad
-                    scratch = load_scratchpad(STATE_DIR, name)
-                    scratch.mark_error(f"rate-limited (exit 3), backoff {backoff+jitter}s")
-                    scratch.remaining_steps = [s for s in scratch.remaining_steps if s not in scratch.completed_steps]
-                    save_scratchpad(STATE_DIR, scratch)
+                    assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+                    if assigned_tid:
+                        scratch = load_scratchpad(STATE_DIR, assigned_tid)
+                        scratch.mark_error(f"rate-limited (exit 3), backoff {backoff+jitter}s")
+                        scratch.finish_agent(f"rate-limited after {tool_iterations} iters")
+                        save_scratchpad(STATE_DIR, scratch)
                 except Exception:
                     pass
                 if bot.consecutive_errors >= RATE_LIMIT_DISABLE_AFTER:
