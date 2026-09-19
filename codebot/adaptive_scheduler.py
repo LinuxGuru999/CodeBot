@@ -11,9 +11,9 @@ detection, cost budgets, and historical yield data.
 
 Why
 ---
-The existing orchestrator.py uses hardcoded caps (MAX_IMPLEMENTER_SLOTS=12,
-MAX_DISCOVERY_SLOTS=6, etc.) and static role allocation. This module replaces
-that with a self-balancing pipeline that answers: "Which allocation of my 30
+The orchestrator uses a single GATEWAY_MAX_CONCURRENT limit (default 30)
+with no granular caps per role. This module replaces static allocation
+with a self-balancing pipeline that answers: "Which allocation of my 30
 workers will move the most legitimate engineering work toward VERIFIED
 completion without compromising security, quality, or budget?"
 

@@ -754,20 +754,13 @@ _MODEL_FALLBACKS: dict[str, str] = {
 }
 
 _model_rotation_index = 0
-_thinking_worker_count = 0
 
 
 def _next_worker_model() -> tuple[str, str]:
-    global _model_rotation_index, _thinking_worker_count
-    if WORKER_MODELS_THINKING and _thinking_worker_count < max(1, MAX_THINKING_CONCURRENT // 2):
-        pool = WORKER_MODELS_THINKING
-        idx = _thinking_worker_count % len(pool)
-        model = pool[idx]
-        _thinking_worker_count += 1
-    else:
-        pool = WORKER_MODELS_NON_THINKING
-        model = pool[_model_rotation_index % len(pool)]
-        _model_rotation_index += 1
+    global _model_rotation_index
+    all_models = WORKER_MODELS_THINKING + WORKER_MODELS_NON_THINKING
+    model = all_models[_model_rotation_index % len(all_models)]
+    _model_rotation_index += 1
     fallback = _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
     return model, fallback
 
@@ -3967,6 +3960,21 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 logger.info(f"Dequeuing '{name}' — slot available")
                 update_bot_state(bot, "starting")
                 start_bot(bot, bots=bots)
+
+    for name, bot in list(bots.items()):
+        if not bot.config.enabled or bot.process is not None:
+            continue
+        status_file = STATE_DIR / f"{name}.status.json"
+        if status_file.exists():
+            try:
+                sdata = json.loads(status_file.read_text())
+                if isinstance(sdata, dict) and sdata.get("current_task") in ("starting", ""):
+                    logger.info(f"Zombie '{name}' — process dead, status='{sdata.get('current_task')}' — resetting to waiting")
+                    update_bot_state(bot, "waiting")
+                    bot.restart_count = 0
+                    bot.consecutive_errors = 0
+            except Exception:
+                pass
 
     for name in due_bots_first(bots):
         bot = bots[name]
