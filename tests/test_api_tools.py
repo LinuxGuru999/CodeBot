@@ -15,6 +15,7 @@ import pytest
 import codebot.api_tools as api_tools
 from codebot.api_tools import (
     read, write, edit, grep, glob, bash, a11y_snapshot,
+    batch_read, batch_grep,
     MAX_READ_BYTES, MAX_BASH_OUTPUT, MAX_GREP_OUTPUT,
     WORKSPACE_ROOT,
 )
@@ -655,6 +656,64 @@ class TestToolPolicyIntegration:
         with patch("codebot.api_tools.resolve_workspace_path", return_value=None):
             result = glob("*.py", ".")
             assert result["error"] == "path denied"
+
+
+class TestBatchRead:
+    def test_batch_read_success(self, ws, ws_file):
+        ws_file("a.txt", "content a")
+        ws_file("b.txt", "content b")
+        result = batch_read(["a.txt", "b.txt"])
+        assert result["success"] is True
+        assert "content a" in result["output"]
+        assert "content b" in result["output"]
+
+    def test_batch_read_missing_file(self, ws, ws_file):
+        ws_file("exists.txt", "hello")
+        result = batch_read(["exists.txt", "missing.txt"])
+        assert result["success"] is True
+        assert "exists.txt" in result["output"]
+        assert "missing.txt" in result["output"]
+        assert "[not found]" in result["output"]
+
+    def test_batch_read_limit_per_file(self, ws):
+        # Create file with many lines
+        many_lines = "\n".join([f"line{i}" for i in range(300)])
+        (ws / "big.txt").write_text(many_lines)
+        result = batch_read(["big.txt"], limit_per_file=10)
+        assert result["success"] is True
+        assert "... (300 total lines)" in result["output"]
+
+    def test_batch_read_path_denied(self, ws):
+        result = batch_read(["../escape.txt"])
+        assert result["success"] is True
+        assert "[not found]" in result["output"] or "path denied" in result["output"]
+
+
+class TestBatchGrep:
+    def test_batch_grep_success(self, ws, ws_file):
+        ws_file("a.py", "def foo():\n    pass")
+        ws_file("b.py", "def bar():\n    pass")
+        result = batch_grep(["def foo", "def bar"], path=".", include="*.py")
+        assert result["success"] is True
+        assert "def foo" in result["output"]
+        assert "def bar" in result["output"]
+
+    def test_batch_grep_invalid_regex(self, ws):
+        result = batch_grep(["[unclosed"], path=".")
+        assert result["success"] is True
+        assert "[invalid regex]" in result["output"]
+
+    def test_batch_grep_limit_per_pattern(self, ws):
+        # Create file with many matching lines
+        many_matches = "\n".join([f"match line {i}" for i in range(100)])
+        (ws / "big.py").write_text(many_matches)
+        result = batch_grep(["match line"], path=".", include="*.py", limit_per_pattern=10)
+        assert result["success"] is True
+        # Should have limited output
+
+    def test_batch_grep_path_denied(self, ws):
+        result = batch_grep(["foo"], path="../escape")
+        assert result["success"] is True
 
 
 class TestAliases:

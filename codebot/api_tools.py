@@ -398,7 +398,10 @@ def batch_read(paths: list[str], limit_per_file: int = 200) -> dict:
             results.append(f"\n--- {path} ---\n[truncated: total limit reached]")
             break
         try:
-            p = _resolve(path)
+            p = resolve_workspace_path(path, WORKSPACE_ROOT)
+            if p is None:
+                results.append(f"\n--- {path} ---\n[path denied]")
+                continue
             if not p.exists():
                 results.append(f"\n--- {path} ---\n[not found]")
                 continue
@@ -435,7 +438,10 @@ def batch_grep(patterns: list[str], path: str = ".", include: str = "", limit_pe
             continue
 
         matches = []
-        search_path = _resolve(path)
+        search_path = resolve_workspace_path(path, WORKSPACE_ROOT)
+        if search_path is None:
+            results.append(f"\n--- pattern: {pat} ---\n[path denied]")
+            continue
         if search_path.is_file():
             file_list = [search_path]
         else:
