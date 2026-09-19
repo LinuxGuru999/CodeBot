@@ -248,6 +248,7 @@ IMPLEMENTATION_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Make the requested change work correctly and completely.",
+        adversarial_to=("correctness_reviewer", "security_reviewer", "architecture_reviewer", "performance_reviewer", "simplicity_reviewer"),
     ),
     AgentRole(
         name="backend_implementer",
@@ -256,6 +257,7 @@ IMPLEMENTATION_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Implement backend changes. Defended against by security and architecture reviewers.",
+        adversarial_to=("correctness_reviewer", "security_reviewer", "architecture_reviewer", "performance_reviewer"),
     ),
     AgentRole(
         name="frontend_implementer",
@@ -303,7 +305,7 @@ REVIEW_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
         incentive="Find behavior the tests failed to cover or spec violations.",
-        adversarial_to=("general_implementer", "backend_implementer"),
+        adversarial_to=("general_implementer", "backend_implementer", "migration_implementer"),
     ),
     AgentRole(
         name="security_reviewer",
@@ -312,7 +314,7 @@ REVIEW_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND, security_review=True),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
         incentive="Find a way to exploit or abuse the change. Adversarial to implementer.",
-        adversarial_to=("general_implementer", "backend_implementer", "frontend_implementer", "architecture_reviewer"),
+        adversarial_to=("general_implementer", "backend_implementer", "frontend_implementer", "architecture_reviewer", "migration_implementer"),
     ),
     AgentRole(
         name="architecture_reviewer",

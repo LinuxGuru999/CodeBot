@@ -162,8 +162,9 @@ paths:
   constitution_file: ".codebot/constitution.md"
   project_config: ".codebot/project.yaml"
 autonomy:
-  level: 2
-  human_approval_required_for: ["secrets", "destructive_migrations"]
+  level: 3
+  escalation_model: "qa_recommendations"
+  qa_recommendation_required_for: ["secrets", "destructive_migrations"]
   autonomous_allowed_for: ["test_additions", "safe_refactors"]
 ```
 

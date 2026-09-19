@@ -16,4 +16,4 @@ Provides an HTTP ingestion endpoint for production telemetry signals (errors, pe
 - Stdlib-only (`http.server`).
 - Bounded I/O (max 64KB request body).
 - Requires Bearer token authentication.
-- Tickets created in `DISCOVERED` state requiring human approval.
+- Tickets created in `DISCOVERED` state proceeding through normal autonomous pipeline.

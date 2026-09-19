@@ -314,3 +314,12 @@ ticket = store.get("CB-xxx")
 # Transition ticket
 store.transition("CB-xxx", TicketState.TRIAGED)
 ```
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-19T04:52:42Z)
+Trigger: misaligned (score=53, reward=0.53)
+Reason: exit=3 reason=error dur=33.45s hb_age=29.7 reb=0 err=0 ckpt=False eff=5 prod=0 no_tickets_pen=0
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->

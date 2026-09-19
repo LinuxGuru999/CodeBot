@@ -24,6 +24,7 @@ from codebot.role_registry import (
     IMPLEMENTATION_ROLES,
     REVIEW_ROLES,
     CONTROL_ROLES,
+    PLANNING_ROLES,
     STANDARD_TOOLS,
     READ_ONLY_TOOLS,
     RESEARCH_TOOLS,
@@ -158,3 +159,83 @@ class TestRoleCounts:
 
     def test_minimum_control_roles(self):
         assert len(CONTROL_ROLES) >= 3
+
+    def test_total_role_count(self):
+        """Total roles should be 29 (8 discovery + 6 implementation + 8 review + 6 control + 1 planning)."""
+        assert len(ALL_ROLES) == 29
+
+    def test_planning_role_exists(self):
+        assert len(PLANNING_ROLES) >= 1
+
+
+class TestNewRoles:
+    def test_ux_reviewer_exists(self):
+        role = get_role("ux_reviewer")
+        assert role is not None
+        assert role.category == RoleCategory.REVIEW
+        assert role.tool_policy.allowed_tools == UX_AUDIT_TOOLS
+
+    def test_ticket_triager_exists(self):
+        role = get_role("ticket_triager")
+        assert role is not None
+        assert role.category == RoleCategory.CONTROL
+        assert "write" in role.tool_policy.allowed_tools
+
+    def test_frontend_implementer_cost_class(self):
+        """frontend_implementer should be STANDARD, not CHEAP, to match ADVANCED coding."""
+        role = get_role("frontend_implementer")
+        assert role.required_model.cost_class == CostClass.STANDARD
+        assert role.required_model.reasoning == ReasoningLevel.MEDIUM
+
+    def test_test_gap_auditor_reasoning(self):
+        """test_gap_auditor should be MEDIUM reasoning for coverage analysis."""
+        role = get_role("test_gap_auditor")
+        assert role.required_model.reasoning == ReasoningLevel.MEDIUM
+
+    def test_documentation_implementer_reasoning(self):
+        """documentation_implementer should be MEDIUM reasoning for accurate docs."""
+        role = get_role("documentation_implementer")
+        assert role.required_model.reasoning == ReasoningLevel.MEDIUM
+        assert role.required_model.cost_class == CostClass.STANDARD
+
+    def test_budget_controller_can_write(self):
+        """budget_controller needs write access to pause/throttle agents."""
+        role = get_role("budget_controller")
+        assert "write" in role.tool_policy.allowed_tools
+
+    def test_ux_auditor_has_npm(self):
+        """ux_auditor should have npm/npx for linting tools."""
+        role = get_role("ux_auditor")
+        assert "npm" in role.tool_policy.allowed_commands
+        assert "npx" in role.tool_policy.allowed_commands
+
+
+class TestAdversarialReviewExtended:
+    def test_frontend_implementer_has_ux_reviewer(self):
+        """frontend_implementer should be reviewed by ux_reviewer."""
+        reviewers = find_adversarial_reviewers("frontend_implementer")
+        names = [r.name for r in reviewers]
+        assert "ux_reviewer" in names
+
+    def test_test_implementer_has_test_reviewer(self):
+        """test_implementer should be reviewed by test_reviewer."""
+        reviewers = find_adversarial_reviewers("test_implementer")
+        names = [r.name for r in reviewers]
+        assert "test_reviewer" in names
+
+    def test_migration_implementer_has_reviewers(self):
+        """migration_implementer should have correctness and security reviewers."""
+        reviewers = find_adversarial_reviewers("migration_implementer")
+        names = [r.name for r in reviewers]
+        assert "correctness_reviewer" in names
+        assert "security_reviewer" in names
+
+    def test_architecture_reviewer_adversarial_to_simplicity(self):
+        """architecture_reviewer should challenge simplicity_reviewer."""
+        role = get_role("architecture_reviewer")
+        assert "simplicity_reviewer" in role.adversarial_to
+
+    def test_security_reviewer_adversarial_to_architecture(self):
+        """security_reviewer should challenge architecture_reviewer."""
+        role = get_role("security_reviewer")
+        assert "architecture_reviewer" in role.adversarial_to
