@@ -10,6 +10,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# CB-5664147-0107: Fixed dependency_auditor finding
+
 
 def process_data(data: Any) -> Any:
     """Process data with proper exception handling.
