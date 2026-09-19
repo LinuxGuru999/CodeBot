@@ -243,7 +243,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         category=RoleCategory.DISCOVERY,
         description="Reads roadmap index and creates feature tickets for pending deliverables",
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(frozenset({"read", "grep", "glob", "bash", "create_ticket"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
+        tool_policy=ToolPolicy(frozenset({"read", "write", "grep", "glob", "bash", "create_ticket"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
         incentive="Find roadmap gaps and create actionable feature tickets. Maximize coverage of pending deliverables.",
     ),
 ]
