@@ -46,17 +46,29 @@ class GateResult(str, Enum):
 
 @dataclass(frozen=True)
 class GateEvaluation:
+    """Result of a single quality gate evaluation.
+    
+    Attributes:
+        gate_name: Name of the gate (e.g., 'build', 'unit_tests')
+        check_type: Type of check (e.g., 'build', 'test', 'lint', 'security')
+        command: The command that was executed
+        output: Captured stdout/stderr (truncated to 2000 chars)
+        duration_ms: Execution time in milliseconds
+        passed: Whether the gate passed
+        required: Whether this gate is required (vs optional)
+        error_message: Error details if result is ERROR
+    """
     gate_name: str
-    result: GateResult
+    check_type: str
     command: str
     output: str
-    duration_seconds: float
+    duration_ms: int
+    passed: bool
     required: bool
     error_message: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d["result"] = self.result.value
         return d
 
 
