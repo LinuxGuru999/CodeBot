@@ -4139,6 +4139,14 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 bot.next_run_at = now + backoff + jitter
                 _rotate_model_on_error(bot, bots)
                 update_bot_state(bot, "waiting")
+                try:
+                    from codebot.scratchpad import load_scratchpad, save_scratchpad
+                    scratch = load_scratchpad(STATE_DIR, name)
+                    scratch.mark_error(f"rate-limited (exit 3), backoff {backoff+jitter}s")
+                    scratch.remaining_steps = [s for s in scratch.remaining_steps if s not in scratch.completed_steps]
+                    save_scratchpad(STATE_DIR, scratch)
+                except Exception:
+                    pass
                 if bot.consecutive_errors >= RATE_LIMIT_DISABLE_AFTER:
                     logger.error(f"Bot '{name}' rate-limited {bot.consecutive_errors}x — disabling (model {bot.config.model})")
                     bot.config.enabled = False
