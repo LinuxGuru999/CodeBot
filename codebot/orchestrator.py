@@ -2242,6 +2242,7 @@ def update_bot_state(bot: BotState, status: str) -> None:
             data["last_update"] = time.time()
             data["restart_count"] = bot.restart_count
             data["consecutive_errors"] = bot.consecutive_errors
+            data["next_run_at"] = bot.next_run_at
             if bot.restart_count > 0:
                 existing = data.get("restart_timestamps", [])
                 if not isinstance(existing, list):
@@ -4463,7 +4464,18 @@ def main() -> None:
     # For early-exit commands (--status, --drain, etc.), build from module-level registry
     bots: dict[str, BotState] = {}
     for config in BOT_REGISTRY:
-        bots[config.name] = BotState(config=config)
+        bot = BotState(config=config)
+        state_file = STATE_DIR / f"{config.name}.state.json"
+        if state_file.exists():
+            try:
+                sdata = json.loads(state_file.read_text())
+                if isinstance(sdata, dict):
+                    bot.consecutive_errors = sdata.get("consecutive_errors", 0)
+                    bot.next_run_at = sdata.get("next_run_at", 0.0)
+                    bot.restart_count = sdata.get("restart_count", 0)
+            except Exception:
+                pass
+        bots[config.name] = bot
 
     if args.status:
         print_status(bots)
@@ -4603,7 +4615,18 @@ def main() -> None:
     _rescale_registry()
     bots: dict[str, BotState] = {}
     for config in _self_mod.BOT_REGISTRY:
-        bots[config.name] = BotState(config=config)
+        bot = BotState(config=config)
+        state_file = STATE_DIR / f"{config.name}.state.json"
+        if state_file.exists():
+            try:
+                sdata = json.loads(state_file.read_text())
+                if isinstance(sdata, dict):
+                    bot.consecutive_errors = sdata.get("consecutive_errors", 0)
+                    bot.next_run_at = sdata.get("next_run_at", 0.0)
+                    bot.restart_count = sdata.get("restart_count", 0)
+            except Exception:
+                pass
+        bots[config.name] = bot
 
     def shutdown_handler(signum, frame):
         logger.info("Shutdown signal received")

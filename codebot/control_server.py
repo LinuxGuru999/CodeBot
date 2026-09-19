@@ -53,12 +53,74 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
+
+# Rate limiting configuration
+RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("RATE_LIMIT_MAX_ATTEMPTS", "5"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
+RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("RATE_LIMIT_COOLDOWN_SECONDS", "300"))
+
+
+class RateLimiter:
+    """Thread-safe rate limiter for authentication attempts."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        # ip -> list of failure timestamps
+        self._failures: dict[str, list[float]] = defaultdict(list)
+        # ip -> cooldown until timestamp (blocked)
+        self._blocked_until: dict[str, float] = {}
+
+    def is_allowed(self, client_ip: str) -> tuple[bool, str | None]:
+        """Check if request from client_ip is allowed.
+
+        Returns (allowed, reason). If blocked, reason explains why.
+        """
+        now = time.time()
+        with self._lock:
+            # Check if currently in cooldown
+            if client_ip in self._blocked_until:
+                if now < self._blocked_until[client_ip]:
+                    remaining = int(self._blocked_until[client_ip] - now)
+                    return False, f"rate limit exceeded; try again in {remaining}s"
+                else:
+                    # Cooldown expired, clear block and reset failures
+                    del self._blocked_until[client_ip]
+                    self._failures[client_ip] = []
+
+            # Clean old failures outside the window
+            cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+            self._failures[client_ip] = [
+                ts for ts in self._failures[client_ip] if ts > cutoff
+            ]
+
+            # Check if over limit
+            if len(self._failures[client_ip]) >= RATE_LIMIT_MAX_ATTEMPTS:
+                # Enter cooldown
+                self._blocked_until[client_ip] = now + RATE_LIMIT_COOLDOWN_SECONDS
+                return (
+                    False,
+                    f"rate limit exceeded ({RATE_LIMIT_MAX_ATTEMPTS} attempts in {RATE_LIMIT_WINDOW_SECONDS}s); blocked for {RATE_LIMIT_COOLDOWN_SECONDS}s",
+                )
+
+            return True, None
+
+    def record_failure(self, client_ip: str) -> None:
+        """Record a failed authentication attempt for client_ip."""
+        now = time.time()
+        with self._lock:
+            self._failures[client_ip].append(now)
+
+
+# Global rate limiter instance
+_rate_limiter = RateLimiter()
 
 BOTS_DIR = Path(__file__).resolve().parent
 STATE_DIR = BOTS_DIR / "state"
