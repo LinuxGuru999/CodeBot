@@ -1892,7 +1892,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
 
     try:
         def _model_responder(msgs):
-            nonlocal active_model, total_retries, timeout_retries, exit_reason
+            nonlocal active_model, total_retries, timeout_retries, exit_reason, used_fallback
             while True:
                 try:
                     _wait_for_rate_limit(active_model)

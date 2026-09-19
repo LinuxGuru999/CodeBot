@@ -94,7 +94,7 @@ class Gatekeeper:
 
         failed_gates = [
             ev.gate_name for ev in evaluations
-            if ev.result.value not in ("pass", "skip")
+            if not ev.passed
         ]
 
         result = {
