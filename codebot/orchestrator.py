@@ -2079,6 +2079,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
 
     prompt_text = prompt_file.read_text()
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+    logger.info(f"start_bot '{bot.config.name}': assigned_tid='{assigned_tid}', prompt={len(prompt_text)} chars")
     if assigned_tid:
         ticket_ctx = _load_ticket_context(assigned_tid)
         if ticket_ctx:

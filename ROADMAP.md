@@ -1700,3 +1700,707 @@ The long-term measure of success is not how much code CodeBot writes.
 It is:
 
 > **How much production-quality software CodeBot can create and maintain, across unrelated projects, per dollar and per minute of human engineering attention.**
+
+---
+
+<!-- DELIVERABLE: id=46 status=PLANNED tier=T1 modules=role_registry.py,api_runner.py,quality_gate.py -->
+# 46. Frontend Architecture and UI Engineering
+
+CodeBot must be capable of building complete, production-quality frontend applications that are beautiful, elegant, and functional.
+
+### §46.A — Component Architecture
+
+- Generate framework-appropriate component hierarchies (React, Vue, Svelte, or vanilla web components based on project contract)
+- Enforce single-responsibility components with clear prop interfaces
+- Support compound component patterns, render props, and higher-order components where idiomatic
+- Maintain a component registry mapping design system tokens to implementations
+
+**Exit Criteria:**
+
+- [ ] Agent can scaffold a multi-page component tree from a design specification
+- [ ] Components pass isolated unit tests without mounting the full application
+- [ ] Prop types/interfaces are strictly typed (TypeScript, Pydantic, or equivalent)
+
+### §46.B — Design System Integration
+
+- Parse and enforce design tokens (colors, spacing, typography, elevation, border radii)
+- Generate CSS custom properties or theme provider configurations from token definitions
+- Maintain visual consistency across all generated components via token references, never hardcoded values
+- Support dark mode, high-contrast mode, and custom theme variants
+
+**Exit Criteria:**
+
+- [ ] All generated UI uses design tokens exclusively (zero hardcoded colors/spacing)
+- [ ] Theme switching works without code changes
+- [ ] Token drift detection alerts when generated code deviates from the design system
+
+### §46.C — Responsive and Adaptive Layouts
+
+- Generate mobile-first responsive layouts using CSS Grid, Flexbox, and container queries
+- Support breakpoint systems defined in the project contract
+- Handle touch targets, viewport units, and safe-area insets for mobile devices
+- Generate adaptive layouts that restructure (not just resize) across breakpoints
+
+**Exit Criteria:**
+
+- [ ] Generated layouts pass responsive checks at 320px, 768px, 1024px, 1440px viewports
+- [ ] No horizontal overflow at any supported breakpoint
+- [ ] Touch targets meet minimum 44×44px requirement
+
+### §46.D — Animation and Motion Design
+
+- Generate CSS transitions and keyframe animations for micro-interactions
+- Support orchestration libraries (Framer Motion, GSAP, or CSS-native) per project contract
+- Respect `prefers-reduced-motion` media query automatically
+- Implement skeleton loading states, optimistic UI updates, and transition choreography
+
+**Exit Criteria:**
+
+- [ ] All animations respect reduced-motion preferences
+- [ ] Page transitions complete within 300ms perceived latency budget
+- [ ] Loading states prevent layout shift (CLS < 0.1)
+
+### §46.E — Visual Polish and Aesthetics
+
+- Apply consistent spacing rhythm (4px/8px grid systems)
+- Generate elegant typography scales with proper hierarchy
+- Implement subtle shadows, gradients, and glassmorphism effects where appropriate
+- Ensure visual harmony across all components and pages
+
+**Exit Criteria:**
+
+- [ ] Generated UI passes visual QA review against design references
+- [ ] Typography scale follows modular ratio (major third, perfect fourth, etc.)
+- [ ] Spacing is mathematically consistent throughout
+
+---
+
+<!-- DELIVERABLE: id=47 status=PLANNED tier=T0 modules=role_registry.py,quality_gate.py -->
+# 47. Accessibility (a11y) Engineering
+
+Web applications built by CodeBot must be usable by everyone, including people relying on assistive technologies.
+
+### §47.A — WCAG Compliance
+
+- Target WCAG 2.2 AA compliance as baseline, AAA where feasible
+- Generate semantic HTML (proper heading hierarchy, landmark regions, list semantics)
+- Ensure all interactive elements are keyboard-accessible with visible focus indicators
+- Provide ARIA attributes only when native semantics are insufficient
+
+**Exit Criteria:**
+
+- [ ] Automated axe-core or equivalent scan reports zero critical/serious violations
+- [ ] All pages navigable via keyboard alone (Tab, Enter, Escape, Arrow keys)
+- [ ] Screen reader testing passes for all user flows
+
+### §47.B — Color Contrast and Visual Accessibility
+
+- Enforce minimum contrast ratios: 4.5:1 for normal text, 3:1 for large text and UI components
+- Never rely solely on color to convey information (pair with icons, text, or patterns)
+- Generate focus-visible styles that meet 3:1 contrast against adjacent colors
+- Support forced-colors mode (Windows High Contrast)
+
+**Exit Criteria:**
+
+- [ ] All text/background combinations pass automated contrast checking
+- [ ] Information conveyed by color has redundant non-color indicator
+- [ ] Forced-colors mode renders all UI elements legibly
+
+### §47.C — Form Accessibility
+
+- Every input has a programmatically associated `<label>`
+- Error messages are linked to inputs via `aria-describedby`
+- Required fields marked with both `required` attribute and visual indicator
+- Fieldsets and legends group related controls
+
+**Exit Criteria:**
+
+- [ ] All forms pass automated accessibility scanning
+- [ ] Error recovery flow is screen-reader announced
+- [ ] Autocomplete attributes correctly applied for browser autofill
+
+---
+
+<!-- DELIVERABLE: id=48 status=PLANNED tier=T0 modules=role_registry.py,api_runner.py,quality_gate.py -->
+# 48. Web Security Hardening
+
+Security must be structural, not bolted on. Every web application CodeBot produces must resist OWASP Top 10 attacks by default.
+
+### §48.A — Input Validation and Sanitization
+
+- Validate all input at the boundary (API routes, form handlers, webhook receivers)
+- Use schema-driven validation (Zod, Pydantic, JSON Schema) — never manual string parsing
+- Sanitize output contextually: HTML encoding for DOM insertion, URL encoding for hrefs, JavaScript encoding for inline scripts
+- Reject invalid input early with descriptive error messages that don't leak internals
+
+**Exit Criteria:**
+
+- [ ] No endpoint accepts unvalidated input
+- [ ] XSS payloads in all input fields are neutralized (reflected, stored, DOM-based)
+- [ ] SQL injection payloads are rejected by parameterized queries or ORM
+
+### §48.B — Authentication and Session Management
+
+- Implement secure session handling: HttpOnly, Secure, SameSite cookies
+- Support JWT with short expiry + refresh token rotation when stateless auth is required
+- Hash passwords with bcrypt/scrypt/argon2 — never MD5/SHA1/SHA256 raw
+- Implement account lockout, rate limiting on auth endpoints, and credential stuffing protection
+- Support MFA/TOTP enrollment and verification flows
+
+**Exit Criteria:**
+
+- [ ] Session fixation attacks are prevented
+- [ ] Auth tokens cannot be accessed via JavaScript (HttpOnly enforced)
+- [ ] Password storage passes hashcat resistance benchmarks
+- [ ] Brute force protection triggers within 5 failed attempts
+
+### §48.C — Authorization and Access Control
+
+- Implement server-side authorization on every protected route (never client-only)
+- Support RBAC (Role-Based Access Control) and ABAC (Attribute-Based Access Control) patterns
+- Enforce principle of least privilege: users see only what they're authorized to access
+- Prevent IDOR (Insecure Direct Object Reference) via ownership checks on every resource access
+
+**Exit Criteria:**
+
+- [ ] Horizontal privilege escalation blocked (user A cannot access user B's resources)
+- [ ] Vertical privilege escalation blocked (regular user cannot access admin routes)
+- [ ] Missing authorization checks detected by automated scanning
+
+### §48.D — HTTP Security Headers and Transport
+
+- Set Content-Security-Policy (CSP) with strict-dynamic, nonce-based script allowlisting
+- Configure X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy
+- Enforce HTTPS via HSTS with preload directive
+- Implement CORS policy matching the project's actual cross-origin requirements (never wildcard in production)
+- Subresource Integrity (SRI) for all external scripts and stylesheets
+
+**Exit Criteria:**
+
+- [ ] Security headers score A+ on Mozilla Observatory or equivalent
+- [ ] CSP blocks inline script execution without nonce
+- [ ] Mixed content warnings: zero
+
+### §48.E — CSRF, Clickjacking, and Injection Prevention
+
+- Implement anti-CSRF tokens for all state-changing requests (or use SameSite cookies as defense-in-depth)
+- Prevent clickjacking via X-Frame-Options: DENY and CSP frame-ancestors
+- Parameterize all database queries; use prepared statements exclusively
+- Escape all template output by default; require explicit opt-in for raw HTML
+
+**Exit Criteria:**
+
+- [ ] CSRF token validation fails closed on missing/invalid tokens
+- [ ] Application cannot be embedded in iframes on unauthorized domains
+- [ ] Zero SQL/NoSQL/LDAP/XML injection vectors in automated scanning
+
+---
+
+<!-- DELIVERABLE: id=49 status=PLANNED tier=T1 modules=role_registry.py,api_runner.py -->
+# 49. API Design and Backend Engineering
+
+CodeBot must produce backend APIs that are consistent, versioned, documented, and resilient.
+
+### §49.A — RESTful API Design
+
+- Follow resource-oriented URL design (nouns, not verbs): `/users/{id}/orders`, not `/getOrders`
+- Use correct HTTP methods: GET (read), POST (create), PUT/PATCH (update), DELETE (remove)
+- Return appropriate status codes: 200, 201, 204, 400, 401, 403, 404, 409, 422, 429, 500
+- Implement HATEOAS links for discoverability where appropriate
+- Consistent error response format: `{error: {code, message, details}}`
+
+**Exit Criteria:**
+
+- [ ] All endpoints follow REST naming conventions
+- [ ] Error responses are consistent across all routes
+- [ ] Pagination implemented for all list endpoints (cursor-based preferred)
+
+### §49.B — API Versioning and Evolution
+
+- Support URL-path versioning (`/v1/users`) or header-based versioning per project contract
+- Maintain backward compatibility within a major version
+- Implement deprecation headers (`Deprecation`, `Sunset`) for retiring endpoints
+- Generate changelog entries for API changes automatically
+
+**Exit Criteria:**
+
+- [ ] Breaking changes require a new major version
+- [ ] Deprecated endpoints return Sunset headers with timeline
+- [ ] v1 clients continue working after v2 deployment
+
+### §49.C — Rate Limiting and Throttling
+
+- Implement per-user, per-IP, and per-endpoint rate limiting
+- Return 429 Too Many Requests with Retry-After header
+- Support sliding window and token bucket algorithms
+- Differentiate limits by plan tier or authentication level
+
+**Exit Criteria:**
+
+- [ ] Rate limit exceeded returns proper 429 with retry guidance
+- [ ] Limits are configurable per project contract
+- [ ] Rate limit state survives single-instance restart (Redis-backed or equivalent)
+
+### §49.D — Middleware Pipeline
+
+- Implement composable middleware chain: logging → auth → rate-limit → validation → handler → error-handling
+- Support middleware ordering guarantees (security middleware always runs before business logic)
+- Allow per-route middleware configuration
+- Implement request/response transformation middleware (compression, serialization)
+
+**Exit Criteria:**
+
+- [ ] Middleware executes in deterministic order
+- [ ] Unauthenticated requests are rejected before reaching business logic
+- [ ] Request body parsing happens exactly once
+
+### §49.E — WebSocket and Real-Time Communication
+
+- Support WebSocket connections for real-time features (chat, notifications, live updates)
+- Implement connection authentication and heartbeat/ping-pong keepalive
+- Handle reconnection gracefully with exponential backoff on the client side
+- Support channel/room-based pub-sub for targeted message delivery
+
+**Exit Criteria:**
+
+- [ ] WebSocket connections authenticate before accepting messages
+- [ ] Disconnected clients auto-reconnect with message replay
+- [ ] Server handles 10K concurrent WebSocket connections without degradation
+
+---
+
+<!-- DELIVERABLE: id=50 status=PLANNED tier=T1 modules=role_registry.py,quality_gate.py,api_runner.py -->
+# 50. Testing Strategy for Web Applications
+
+Comprehensive testing is non-negotiable. CodeBot must generate and maintain tests at every level.
+
+### §50.A — Unit Testing
+
+- Test every exported function, component, and utility in isolation
+- Mock external dependencies (database, API calls, filesystem)
+- Achieve >80% line coverage for business logic, >90% for security-critical paths
+- Test edge cases: empty input, null values, boundary conditions, Unicode, extremely long strings
+
+**Exit Criteria:**
+
+- [ ] Unit test suite runs in <60 seconds
+- [ ] Coverage thresholds enforced in CI (build fails below threshold)
+- [ ] Zero flaky tests (tests pass deterministically regardless of execution order)
+
+### §50.B — Integration Testing
+
+- Test API endpoints end-to-end with real database (test containers or in-memory DB)
+- Verify middleware pipeline behavior (auth rejection, rate limiting, validation errors)
+- Test inter-service communication and event propagation
+- Verify database migrations apply and rollback cleanly
+
+**Exit Criteria:**
+
+- [ ] All API routes have integration tests covering happy path and error cases
+- [ ] Database state is isolated between tests (transaction rollback or fresh fixtures)
+- [ ] External service failures are tested (timeout, 500, malformed response)
+
+### §50.C — End-to-End (E2E) Testing
+
+- Test critical user journeys through the full stack (browser → server → database → browser)
+- Use Playwright, Cypress, or Selenium per project contract
+- Test across browsers: Chrome, Firefox, Safari, Edge (latest two versions)
+- Include visual regression testing for UI changes
+
+**Exit Criteria:**
+
+- [ ] Core user flows (signup, login, primary CRUD operations) have E2E coverage
+- [ ] E2E tests run headlessly in CI
+- [ ] Visual regression diffs reviewed before merge
+
+### §50.D — Performance and Load Testing
+
+- Benchmark API response times: p50 < 100ms, p95 < 500ms, p99 < 1s for standard endpoints
+- Load test with expected peak concurrency (k6, Locust, or artillery)
+- Profile memory usage and detect leaks under sustained load
+- Test database query performance (N+1 detection, slow query alerts)
+
+**Exit Criteria:**
+
+- [ ] Performance budgets defined and enforced in CI
+- [ ] No endpoint exceeds p95 budget under 2× expected load
+- [ ] Memory growth flat over 1-hour sustained load test
+
+### §50.E — Security Testing
+
+- Run OWASP ZAP or equivalent DAST scanner against staging environment
+- Perform dependency vulnerability scanning (npm audit, pip-audit, cargo audit)
+- Execute fuzz testing on all input boundaries
+- Verify security headers and TLS configuration programmatically
+
+**Exit Criteria:**
+
+- [ ] DAST scan reports zero high/critical findings
+- [ ] Dependencies with known CVEs block deployment
+- [ ] Fuzz testing runs for minimum 1 hour per release cycle
+
+---
+
+<!-- DELIVERABLE: id=51 status=PLANNED tier=T1 modules=role_registry.py,api_runner.py,quality_gate.py -->
+# 51. Performance Optimization
+
+Web applications must be fast by default. CodeBot must engineer for performance at every layer.
+
+### §51.A — Frontend Performance (Core Web Vitals)
+
+- Target LCP < 2.5s, INP < 200ms, CLS < 0.1
+- Implement code splitting and lazy loading for routes and heavy components
+- Optimize images: WebP/AVIF format, responsive srcset, lazy loading below fold
+- Minimize main-thread work: defer non-critical JS, use web workers for computation
+- Preload critical resources, preconnect to third-party origins
+
+**Exit Criteria:**
+
+- [ ] Lighthouse performance score ≥ 90 on mobile and desktop
+- [ ] Total bundle size tracked and budgeted per project contract
+- [ ] Time to Interactive < 3.5s on 3G throttled connection
+
+### §51.B — Backend Performance
+
+- Implement caching layers: application cache (Redis/Memcached), HTTP cache (CDN, Cache-Control), database query cache
+- Optimize database queries: proper indexing, query planning, N+1 prevention, connection pooling
+- Use async/non-blocking I/O for network-bound operations
+- Implement pagination at the database level (never load unbounded result sets into memory)
+
+**Exit Criteria:**
+
+- [ ] Database queries profiled; no full table scans on hot paths
+- [ ] Cache hit ratio > 80% for repeated reads
+- [ ] Connection pool sized appropriately (no connection starvation under load)
+
+### §51.C — Asset Optimization and Delivery
+
+- Minify CSS, JavaScript, and HTML in production builds
+- Implement tree-shaking to eliminate dead code from bundles
+- Generate and serve Brotli/gzip compressed assets
+- Configure CDN distribution with appropriate cache-control and invalidation strategies
+- Implement service workers for offline capability where specified
+
+**Exit Criteria:**
+
+- [ ] Production assets served compressed (Brotli preferred, gzip fallback)
+- [ ] Unused code eliminated from production bundles (verified via bundle analyzer)
+- [ ] CDN cache hit ratio > 95% for static assets
+
+---
+
+<!-- DELIVERABLE: id=52 status=PLANNED tier=T1 modules=role_registry.py,api_runner.py -->
+# 52. State Management and Data Flow
+
+Complex web applications require disciplined state management to remain maintainable.
+
+### §52.A — Client-Side State Architecture
+
+- Choose state management approach appropriate to complexity: local state → context → store (Redux/Zustand/Pinia/Vuex)
+- Normalize state shape to prevent duplication and inconsistency
+- Implement optimistic updates with automatic rollback on server rejection
+- Separate server state (React Query/SWR/RTK Query) from client-only state
+
+**Exit Criteria:**
+
+- [ ] State shape documented and enforced via types/schemas
+- [ ] Optimistic updates revert correctly on failure
+- [ ] No circular state dependencies
+
+### §52.B — Server-Side State and Caching
+
+- Implement stale-while-revalidate caching patterns
+- Support cache invalidation via events, TTL, or tag-based purging
+- Handle cache stampede protection (thundering herd) for popular resources
+- Maintain cache coherence between application instances
+
+**Exit Criteria:**
+
+- [ ] Cache invalidation propagates within defined SLA (< 5s typical)
+- [ ] Thundering herd scenarios handled via request coalescing
+- [ ] Cache memory bounded with eviction policies (LRU/LFU)
+
+### §52.C — Form State and Validation
+
+- Implement progressive validation: inline on blur, comprehensive on submit
+- Preserve form state across navigation (draft saving)
+- Support complex form patterns: dynamic field arrays, conditional fields, multi-step wizards
+- Debounce expensive validations (uniqueness checks, API lookups)
+
+**Exit Criteria:**
+
+- [ ] Form data persists across accidental navigation away
+- [ ] Validation feedback appears within 300ms of relevant trigger
+- [ ] Multi-step forms support forward/backward navigation without data loss
+
+---
+
+<!-- DELIVERABLE: id=53 status=PLANNED tier=T1 modules=role_registry.py,api_runner.py -->
+# 53. Error Handling and Resilience
+
+Web applications must degrade gracefully. Every failure mode must be anticipated and handled.
+
+### §53.A — Error Boundaries and Recovery
+
+- Implement component-level error boundaries that prevent full-page crashes
+- Display meaningful error UI with recovery actions (retry button, alternative navigation)
+- Log errors with full context (component stack, user action, state snapshot) to monitoring
+- Never show raw stack traces or internal error details to end users
+
+**Exit Criteria:**
+
+- [ ] Single component failure doesn't crash the entire page
+- [ ] All errors logged with actionable debugging context
+- [ ] User-facing error messages are helpful, not technical
+
+### §53.B — Network Resilience
+
+- Implement retry logic with exponential backoff and jitter for transient failures
+- Detect offline state and queue mutations for later sync
+- Handle partial failures gracefully (some items succeed, some fail in batch operations)
+- Implement circuit breakers for downstream service dependencies
+
+**Exit Criteria:**
+
+- [ ] Transient network errors retried automatically (max 3 attempts with backoff)
+- [ ] Offline mode queues writes and syncs on reconnection
+- [ ] Circuit breaker opens after configurable failure threshold
+
+### §53.C — Graceful Degradation
+
+- Progressive enhancement: core functionality works without JavaScript where feasible
+- Feature detection over browser sniffing
+- Fallback content for unsupported features (video codecs, APIs, CSS features)
+- Server-side rendering or static generation for SEO-critical and accessibility-critical pages
+
+**Exit Criteria:**
+
+- [ ] Core content accessible with JavaScript disabled
+- [ ] Unsupported features show fallback rather than broken UI
+- [ ] SSR/SSG pages render meaningful content before hydration
+
+---
+
+<!-- DELIVERABLE: id=54 status=PLANNED tier=T2 modules=role_registry.py,api_runner.py -->
+# 54. Internationalization (i18n) and Localization (l10n)
+
+Web applications targeting global audiences must support multiple languages and regional formats.
+
+### §54.A — Translation Infrastructure
+
+- Extract all user-facing strings to translation files (never hardcode display text)
+- Support ICU MessageFormat for pluralization, gender, and selection
+- Implement language negotiation: URL path, Accept-Language header, user preference, cookie
+- Support right-to-left (RTL) layout mirroring
+
+**Exit Criteria:**
+
+- [ ] Zero hardcoded English strings in UI templates
+- [ ] Pluralization rules correct for target locales
+- [ ] RTL layout renders correctly without overlapping elements
+
+### §54.B — Locale-Aware Formatting
+
+- Format dates, times, numbers, and currencies according to user locale (Intl API)
+- Handle timezone conversion: store UTC, display local
+- Support locale-specific sorting and collation
+- Handle name ordering, address formats, and phone number validation per region
+
+**Exit Criteria:**
+
+- [ ] Dates display correctly for all supported locales
+- [ ] Currency amounts show correct symbol, decimal places, and grouping
+- [ ] Timezone conversions accurate including DST transitions
+
+---
+
+<!-- DELIVERABLE: id=55 status=PLANNED tier=T2 modules=role_registry.py,api_runner.py -->
+# 55. Deployment, CI/CD, and DevOps
+
+CodeBot must produce applications that deploy reliably and recover automatically.
+
+### §55.A — Containerization
+
+- Generate Dockerfiles following best practices: multi-stage builds, minimal base images, non-root user
+- Implement health check endpoints for container orchestration probes
+- Configure graceful shutdown handling (SIGTERM → drain connections → exit)
+- Support docker-compose for local development environments
+
+**Exit Criteria:**
+
+- [ ] Docker image size optimized (< 200MB for Node.js, < 100MB for Python/Go)
+- [ ] Health check endpoint returns 200 within 5s of startup
+- [ ] Container runs as non-root user
+
+### §55.B — CI/CD Pipeline Generation
+
+- Generate CI pipeline configurations (GitHub Actions, GitLab CI, or project-specified)
+- Pipeline stages: lint → type-check → unit test → build → integration test → security scan → deploy
+- Implement deployment strategies: blue-green, canary, rolling update per project contract
+- Automate database migration execution during deployment
+
+**Exit Criteria:**
+
+- [ ] Full CI pipeline completes in < 15 minutes
+- [ ] Failed security scan blocks deployment
+- [ ] Rollback procedure tested and documented
+
+### §55.C — Observability and Monitoring
+
+- Implement structured logging (JSON) with correlation IDs spanning request lifecycle
+- Expose Prometheus-compatible metrics endpoints (request count, latency histogram, error rate)
+- Configure distributed tracing (OpenTelemetry) for multi-service architectures
+- Set up alerting rules for error rate spikes, latency degradation, and availability drops
+
+**Exit Criteria:**
+
+- [ ] Every request traceable from ingress to database and back via correlation ID
+- [ ] Alert fires within 1 minute of error rate exceeding threshold
+- [ ] Dashboards auto-generated showing golden signals (latency, traffic, errors, saturation)
+
+### §55.D — Database Migration Safety
+
+- Generate reversible migrations for all schema changes
+- Implement expand-and-contract pattern for zero-downtime column renames/removals
+- Test migrations against production-scale data volumes before deployment
+- Support seed data scripts for development and staging environments
+
+**Exit Criteria:**
+
+- [ ] Every migration has a tested rollback path
+- [ ] Column removal takes minimum 2 deployment cycles (expand → migrate → contract)
+- [ ] Migration execution time bounded and monitored
+
+---
+
+<!-- DELIVERABLE: id=56 status=PLANNED tier=T2 modules=role_registry.py,api_runner.py,quality_gate.py -->
+# 56. Developer Experience (DX) and Code Quality
+
+Code produced by CodeBot must be a pleasure for human developers to read, maintain, and extend.
+
+### §56.A — Code Style and Consistency
+
+- Enforce project-specific linting rules (ESLint, Ruff, Clippy) with zero warnings policy
+- Apply consistent formatting via Prettier, Black, rustfmt, or gofmt
+- Maintain import ordering conventions (stdlib → external → internal → relative)
+- Enforce naming conventions: camelCase for JS/TS, snake_case for Python/Rust, PascalCase for types/components
+
+**Exit Criteria:**
+
+- [ ] `lint --fix` produces zero changes on generated code
+- [ ] Formatter is idempotent (running twice produces identical output)
+- [ ] Import ordering matches project convention
+
+### §56.B — Type Safety and Contracts
+
+- Use strict TypeScript (`strict: true`, no `any`) for frontend and Node.js backends
+- Use Pydantic v2 or equivalent for Python API validation
+- Generate OpenAPI/Swagger specs from route definitions automatically
+- Maintain type synchronization between frontend and backend (shared types or code generation)
+
+**Exit Criteria:**
+
+- [ ] Zero `any` types in TypeScript codebase
+- [ ] OpenAPI spec matches actual API behavior (verified by contract testing)
+- [ ] Type changes in backend propagate to frontend types automatically
+
+### §56.C — Documentation Generation
+
+- Generate JSDoc/docstrings for all public functions, classes, and modules
+- Maintain README with setup instructions, architecture overview, and contribution guide
+- Auto-generate API reference documentation from route definitions and types
+- Keep CHANGELOG updated with every merged change
+
+**Exit Criteria:**
+
+- [ ] All public APIs have documentation with examples
+- [ ] README allows a new developer to run the project in < 5 minutes
+- [ ] API docs stay synchronized with implementation (generated, not hand-written)
+
+---
+
+<!-- DELIVERABLE: id=57 status=PLANNED tier=T2 modules=role_registry.py,api_runner.py -->
+# 57. SEO and Discoverability
+
+Public-facing web applications must be discoverable by search engines and social platforms.
+
+### §57.A — Technical SEO
+
+- Generate semantic HTML with proper heading hierarchy (single H1, logical nesting)
+- Implement canonical URLs to prevent duplicate content issues
+- Generate XML sitemaps and robots.txt dynamically
+- Support structured data (JSON-LD) for rich search results
+
+**Exit Criteria:**
+
+- [ ] Lighthouse SEO score ≥ 90
+- [ ] All indexable pages have unique meta titles and descriptions
+- [ ] Structured data validates against schema.org specifications
+
+### §57.B — Social Sharing and Open Graph
+
+- Generate Open Graph and Twitter Card meta tags for all shareable pages
+- Support dynamic OG image generation for content-rich pages
+- Implement proper canonical and alternate language link tags
+
+**Exit Criteria:**
+
+- [ ] Social preview cards render correctly on Facebook, Twitter, LinkedIn, Slack
+- [ ] OG image dimensions meet platform requirements (1200×630)
+
+### §57.C — Performance as SEO Signal
+
+- Core Web Vitals directly impact search ranking; optimize accordingly
+- Implement prerendering or SSR for crawler-facing content
+- Minimize render-blocking resources in critical path
+
+**Exit Criteria:**
+
+- [ ] Core Web Vitals pass "Good" thresholds on real user data (CrUX)
+- [ ] Search engine crawlers receive fully rendered content
+
+---
+
+<!-- DELIVERABLE: id=58 status=PLANNED tier=T1 modules=role_registry.py,api_runner.py,quality_gate.py -->
+# 58. Data Layer Engineering
+
+Robust data modeling and persistence underpins every reliable web application.
+
+### §58.A — Schema Design
+
+- Normalize relational schemas to 3NF unless deliberate denormalization is justified
+- Implement proper foreign keys, constraints, and indexes
+- Use UUIDs or snowflake IDs for primary keys in distributed systems
+- Design schemas for query patterns, not just storage patterns
+
+**Exit Criteria:**
+
+- [ ] All tables have primary keys, appropriate indexes, and foreign key constraints
+- [ ] No N+1 query patterns in generated data access code
+- [ ] Schema supports projected growth (partitioning strategy defined)
+
+### §58.B — Data Validation and Integrity
+
+- Validate at every layer: client form → API schema → database constraint
+- Implement database-level constraints (NOT NULL, CHECK, UNIQUE) as final safety net
+- Use transactions for multi-table mutations to prevent partial writes
+- Implement soft deletes where audit trail is required
+
+**Exit Criteria:**
+
+- [ ] Invalid data cannot reach the database regardless of client behavior
+- [ ] Multi-table operations are atomic (all succeed or all rollback)
+- [ ] Deleted records preserved for audit period per project contract
+
+### §58.C — Backup and Recovery
+
+- Generate backup schedules appropriate to data criticality
+- Test restore procedures regularly (backup without tested restore is not a backup)
+- Implement point-in-time recovery for transactional databases
+- Encrypt backups at rest
+
+**Exit Criteria:**
+
+- [ ] Restore from backup completes within RTO defined in project contract
+- [ ] Backup integrity verified via automated checksum validation
+- [ ] Point-in-time recovery tested quarterly

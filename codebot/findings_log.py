@@ -93,7 +93,7 @@ def append_finding(
     severity: str,
     path: Path | None = None,
 ) -> None:
-    target = path or DEFAULT_FINDINGS_PATH
+    target = path or get_default_findings_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "ts": time.time(),
@@ -109,7 +109,7 @@ def append_finding(
 
 
 def read_findings(path: Path | None = None, limit: int = MAX_FINDINGS_READ) -> list[dict[str, Any]]:
-    target = path or DEFAULT_FINDINGS_PATH
+    target = path or get_default_findings_path()
     if not target.exists():
         return []
     results: list[dict[str, Any]] = []
@@ -131,7 +131,7 @@ def read_findings(path: Path | None = None, limit: int = MAX_FINDINGS_READ) -> l
 
 
 def rotate_findings(path: Path | None = None, max_lines: int = MAX_FINDINGS_LINES) -> None:
-    target = path or DEFAULT_FINDINGS_PATH
+    target = path or get_default_findings_path()
     try:
         if not target.exists():
             return

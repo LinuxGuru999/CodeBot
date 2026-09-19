@@ -86,6 +86,10 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `integration_queue.py` | ~220 | Integration queue with dependency-aware merge ordering |
 | `stale_branch_detector.py` | ~240 | Stale branch detection and cleanup mechanism |
 | `adaptive_rate_limiter.py` | ~200 | Adaptive rate limiting based on API provider feedback |
+| `alignment_events.py` | ~150 | Alignment event bus for reward scoring and prompt evolution triggers |
+| `bot_metrics.py` | ~180 | Per-bot performance metrics collection, aggregation, and reporting |
+| `checkpoint_manager.py` | ~200 | Agent checkpoint save/restore for crash recovery and session continuity |
+| `file_lock.py` | ~120 | Cross-process file locking primitives for safe concurrent state access |
 
 ### Capability Modules (CAP Pipeline)
 
