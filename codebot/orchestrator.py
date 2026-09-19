@@ -2083,6 +2083,9 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
         ticket_ctx = _load_ticket_context(assigned_tid)
         if ticket_ctx:
             prompt_text = f"{prompt_text}\n\n{ticket_ctx}"
+            logger.info(f"Injected ticket context for {bot.config.name}: {assigned_tid} ({len(ticket_ctx)} chars)")
+        else:
+            logger.warning(f"No ticket context found for {bot.config.name}: {assigned_tid}")
     try:
         from codebot.scratchpad import load_scratchpad, create_handoff_note
         if assigned_tid:

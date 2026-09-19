@@ -27,7 +27,6 @@ Invariants
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import re
@@ -36,6 +35,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from codebot.file_lock import flock, LOCK_SH, LOCK_EX, LOCK_UN
 
 
 SCHEMA_VERSION = "2.0"
@@ -347,12 +348,12 @@ class TicketStore:
             return
         try:
             lock_path = self._path.with_suffix(".lock")
-            with open(lock_path, "w") as lock_fd:
-                fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            with open(lock_path, "a+") as lock_fd:
+                flock(lock_fd, LOCK_SH)
                 try:
                     data = json.loads(self._path.read_text(encoding="utf-8"))
                 finally:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    flock(lock_fd, LOCK_UN)
             for entry in data.get("tickets", []):
                 t = Ticket.from_dict(entry)
                 self._tickets[t.id] = t
@@ -437,15 +438,15 @@ class TicketStore:
         }
         lock_path = self._path.with_suffix(".lock")
         try:
-            with open(lock_path, "w") as lock_fd:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            with open(lock_path, "a+") as lock_fd:
+                flock(lock_fd, LOCK_EX)
                 try:
                     self._backup()
                     tmp = self._path.with_suffix(".tmp")
                     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                     tmp.replace(self._path)
                 finally:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    flock(lock_fd, LOCK_UN)
         except OSError:
             self._backup()
             tmp = self._path.with_suffix(".tmp")

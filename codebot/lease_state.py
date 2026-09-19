@@ -18,12 +18,13 @@ Invariants
 - Dead-letter records are unique by work-item id.
 """
 
-import fcntl
 import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+
+from codebot.file_lock import flock, LOCK_EX, LOCK_UN
 
 
 @contextmanager
@@ -31,7 +32,7 @@ def _locked_state(state_dir: Path) -> Iterator[dict]:
     state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = state_dir / "leases.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        flock(lock.fileno(), LOCK_EX)
         try:
             state_path = state_dir / "leases.json"
             if state_path.exists():
@@ -43,7 +44,7 @@ def _locked_state(state_dir: Path) -> Iterator[dict]:
             temporary_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
             temporary_path.replace(state_path)
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            flock(lock.fileno(), LOCK_UN)
 
 
 def acquire(state_dir: Path, item_id: str, owner: str, *, now: float, lease_seconds: int, max_attempts: int = 3) -> dict:

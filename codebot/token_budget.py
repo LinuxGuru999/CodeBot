@@ -12,13 +12,14 @@ An exclusive lock and replace-based writes prevent concurrent runners from
 overwriting one another, while malformed data fails closed to avoid overspend.
 """
 
-import fcntl
 import json
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from codebot.file_lock import flock, LOCK_EX, LOCK_UN, LOCK_NB
 
 CAP = 4_000_000_000
 LOCK_TIMEOUT = 5.0
@@ -68,7 +69,7 @@ def _locked(path: Path):
     deadline = time.monotonic() + LOCK_TIMEOUT
     while True:
         try:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            flock(fp.fileno(), LOCK_EX | LOCK_NB)
             return fp
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -163,7 +164,7 @@ def record_usage_locked(
         _write(ledger_path, ledger)
         return ledger
     finally:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        flock(lock.fileno(), LOCK_UN)
         lock.close()
 
 

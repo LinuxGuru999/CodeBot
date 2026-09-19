@@ -23,7 +23,6 @@ Invariants
 """
 
 import concurrent.futures
-import fcntl
 import json
 import os
 import re
@@ -36,6 +35,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from codebot.file_lock import flock, LOCK_EX, LOCK_UN, LOCK_NB
 
 try:
     from bots.api_tools import bash, read, write, edit, grep, glob
@@ -1237,7 +1238,7 @@ def _locked_ledger_write(state_dir: Path, token_report_cb, manifest_name: str) -
         fp = open(target, "a+")
         while time.time() - start < timeout:
             try:
-                fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                flock(fp, LOCK_EX | LOCK_NB)
                 acquired = True
                 break
             except BlockingIOError:
@@ -1254,7 +1255,7 @@ def _locked_ledger_write(state_dir: Path, token_report_cb, manifest_name: str) -
     finally:
         if fp is not None:
             try:
-                fcntl.flock(fp, fcntl.LOCK_UN)
+                flock(fp, LOCK_UN)
             except Exception:
                 pass
             try:
