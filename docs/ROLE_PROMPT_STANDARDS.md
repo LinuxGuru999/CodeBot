@@ -28,7 +28,7 @@ Every role prompt MUST contain these sections in order:
 
 Optional sections: Output Format, Complexity Tiers, Decomposition Rules, Strategic Priorities. Never omit required sections.
 
-Reference implementation: `codebot/roles/feature_hunter.md`.
+Reference implementation: `codebot/roles/feature_hunter.md` (hardened for cheap models — see §14).
 
 ---
 
@@ -397,3 +397,138 @@ Before shipping any new or modified role prompt, verify:
 - [ ] Role added to queue scaling logic in orchestrator if applicable (`_scale_queue_depth` checks `DISCOVERY_ROLE_NAMES | PLANNING_ROLE_NAMES`)
 - [ ] Role added to no-ticket penalty tracking in orchestrator (exit handler checks at lines ~4158 and ~4269)
 - [ ] `create_ticket` tool policy includes `write` if agent needs checkpoint saving
+
+---
+
+## 14. Prompt Hardening for Cheap Models
+
+Cheap models (xiaomi-mimo-2.5, meta-muse-spark-1.2) have weak instruction-following discipline. They treat "Do NOT read X" as background context, not hard constraints. They wander into codebases when they should be calling tools. They loop on dedup checks instead of advancing.
+
+Every pattern below was discovered by debugging production agent failures where the model ran 40+ iterations, read dozens of forbidden files, and created zero tickets.
+
+### 14.1 Blacklists Fail — Use Whitelists Instead
+
+**Problem**: "Do NOT read .drain, .update_lock, alignment_scores.json, project.yaml, constitution.md" lists are treated as suggestions. The model reads them anyway, then reads OTHER files not on the list.
+
+**Solution**: Replace blacklists with an explicit `ALLOWED FILES` table as a hard gate:
+
+```markdown
+## ALLOWED FILES (HARD GATE)
+
+You may ONLY read these files. Reading ANY other file is a violation.
+
+| File | Purpose |
+|------|---------|
+| `.codebot/roadmap_index.json` | Source of deliverables |
+| `.codebot/state/tickets.json` | Dedup check — read ONCE only |
+| `.codebot/state/{name}.checkpoint.json` | Your checkpoint |
+
+**If you find yourself wanting to read ANY file not in this table — STOP.
+You don't need it. Call `create_ticket` instead.**
+```
+
+**Evidence**: feature_hunter v1 (blacklist prompt) read 11 random .py files (tool_policy.py, orchestrator.py, alignment_service.py, etc.) across 47 iterations, creating 0 tickets. v2 (whitelist prompt) read 0 random files, created 5 tickets in 10 iterations.
+
+### 14.2 Linear Flow — No Backtracking
+
+**Problem**: Prompts with two process descriptions (e.g., "Startup Sequence" section + "Process" section) cause models to complete step 1-2, then re-read the Process section and loop on step 4 (dedup) forever.
+
+**Solution**: Single linear flow with explicit "DO NOT go back" instructions:
+
+```markdown
+## Process (LINEAR — NO LOOPS BACK)
+
+Execute these steps IN ORDER. After each step, move to the next.
+Do NOT revisit a completed step.
+
+### Step 1: Read index
+...
+### Step 2: Read checkpoint
+...
+### Step 3: Build dedup set (ONE READ of tickets.json)
+...
+### Step 4: Create tickets (THE MAIN LOOP)
+For each candidate, call `create_ticket` IMMEDIATELY.
+**DO NOT re-read tickets.json. DO NOT re-grep. Just call create_ticket.**
+```
+
+**Evidence**: feature_decomposer with two process sections got stuck reading tickets.json7 times in a loop. v3 with linear flow read it once, then created tickets.
+
+### 14.3 Dedup as One-Shot Gate
+
+**Problem**: Models loop on dedup checks — they read tickets.json, grep it, read it again, grep it again, never advancing to create_ticket.
+
+**Solution**: Explicitly state dedup is a ONE-TIME operation:
+
+```markdown
+### Step 3: Build dedup set (ONE READ of tickets.json)
+Read tickets.json ONCE. Scan for existing ticket titles. Build a set of
+deduped IDs. Do NOT re-read this file later. Do NOT grep this file
+repeatedly. One read is enough.
+
+### Step 4: Create tickets
+**DO NOT re-read tickets.json. DO NOT re-grep tickets.json.
+Just call create_ticket for the next candidate.**
+```
+
+Add to anti-patterns:
+```
+1. Reading tickets.json more than once = noop. One read in Step 3 is enough.
+   Re-reading means you're stuck in a loop.
+```
+
+### 14.4 Forced Action After Data Load
+
+**Problem**: Models read data files and then wander instead of acting on the data.
+
+**Solution**: Explicitly state the VERY NEXT action after each data load:
+
+```markdown
+### Step 2: Read checkpoint
+[read checkpoint]
+
+### Step 3: START CREATING TICKETS IMMEDIATELY
+After Steps 1-2, your NEXT tool call MUST be `create_ticket` for the
+first non-deduped candidate. Do NOT read any other files.
+```
+
+### 14.5 Contradiction Elimination
+
+**Problem**: Sections that contradict each other cause models to wander trying to reconcile them. Example: "Do NOT read project.yaml" in one section, "Read project.yaml" in another.
+
+**Solution**: Audit all sections for contradictions. If a file is needed conditionally (e.g., "only when decomposing"), state the condition explicitly in ONE place:
+
+```markdown
+## ALLOWED FILES
+| `.codebot/project.yaml` | Only when actively decomposing a specific ticket |
+| `.codebot/constitution.md` | Only when decomposing — to check protected invariants |
+```
+
+Remove any "Do NOT read project.yaml" from other sections — the whitelist already controls access.
+
+### 14.6 Anti-Patterns as Violations
+
+**Problem**: Anti-patterns listed as "NEVER DO THESE" are treated as background context.
+
+**Solution**: Frame anti-patterns as violations with explicit penalties tied to the noop system:
+
+```markdown
+## Anti-Patterns (VIOLATIONS — WILL BE PENALIZED)
+
+1. **Reading tickets.json more than once** = noop. One read is enough.
+2. **Reading files not in ALLOWED FILES table** = noop.
+3. **Writing text output instead of calling create_ticket** = noop.
+```
+
+### 14.7 Summary Checklist
+
+Before shipping a hardened prompt for a cheap model, verify:
+
+- [ ] ALLOWED FILES table replaces all "Do NOT read" blacklists
+- [ ] Single linear process flow with no backtracking
+- [ ] Dedup is a one-shot gate (ONE read of tickets.json)
+- [ ] Explicit "NEXT tool call MUST be X" after data loads
+- [ ] No contradictions between sections
+- [ ] Anti-patterns framed as violations with penalties
+- [ ] Minimum output requirement stated in ≥ 3 locations
+- [ ] Complete JSON tool call example included
