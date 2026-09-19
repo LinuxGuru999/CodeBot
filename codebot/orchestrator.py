@@ -2129,7 +2129,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             f"Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
             f"- At startup and after every atomic task, write Unix timestamp to {heartbeat_file} using the `write` tool.\n"
             f"- After every atomic task, write <4KB checkpoint to {ckpt_file} using the `write` tool (atomic tmp->replace).\n"
-            f"- Before each atomic task, check if `state/.drain` or `state/.update_lock` exists via `read` tool. If either exists, exit 0.\n"
+            f"- Before each atomic task, run `bash` with `test -f {STATE_DIR}/.drain || test -f {STATE_DIR}/.update_lock && echo DRAIN` to check for drain. If output contains DRAIN, exit 0. Do NOT use the `read` tool for drain checks.\n"
             f"- State dir: {STATE_DIR}  Log dir: {LOGS_DIR}  Prompt: {prompt_file.name}\n"
             f"{ckpt_block}\n"
             f"--- Task Specification ({prompt_file.name}) ---\n"
