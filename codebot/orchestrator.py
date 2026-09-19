@@ -103,16 +103,16 @@ except ImportError:
     _GATEWAY = False
     _PG_MAX_CONCURRENT = 10
     GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "3"))
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "22"))
+GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "30"))
 
 CODEBOT_MIN_MEMORY_MB = int(os.getenv("CODEBOT_MIN_MEMORY_MB", "60"))
-MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "4"))
-MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "4"))
-MAX_QWEN_38_CONCURRENT = int(os.getenv("CODEBOT_MAX_QWEN_38", "4"))
-MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "12"))
-MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "6"))
-MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "6"))
-MAX_REVIEWER_SLOTS = int(os.getenv("CODEBOT_MAX_REVIEWERS", "6"))
+MAX_THINKING_CONCURRENT = int(os.getenv("CODEBOT_MAX_THINKING_CONCURRENT", "6"))
+MAX_EXPENSIVE_CONCURRENT = int(os.getenv("CODEBOT_MAX_EXPENSIVE_CONCURRENT", "6"))
+MAX_QWEN_38_CONCURRENT = int(os.getenv("CODEBOT_MAX_QWEN_38", "6"))
+MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "24"))
+MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "2"))
+MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "2"))
+MAX_REVIEWER_SLOTS = int(os.getenv("CODEBOT_MAX_REVIEWERS", "2"))
 USE_MANIFEST_SCHEDULER = os.getenv("CODEBOT_MANIFEST_SCHEDULER", "0") == "1"
 
 # Model-based rate limiting: max spawns per model within a time window
@@ -1823,6 +1823,7 @@ def _retry_stuck_starting(bot: BotState, bots: dict[str, BotState]) -> bool:
         pass
     bot.process = None
     update_bot_state(bot, "waiting")
+    start_bot(bot, bots=bots, is_overture=True)
     return True
 
 # ---------------------------------------------------------------------------
@@ -3682,6 +3683,7 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 pass
             if exit_code in (0, 3):
                 bot.consecutive_errors = 0
+                bot.restart_count = 0
                 if exit_code == 3:
                     logger.info(f"Bot '{name}' yielded on rate limit — requeue soon, no error count")
                     bot.next_run_at = now + RATE_LIMIT_REQUEUE_S
