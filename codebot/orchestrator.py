@@ -860,6 +860,7 @@ def _rotate_model_on_error(bot: BotState, bots: dict[str, BotState] | None = Non
 
     Cycles through all available models, skipping the one that just failed.
     Tracks consecutive failures per model to avoid retrying a broken provider.
+    Considers rate limiter state to avoid rotating to heavily rate-limited models.
     """
     all_models = WORKER_MODELS_THINKING + WORKER_MODELS_NON_THINKING
     failed_model = bot.config.model
@@ -876,13 +877,37 @@ def _rotate_model_on_error(bot: BotState, bots: dict[str, BotState] | None = Non
                 m = b.config.model
                 live_counts[m] = live_counts.get(m, 0) + 1
 
+    rate_limiter_available = False
+    rate_limiter_state = {}
+    try:
+        from codebot.adaptive_rate_limiter import rate_limiter
+        rate_limiter_available = True
+        for m in all_models:
+            can_spawn, _ = rate_limiter.can_spawn_now(m)
+            state = rate_limiter._get_state(m)
+            rate_limiter_state[m] = {
+                "can_spawn": can_spawn,
+                "effective_interval": state.effective_interval,
+                "consecutive_rate_limits": state.consecutive_rate_limits,
+            }
+    except Exception:
+        pass
+
     candidates = []
     for m in all_models:
         if m == failed_model:
             continue
         if failures.get(m, 0) >= 3:
             continue
-        candidates.append((live_counts.get(m, 0), m))
+        live = live_counts.get(m, 0)
+        if rate_limiter_available and m in rate_limiter_state:
+            rl = rate_limiter_state[m]
+            if rl["consecutive_rate_limits"] >= 2:
+                continue
+            penalty = rl["effective_interval"] * 2
+            candidates.append((live + penalty, m))
+        else:
+            candidates.append((live, m))
 
     if not candidates:
         candidates = [(live_counts.get(m, 0), m) for m in all_models if m != failed_model]
