@@ -759,15 +759,76 @@ _MODEL_FALLBACKS: dict[str, str] = {
 }
 
 _model_rotation_index = 0
+_model_allocation_counts: dict[str, int] = {}
 
 
-def _next_worker_model() -> tuple[str, str]:
+def _next_worker_model(bots: dict[str, BotState] | None = None) -> tuple[str, str]:
     global _model_rotation_index
     all_models = WORKER_MODELS_THINKING + WORKER_MODELS_NON_THINKING
-    model = all_models[_model_rotation_index % len(all_models)]
-    _model_rotation_index += 1
+
+    if bots is not None:
+        live_counts: dict[str, int] = {m: 0 for m in all_models}
+        for b in bots.values():
+            if b.process is not None and b.process.poll() is None:
+                m = b.config.model
+                live_counts[m] = live_counts.get(m, 0) + 1
+        min_count = min(live_counts.get(m, 0) for m in all_models)
+        candidates = [m for m in all_models if live_counts.get(m, 0) == min_count]
+        model = candidates[_model_rotation_index % len(candidates)]
+        _model_rotation_index += 1
+        for m in all_models:
+            _model_allocation_counts[m] = live_counts.get(m, 0)
+    else:
+        model = all_models[_model_rotation_index % len(all_models)]
+        _model_rotation_index += 1
+
     fallback = _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
     return model, fallback
+
+
+def _rotate_model_on_error(bot: BotState, bots: dict[str, BotState] | None = None) -> str:
+    """Pick a different model for a bot that just errored out.
+
+    Cycles through all available models, skipping the one that just failed.
+    Tracks consecutive failures per model to avoid retrying a broken provider.
+    """
+    all_models = WORKER_MODELS_THINKING + WORKER_MODELS_NON_THINKING
+    failed_model = bot.config.model
+
+    if not hasattr(bot, '_model_failures'):
+        bot._model_failures = {}  # type: ignore[attr-defined]
+    failures = bot._model_failures  # type: ignore[attr-defined]
+    failures[failed_model] = failures.get(failed_model, 0) + 1
+
+    live_counts: dict[str, int] = {}
+    if bots is not None:
+        for b in bots.values():
+            if b.process is not None and b.process.poll() is None:
+                m = b.config.model
+                live_counts[m] = live_counts.get(m, 0) + 1
+
+    candidates = []
+    for m in all_models:
+        if m == failed_model:
+            continue
+        if failures.get(m, 0) >= 3:
+            continue
+        candidates.append((live_counts.get(m, 0), m))
+
+    if not candidates:
+        candidates = [(live_counts.get(m, 0), m) for m in all_models if m != failed_model]
+
+    if not candidates:
+        return failed_model
+
+    candidates.sort(key=lambda x: x[0])
+    new_model = candidates[0][1]
+
+    old_model = bot.config.model
+    bot.config.model = new_model
+    bot.config.fallback_model = _MODEL_FALLBACKS.get(new_model, "xiaomi-mimo-2.5")
+    logger.info(f"Model rotation for '{bot.config.name}': {old_model} -> {new_model} (error on {old_model}, failures={failures})")
+    return new_model
 
 
 BOT_REGISTRY = _scale_workers_to_demand(BOT_REGISTRY, GATEWAY_MAX_CONCURRENT)
@@ -1934,7 +1995,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
         update_bot_state(bot, "paused")
         return False
     if bot.config.name in WORKER_POOL:
-        rotated_model, rotated_fallback = _next_worker_model()
+        rotated_model, rotated_fallback = _next_worker_model(bots)
         bot.config.model = rotated_model
         bot.config.fallback_model = rotated_fallback
     ckpt = checkpoint_path(bot.config.name)
@@ -3633,14 +3694,20 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
             if exit_code in (0, 3):
                 bot.consecutive_errors = 0
                 bot.restart_count = 0
-                if exit_code == 3:
-                    logger.info(f"Bot '{name}' yielded on rate limit — requeue soon, no error count")
-                    bot.next_run_at = now + RATE_LIMIT_REQUEUE_S
-                    update_bot_state(bot, "waiting")
-                    continue
-            else:
+            if exit_code == 3:
+                bot.consecutive_errors = 0
+                bot.next_run_at = now + RATE_LIMIT_REQUEUE_S
+                update_bot_state(bot, "waiting")
+                _rotate_model_on_error(bot, bots)
+                logger.info(f"Bot '{name}' rate-limited (exit 3) — rotated to {bot.config.model}, requeue in {RATE_LIMIT_REQUEUE_S}s")
+            elif exit_code != 0:
                 bot.consecutive_errors += 1
                 if bot.consecutive_errors >= 3:
+                    _rotate_model_on_error(bot, bots)
+                    bot.consecutive_errors = 0
+                    logger.warning(f"Bot '{name}' failed 3 times — rotated to {bot.config.model}")
+                else:
+                    logger.warning(f"Bot '{name}' exited with code {exit_code} (attempt {bot.consecutive_errors}/3)")
                     logger.error(f"Bot '{name}' failed 3 times — disabling (model {bot.config.model})")
                     bot.config.enabled = False
                     update_bot_state(bot, "disabled")

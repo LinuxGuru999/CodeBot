@@ -857,8 +857,8 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
         return 0
     # header
     if verbose:
-        print(f"{'Agent':<26s} {'Status':<9s} {'HB':>7s} {'LOG':>7s} {'ITER':>5s} {'TASK':<22s} {'PID':>7s} {'RST':>4s} {'ERR':>4s} {'MODEL':<14s}")
-        print("-" * 120)
+        print(f"{'Agent':<26s} {'Status':<17s} {'HB':>15s} {'LOG':>15s} {'ITER':>5s} {'TASK':<22s} {'PID':>7s} {'RST':>4s} {'ERR':>4s} {'MODEL':<14s}")
+        print("-" * 130)
         for a in agents:
             hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
             loga = _age_str(a["log_age"], enabled) if a["log_age"] is not None else _c("-", "gray", enabled)
@@ -870,8 +870,8 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
             err = str(a["consecutive_errors"]) if a["consecutive_errors"] is not None else "-"
             print(f"{a['name']:<26s} {_ansi_pad(bucket, 17)} {_ansi_pad(hb, 15, 'right')} {_ansi_pad(loga, 15, 'right')} {str(a['iteration']):>5s} {task:<22s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<14s}")
     else:
-        print(f"{'Agent':<25s} {'Status':<10s} {'HB Age':>8s} {'PID':>8s} {'ITER':>6s} {'TASK':<18s}")
-        print("-" * 90)
+        print(f"{'Agent':<25s} {'Status':<18s} {'HB Age':>18s} {'PID':>8s} {'ITER':>6s} {'TASK':<18s}")
+        print("-" * 100)
         for a in agents:
             bucket = _bucket_color(a["bucket"], enabled)
             pid_s = str(a["pid"]) if a["pid"] else "-"
