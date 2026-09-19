@@ -425,12 +425,17 @@ def retry_dead_letter(item_id: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _auth(self) -> bool:
+    def _auth(self) -> bool | None:
         """Validate Bearer token via Authorization header with rate limiting.
 
         Fail-closed: when CONTROL_TOKEN is unset/empty, reject all requests
         (Constitution §2: no implicit trust at auth boundaries).
         Rate-limited: excessive failed attempts trigger 429 responses.
+
+        Returns:
+            True  - authenticated successfully
+            False - authentication failed (caller must send 401)
+            None  - rate limited (429 already sent, caller must return immediately)
         """
         # Get client IP for rate limiting
         client_ip = self.client_address[0] if self.client_address else "unknown"
@@ -440,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
         if not allowed:
             logger.warning("Rate limit exceeded for %s: %s", client_ip, reason)
             self._json(429, {"error": "too many requests", "reason": reason})
-            return False
+            return None
 
         if not CONTROL_TOKEN:
             logger.warning(
@@ -506,7 +511,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok", "time": time.time()})
             return
 
-        if not self._auth():
+        auth_result = self._auth()
+        if auth_result is None:
+            return  # Rate limited, response already sent
+        if not auth_result:
             self._json(401, {"error": "unauthorized"})
             return
 
@@ -632,7 +640,10 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802
-        if not self._auth():
+        auth_result = self._auth()
+        if auth_result is None:
+            return  # Rate limited, response already sent
+        if not auth_result:
             self._json(401, {"error": "unauthorized"})
             return
         parsed = urlparse(self.path)

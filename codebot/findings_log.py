@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,50 @@ BOTS_DIR = Path(__file__).parent
 PROJECT_ROOT = BOTS_DIR.parent
 STATE_DIR = PROJECT_ROOT / ".codebot" / "state"
 DEFAULT_FINDINGS_PATH = STATE_DIR / "findings.jsonl"
+
+# T4.3 incremental adapter seam: when a ProjectAdapter is provided, its
+# state_dir overrides the static default above (mirrors rl_engine.py /
+# orchestrator.py). Also honours CODEBOT_STATE_DIR / CODEBOT_PROJECT_ROOT
+# env vars so all agents resolve the same location without an adapter.
+_adapter_instance: Any | None = None
+
+
+def set_project_adapter(adapter: Any) -> None:
+    """Inject a ProjectAdapter; its state_dir becomes the findings location."""
+    global _adapter_instance, STATE_DIR, DEFAULT_FINDINGS_PATH
+    _adapter_instance = adapter
+    try:
+        p = adapter.paths()  # type: ignore[union-attr]
+        STATE_DIR = p.state_dir
+        DEFAULT_FINDINGS_PATH = p.state_dir / "findings.jsonl"
+    except Exception:
+        pass
+
+
+def get_adapter() -> Any | None:
+    """Return the injected ProjectAdapter, if any."""
+    return _adapter_instance
+
+
+def _resolve_state_dir() -> Path:
+    """Resolve the project state dir: adapter > env > static default."""
+    if _adapter_instance is not None:
+        try:
+            return _adapter_instance.paths().state_dir  # type: ignore[union-attr]
+        except Exception:
+            pass
+    env_state = os.environ.get("CODEBOT_STATE_DIR")
+    if env_state:
+        return Path(env_state)
+    env_root = os.environ.get("CODEBOT_PROJECT_ROOT")
+    if env_root:
+        return Path(env_root) / ".codebot" / "state"
+    return STATE_DIR
+
+
+def get_default_findings_path() -> Path:
+    """Return the findings.jsonl path all agents should share."""
+    return _resolve_state_dir() / "findings.jsonl"
 
 FINDINGS_SCHEMA_KEYS = frozenset({"ts", "bot", "type", "module", "finding", "severity"})
 

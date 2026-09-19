@@ -1886,12 +1886,14 @@ botop term — interactive
         if not s:
             continue
         if s.startswith("!"):
-            # shell escape
+            # shell escape - use shell=False with shlex.split to prevent injection
             sh = s[1:].strip()
             if not sh:
                 continue
             try:
-                subprocess.run(sh, shell=True)
+                import shlex
+                cmd = shlex.split(sh)
+                subprocess.run(cmd, shell=False)
             except Exception as e:
                 print(f"shell error: {e}", file=sys.stderr)
             continue
