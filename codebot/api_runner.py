@@ -408,11 +408,11 @@ def _resolve_api_key_for_provider(provider_name: str = "dialagram") -> str | Non
 
 
 API_URL = _DEFAULT_API_URL
-API_TIMEOUT = 120
+API_TIMEOUT = 30
 
 
 API_URL = _DEFAULT_API_URL
-API_TIMEOUT = 120
+API_TIMEOUT = 30
 MAX_TOOL_ITERATIONS = 150
 MAX_RETRIES = 5
 MAX_TIMEOUT_RETRIES = 3
