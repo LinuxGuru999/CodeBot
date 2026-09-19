@@ -54,7 +54,7 @@ class ModelRateState:
     @property
     def effective_interval(self) -> float:
         if self.consecutive_rate_limits > 0:
-            return self.min_interval * (2 ** min(self.consecutive_rate_limits, 4))
+            return self.min_interval * (2 ** min(self.consecutive_rate_limits, 2))
         return self.min_interval
 
     def record_request(self) -> None:
@@ -69,7 +69,7 @@ class ModelRateState:
         if retry_after:
             self.min_interval = max(self.min_interval, retry_after)
         else:
-            self.min_interval = min(self.min_interval * 2, 30.0)
+            self.min_interval = min(self.min_interval * 1.5, 5.0)
 
         self.learned_rpm = max(1.0, 60.0 / self.min_interval)
 
