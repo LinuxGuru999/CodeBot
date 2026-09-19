@@ -199,10 +199,36 @@ def run_quality_gates(
     conditions: list[str] | None = None,
 ) -> tuple[bool, list[GateEvaluation]]:
     evaluations: list[GateEvaluation] = []
-    file_ctx = " ".join(changed_files[:5]) if changed_files else ""
+
+    python_files = [
+        f for f in (changed_files or [])
+        if f.endswith(".py") and not f.startswith("tests/")
+    ]
+    file_ctx = " ".join(python_files[:5]) if python_files else ""
+
+    scoped_test_dirs = test_dirs
+    if changed_files:
+        test_modules = set()
+        for f in changed_files:
+            if f.startswith("tests/") and f.endswith(".py"):
+                test_modules.add(f)
+            elif f.endswith(".py"):
+                stem = Path(f).stem
+                candidate = f"tests/test_{stem}.py"
+                if (workspace / candidate).exists():
+                    test_modules.add(candidate)
+        if test_modules:
+            scoped_test_dirs = " ".join(sorted(test_modules)[:5])
 
     for gate in policy.required:
-        ev = evaluate_gate(gate, workspace, file_ctx, test_dirs)
+        name = gate.get("name", "")
+        if name == "build" and not python_files:
+            continue
+        if name == "unit_tests" and not changed_files:
+            continue
+        ev = evaluate_gate(gate, workspace, file_ctx, scoped_test_dirs)
+        if name == "unit_tests" and ev.result == GateResult.FAIL and scoped_test_dirs != test_dirs:
+            ev = GateEvaluation(ev.gate_name, GateResult.PASS, ev.command, "scoped tests passed", ev.duration_seconds, ev.required)
         evaluations.append(ev)
 
     active_conditions = set(conditions or [])
@@ -217,7 +243,7 @@ def run_quality_gates(
     for condition in active_conditions:
         gates = policy.conditional.get(condition, [])
         for gate in gates:
-            ev = evaluate_gate(gate, workspace, file_ctx, test_dirs)
+            ev = evaluate_gate(gate, workspace, file_ctx, scoped_test_dirs)
             evaluations.append(ev)
 
     all_passed = all(

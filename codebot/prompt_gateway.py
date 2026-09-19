@@ -29,11 +29,31 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger("prompt_gateway")
 
-MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "45")))
+MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "30")))
 MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", os.getenv("CODEBOT_MIN_SPAWN_GAP", "8")))
+
+try:
+    from codebot.adaptive_rate_limiter import rate_limiter
+    _HAS_RATE_LIMITER = True
+except ImportError:
+    _HAS_RATE_LIMITER = False
+    rate_limiter = None  # type: ignore
+
+
+def record_rate_limit(model: str, retry_after: Optional[float] = None) -> None:
+    """Record a rate limit response for adaptive learning."""
+    if _HAS_RATE_LIMITER and rate_limiter:
+        rate_limiter.record_rate_limit(model, retry_after)
+
+
+def record_success(model: str) -> None:
+    """Record a successful API call for adaptive learning."""
+    if _HAS_RATE_LIMITER and rate_limiter:
+        rate_limiter.record_success(model)
 
 _last_spawn_ts = 0.0
 
@@ -177,7 +197,7 @@ def running_count(bots: dict) -> int:
     return n
 
 
-def spawn_allowed(bots: dict) -> tuple[bool, str]:
+def spawn_allowed(bots: dict, model: str = "") -> tuple[bool, str]:
     """Check the global spawn gate without mutating state."""
     running = running_count(bots)
     if running >= MAX_CONCURRENT:
@@ -185,6 +205,10 @@ def spawn_allowed(bots: dict) -> tuple[bool, str]:
     gap = time.time() - _last_spawn_ts
     if gap < MIN_SPAWN_GAP:
         return False, f"spawn gap {gap:.0f}s < {MIN_SPAWN_GAP}s"
+    if _HAS_RATE_LIMITER and rate_limiter and model:
+        can_spawn, reason = rate_limiter.can_spawn(model)
+        if not can_spawn:
+            return False, reason
     return True, "slot available"
 
 

@@ -101,6 +101,13 @@ ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
 # override the defaults above.
 _adapter_instance: Any = None
 
+try:
+    from codebot.adaptive_rate_limiter import rate_limiter
+    _HAS_RATE_LIMITER = True
+except ImportError:
+    _HAS_RATE_LIMITER = False
+    rate_limiter = None
+
 
 def set_project_adapter(adapter: Any) -> None:
     global _adapter_instance, BOTS_DIR, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR, DRAIN_FILE, UPDATE_LOCK, RESTART_FILE
@@ -1993,6 +2000,7 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
                 return False, f"gap {gap:.1f}s<0s"
         elif gap < GATEWAY_MIN_SPAWN_GAP:
             return False, f"gap {gap:.0f}s<{GATEWAY_MIN_SPAWN_GAP}s"
+    
     return True, "slot available"
 
 

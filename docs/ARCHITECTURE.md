@@ -85,6 +85,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `alignment_service.py` | ~250 | Decoupled alignment pipeline for reward scoring and prompt evolution |
 | `integration_queue.py` | ~220 | Integration queue with dependency-aware merge ordering |
 | `stale_branch_detector.py` | ~240 | Stale branch detection and cleanup mechanism |
+| `adaptive_rate_limiter.py` | ~200 | Adaptive rate limiting based on API provider feedback |
 
 ### Capability Modules (CAP Pipeline)
 
