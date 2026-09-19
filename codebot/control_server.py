@@ -426,11 +426,22 @@ def retry_dead_letter(item_id: str) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     def _auth(self) -> bool:
-        """Validate Bearer token via Authorization header.
+        """Validate Bearer token via Authorization header with rate limiting.
 
         Fail-closed: when CONTROL_TOKEN is unset/empty, reject all requests
         (Constitution §2: no implicit trust at auth boundaries).
+        Rate-limited: excessive failed attempts trigger 429 responses.
         """
+        # Get client IP for rate limiting
+        client_ip = self.client_address[0] if self.client_address else "unknown"
+
+        # Check rate limit before processing auth
+        allowed, reason = _rate_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning("Rate limit exceeded for %s: %s", client_ip, reason)
+            self._json(429, {"error": "too many requests", "reason": reason})
+            return False
+
         if not CONTROL_TOKEN:
             logger.warning(
                 "CONTROL_TOKEN is not set — all authenticated requests are rejected "
@@ -439,7 +450,12 @@ class Handler(BaseHTTPRequestHandler):
             return False
         auth = self.headers.get("Authorization", "")
         expected = f"Bearer {CONTROL_TOKEN}"
-        return hmac.compare_digest(auth.strip(), expected)
+        result = hmac.compare_digest(auth.strip(), expected)
+        if not result:
+            # Record failed auth attempt for rate limiting
+            _rate_limiter.record_failure(client_ip)
+            logger.warning("Authentication failed for %s", client_ip)
+        return result
 
     def _json(self, code: int, obj: dict | list) -> None:
         """Send JSON response with security headers (Constitution §2)."""
