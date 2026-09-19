@@ -863,7 +863,16 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
     if orch.get("drain") and orch.get("drain_text"):
         print(f"  drain: {orch['drain_text'][:120]}")
     if not agents:
-        print("No agents found.")
+        print(_c("No agents found.", "yellow", enabled))
+        print(f"\nPossible causes:")
+        print(f"  - Orchestrator is not running")
+        print(f"  - Agents have not been spawned yet")
+        print(f"  - All agents have crashed or exited")
+        print(f"\nState directory: {state_dir}")
+        print(f"\nNext steps:")
+        print(f"  1. Check orchestrator status: pgrep -f orchestrator")
+        print(f"  2. Start orchestrator if needed: python3 -m codebot.orchestrator")
+        print(f"  3. Inspect state files: ls -la {state_dir}/*.heartbeat")
         return 0
     # header
     if verbose:

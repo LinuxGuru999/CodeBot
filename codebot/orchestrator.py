@@ -3159,34 +3159,107 @@ def _recover_deferred_tickets() -> int:
     return recovered
 
 
+def _get_pipeline_state() -> dict[str, int]:
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            return {}
+        store = TicketStore(store_path)
+        counts: dict[str, int] = {}
+        for state in TicketState:
+            tickets = store.list_by_state(state)
+            if tickets:
+                counts[state.value] = len(tickets)
+        return counts
+    except Exception:
+        return {}
+
+
+def _compute_dynamic_priority(pipeline: dict[str, int]) -> dict[str, int]:
+    ready = pipeline.get("ready", 0)
+    planning = pipeline.get("planning", 0)
+    implementing = pipeline.get("implementing", 0)
+    reviewing = pipeline.get("reviewing", 0)
+    verifying = pipeline.get("verifying", 0)
+    discovered = pipeline.get("discovered", 0)
+    triaged = pipeline.get("triaged", 0)
+    complete = pipeline.get("complete", 0)
+    total_non_complete = ready + planning + implementing + reviewing + verifying + discovered + triaged
+
+    priorities: dict[str, int] = {}
+
+    if total_non_complete == 0:
+        discovery_roles = {
+            "bug_hunter", "security_auditor", "architecture_auditor",
+            "performance_auditor", "test_gap_auditor", "documentation_auditor",
+            "dependency_auditor", "ux_auditor", "feature_hunter",
+        }
+        for r in discovery_roles:
+            priorities[r] = 10
+        for r in {"general_implementer", "backend_implementer", "frontend_implementer",
+                   "test_implementer", "migration_implementer", "documentation_implementer"}:
+            priorities[r] = 50
+        for r in {"implementation_planner", "implementation_planner-2",
+                   "implementation_planner-3", "implementation_planner-4"}:
+            priorities[r] = 50
+        return priorities
+
+    if ready >= 50:
+        for r in {"implementation_planner", "implementation_planner-2",
+                   "implementation_planner-3", "implementation_planner-4"}:
+            priorities[r] = 10
+    elif ready >= 20:
+        for r in {"implementation_planner", "implementation_planner-2",
+                   "implementation_planner-3", "implementation_planner-4"}:
+            priorities[r] = 15
+
+    if implementing >= 10 or planning > 0:
+        for r in {"general_implementer", "general_implementer-2", "general_implementer-3",
+                   "general_implementer-4", "backend_implementer", "backend_implementer-2",
+                   "frontend_implementer", "test_implementer", "migration_implementer",
+                   "documentation_implementer"}:
+            priorities[r] = 10
+
+    if reviewing >= 5 or implementing >= 15:
+        for r in {"correctness_reviewer", "security_reviewer", "architecture_reviewer",
+                   "test_reviewer", "performance_reviewer", "simplicity_reviewer",
+                   "documentation_reviewer"}:
+            priorities[r] = 10
+
+    if verifying >= 3:
+        priorities["scheduler"] = 10
+
+    if discovered >= 10 or triaged >= 10:
+        discovery_roles = {
+            "bug_hunter", "security_auditor", "architecture_auditor",
+            "performance_auditor", "test_gap_auditor", "documentation_auditor",
+            "dependency_auditor", "ux_auditor", "feature_hunter",
+        }
+        for r in discovery_roles:
+            priorities[r] = 25
+
+    return priorities
+
+
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
     now = time.time()
     due = [n for n, b in bots.items()
            if b.config.enabled and b.process is None
            and b.next_run_at and now >= b.next_run_at]
-    due.sort(key=lambda n: (TIER_PRIORITY.get(n, 2), bots[n].next_run_at))
-    # Worker pool uses cloned implementer roles; complexity routing is soft
-    # affinity in the prompt, not a hard scheduler gate.
-    worker_pool = WORKER_POOL
-    queue_path = Path(__file__).parent.parent / "docs" / "triage" / "QUEUE.md"
-    complexity_map = _parse_queue_complexity(queue_path)
-    if not complexity_map:
-        rest = [n for n in bots if n not in due]
-        return due + rest
-    has_worker_due = any(n in worker_pool for n in due)
-    if not has_worker_due:
-        rest = [n for n in bots if n not in due]
-        return due + rest
-    available = set(complexity_map.values())
-    filtered_due: list[str] = []
-    for name in due:
-        if name in worker_pool:
-            if available:
-                filtered_due.append(name)
-        else:
-            filtered_due.append(name)
-    rest = [n for n in bots if n not in filtered_due]
-    return filtered_due + rest
+
+    pipeline = _get_pipeline_state()
+    dynamic = _compute_dynamic_priority(pipeline)
+
+    def sort_key(name: str) -> tuple[int, float]:
+        dyn = dynamic.get(name)
+        if dyn is not None:
+            return (dyn, bots[name].next_run_at)
+        return (TIER_PRIORITY.get(name, 2), bots[name].next_run_at)
+
+    due.sort(key=sort_key)
+    rest = [n for n in bots if n not in due]
+    return due + rest
 
 # ---------------------------------------------------------------------------
 # Manifest-driven scheduler helpers (USE_MANIFEST_SCHEDULER — flag OFF: legacy untouched)
