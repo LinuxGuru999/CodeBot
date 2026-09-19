@@ -35,6 +35,7 @@ logger = logging.getLogger("lifecycle_scheduler")
 
 class LifecyclePhase(str, Enum):
     TRIAGE = "TRIAGE"
+    READY_GATE = "READY_GATE"
     PLANNING = "PLANNING"
     IMPLEMENTATION = "IMPLEMENTATION"
     REVIEW = "REVIEW"
