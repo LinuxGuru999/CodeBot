@@ -4463,8 +4463,13 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             if bot.next_run_at and now < bot.next_run_at:
                 continue
             if bot.next_run_at and now >= bot.next_run_at:
-                logger.info(f"Bot '{name}' interval elapsed — respawning (model {bot.config.model})")
-                start_bot(bot, bots=bots)
+                ok, why = _spawn_gate(bots=bots, is_queued=False, bot_name=name)
+                if ok:
+                    logger.info(f"Bot '{name}' interval elapsed — respawning (model {bot.config.model})")
+                    start_bot(bot, bots=bots)
+                else:
+                    logger.info(f"Bot '{name}' interval elapsed — queued ({why})")
+                    update_bot_state(bot, "queued")
             continue
         if alive and is_stuck(bot):
             eff = effective_heartbeat_timeout(bot)

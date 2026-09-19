@@ -1787,47 +1787,93 @@ def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_c
 
     # live loop
     import select
+    import os
 
     print(_c("Starting live dashboard — Ctrl-C or 'q' to quit", "dim", enabled), file=sys.stderr)
     time.sleep(0.2)
+
+    _use_raw = sys.stdin.isatty() and sys.stdout.isatty()
+    if _use_raw:
+        import termios, tty
+        _orig_tattrs = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            _run_live_loop_raw(project_root, enabled, interval, current_view)
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _orig_tattrs)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+    else:
+        _run_live_loop_piped(project_root, enabled, interval, current_view)
+
+    return 0
+
+
+def _run_live_loop_raw(project_root: Path, enabled: bool, interval: float, view: str) -> None:
+    import os, select, tty, termios
+    ticker = 0
+    current_view = view
     while True:
         ticker += 1
         frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view)
-        if sys.stdout.isatty():
-            sys.stdout.write("\033[2J\033[H")
-        else:
-            sys.stdout.write("\n" + "="*80 + "\n")
+        sys.stdout.write("\033[2J\033[H")
         sys.stdout.write(frame + "\n")
         sys.stdout.flush()
 
         deadline = time.time() + interval
         while time.time() < deadline:
-            if sys.stdin.isatty():
-                try:
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
-                    if rlist:
-                        line = sys.stdin.readline()
-                        if line is None:
-                            pass
-                        else:
-                            s = line.strip().lower()
-                            if s in ("q", "quit", "exit"):
-                                print(_c("\nQuit live", "dim", enabled))
-                                return 0
-                            elif s in ("1", "a", "agents"):
-                                current_view = "agents"
-                            elif s in ("2", "t", "tickets"):
-                                current_view = "tickets"
-                            elif s in ("3", "b", "both"):
-                                current_view = "both"
-                            break
-                except Exception:
-                    time.sleep(0.2)
-            else:
-                time.sleep(0.2)
+            rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if rlist:
+                ch = os.read(sys.stdin.fileno(), 1)
+                if not ch:
+                    break
+                c = ch.decode("utf-8", errors="ignore")
+                if c in ("q", "Q", "\x03", "\x04"):
+                    print(_c("\nQuit live", "dim", enabled))
+                    return
+                elif c in ("1", "a"):
+                    current_view = "agents"
+                    break
+                elif c in ("2", "t"):
+                    current_view = "tickets"
+                    break
+                elif c in ("3", "b"):
+                    current_view = "both"
+                    break
+                elif c in ("\r", "\n", " "):
+                    break
+
+
+def _run_live_loop_piped(project_root: Path, enabled: bool, interval: float, view: str) -> None:
+    import select
+    ticker = 0
+    current_view = view
+    while True:
+        ticker += 1
+        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view)
+        sys.stdout.write("\n" + "="*80 + "\n")
+        sys.stdout.write(frame + "\n")
+        sys.stdout.flush()
+
+        deadline = time.time() + interval
+        while time.time() < deadline:
+            rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
+            if rlist:
+                line = sys.stdin.readline()
+                if line is None:
+                    return
+                s = line.strip().lower()
+                if s in ("q", "quit", "exit"):
+                    print(_c("\nQuit live", "dim", enabled))
+                    return
+                elif s in ("1", "a", "agents"):
+                    current_view = "agents"
+                elif s in ("2", "t", "tickets"):
+                    current_view = "tickets"
+                elif s in ("3", "b", "both"):
+                    current_view = "both"
                 break
-            if not sys.stdin.isatty():
-                time.sleep(max(0, deadline - time.time()))
+            else:
                 break
 
 
