@@ -344,4 +344,3 @@ class TestTelemetryHandlerAuth:
         assert header_dict.get("X-Content-Type-Options") == "nosniff"
         assert header_dict.get("X-Frame-Options") == "DENY"
         assert header_dict.get("Referrer-Policy") == "no-referrer"
-"}}]}

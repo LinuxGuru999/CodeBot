@@ -183,6 +183,10 @@ def create_handoff_note(state: ScratchpadState) -> str:
         "=== TICKET SCRATCHPAD HANDOFF ===",
         f"Ticket: {state.ticket_id}",
     ]
+    if state.current_agent:
+        lines.append(f"Current agent: {state.current_agent}")
+        if state.current_stage:
+            lines.append(f"Current stage: {state.current_stage}")
     if state.agent_history:
         lines.append(f"Agent chain: {' → '.join(h.get('agent', '?') for h in state.agent_history[-5:])}")
         last = state.agent_history[-1]

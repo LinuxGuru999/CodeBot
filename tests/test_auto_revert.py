@@ -430,4 +430,3 @@ class TestProcess:
             ]
             result = auto_revert.process()
             assert result["reverted"] == []
-"}}]}

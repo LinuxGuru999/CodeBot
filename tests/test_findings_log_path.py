@@ -126,4 +126,3 @@ class TestFindingsLogReadWrite:
         # Should be the last 3
         assert results[0]["bot"] == "bot_7"
         assert results[2]["bot"] == "bot_9"
-"}}]}
