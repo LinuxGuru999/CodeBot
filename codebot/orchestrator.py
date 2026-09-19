@@ -1795,30 +1795,33 @@ def _retry_disabled_bot(bot: BotState, bots: dict[str, BotState]) -> bool:
     return True
 
 def _is_stuck_starting(bot: BotState, threshold: float = 120.0) -> bool:
-    state_file = STATE_DIR / f"{bot.config.name}.state.json"
-    try:
-        if state_file.exists():
-            data = json.loads(state_file.read_text())
-            if data.get("status") == "starting":
-                started = data.get("started", 0)
-                if time.time() - started > threshold:
-                    return True
-    except Exception:
-        pass
-    return False
+    if bot.process is None or bot.process.poll() is not None:
+        return False
+    
+    last_hb = read_heartbeat(bot.config.name)
+    if last_hb > 0:
+        return False
+    
+    elapsed = time.time() - (bot.started_at or bot.last_heartbeat or time.time())
+    return elapsed > threshold
 
 def _retry_stuck_starting(bot: BotState, bots: dict[str, BotState]) -> bool:
     if not _is_stuck_starting(bot):
         return False
     
-    logger.info(f"Retrying bot '{bot.config.name}' stuck in starting >2min")
-    if bot.process is not None:
-        try:
-            bot.process.kill()
-        except Exception:
-            pass
+    bot.restart_count += 1
+    
+    if bot.restart_count >= 2 and bot.config.fallback_model and bot.config.model != bot.config.fallback_model:
+        logger.info(f"Retrying bot '{bot.config.name}' with fallback model '{bot.config.fallback_model}' (attempt {bot.restart_count})")
+        bot.config.model = bot.config.fallback_model
+    else:
+        logger.info(f"Retrying bot '{bot.config.name}' stuck starting >2min (attempt {bot.restart_count})")
+    
+    try:
+        bot.process.kill()
+    except Exception:
+        pass
     bot.process = None
-    bot.consecutive_errors = 0
     update_bot_state(bot, "waiting")
     return True
 
