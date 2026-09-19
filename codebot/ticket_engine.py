@@ -348,18 +348,19 @@ class TicketStore:
             return
         try:
             lock_path = self._path.with_suffix(".lock")
-            with open(lock_path, "a+") as lock_fd:
-                flock(lock_fd, LOCK_SH)
+            lock_path.touch(exist_ok=True)
+            with open(lock_path, "r") as lock_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH)
                 try:
                     data = json.loads(self._path.read_text(encoding="utf-8"))
                 finally:
-                    flock(lock_fd, LOCK_UN)
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
             for entry in data.get("tickets", []):
                 t = Ticket.from_dict(entry)
                 self._tickets[t.id] = t
                 self._evidence_index[t.evidence_hash()] = t.id
                 self._index_title(t)
-        except (json.JSONDecodeError, KeyError, ValueError):
+        except (json.JSONDecodeError, KeyError, ValueError, OSError):
             self._tickets = {}
             self._evidence_index = {}
             self._word_index = {}
