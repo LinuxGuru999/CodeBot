@@ -141,6 +141,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.IMPLEMENTING,
         TicketState.PLANNING,
         TicketState.REJECTED,
+        TicketState.DEFERRED,
     }),
     TicketState.BLOCKED: frozenset({
         TicketState.READY,
@@ -205,6 +206,12 @@ class Ticket:
             raise ValueError(
                 f"invalid transition {self.state.value} -> {new_state.value} "
                 f"(allowed: {sorted(s.value for s in allowed)})"
+            )
+        if (self.state == TicketState.READY and
+            new_state == TicketState.IMPLEMENTING and
+            _RISK_ORDER.get(self.risk.value, 0) >= _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)):
+            raise ValueError(
+                f"ticket {self.id} risk={self.risk.value} requires PLANNING before IMPLEMENTING"
             )
         updates = {"state": new_state, "updated_at": time.time()}
         if new_state == TicketState.REWORK:
