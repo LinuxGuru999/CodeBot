@@ -368,6 +368,8 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         started = state.get("started")
 
         cur_task = status.get("current_task", "") or scratch.get("phase", "") or ""
+        if bot_status == "disabled" and cur_task == "waiting":
+            bucket = "WAITING"
         task_desc = str(status.get("task_description", "") or "")[:60]
         if task_desc and task_desc != cur_task:
             if cur_task in ("", "starting") or cur_task.startswith("tool:"):
@@ -448,7 +450,7 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
             "scratch": scratch,
         })
     # sort: RUNNING first, then STALE, then PAUSED, then DEAD, then UNKNOWN
-    order = {"RUNNING": 0, "STALE": 1, "PAUSED": 2, "DEAD": 3, "UNKNOWN": 4}
+    order = {"RUNNING": 0, "STALE": 1, "WAITING": 2, "PAUSED": 3, "DEAD": 4, "UNKNOWN": 5}
     agents.sort(key=lambda a: (order.get(a["bucket"], 9), (a["hb_age"] if a["hb_age"] is not None else 99999), a["name"]))
     return agents
 
@@ -810,7 +812,7 @@ def _age_str(age: float | None, enabled: bool = False) -> str:
     return _c(s, col, enabled) if col else s
 
 def _bucket_color(bucket: str, enabled: bool) -> str:
-    cols = {"RUNNING": "green", "STALE": "yellow", "PAUSED": "cyan", "DEAD": "red", "UNKNOWN": "gray"}
+    cols = {"RUNNING": "green", "STALE": "yellow", "WAITING": "cyan", "PAUSED": "cyan", "DEAD": "red", "UNKNOWN": "gray"}
     return _c(bucket, cols.get(bucket, "gray"), enabled)
 
 def _severity_color(sev: str, enabled: bool) -> str:
@@ -901,7 +903,7 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
             print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb_c, 8, 'right')} {pid_s:>7s} {iter_s:>5s} {task:<20s} {model:<20s}")
     # summary
     cnt = Counter(a["bucket"] for a in agents)
-    print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
+    print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","WAITING","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
     running = [a for a in agents if a["bucket"]=="RUNNING"]
     if running:
         print(f"Running PIDs: " + ", ".join(f"{a['name']}:{a['pid']}" for a in running[:10] if a["pid"]))

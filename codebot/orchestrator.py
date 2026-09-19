@@ -3322,7 +3322,7 @@ def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
                 "backend_implementer", "backend_implementer-2",
                 "frontend_implementer", "test_implementer",
                 "migration_implementer", "documentation_implementer"}:
-        return implementing > 0 or planning > 0
+        return False
     if name in {"correctness_reviewer", "security_reviewer",
                 "architecture_reviewer", "test_reviewer",
                 "performance_reviewer", "simplicity_reviewer",
@@ -3332,7 +3332,7 @@ def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
                 "performance_auditor", "test_gap_auditor",
                 "documentation_auditor", "dependency_auditor",
                 "ux_auditor", "feature_hunter"}:
-        return ready == 0 and discovered >= 20
+        return False
     return True
 
 
@@ -3375,11 +3375,11 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
         if name in planner_names:
             should_enable = ready >= 10
         elif name in implementer_names:
-            should_enable = implementing > 0 or planning > 0
+            should_enable = False
         elif name in reviewer_names:
             should_enable = verifying > 0 or reviewing > 0
         elif name in discovery_names:
-            should_enable = ready == 0 and discovered >= 20
+            should_enable = False
 
         if not should_enable and bot.process is not None and bot.process.poll() is None:
             try:
@@ -3391,7 +3391,16 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
                 except Exception:
                     pass
             bot.process = None
+            write_heartbeat(bot.config.name)
             update_bot_state(bot, "disabled")
+            status_path = STATE_DIR / f"{bot.config.name}.status.json"
+            try:
+                sdata = json.loads(status_path.read_text()) if status_path.exists() else {}
+                sdata["current_task"] = "waiting"
+                sdata["task_description"] = "pipeline idle — no tickets to process"
+                _write_json_atomic(status_path, sdata)
+            except Exception:
+                pass
 
 
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
@@ -5161,8 +5170,7 @@ def main() -> None:
                           "backend_implementer", "backend_implementer-2",
                           "frontend_implementer", "test_implementer",
                           "migration_implementer", "documentation_implementer"}:
-                if implementing == 0 and planning == 0:
-                    continue
+                continue
             elif name in {"correctness_reviewer", "security_reviewer",
                           "architecture_reviewer", "test_reviewer",
                           "performance_reviewer", "simplicity_reviewer",
@@ -5173,8 +5181,7 @@ def main() -> None:
                           "performance_auditor", "test_gap_auditor",
                           "documentation_auditor", "dependency_auditor",
                           "ux_auditor", "feature_hunter"}:
-                if ready > 0:
-                    continue
+                continue
             needed.append(bot)
         logger.info(f"Overture: {len(needed)}/{len(order)} bots needed, staggered start ({_SPAWN_STAGGER_SECONDS}s interval)")
         for bot in needed:
