@@ -236,18 +236,22 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._pinned_ip = pinned_ip
 
     def connect(self) -> None:
-        """Connect to the pinned IP and verify SSL against the original hostname."""
-        if self._pinned_ip:
-            sock = socket.create_connection(
-                (self._pinned_ip, self.port), self.timeout, self.source_address
-            )
-            if self._tunnel_host:
-                sock.set_tunnel(self._tunnel_host, self._tunnel_port)
-            
-            # Wrap with SSL, using the original hostname for SNI and verification
-            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
-        else:
-            super().connect()
+        """Connect to the pinned IP and verify SSL against the original hostname.
+        
+        Raises:
+            ValueError: If pinned_ip is not provided, preventing fallback to DNS resolution.
+        """
+        if not self._pinned_ip:
+            raise ValueError("Pinned IP is required for secure connection; refusing to resolve hostname")
+        
+        sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
+        if self._tunnel_host:
+            sock.set_tunnel(self._tunnel_host, self._tunnel_port)
+        
+        # Wrap with SSL, using the original hostname for SNI and verification
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
 class _PinnedURLHandler(urllib.request.AbstractHTTPHandler):
