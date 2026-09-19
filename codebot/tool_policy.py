@@ -69,8 +69,11 @@ def allowlisted_command(command: str) -> list[str] | None:
             if ".." in token:
                 return None
         return left_argv + ["|"] + right_argv
-    if any(any(character in token for character in SHELL_METACHARACTERS) for token in argv):
-        return None
+    is_python = argv[0] in ("pytest", "python3", "python")
+    has_c_flag = is_python and "-c" in argv[1:]
+    if not has_c_flag:
+        if any(any(character in token for character in SHELL_METACHARACTERS) for token in argv):
+            return None
     if argv[0] == "git":
         offset = 1
         if len(argv) >= 4 and argv[1] == "-C":
@@ -97,13 +100,13 @@ def allowlisted_command(command: str) -> list[str] | None:
                 return None
         return argv
     if argv[0] in ("pytest", "python3", "python") or argv[0] in ALLOWED_PYTHON_COMMANDS:
-        in_c_string = False
+        skip_next = False
         for token in argv[1:]:
-            if token == "-c":
-                in_c_string = True
+            if skip_next:
+                skip_next = False
                 continue
-            if in_c_string:
-                in_c_string = False
+            if token == "-c":
+                skip_next = True
                 continue
             if token.startswith("-"):
                 if token not in ALLOWED_PYTEST_ARGS and token not in ALLOWED_PYTHON_FLAGS and not token.startswith("--tb=") and not token.startswith("-k"):
