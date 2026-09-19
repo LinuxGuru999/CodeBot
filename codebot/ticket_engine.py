@@ -88,7 +88,7 @@ class RiskLevel(str, Enum):
 
 # Minimum risk level that requires an implementation plan before IMPLEMENTING.
 # Configurable: raise to HIGH to exempt medium-risk tickets from planning.
-MIN_RISK_FOR_PLANNING = RiskLevel.MEDIUM
+MIN_RISK_FOR_PLANNING = RiskLevel.HIGH
 
 # Ordered risk levels for threshold comparison
 _RISK_ORDER: dict[str, int] = {

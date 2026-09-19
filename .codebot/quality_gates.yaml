@@ -32,3 +32,35 @@ conditional:
   documentation_impact:
     - name: documentation_review
       command: "echo 'verify docs updated per Same-PR rule'"
+
+  frontend_change:
+    - name: ui_review
+      command: "echo 'requires UI quality review'"
+    - name: responsive_test
+      command: "python3 -m pytest -q -k responsive {test_dirs}"
+    - name: visual_regression
+      command: "echo 'requires visual regression baseline comparison'"
+
+  accessibility_scan:
+    - name: a11y_check
+      command: "echo 'requires WCAG accessibility scan'"
+
+  e2e_browser:
+    - name: browser_e2e
+      command: "echo 'requires Playwright E2E test run'"
+
+  deployment_smoke:
+    - name: smoke_test
+      command: "echo 'requires deployment smoke test'"
+
+  auth_security_review:
+    - name: auth_review
+      command: "echo 'requires adversarial auth security review'"
+
+  tenant_scope_change:
+    - name: isolation_tests
+      command: "python3 -m pytest -q -k tenant_isolation {test_dirs}"
+
+  performance_budget:
+    - name: budget_check
+      command: "echo 'requires performance budget verification'"

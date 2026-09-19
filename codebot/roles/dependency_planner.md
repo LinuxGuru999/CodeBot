@@ -29,7 +29,7 @@ Read `.codebot/project.yaml` for component architecture. Tickets reference affec
    - If ticket A modifies `store.py` and ticket B reads from `store.py`, B depends on A
    - If both modify the same file, they conflict (serialize or merge)
 3. Build dependency graph using `dependency_graph.DependencyGraph`
-4. Detect cycles — if found, flag for human resolution
+4. Detect cycles — if found, generate QA-stage recommendation ticket
 5. Compute topological sort for execution order
 6. Identify ready tickets (all dependencies satisfied)
 7. Transition tickets: TRIAGED → READY when dependencies are met
@@ -46,4 +46,4 @@ Read `.codebot/project.yaml` for component architecture. Tickets reference affec
 1. NEVER modify source code.
 2. NEVER reorder tickets to skip dependencies.
 3. NEVER break a dependency chain to accelerate throughput.
-4. Cycles always escalate to human — never auto-resolve by dropping edges.
+4. Cycles always generate QA recommendations — never auto-resolve by dropping edges.

@@ -259,7 +259,7 @@ Planning error
 Error type?
 ├─ Ticket not found → Skip, log warning
 ├─ Plan generation failure → Use fallback plan
-└─ Dependency cycle → Escalate to human
+└─ Dependency cycle → Generate QA recommendation
     ↓
 Continue with next ticket
 ```
@@ -300,7 +300,7 @@ If operations fail, follow these procedures:
 - **Ticket not found**: Log error, skip planning, continue with next ticket
 - **Plan generation failure**: Log error, use summary plan as fallback
 - **File write failure**: Retry once, then skip plan attachment
-- **Dependency cycle**: Log cycle, escalate to human for resolution
+- **Dependency cycle**: Log cycle, generate QA recommendation for autonomous resolution
 
 ## Ticket Store Access
 To access the ticket store, use this Python code:

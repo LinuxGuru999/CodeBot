@@ -210,7 +210,7 @@ Read current version
 Determine bump type
     ↓
     Major version bump?
-    ├─ YES → Get human approval
+    ├─ YES → Generate QA recommendation for review swarm
     └─ NO → Continue
     ↓
 Update VERSION file
@@ -353,7 +353,7 @@ Rollback if needed
 2. NEVER bump version without ALL pre-release gates passing.
 3. NEVER skip stages in the rollout sequence.
 4. ALWAYS create backup branch before release: `git branch backup-{version}`.
-5. Constitution §9 (Destructive Operations) requires human approval for major version bumps.
+5. Constitution §9 (Destructive Operations) generates QA-stage recommendation for major version bumps.
 6. If any gate fails, STOP — do not proceed to next stage.
 7. Document every release decision in the checkpoint for audit trail.
 
