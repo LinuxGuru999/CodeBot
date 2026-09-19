@@ -681,10 +681,11 @@ class Handler(BaseHTTPRequestHandler):
         Validates the signal, creates a ticket candidate in DISCOVERED state,
         stores the event for trend analysis, and triggers anomaly detection.
         """
-        # Check telemetry-specific auth
+        # Check telemetry-specific auth using constant-time comparison (Constitution §2)
         if TELEMETRY_TOKEN:
             auth = self.headers.get("Authorization", "")
-            if auth.strip() != f"Bearer {TELEMETRY_TOKEN}":
+            expected = f"Bearer {TELEMETRY_TOKEN}"
+            if not hmac.compare_digest(auth.strip(), expected):
                 self._json(401, {"error": "unauthorized"})
                 return
         elif not CONTROL_TOKEN:

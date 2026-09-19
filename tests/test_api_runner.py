@@ -315,3 +315,99 @@ class TestWriteBotStatus:
         )
         data = json.loads((tmp_path / "bot.status.json").read_text())
         assert data["files_touched"] == []
+
+
+class TestAutoCommitGatekeeperFailClosed:
+    """Tests for _auto_commit gatekeeper fail-closed behavior.
+
+    CB-2195514-9B12: When the gatekeeper cannot be imported or raises an
+    exception, _auto_commit MUST block the commit (fail-closed), not silently
+    allow it (fail-open). The previous behavior violated Constitution §4
+    (Central Quality Gate) and GAP-2.
+    """
+
+    def _make_adapter(self, tmp_path):
+        """Create a mock adapter with paths() returning tmp_path-based dirs."""
+        adapter = MagicMock()
+        adapter.paths.return_value = MagicMock(
+            state_dir=tmp_path / "state",
+            quality_policy=tmp_path / "policy.yaml",
+            repository_root=tmp_path,
+        )
+        adapter.paths.return_value.state_dir.mkdir(parents=True, exist_ok=True)
+        return adapter
+
+    def test_gatekeeper_import_error_blocks_commit(self, tmp_path):
+        """When gatekeeper module cannot be imported, commit must be blocked."""
+        adapter = self._make_adapter(tmp_path)
+        # Create a file that would be committed
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        # Mock git to succeed
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("builtins.__import__", side_effect=ImportError("no module")), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
+            _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
+            # bash should NOT have been called for git add/commit since gatekeeper import failed
+            for call in mock_bash.call_args_list:
+                cmd = call[0][0]
+                assert "git add" not in cmd, f"git add should not execute when gatekeeper import fails: {cmd}"
+
+    def test_gatekeeper_exception_blocks_commit(self, tmp_path):
+        """When gatekeeper raises an exception, commit must be blocked."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        mock_gk = MagicMock()
+        mock_gk.verify_ticket.side_effect = RuntimeError("gatekeeper crashed")
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.api_runner.Gatekeeper", mock_gk, create=True), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
+            _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
+            # bash should NOT have been called for git add/commit since gatekeeper crashed
+            for call in mock_bash.call_args_list:
+                cmd = call[0][0]
+                assert "git add" not in cmd, f"git add should not execute when gatekeeper crashes: {cmd}"
+
+    def test_gatekeeper_rework_decision_blocks_commit(self, tmp_path):
+        """When gatekeeper returns REWORK decision, commit must be blocked."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        mock_gk = MagicMock()
+        mock_gk.verify_ticket.return_value = {
+            "decision": "REWORK",
+            "failed_gates": ["pytest"],
+            "passed": False,
+        }
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.api_runner.Gatekeeper", return_value=mock_gk, create=True), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
+            _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
+            # bash should NOT have been called for git add since gatekeeper returned REWORK
+            for call in mock_bash.call_args_list:
+                cmd = call[0][0]
+                assert "git add" not in cmd, f"git add should not execute when gatekeeper returns REWORK: {cmd}"
+
+    def test_gatekeeper_complete_decision_allows_commit(self, tmp_path):
+        """When gatekeeper returns COMPLETE, commit proceeds normally."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        mock_gk = MagicMock()
+        mock_gk.verify_ticket.return_value = {
+            "decision": "COMPLETE",
+            "failed_gates": [],
+            "passed": True,
+        }
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.api_runner.Gatekeeper", return_value=mock_gk, create=True), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
+            _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
+            # bash SHOULD have been called for git add since gatekeeper returned COMPLETE
+            has_git_add = any("git add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
+            assert has_git_add, "git add should execute when gatekeeper returns COMPLETE"

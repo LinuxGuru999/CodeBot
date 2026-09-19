@@ -704,7 +704,7 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
     if not base_impl:
         return registry
-    target = min(demand, GATEWAY_MAX_CONCURRENT, max_concurrent - len(non_impl))
+    target = min(demand, max_concurrent - len(non_impl))
     target = max(target, len(base_impl))
     role_map = {c.name: c for c in base_impl}
     ticket_classes = _peek_ticket_classes()
@@ -732,10 +732,15 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
 
 
 WORKER_MODELS_NON_THINKING = (
-    "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.8-max",
+    "xiaomi-mimo-2.5", "qwen-3.5-plus", "qwen-3.6-plus", "qwen-3.7-plus",
+    "qwen-3.7-max", "qwen-3.8-max", "meta-muse-spark-1.2", "meta-muse-spark-1.3",
+    "qwen-3.5-omni-plus",
 )
 
-WORKER_MODELS_THINKING = ()
+WORKER_MODELS_THINKING = (
+    "qwen-3.5-plus-thinking", "qwen-3.6-plus-thinking",
+    "qwen-3.7-max-thinking", "qwen-3.8-max-thinking",
+)
 
 _MODEL_FALLBACKS: dict[str, str] = {
     "xiaomi-mimo-2.5": "qwen-3.5-plus",
