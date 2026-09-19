@@ -127,11 +127,6 @@ PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
     "feature_decomposer",
 })
 
-MAX_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_IMPLEMENTERS", "12"))
-MAX_NON_IMPLEMENTER_SLOTS = int(os.getenv("CODEBOT_MAX_NON_IMPLEMENTERS", "6"))
-MAX_DISCOVERY_SLOTS = int(os.getenv("CODEBOT_MAX_DISCOVERY", "8"))
-MAX_REVIEWER_SLOTS = int(os.getenv("CODEBOT_MAX_REVIEWERS", "6"))
-
 MAX_DISCOVERY_NO_TICKET_RUNS = 10
 RATE_LIMIT_REQUEUE_S = int(os.getenv("CODEBOT_RATE_LIMIT_REQUEUE_S", "300"))
 _metrics_tick = 0
@@ -352,7 +347,7 @@ class BotConfig:
 # starves; scanners/auditors/gates share the 2 remaining slots by tier priority.
 
 MODEL_TIER_CHEAP = frozenset({"xiaomi-mimo-2.5"})
-MODEL_TIER_EXPENSIVE = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking"})
+MODEL_TIER_EXPENSIVE = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
 _COMPLEXITY_RANK = {"trivial": 0, "small": 1, "medium": 2, "high": 3, "critical": 4}
 
 
@@ -667,7 +662,7 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
     if not base_impl:
         return registry
-    target = min(demand, MAX_IMPLEMENTER_SLOTS, max_concurrent - len(non_impl))
+    target = min(demand, GATEWAY_MAX_CONCURRENT, max_concurrent - len(non_impl))
     target = max(target, len(base_impl))
     role_map = {c.name: c for c in base_impl}
     ticket_classes = _peek_ticket_classes()
@@ -912,17 +907,10 @@ def _load_ticket_context(ticket_id: str) -> str:
 
 
 _ADAPTIVE_SCHEDULER = None
-_ADAPTIVE_IMPL_CAP_OVERRIDE: int | None = None
 
 
 def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
-    """Use the adaptive scheduler to dynamically throttle implementer spawning.
-
-    When review pressure exceeds implementation pressure, temporarily reduces
-    MAX_IMPLEMENTER_SLOTS to prevent flooding the review queue. When the
-    backlog is healthy, restores normal capacity.
-    """
-    global _ADAPTIVE_SCHEDULER, _ADAPTIVE_IMPL_CAP_OVERRIDE, MAX_IMPLEMENTER_SLOTS
+    global _ADAPTIVE_SCHEDULER
     try:
         from codebot.adaptive_scheduler import AdaptiveScheduler
         from codebot.scheduler_config import SchedulerConfig
@@ -983,7 +971,7 @@ def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
         snapshot_time=now,
     )
 
-    decision = _ADAPTIVE_SCHEDULER.tick(
+    _ADAPTIVE_SCHEDULER.tick(
         pipeline=ps,
         ready_tickets=[],
         review_tickets=[],
@@ -993,34 +981,6 @@ def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
         candidate_tickets=[],
         now=now,
     )
-
-    from codebot.queue_pressure import SchedulerMode
-    mode = decision.mode
-
-    if mode in (SchedulerMode.REVIEW_HEAVY, SchedulerMode.VERIFICATION_HEAVY, SchedulerMode.REWORK_HEAVY):
-        impl_active = sum(1 for w in workers if w.role in IMPLEMENTER_ROLE_NAMES)
-        if impl_active > 2:
-            new_cap = max(2, impl_active // 2)
-            if _ADAPTIVE_IMPL_CAP_OVERRIDE != new_cap:
-                _ADAPTIVE_IMPL_CAP_OVERRIDE = new_cap
-                logger.info(
-                    f"[adaptive] Mode={mode.value}: review congestion detected. "
-                    f"Throttling implementers: {MAX_IMPLEMENTER_SLOTS} -> {new_cap} "
-                    f"(reviewing={ps.reviewing_count}, implementing={ps.implementing_count})"
-                )
-    elif _ADAPTIVE_IMPL_CAP_OVERRIDE is not None:
-        logger.info(
-            f"[adaptive] Mode={mode.value}: congestion cleared. "
-            f"Restoring implementer cap: {_ADAPTIVE_IMPL_CAP_OVERRIDE} -> {MAX_IMPLEMENTER_SLOTS}"
-        )
-        _ADAPTIVE_IMPL_CAP_OVERRIDE = None
-
-
-def _effective_max_implementers() -> int:
-    """Return the current implementer cap, considering adaptive throttling."""
-    if _ADAPTIVE_IMPL_CAP_OVERRIDE is not None:
-        return _ADAPTIVE_IMPL_CAP_OVERRIDE
-    return MAX_IMPLEMENTER_SLOTS
 
 
 def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
@@ -2061,7 +2021,6 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             (STATE_DIR / ".last_spawn").write_text(str(time.time()))
         except OSError:
             pass
-        _record_model_spawn(bot.config.model)
         if _GATEWAY:
             _gateway_note_spawn()
 
