@@ -1738,6 +1738,63 @@ def is_stuck(bot: BotState) -> bool:
     return True
 
 # ---------------------------------------------------------------------------
+# Model Rate Tracking
+# ---------------------------------------------------------------------------
+
+def _record_model_spawn(model: str) -> None:
+    now = time.time()
+    if model not in _model_spawn_history:
+        _model_spawn_history[model] = []
+    _model_spawn_history[model].append(now)
+
+def _can_spawn_model(model: str) -> tuple[bool, str]:
+    now = time.time()
+    limits = MODEL_RATE_LIMITS.get(model, MODEL_RATE_LIMIT_DEFAULT)
+    limit = limits["limit"]
+    window = limits["window"]
+    
+    if model not in _model_spawn_history:
+        return True, "no history"
+    
+    cutoff = now - window
+    recent = [t for t in _model_spawn_history[model] if t > cutoff]
+    _model_spawn_history[model] = recent
+    
+    if len(recent) >= limit:
+        return False, f"model rate limit {len(recent)}/{limit} in {window}s"
+    return True, "ok"
+
+def _cleanup_model_history() -> None:
+    now = time.time()
+    for model in list(_model_spawn_history.keys()):
+        _model_spawn_history[model] = [t for t in _model_spawn_history[model] if t > now - 120]
+        if not _model_spawn_history[model]:
+            del _model_spawn_history[model]
+
+def _is_disabled_too_long(bot: BotState, threshold: float = 10.0) -> bool:
+    state_file = STATE_DIR / f"{bot.config.name}.state.json"
+    try:
+        if state_file.exists():
+            data = json.loads(state_file.read_text())
+            if data.get("status") == "disabled":
+                last_update = data.get("last_update", 0)
+                if time.time() - last_update > threshold:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def _retry_disabled_bot(bot: BotState, bots: dict[str, BotState]) -> bool:
+    if not _is_disabled_too_long(bot):
+        return False
+    
+    logger.info(f"Retrying disabled bot '{bot.config.name}' after 10s cooldown")
+    bot.consecutive_errors = 0
+    bot.config.enabled = True
+    update_bot_state(bot, "waiting")
+    return True
+
+# ---------------------------------------------------------------------------
 # Process Management
 # ---------------------------------------------------------------------------
 
@@ -1848,6 +1905,10 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
         if bot_model == "qwen-3.8-max":
             if model_counts.get("qwen-3.8-max", 0) >= MAX_QWEN_38_CONCURRENT:
                 return False, f"qwen-3.8-max cap {model_counts['qwen-3.8-max']}/{MAX_QWEN_38_CONCURRENT}"
+        if bot_model:
+            can_spawn, rate_msg = _can_spawn_model(bot_model)
+            if not can_spawn:
+                return False, rate_msg
     base_role = bot_name.split("-")[0] if "-" in bot_name else bot_name
     if bot_name in WORKER_POOL:
         reserved = worker_reserved_slots(GATEWAY_MAX_CONCURRENT)
@@ -2055,6 +2116,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             (STATE_DIR / ".last_spawn").write_text(str(time.time()))
         except OSError:
             pass
+        _record_model_spawn(bot.config.model)
         if _GATEWAY:
             _gateway_note_spawn()
 
@@ -3548,6 +3610,11 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 update_bot_state(bot, "drained")
         return
     now = time.time()
+    # Retry disabled bots after 10s cooldown
+    for name, bot in bots.items():
+        if not bot.config.enabled and bot.process is None:
+            if _retry_disabled_bot(bot, bots):
+                logger.info(f"Retrying '{name}' after disabled cooldown")
     # Queued dequeue (same as legacy, keep kill switches intact)
     for name, bot in bots.items():
         if not bot.config.enabled:
