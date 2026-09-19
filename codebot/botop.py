@@ -1050,7 +1050,6 @@ def cmd_claims(project_root: Path, json_out: bool = False) -> int:
         worker = c["worker"][:22]
         tid = c["ticket_id"][:16]
         cl = c["class"][:10]
-        # strip ansi for file col? keep simple
         print(f"{c['file']:<45s} {worker:<22s} {tid:<16s} {_ansi_pad(age_c, 18, 'right')} {cl:<10s}")
     stale = [c for c in claims if c["age"] > 7200]
     if stale:
@@ -1166,7 +1165,7 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             rw = _ticket_rework(t)
             rw_s = f" R{rw}" if rw else ""
             print(f"  [{_ansi_pad(_severity_color(sev, enabled), 10)}] {_ticket_id(t):<18s}{rw_s} {_ticket_title(t)}")
-            # strip ansi for width? ignore
+            # ANSI-aware padding via _ansi_pad()
     else:
         for st in ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]:
             subset = [t for t in tickets if _ticket_state(t).upper() == st]
@@ -1670,10 +1669,9 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
             err = str(a["consecutive_errors"]) if a.get("consecutive_errors") not in (None, "") else "-"
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
             # pad bucket ansi-aware: we need visual width; use raw bucket for spacing then color
-            # for table alignment, keep bucket plain width 8 via _strip logic is complex; accept slight misalignment with ansi
             name = a["name"][:24]
-            # use plain widths then inject color? do manual
-            lines.append(f"│ {name:<24s} {bucket:<18s} {hb:>15s} {loga:>15s} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s}")
+            # use _ansi_pad for ANSI-aware column alignment
+            lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 18)} {_ansi_pad(hb, 15, 'right')} {_ansi_pad(loga, 15, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s}")
         if len(agents) > 32:
             lines.append(f"│ ... +{len(agents)-20} more (use botop status --verbose)")
     lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
@@ -1718,7 +1716,7 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
             for t in subset[:3]:
                 sev = _tsev(t)
                 sev_c = _severity_color(sev, enabled)
-                lines.append(f"│   {sev_c:<18s} {_tid(t)[:18]:<18s} {_ttitle(t)}")
+                lines.append(f"│   {_ansi_pad(sev_c, 18)} {_tid(t)[:18]:<18s} {_ttitle(t)}")
             if len(subset)>3:
                 lines.append(f"│   ... +{len(subset)-3} more")
     lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
