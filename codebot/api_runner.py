@@ -997,6 +997,8 @@ def _execute_provider_session(
     tool_iterations = 0
     total_retries = 0
     timeout_retries = 0
+    rate_429_retries = 0
+    MAX_429_RETRIES = 3
     nudges = 0
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     api_calls = 0
@@ -1060,12 +1062,24 @@ def _execute_provider_session(
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code == 429:
+                    if rate_429_retries < MAX_429_RETRIES:
+                        delay = BACKOFFS[min(rate_429_retries, len(BACKOFFS) - 1)]
+                        rate_429_retries += 1
+                        _write_heartbeat(hb_path)
+                        _sleep(delay)
+                        continue
                     _write_heartbeat(hb_path)
                     _write_checkpoint(ck_path, bot_name, "rate_limited_yield")
                     return _result("rate_limited_yield")
                 try:
                     body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
                     if "429" in body or "rate" in body.lower():
+                        if rate_429_retries < MAX_429_RETRIES:
+                            delay = BACKOFFS[min(rate_429_retries, len(BACKOFFS) - 1)]
+                            rate_429_retries += 1
+                            _write_heartbeat(hb_path)
+                            _sleep(delay)
+                            continue
                         _write_heartbeat(hb_path)
                         _write_checkpoint(ck_path, bot_name, "rate_limited_yield")
                         return _result("rate_limited_yield")
