@@ -998,7 +998,7 @@ def _execute_provider_session(
     total_retries = 0
     timeout_retries = 0
     rate_429_retries = 0
-    MAX_429_RETRIES = 3
+    MAX_429_RETRIES = 5
     nudges = 0
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     api_calls = 0
