@@ -3569,12 +3569,10 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
             try:
                 sdata = json.loads(status_file.read_text())
                 if isinstance(sdata, dict) and sdata.get("current_task") in ("starting", ""):
-                    hb_age = time.time() - read_heartbeat(name) if read_heartbeat(name) > 0 else 999
-                    if hb_age > 180 or (time.time() - bot.started_at > 120 if bot.started_at else True):
-                        logger.info(f"Zombie '{name}' — process dead, status='{sdata.get('current_task')}', hb_age={hb_age:.0f}s — resetting to waiting")
-                        update_bot_state(bot, "waiting")
-                        bot.restart_count = 0
-                        bot.consecutive_errors = 0
+                    logger.info(f"Zombie '{name}' — process dead, status='{sdata.get('current_task')}' — resetting to waiting")
+                    update_bot_state(bot, "waiting")
+                    bot.restart_count = 0
+                    bot.consecutive_errors = 0
             except Exception:
                 pass
     # Exit + stuck handling for all bots (before manifest scheduling)
