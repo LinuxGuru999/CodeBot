@@ -1,385 +1,297 @@
-"""Unit tests for codebot.coverage_bridge module.
+"""Tests for codebot/coverage_bridge.py — measured coverage to ticket conversion."""
 
-Covers severity mapping, line range grouping, MAX_LINES_PER_TICKET splitting,
-protected_paths exclusion, evidence hash deduplication, max_tickets cap,
-and empty report handling.
-"""
-
-from __future__ import annotations
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from codebot.coverage_bridge import (
-    CoverageGap,
-    _compute_evidence_hash,
-    _classify_severity,
-    _is_protected,
-    _group_consecutive_lines,
-    _split_into_chunks,
-    generate_coverage_tickets,
-    DEFAULT_MIN_COVERAGE_PCT,
-    CRITICAL_THRESHOLD_PCT,
-    HIGH_THRESHOLD_PCT,
-    MEDIUM_THRESHOLD_PCT,
-    MAX_LINES_PER_TICKET,
-    PROTECTED_PATHS,
-)
+# Ensure project root is on sys.path for direct imports
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import codebot.coverage_bridge as cb
 
 
-class TestCoverageGap:
-    """Tests for CoverageGap dataclass."""
+# ---------------------------------------------------------------------------
+# Helper factories
+# ---------------------------------------------------------------------------
 
-    def test_to_dict(self) -> None:
-        gap = CoverageGap(
-            module_path="codebot/foo.py",
-            missing_lines=[1, 2, 3],
-            coverage_pct=45.0,
-            severity="high",
-            evidence_hash="abc123",
-        )
-        d = gap.to_dict()
-        assert d["module_path"] == "codebot/foo.py"
-        assert d["missing_lines"] == [1, 2, 3]
-        assert d["coverage_pct"] == 45.0
-        assert d["severity"] == "high"
-        assert d["evidence_hash"] == "abc123"
-
-    def test_frozen(self) -> None:
-        gap = CoverageGap(
-            module_path="x.py",
-            missing_lines=[],
-            coverage_pct=100.0,
-            severity="low",
-            evidence_hash="hash",
-        )
-        with pytest.raises(AttributeError):
-            gap.module_path = "y.py"  # type: ignore[misc]
+def _make_module(path="codebot/foo.py", statements=100, covered=60, missing=None, coverage_pct=None):
+    if coverage_pct is None:
+        coverage_pct = (covered / statements * 100) if statements > 0 else 0.0
+    return SimpleNamespace(
+        path=path,
+        statements=statements,
+        covered=covered,
+        missing=missing or list(range(covered + 1, statements + 1)),
+        coverage_pct=coverage_pct,
+    )
 
 
-class TestComputeEvidenceHash:
-    """Tests for _compute_evidence_hash()."""
-
-    def test_deterministic(self) -> None:
-        h1 = _compute_evidence_hash("foo.py", [1, 2, 3])
-        h2 = _compute_evidence_hash("foo.py", [1, 2, 3])
-        assert h1 == h2
-
-    def test_different_paths_different_hashes(self) -> None:
-        h1 = _compute_evidence_hash("foo.py", [1, 2])
-        h2 = _compute_evidence_hash("bar.py", [1, 2])
-        assert h1 != h2
-
-    def test_different_lines_different_hashes(self) -> None:
-        h1 = _compute_evidence_hash("foo.py", [1, 2])
-        h2 = _compute_evidence_hash("foo.py", [1, 3])
-        assert h1 != h2
-
-    def test_order_independent(self) -> None:
-        """Hash should be same regardless of line order (sorted internally)."""
-        h1 = _compute_evidence_hash("foo.py", [3, 1, 2])
-        h2 = _compute_evidence_hash("foo.py", [1, 2, 3])
-        assert h1 == h2
-
-    def test_hash_length(self) -> None:
-        h = _compute_evidence_hash("foo.py", [1])
-        assert len(h) == 16  # First 16 chars of SHA-256 hex
+def _make_report(modules=None, error=False, total_coverage_pct=60.0):
+    mods = modules or []
+    mod_dict = {m.path: m for m in mods}
+    report = SimpleNamespace(
+        modules=mod_dict,
+        error=error,
+        total_coverage_pct=total_coverage_pct,
+    )
+    # below_threshold returns modules under the given pct
+    def below_threshold(pct):
+        return [m for m in mods if m.coverage_pct < pct]
+    report.below_threshold = below_threshold
+    return report
 
 
-class TestClassifySeverity:
-    """Tests for _classify_severity()."""
+# ---------------------------------------------------------------------------
+# Threshold-to-severity mapping tests
+# ---------------------------------------------------------------------------
 
-    def test_critical(self) -> None:
-        assert _classify_severity(29.9) == "critical"
-        assert _classify_severity(0.0) == "critical"
+class TestSeverityForCoverage:
+    def test_below_30_is_critical(self):
+        assert cb._severity_for_coverage(10.0) == "critical"
+        assert cb._severity_for_coverage(29.9) == "critical"
 
-    def test_high(self) -> None:
-        assert _classify_severity(30.0) == "high"
-        assert _classify_severity(49.9) == "high"
+    def test_30_to_50_is_high(self):
+        assert cb._severity_for_coverage(30.0) == "high"
+        assert cb._severity_for_coverage(49.9) == "high"
 
-    def test_medium(self) -> None:
-        assert _classify_severity(50.0) == "medium"
-        assert _classify_severity(69.9) == "medium"
+    def test_50_to_70_is_medium(self):
+        assert cb._severity_for_coverage(50.0) == "medium"
+        assert cb._severity_for_coverage(69.9) == "medium"
 
-    def test_low(self) -> None:
-        assert _classify_severity(70.0) == "low"
-        assert _classify_severity(100.0) == "low"
+    def test_70_and_above_is_low(self):
+        assert cb._severity_for_coverage(70.0) == "low"
+        assert cb._severity_for_coverage(100.0) == "low"
 
+
+class TestRiskForCoverage:
+    def test_below_30_is_critical(self):
+        assert cb._risk_for_coverage(10.0) == "critical"
+
+    def test_30_to_50_is_high(self):
+        assert cb._risk_for_coverage(30.0) == "high"
+        assert cb._risk_for_coverage(49.9) == "high"
+
+    def test_50_and_above_is_medium(self):
+        assert cb._risk_for_coverage(50.0) == "medium"
+        assert cb._risk_for_coverage(100.0) == "medium"
+
+
+# ---------------------------------------------------------------------------
+# Constants verification
+# ---------------------------------------------------------------------------
+
+class TestConstants:
+    def test_default_min_coverage(self):
+        assert cb.DEFAULT_MIN_COVERAGE_PCT == 60.0
+
+    def test_critical_threshold(self):
+        assert cb.CRITICAL_THRESHOLD_PCT == 30.0
+
+    def test_high_threshold(self):
+        assert cb.HIGH_THRESHOLD_PCT == 50.0
+
+    def test_medium_threshold(self):
+        assert cb.MEDIUM_THRESHOLD_PCT == 70.0
+
+    def test_max_lines_per_ticket(self):
+        assert cb.MAX_LINES_PER_TICKET == 50
+
+
+# ---------------------------------------------------------------------------
+# Line range grouping tests (_chunk_missing_lines)
+# ---------------------------------------------------------------------------
+
+class TestChunkMissingLines:
+    def test_empty_missing_returns_single_empty_chunk(self):
+        chunks = cb._chunk_missing_lines([], 50)
+        assert chunks == [[]]
+
+    def test_under_max_returns_single_chunk(self):
+        lines = list(range(1, 11))
+        chunks = cb._chunk_missing_lines(lines, 50)
+        assert len(chunks) == 1
+        assert chunks[0] == lines
+
+    def test_exactly_max_returns_single_chunk(self):
+        lines = list(range(1, 51))
+        chunks = cb._chunk_missing_lines(lines, 50)
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 50
+
+    def test_over_max_splits_into_multiple_chunks(self):
+        lines = list(range(1, 101))
+        chunks = cb._chunk_missing_lines(lines, 50)
+        assert len(chunks) == 2
+        assert len(chunks[0]) == 50
+        assert len(chunks[1]) == 50
+
+    def test_non_even_split(self):
+        lines = list(range(1, 76))
+        chunks = cb._chunk_missing_lines(lines, 50)
+        assert len(chunks) == 2
+        assert len(chunks[0]) == 50
+        assert len(chunks[1]) == 25
+
+    def test_sorts_input_lines(self):
+        lines = [10, 5, 1, 3]
+        chunks = cb._chunk_missing_lines(lines, 50)
+        assert chunks[0] == [1, 3, 5, 10]
+
+
+# ---------------------------------------------------------------------------
+# _format_line_ranges tests
+# ---------------------------------------------------------------------------
+
+class TestFormatLineRanges:
+    def test_empty_list_returns_all(self):
+        assert cb._format_line_ranges([]) == "all"
+
+    def test_single_line(self):
+        assert cb._format_line_ranges([5]) == "5"
+
+    def test_consecutive_lines_form_range(self):
+        assert cb._format_line_ranges([1, 2, 3]) == "1-3"
+
+    def test_non_consecutive_lines_separated(self):
+        assert cb._format_line_ranges([1, 5, 10]) == "1, 5, 10"
+
+    def test_mixed_ranges_and_singles(self):
+        result = cb._format_line_ranges([1, 2, 3, 7, 8, 15])
+        assert result == "1-3, 7-8, 15"
+
+
+# ---------------------------------------------------------------------------
+# Protected path exclusion tests
+# ---------------------------------------------------------------------------
 
 class TestIsProtected:
-    """Tests for _is_protected()."""
+    def test_protected_prefix_matches(self):
+        assert cb._is_protected("codebot/orchestrator.py", {"codebot/orchestrator"}) is True
 
-    def test_tests_dir_protected(self) -> None:
-        assert _is_protected("tests/test_foo.py")
-        assert _is_protected("tests/")
+    def test_unprotected_path_returns_false(self):
+        assert cb._is_protected("codebot/foo.py", {"codebot/bar"}) is False
 
-    def test_codebot_dir_protected(self) -> None:
-        assert _is_protected(".codebot/state/file.json")
+    def test_empty_protected_set(self):
+        assert cb._is_protected("codebot/foo.py", set()) is False
 
-    def test_docs_dir_protected(self) -> None:
-        assert _is_protected("docs/readme.md")
-
-    def test_normal_path_not_protected(self) -> None:
-        assert not _is_protected("codebot/foo.py")
-        assert not _is_protected("src/bar.py")
-
-    def test_partial_match_not_protected(self) -> None:
-        """Path starting with 'test' but not 'tests/' should not be protected."""
-        assert not _is_protected("testing/utils.py")
+    def test_exact_prefix_match(self):
+        assert cb._is_protected("codebot/core/engine.py", {"codebot/core/"}) is True
 
 
-class TestGroupConsecutiveLines:
-    """Tests for _group_consecutive_lines()."""
-
-    def test_empty_list(self) -> None:
-        assert _group_consecutive_lines([]) == []
-
-    def test_single_line(self) -> None:
-        assert _group_consecutive_lines([5]) == [(5, 5)]
-
-    def test_consecutive_lines(self) -> None:
-        assert _group_consecutive_lines([1, 2, 3, 4]) == [(1, 4)]
-
-    def test_non_consecutive_lines(self) -> None:
-        result = _group_consecutive_lines([1, 3, 5])
-        assert result == [(1, 1), (3, 3), (5, 5)]
-
-    def test_mixed_ranges(self) -> None:
-        result = _group_consecutive_lines([1, 2, 3, 5, 6, 8])
-        assert result == [(1, 3), (5, 6), (8, 8)]
-
-    def test_unsorted_input(self) -> None:
-        """Should handle unsorted input correctly."""
-        result = _group_consecutive_lines([5, 1, 3, 2, 4])
-        assert result == [(1, 5)]
-
-    def test_duplicates_removed(self) -> None:
-        result = _group_consecutive_lines([1, 1, 2, 2, 3])
-        assert result == [(1, 3)]
-
-
-class TestSplitIntoChunks:
-    """Tests for _split_into_chunks()."""
-
-    def test_empty_list(self) -> None:
-        assert _split_into_chunks([]) == []
-
-    def test_single_chunk(self) -> None:
-        lines = [1, 2, 3]
-        chunks = _split_into_chunks(lines, max_size=10)
-        assert chunks == [[1, 2, 3]]
-
-    def test_multiple_chunks(self) -> None:
-        lines = list(range(1, 11))  # 10 lines
-        chunks = _split_into_chunks(lines, max_size=3)
-        assert len(chunks) == 4  # 3+3+3+1
-        assert chunks[0] == [1, 2, 3]
-        assert chunks[1] == [4, 5, 6]
-        assert chunks[2] == [7, 8, 9]
-        assert chunks[3] == [10]
-
-    def test_exact_chunk_size(self) -> None:
-        lines = [1, 2, 3]
-        chunks = _split_into_chunks(lines, max_size=3)
-        assert chunks == [[1, 2, 3]]
-
-    def test_deduplication(self) -> None:
-        lines = [1, 1, 2, 2, 3]
-        chunks = _split_into_chunks(lines, max_size=10)
-        assert chunks == [[1, 2, 3]]
-
-    def test_sorted_output(self) -> None:
-        lines = [5, 1, 3, 2, 4]
-        chunks = _split_into_chunks(lines, max_size=10)
-        assert chunks == [[1, 2, 3, 4, 5]]
-
+# ---------------------------------------------------------------------------
+# generate_coverage_tickets tests
+# ---------------------------------------------------------------------------
 
 class TestGenerateCoverageTickets:
-    """Tests for generate_coverage_tickets()."""
+    @patch("codebot.coverage_bridge._create_test_ticket")
+    def test_error_report_returns_empty(self, mock_create):
+        report = _make_report(error=True)
+        store = MagicMock()
+        result = cb.generate_coverage_tickets(report, store)
+        assert result == []
+        mock_create.assert_not_called()
 
-    def test_empty_modules(self) -> None:
-        tickets = generate_coverage_tickets({"modules": {}})
-        assert tickets == []
+    @patch("codebot.coverage_bridge._create_test_ticket")
+    def test_empty_modules_returns_empty(self, mock_create):
+        report = _make_report(modules=[])
+        store = MagicMock()
+        result = cb.generate_coverage_tickets(report, store)
+        assert result == []
+        mock_create.assert_not_called()
 
-    def test_no_missing_lines(self) -> None:
-        coverage_data = {
-            "modules": {
-                "foo.py": {"missing_lines": [], "coverage_pct": 100.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert tickets == []
+    @patch("codebot.coverage_bridge._create_test_ticket")
+    def test_skips_protected_paths(self, mock_create):
+        mod = _make_module(path="protected/mod.py", coverage_pct=10.0)
+        report = _make_report(modules=[mod])
+        store = MagicMock()
+        result = cb.generate_coverage_tickets(report, store, protected_paths={"protected/"})
+        assert result == []
+        mock_create.assert_not_called()
 
-    def test_protected_path_skipped(self) -> None:
-        coverage_data = {
-            "modules": {
-                "tests/test_foo.py": {"missing_lines": [1, 2], "coverage_pct": 0.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert tickets == []
+    @patch("codebot.coverage_bridge._create_test_ticket")
+    def test_skips_zero_statement_modules(self, mock_create):
+        mod = _make_module(path="empty.py", statements=0, covered=0, missing=[], coverage_pct=0.0)
+        report = _make_report(modules=[mod])
+        store = MagicMock()
+        result = cb.generate_coverage_tickets(report, store)
+        assert result == []
+        mock_create.assert_not_called()
 
-    def test_low_coverage_generates_ticket(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1, 2, 3], "coverage_pct": 20.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert len(tickets) == 1
-        assert tickets[0]["severity"] == "critical"
-        assert "codebot/foo.py" in tickets[0]["title"]
+    @patch("codebot.coverage_bridge._create_test_ticket")
+    def test_respects_max_tickets_cap(self, mock_create):
+        mock_create.return_value = "TICKET-ID"
+        mods = [_make_module(path=f"mod{i}.py", coverage_pct=10.0, statements=100, missing=list(range(1, 101))) for i in range(30)]
+        report = _make_report(modules=mods)
+        store = MagicMock()
+        result = cb.generate_coverage_tickets(report, store, max_tickets=5)
+        assert len(result) == 5
 
-    def test_medium_coverage_generates_ticket(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/bar.py": {"missing_lines": [10, 20], "coverage_pct": 55.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert len(tickets) == 1
-        assert tickets[0]["severity"] == "medium"
+    @patch("codebot.coverage_bridge._create_test_ticket")
+    def test_creates_tickets_for_below_threshold_modules(self, mock_create):
+        mock_create.return_value = "T-1"
+        mod = _make_module(path="low.py", coverage_pct=20.0, statements=100, missing=list(range(1, 81)))
+        report = _make_report(modules=[mod])
+        store = MagicMock()
+        result = cb.generate_coverage_tickets(report, store)
+        assert len(result) >= 1
+        assert mock_create.called
 
-    def test_high_coverage_skipped(self) -> None:
-        """Coverage >= 70% should be skipped (low severity)."""
-        coverage_data = {
-            "modules": {
-                "codebot/good.py": {"missing_lines": [1], "coverage_pct": 75.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert tickets == []
+    @patch("codebot.coverage_bridge._create_test_ticket")
+    def test_handles_none_return_from_create_ticket(self, mock_create):
+        mock_create.return_value = None
+        mod = _make_module(path="fail.py", coverage_pct=10.0, statements=10, missing=list(range(1, 10)))
+        report = _make_report(modules=[mod])
+        store = MagicMock()
+        result = cb.generate_coverage_tickets(report, store)
+        assert result == []
 
-    def test_deduplication_with_existing_hashes(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1, 2], "coverage_pct": 40.0},
-            }
-        }
-        # Compute the hash that would be generated
-        from codebot.coverage_bridge import _compute_evidence_hash
-        existing_hash = _compute_evidence_hash("codebot/foo.py", [1, 2])
-        tickets = generate_coverage_tickets(coverage_data, existing_hashes={existing_hash})
-        assert tickets == []
 
-    def test_max_tickets_cap(self) -> None:
-        """Should not generate more than max_tickets."""
-        modules = {}
-        for i in range(30):
-            modules[f"codebot/mod{i}.py"] = {
-                "missing_lines": [1],
-                "coverage_pct": 20.0,  # Critical
-            }
-        coverage_data = {"modules": modules}
-        tickets = generate_coverage_tickets(coverage_data, max_tickets=5)
-        assert len(tickets) == 5
+# ---------------------------------------------------------------------------
+# coverage_delta_score tests
+# ---------------------------------------------------------------------------
 
-    def test_sorting_by_severity_then_path(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/z.py": {"missing_lines": [1], "coverage_pct": 20.0},  # Critical
-                "codebot/a.py": {"missing_lines": [1], "coverage_pct": 20.0},  # Critical
-                "codebot/m.py": {"missing_lines": [1], "coverage_pct": 40.0},  # High
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        # Critical tickets first, sorted by path
-        assert tickets[0]["affected_modules"] == ["codebot/a.py"]
-        assert tickets[1]["affected_modules"] == ["codebot/z.py"]
-        # Then high
-        assert tickets[2]["affected_modules"] == ["codebot/m.py"]
+class TestCoverageDeltaScore:
+    def test_no_old_report_returns_zero(self):
+        new_report = _make_report(total_coverage_pct=70.0)
+        assert cb.coverage_delta_score(None, new_report) == 0.0
 
-    def test_ticket_structure(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1, 2, 3], "coverage_pct": 40.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        ticket = tickets[0]
-        assert "title" in ticket
-        assert "ticket_class" in ticket
-        assert ticket["ticket_class"] == "test"
-        assert "severity" in ticket
-        assert "source" in ticket
-        assert ticket["source"] == "coverage_bridge"
-        assert "evidence" in ticket
-        assert "problem_statement" in ticket
-        assert "desired_state" in ticket
-        assert "acceptance_criteria" in ticket
-        assert "affected_modules" in ticket
-        assert "evidence_hash" in ticket
+    def test_old_report_with_error_returns_zero(self):
+        old_report = _make_report(error=True)
+        new_report = _make_report(total_coverage_pct=70.0)
+        assert cb.coverage_delta_score(old_report, new_report) == 0.0
 
-    def test_line_range_formatting(self) -> None:
-        """Test that line ranges are formatted correctly in title."""
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1, 2, 3, 5, 7], "coverage_pct": 40.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        title = tickets[0]["title"]
-        # Should contain range notation like "1-3"
-        assert "1-3" in title or "1, 2, 3" in title
+    def test_new_report_with_error_returns_zero(self):
+        old_report = _make_report(total_coverage_pct=50.0)
+        new_report = _make_report(error=True)
+        assert cb.coverage_delta_score(old_report, new_report) == 0.0
 
-    def test_single_line_formatting(self) -> None:
-        """Single lines should not use range notation."""
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [42], "coverage_pct": 40.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        title = tickets[0]["title"]
-        assert "42" in title
+    def test_positive_delta_capped_at_0_1(self):
+        old_report = _make_report(total_coverage_pct=0.0)
+        new_report = _make_report(total_coverage_pct=100.0)
+        score = cb.coverage_delta_score(old_report, new_report)
+        assert score == 0.1  # capped
 
-    def test_split_into_multiple_tickets_when_many_lines(self) -> None:
-        """Many missing lines should be split into multiple tickets."""
-        missing = list(range(1, 101))  # 100 lines
-        coverage_data = {
-            "modules": {
-                "codebot/big.py": {"missing_lines": missing, "coverage_pct": 20.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        # MAX_LINES_PER_TICKET = 50, so 100 lines -> 2 tickets
-        assert len(tickets) == 2
-        # Both should reference the same module
-        assert all("big.py" in t["title"] for t in tickets)
+    def test_negative_delta_capped_at_neg_0_1(self):
+        old_report = _make_report(total_coverage_pct=100.0)
+        new_report = _make_report(total_coverage_pct=0.0)
+        score = cb.coverage_delta_score(old_report, new_report)
+        assert score == -0.1  # capped
 
-    def test_acceptance_criteria_content(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1], "coverage_pct": 40.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        criteria = tickets[0]["acceptance_criteria"]
-        assert any("pytest passes" in c for c in criteria)
-        assert any("coverage" in c.lower() for c in criteria)
+    def test_module_specific_delta(self):
+        mod_old = _make_module(path="a.py", coverage_pct=50.0)
+        mod_new = _make_module(path="a.py", coverage_pct=60.0)
+        old_report = _make_report(modules=[mod_old])
+        new_report = _make_report(modules=[mod_new])
+        score = cb.coverage_delta_score(old_report, new_report, module_path="a.py")
+        assert score == pytest.approx(0.1, abs=0.01)  # 10% / 100 = 0.1
 
-    def test_rollback_strategy(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1], "coverage_pct": 40.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert tickets[0]["rollback_strategy"] == "revert commit"
-
-    def test_risk_level(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1], "coverage_pct": 40.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert tickets[0]["risk"] == "low"
-
-    def test_schema_version(self) -> None:
-        coverage_data = {
-            "modules": {
-                "codebot/foo.py": {"missing_lines": [1], "coverage_pct": 40.0},
-            }
-        }
-        tickets = generate_coverage_tickets(coverage_data)
-        assert tickets[0]["schema_version"] == "2.0"
+    def test_missing_module_returns_zero(self):
+        old_report = _make_report(modules=[])
+        new_report = _make_report(modules=[])
+        score = cb.coverage_delta_score(old_report, new_report, module_path="ghost.py")
+        assert score == 0.0
