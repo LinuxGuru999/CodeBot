@@ -26,6 +26,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shlex
 import signal
 import sys
 import subprocess
@@ -340,24 +341,24 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
         else:
             base = str(WORK_ROOT)
         repo_path = f"{base}/{repo}"
-        result = bash(f"git -C {repo_path} status --short", timeout=10)
+        result = bash(f"git -C {shlex.quote(repo_path)} status --short", timeout=10)
         if not result["success"] or not result["output"].strip():
             continue
 
-        add_result = bash(f"git -C {repo_path} add -A", timeout=15)
+        add_result = bash(f"git -C {shlex.quote(repo_path)} add -A", timeout=15)
         if not add_result["success"]:
             _log(f"{bot_name}: auto-commit git add failed for {repo}: {add_result.get('error', '')}")
             continue
 
         commit_msg = f"bot: {bot_name} auto-commit after task completion"
-        commit_result = bash(f'git -C {repo_path} commit -m "{commit_msg}"', timeout=15)
+        commit_result = bash(f'git -C {shlex.quote(repo_path)} commit -m {shlex.quote(commit_msg)}', timeout=15)
         if not commit_result["success"]:
             if "nothing to commit" in commit_result.get("error", "") or "nothing to commit" in commit_result.get("output", ""):
                 continue
             _log(f"{bot_name}: auto-commit git commit failed for {repo}: {commit_result.get('error', '')}")
             continue
 
-        push_result = bash(f"git -C {repo_path} push origin HEAD", timeout=30)
+        push_result = bash(f"git -C {shlex.quote(repo_path)} push origin HEAD", timeout=30)
         if push_result["success"]:
             _log(f"{bot_name}: auto-commit + push successful for {repo}")
         else:

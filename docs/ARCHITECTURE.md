@@ -58,6 +58,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `scheduler_metrics.py` | ~290 | Throughput metrics collector: utilization, cycle time, discovery yield, cost per ticket |
 | `work_scorer.py` | ~392 | Utility scoring engine: priority + bottleneck relief + dependency unlock + aging - penalties |
 | `orchestrator.py` | ~2900 | Process lifecycle: start, stop, health monitoring, heartbeat checking, drain management |
+| `config_reloader.py` | ~160 | Hot-reloading for prompts, source code, and bot registry config; triggers graceful respawns |
 | `api_runner.py` | ~1450 | LLM execution loop: prompt assembly, tool dispatch, claim protocol, auto-commit |
 | `ticket_engine.py` | ~390 | Normalized ticket schema v2, 14-state machine, SHA-256 dedup, persistent CRUD |
 | `dependency_graph.py` | ~160 | DAG construction, cycle detection, topological sort, ready-ticket resolution |
@@ -120,6 +121,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `migrations/` | Database/schema migration scripts (migration_001, 003, 004) |
 | `anomaly_alerts.py` | Anomaly detection on metrics |
 | `auto_revert.py` | Automatic rollback on build gate failure |
+| `module.py` | Example module demonstrating proper exception handling patterns |
 
 ## Data Flow
 
