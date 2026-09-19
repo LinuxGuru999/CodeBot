@@ -81,7 +81,7 @@ security:
   ssrf_protection: true
   bearer_token_auth: false
   password_hashing: "none"
-  rate_limiting: false
+  rate_limiting: true
   security_headers: false
   blocklist_validation: true
   tls_verification_default: true

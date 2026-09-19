@@ -147,16 +147,20 @@ def _update_github_progress(
         _log(f"{bot_name}: GitHub progress update unavailable")
 
 
-def _auto_commit(bot_name: str, files_touched: list[str]) -> None:
+def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
     """Auto-commit and push any uncommitted changes when a worker completes.
 
     Why: Workers often skip the git commit step even when told to commit.
     This structural fix ensures changes are always committed after completion.
     SELF-03: Gatekeeper must PASS before any commit proceeds.
     CB-2195514-9B12: Fail-closed on gatekeeper errors or missing adapter.
+
+    Returns:
+        True if commit was successful (or no files to commit).
+        False if gatekeeper blocked commit or an error occurred.
     """
     if not files_touched:
-        return
+        return True
 
     # Fail-closed: gatekeeper check is mandatory before any commit
     if _adapter_instance is None:

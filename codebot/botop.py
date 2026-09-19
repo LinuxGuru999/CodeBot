@@ -857,29 +857,29 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
         return 0
     # header
     if verbose:
-        print(f"{'Agent':<26s} {'Status':<17s} {'HB':>15s} {'LOG':>15s} {'ITER':>5s} {'TASK':<22s} {'PID':>7s} {'RST':>4s} {'ERR':>4s} {'MODEL':<14s}")
-        print("-" * 130)
+        print(f"{'Agent':<24s} {'Status':<10s} {'HB':>8s} {'LOG':>8s} {'ITER':>5s} {'TASK':<20s} {'PID':>7s} {'RST':>4s} {'ERR':>4s} {'MODEL':<14s}")
+        print("-" * 110)
         for a in agents:
             hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
             loga = _age_str(a["log_age"], enabled) if a["log_age"] is not None else _c("-", "gray", enabled)
             bucket = _bucket_color(a["bucket"], enabled)
             pid_s = str(a["pid"]) if a["pid"] else "-"
-            task = (a["current_task"] or "")[:22]
+            task = (a["current_task"] or "")[:20]
             model = a["model"] or "-"
             rst = str(a["restart_count"]) if a["restart_count"] is not None else "-"
             err = str(a["consecutive_errors"]) if a["consecutive_errors"] is not None else "-"
-            print(f"{a['name']:<26s} {_ansi_pad(bucket, 17)} {_ansi_pad(hb, 15, 'right')} {_ansi_pad(loga, 15, 'right')} {str(a['iteration']):>5s} {task:<22s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<14s}")
+            print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {str(a['iteration']):>5s} {task:<20s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<14s}")
     else:
-        print(f"{'Agent':<25s} {'Status':<18s} {'HB Age':>18s} {'PID':>8s} {'ITER':>6s} {'TASK':<25s} {'MODEL':<14s}")
-        print("-" * 120)
+        print(f"{'Agent':<24s} {'Status':<10s} {'HB Age':>8s} {'PID':>7s} {'ITER':>5s} {'TASK':<20s} {'MODEL':<14s}")
+        print("-" * 95)
         for a in agents:
             bucket = _bucket_color(a["bucket"], enabled)
             pid_s = str(a["pid"]) if a["pid"] else "-"
-            task = (a["current_task"] or "")[:25]
+            task = (a["current_task"] or "")[:20]
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
             hb_c = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("?", "gray", enabled)
             model = a["model"] or "-"
-            print(f"{a['name']:<25s} {_ansi_pad(bucket, 18)} {_ansi_pad(hb_c, 18, 'right')} {pid_s:>8s} {iter_s:>6s} {task:<25s} {model:<14s}")
+            print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb_c, 8, 'right')} {pid_s:>7s} {iter_s:>5s} {task:<20s} {model:<14s}")
     # summary
     cnt = Counter(a["bucket"] for a in agents)
     print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
