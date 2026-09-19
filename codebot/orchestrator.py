@@ -3148,13 +3148,9 @@ def _advance_ready_to_planning() -> int:
 
 
 def _route_ready_tickets() -> int:
-    """Route READY tickets by risk level.
-
-    Risk >= MEDIUM → PLANNING (needs decomposition/plan before implementation).
-    Risk < MEDIUM → IMPLEMENTING (simple enough to skip planning).
-    """
+    """Route all READY tickets into DECOMPOSE for breakdown before planning."""
     try:
-        from codebot.ticket_engine import TicketStore, TicketState, MIN_RISK_FOR_PLANNING, _RISK_ORDER
+        from codebot.ticket_engine import TicketStore, TicketState
     except ImportError:
         return 0
 
@@ -3171,25 +3167,121 @@ def _route_ready_tickets() -> int:
 
     ready = ts.list_by_state(TicketState.READY)
     routed = 0
-    threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
 
     for ticket in ready:
         tid = getattr(ticket, 'id', '')
         if not tid:
             continue
-        risk_order = _RISK_ORDER.get(getattr(ticket.risk, 'value', str(ticket.risk)), 0)
         try:
-            if risk_order >= threshold_order:
-                ts.transition(tid, TicketState.PLANNING)
-                logger.info(f"Routed {tid} READY -> PLANNING (risk={ticket.risk.value})")
-            else:
-                ts.transition(tid, TicketState.IMPLEMENTING)
-                logger.info(f"Routed {tid} READY -> IMPLEMENTING (risk={ticket.risk.value}, skipped planning)")
+            ts.transition(tid, TicketState.DECOMPOSE)
+            logger.info(f"Routed {tid} READY -> DECOMPOSE")
             routed += 1
         except ValueError as e:
             logger.debug(f"Failed to route {tid}: {e}")
 
     return routed
+
+
+DECOMPOSER_ROLE_NAMES: frozenset[str] = frozenset({
+    "feature_decomposer", "ticket_decomposer",
+})
+
+
+def _dispatch_decompose_agents(bots: dict[str, BotState]) -> int:
+    """Dispatch DECOMPOSE tickets to decomposer agents, advance to PLANNING when done.
+
+    For each DECOMPOSE ticket without an active claim: find an idle decomposer bot,
+    create a claim, and start/restart it. For tickets whose decomposition artifact
+    already exists: transition DECOMPOSE -> PLANNING.
+    """
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    decomposing = ts.list_by_state(TicketState.DECOMPOSE)
+    if not decomposing:
+        return 0
+
+    decomp_dir = STATE_DIR / "decompositions"
+    decomp_dir.mkdir(parents=True, exist_ok=True)
+
+    claims_dir = STATE_DIR / "claims"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    active_claims: set[str] = set()
+    for p in claims_dir.glob("*.json"):
+        active_claims.add(p.stem.rsplit(".", 1)[0])
+
+    idle_decomposers = []
+    unassigned_running = []
+    for name, bot in bots.items():
+        base_name = name.split("-")[0] if "-" in name else name
+        if base_name not in DECOMPOSER_ROLE_NAMES:
+            continue
+        if bot.process is not None and bot.process.poll() is None:
+            if not getattr(bot, '_assigned_ticket_id', ''):
+                unassigned_running.append((name, bot))
+        else:
+            idle_decomposers.append((name, bot))
+
+    available = idle_decomposers + unassigned_running
+    dispatched = 0
+
+    for ticket in decomposing:
+        tid = getattr(ticket, 'id', '')
+        if not tid:
+            continue
+
+        decomp_file = decomp_dir / f"{tid}.decomp.json"
+        if decomp_file.exists():
+            try:
+                ts.transition(tid, TicketState.PLANNING)
+                logger.info(f"Decomposition complete: {tid} DECOMPOSE -> PLANNING")
+                dispatched += 1
+                for cf in claims_dir.glob(f"{tid}.*.json"):
+                    try:
+                        cf.unlink()
+                    except OSError:
+                        pass
+            except ValueError as e:
+                logger.debug(f"Failed to advance {tid} to PLANNING: {e}")
+            continue
+
+        if tid in active_claims:
+            continue
+
+        if not available:
+            break
+
+        idx, bot_name, bot = available.pop(0)
+        claim_file = claims_dir / f"{tid}.{bot_name}.json"
+        try:
+            claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "decompose"}
+            tmp = claim_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
+            tmp.replace(claim_file)
+        except OSError:
+            continue
+
+        bot._assigned_ticket_id = tid
+        dispatched += 1
+        logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
+        if bot.process is not None and bot.process.poll() is None:
+            stop_bot(bot, f"restarting with decomposition {tid}")
+            start_bot(bot, bots=bots)
+
+    return dispatched
 
 
 def _dispatch_planning_agents(bots: dict[str, BotState]) -> int:

@@ -36,6 +36,7 @@ logger = logging.getLogger("lifecycle_scheduler")
 class LifecyclePhase(str, Enum):
     TRIAGE = "TRIAGE"
     READY_GATE = "READY_GATE"
+    DECOMPOSE = "DECOMPOSE"
     PLANNING = "PLANNING"
     IMPLEMENTATION = "IMPLEMENTATION"
     REVIEW = "REVIEW"
@@ -69,15 +70,23 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         agent_roles=(),
         handler_name="_route_ready_tickets",
         requires_bots=False,
-        description="Route READY tickets: risk >= MEDIUM to PLANNING, LOW directly to IMPLEMENTING",
+        description="Route all READY tickets into DECOMPOSE",
+    ),
+    LifecycleDispatchEntry(
+        phase=LifecyclePhase.DECOMPOSE,
+        ticket_states=("DECOMPOSE",),
+        agent_roles=("feature_decomposer", "ticket_decomposer"),
+        handler_name="_dispatch_decompose_agents",
+        requires_bots=True,
+        description="Decompose tickets into sub-tickets, advance to PLANNING when done",
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.PLANNING,
         ticket_states=("PLANNING",),
-        agent_roles=("feature_decomposer", "ticket_decomposer", "implementation_planner"),
+        agent_roles=("implementation_planner",),
         handler_name="_dispatch_planning_agents",
         requires_bots=True,
-        description="Decompose features and generate implementation plans, advance to IMPLEMENTING",
+        description="Generate implementation plans, advance to IMPLEMENTING when done",
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.IMPLEMENTATION,

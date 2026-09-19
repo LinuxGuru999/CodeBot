@@ -122,6 +122,7 @@ def calculate_pressure(
     triaged_count: int | None = None,
     blocked_count: int | None = None,
     deferred_count: int | None = None,
+    decompose_count: int | None = None,
     active_by_role: dict[str, int] | None = None,
     total_slots: int | None = None,
     backlog_low_watermark: int = 20,
@@ -144,6 +145,7 @@ def calculate_pressure(
         triaged_count = getattr(ps, "triaged_count", 0)
         blocked_count = getattr(ps, "blocked_count", 0)
         deferred_count = getattr(ps, "deferred_count", 0)
+        decompose_count = getattr(ps, "decompose_count", 0)
         integration_queue_count = getattr(ps, "integration_queue_depth", getattr(ps, "integration_queue_count", 0))
         total_slots = getattr(ps, "total_slots", getattr(ps, "max_slots", 30))
         cats = ps.workers_by_category() if callable(getattr(ps, "workers_by_category", None)) else getattr(ps, "workers_by_category", {})
@@ -167,6 +169,7 @@ def calculate_pressure(
     triaged_count = triaged_count or 0
     blocked_count = blocked_count or 0
     deferred_count = deferred_count or 0
+    decompose_count = decompose_count or 0
     integration_queue_count = integration_queue_count or 0
     active_by_role = active_by_role or {}
     total = max(total_slots or 30, 1)
@@ -205,6 +208,7 @@ def calculate_pressure(
         + validating_count
         + triaged_count
         + ready_count
+        + decompose_count
         + planning_count
         + implementing_count
         + reviewing_count
@@ -214,7 +218,7 @@ def calculate_pressure(
         + deferred_count
         + candidate_count
     )
-    backlog = ready_count + planning_count
+    backlog = ready_count + decompose_count + planning_count
     low = backlog_low_watermark
     target = backlog_target
     high = backlog_high_watermark
@@ -285,6 +289,7 @@ def determine_mode(
     _ts = getattr(pipeline_state, "total_slots", getattr(pipeline_state, "max_slots", 30))
     total_work = (
         getattr(pipeline_state, "ready_count", 0)
+        + getattr(pipeline_state, "decompose_count", 0)
         + getattr(pipeline_state, "implementing_count", 0)
         + getattr(pipeline_state, "reviewing_count", 0)
         + getattr(pipeline_state, "verifying_count", 0)

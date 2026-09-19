@@ -47,6 +47,7 @@ class TicketState(str, Enum):
     VALIDATING = "VALIDATING"
     TRIAGED = "TRIAGED"
     READY = "READY"
+    DECOMPOSE = "DECOMPOSE"
     PLANNING = "PLANNING"
     IMPLEMENTING = "IMPLEMENTING"
     REVIEWING = "REVIEWING"
@@ -117,13 +118,17 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.REJECTED,
     }),
     TicketState.READY: frozenset({
-        TicketState.PLANNING,
-        TicketState.IMPLEMENTING,
+        TicketState.DECOMPOSE,
         TicketState.DEFERRED,
+    }),
+    TicketState.DECOMPOSE: frozenset({
+        TicketState.PLANNING,
+        TicketState.READY,
+        TicketState.BLOCKED,
     }),
     TicketState.PLANNING: frozenset({
         TicketState.IMPLEMENTING,
-        TicketState.READY,
+        TicketState.DECOMPOSE,
         TicketState.BLOCKED,
     }),
     TicketState.IMPLEMENTING: frozenset({
@@ -141,12 +146,14 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     }),
     TicketState.REWORK: frozenset({
         TicketState.IMPLEMENTING,
+        TicketState.DECOMPOSE,
         TicketState.PLANNING,
         TicketState.REJECTED,
         TicketState.DEFERRED,
     }),
     TicketState.BLOCKED: frozenset({
         TicketState.READY,
+        TicketState.DECOMPOSE,
         TicketState.PLANNING,
         TicketState.IMPLEMENTING,
         TicketState.DEFERRED,

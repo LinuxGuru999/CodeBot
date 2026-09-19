@@ -68,6 +68,7 @@ class PipelineState:
     validating_count: int = 0
     triaged_count: int = 0
     ready_count: int = 0
+    decompose_count: int = 0
     planning_count: int = 0
     implementing_count: int = 0
     reviewing_count: int = 0
@@ -148,6 +149,7 @@ class PipelineState:
             + self.validating_count
             + self.triaged_count
             + self.ready_count
+            + self.decompose_count
             + self.planning_count
             + self.implementing_count
             + self.reviewing_count
@@ -217,6 +219,7 @@ class PipelineState:
                 "validating": self.validating_count,
                 "triaged": self.triaged_count,
                 "ready": self.ready_count,
+                "decompose": self.decompose_count,
                 "planning": self.planning_count,
                 "implementing": self.implementing_count,
                 "reviewing": self.reviewing_count,
@@ -315,6 +318,7 @@ def inspect_pipeline(
         validating_count=state_counts.get("VALIDATING", 0),
         triaged_count=state_counts.get("TRIAGED", 0),
         ready_count=state_counts.get("READY", 0),
+        decompose_count=state_counts.get("DECOMPOSE", 0),
         planning_count=state_counts.get("PLANNING", 0),
         implementing_count=state_counts.get("IMPLEMENTING", 0),
         reviewing_count=state_counts.get("REVIEWING", 0),
@@ -399,6 +403,7 @@ class PipelineInspector:
             validating_count=counts.get("VALIDATING", 0),
             triaged_count=counts.get("TRIAGED", 0),
             ready_count=counts.get("READY", 0),
+            decompose_count=counts.get("DECOMPOSE", 0),
             planning_count=counts.get("PLANNING", 0),
             implementing_count=counts.get("IMPLEMENTING", 0),
             reviewing_count=counts.get("REVIEWING", 0),
