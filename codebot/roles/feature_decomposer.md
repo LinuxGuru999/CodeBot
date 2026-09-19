@@ -35,7 +35,7 @@ Fast-path process (index-driven):
 3. Prioritize: T0 first, then T1, then T2. Within same tier, IN_PROGRESS before PLANNED.
 4. For each actionable deliverable, check if a ticket already exists via `ticket_engine` before creating one.
 5. Create tickets for deliverables without existing tickets.
-6. Set `source="roadmap"` and `evidence="ROADMAP §{id}: {title}"`.
+6. Set `source="feature_decomposer"` and `evidence="ROADMAP §{id}: {title}"`.
 7. Map tier to severity: T0-T2 = high, T3 = medium, T4+ = low.
 8. Set `affected_modules` from the index entry's modules array.
 9. Set `dependencies` based on tier ordering (T0 before T1, T1 before T2).
@@ -86,7 +86,7 @@ create_ticket(
     ticket_class=TicketClass.FEATURE,  # or BUG, TEST, etc.
     severity=Severity.MEDIUM,
     source="feature_decomposer",
-    evidence="Parent ticket: {parent_id}\nRoadmap: {tier}",
+    evidence="ROADMAP §{id}: {title}",
     problem_statement="{what needs to be done and why}",
     desired_state="{what success looks like}",
     acceptance_criteria=["criterion 1", "criterion 2"],
@@ -116,11 +116,12 @@ Batching strategy:
 
 ## Session Management
 - `SESSION_TIMEOUT = 1800` seconds (extended for 86-section roadmap processing)
-- Heartbeat: write to `state/feature_decomposer.heartbeat`
-- Checkpoint: write to `state/feature_decomposer.checkpoint.json`
+- Heartbeat: write to `.codebot/state/feature_decomposer.heartbeat`
+- Checkpoint: write to `.codebot/state/feature_decomposer.checkpoint.json`
 - Checkpoint format: `{"processed_ids": ["2.A", "2.D", ...], "tickets_created": N, "last_batch": "T0"}`
 - On restart: read checkpoint, skip already-processed IDs, resume from last batch
-- Noop cap: exit at >= 10 consecutive no-ops
+- **MINIMUM 5 tickets per run.** Do NOT exit before calling `create_ticket` at least 5 times. If dedup eliminates candidates, decompose remaining deliverables into finer sub-tickets until you reach 5.
+- Noop cap: exit at >= 20 consecutive no-ops (raised from 10 to allow broader search)
 - Priority: Read `.codebot/roadmap_index.json` FIRST. Only read ROADMAP.md sections you need.
 
 ## Safety Rules
