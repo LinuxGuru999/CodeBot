@@ -1804,49 +1804,17 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
-        while True:
-            if tool_iterations >= MAX_TOOL_ITERATIONS:
-                _log(f"{bot_name}: FATAL — hit {MAX_TOOL_ITERATIONS} tool iteration limit")
-                exit_reason = "iteration_limit"
-                # CAP-11: Save scratchpad for task_splitter handoff before exit
-                if _scratch_available and _scratch_state is not None:
-                    _scratch_state.mark_error(f"iteration limit {MAX_TOOL_ITERATIONS}")
-                    _scratch_state.iteration = tool_iterations
-                    save_scratchpad(state_dir, _scratch_state)
-                sys.exit(1)
-
-            # Periodic drain check between iterations (tool executions check individually too)
-            if tool_iterations > 0 and _is_draining(bot_name):
-                _log(f"{bot_name}: drain detected mid-run, exiting cleanly")
-                _write_heartbeat(heartbeat_file)
-                exit_reason = "drain"
-                sys.exit(0)
-
-            # CAP-07: Auto-compact context when approaching token budget
-            if _compaction_available and tool_iterations > 0 and tool_iterations % 5 == 0:
-                if needs_compaction(messages, max_tokens=_compaction_budget):
-                    old_len = len(messages)
-                    messages = compact_messages(messages, max_tokens=_compaction_budget)
-                    _log(f"{bot_name}: context compacted ({old_len}→{len(messages)} messages)")
-                    if _scratch_available and _scratch_state is not None:
-                        _scratch_state.context_summary = f"Compacted at iter {tool_iterations}, {len(messages)} msgs remain"
-                        save_scratchpad(state_dir, _scratch_state)
-
-            # ---- API call with retry envelope ----
-            resp_json = None
-            _fallback_needed = False
-            _log(f"{bot_name}: API call #{tool_iterations + 1} ({len(messages)} msgs)")
+        def _model_responder(msgs):
+            nonlocal active_model, total_retries, timeout_retries, exit_reason
             while True:
                 try:
-                    resp_json = _call_api(messages, active_model, api_key)
-                    break
+                    return _call_api(msgs, active_model, api_key)
                 except urllib.error.HTTPError as exc:
                     if exc.code == 429:
                         _log(f"{bot_name}: 429 rate-limited, yielding slot for requeue")
                         _write_heartbeat(heartbeat_file)
                         exit_reason = "rate_limited_yield"
                         sys.exit(3)
-                    # Try to handle 429 encoded only in body with non-429 status
                     try:
                         body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
                         if "429" in body or "rate" in body.lower():
@@ -1862,26 +1830,23 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     exit_reason = "http_error"
                     sys.exit(1)
                 except urllib.error.URLError as exc:
-                    # Covers timeout and connection errors from urlopen
                     msg = str(exc).lower()
                     is_timeout = "timed out" in msg or "timeout" in msg or isinstance(exc.reason, TimeoutError) if hasattr(exc, "reason") else False
-                    # Connection errors and timeouts share the same retry budget but timeout has its own cap
                     if total_retries < MAX_RETRIES and timeout_retries < MAX_TIMEOUT_RETRIES:
                         delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
                         delay = min(delay, MAX_BACKOFF)
                         _log(f"{bot_name}: connection error, retrying in {delay}s")
                         time.sleep(delay)
                         total_retries += 1
-                        # Only count toward timeout cap if it looks like a timeout
-                        if is_timeout or "connection" in msg or "temporary failure" in msg or "name resolution" in msg:
-                            timeout_retries += 1
-                        else:
-                            timeout_retries += 1
+                        timeout_retries += 1
                         continue
                     _log(f"{bot_name}: FATAL — connection error after {total_retries} retries")
                     if fallback_model and not used_fallback:
-                        _fallback_needed = True
-                        break
+                        active_model = fallback_model
+                        used_fallback = True
+                        total_retries = 0
+                        timeout_retries = 0
+                        continue
                     exit_reason = "connection_error"
                     sys.exit(1)
                 except TimeoutError:
@@ -1895,12 +1860,14 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                         continue
                     _log(f"{bot_name}: FATAL — timeout after {timeout_retries} retries")
                     if fallback_model and not used_fallback:
-                        _fallback_needed = True
-                        break
+                        active_model = fallback_model
+                        used_fallback = True
+                        total_retries = 0
+                        timeout_retries = 0
+                        continue
                     exit_reason = "timeout"
                     sys.exit(1)
                 except Exception:
-                    # Unknown transient — retry up to global cap before giving up
                     if total_retries < MAX_RETRIES:
                         delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
                         delay = min(delay, MAX_BACKOFF)
@@ -1910,119 +1877,43 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                         continue
                     _log(f"{bot_name}: FATAL — unexpected error after {total_retries} retries")
                     if fallback_model and not used_fallback:
-                        _fallback_needed = True
-                        break
+                        active_model = fallback_model
+                        used_fallback = True
+                        total_retries = 0
+                        timeout_retries = 0
+                        continue
                     exit_reason = "unexpected_error"
                     sys.exit(1)
 
-            if _fallback_needed:
-                _log(f"{bot_name}: switching to fallback model {fallback_model}")
-                active_model = fallback_model
-                used_fallback = True
-                total_retries = 0
-                timeout_retries = 0
-                continue
-
-            # ---- Parse response ----
-            try:
-                choices = resp_json.get("choices") or []
-                msg = choices[0].get("message", {}) if choices else {}
-            except Exception:
-                msg = {}
-
-            tool_calls = msg.get("tool_calls")
-            content = msg.get("content")
-
-            has_tool_calls = bool(tool_calls)
-            has_content = bool(content and str(content).strip())
-
-            if has_tool_calls:
-                _log(f"{bot_name}: model returned {len(tool_calls)} tool_call(s)")
-                messages.append(msg)
-                for tc in tool_calls:
-                    if _is_draining(bot_name):
-                        _log(f"{bot_name}: drain detected during tool execution, exiting")
-                        _write_heartbeat(heartbeat_file)
-                        exit_reason = "drain"
-                        sys.exit(0)
-                    tc_id = tc.get("id", "")
-                    func = tc.get("function", {}) or {}
-                    name = func.get("name", "")
-                    args_raw = func.get("arguments", "{}")
-                    if isinstance(args_raw, dict):
-                        args = args_raw
-                    else:
-                        try:
-                            args = json.loads(args_raw) if args_raw else {}
-                        except Exception:
-                            args = {}
-                        if not isinstance(args, dict):
-                            args = {}
-                    _log(f"{bot_name}: executing tool '{name}'")
-                    result = _execute_tool(name, args)
-                    if not result.get("success", True):
-                        _log(f"{bot_name}: tool '{name}' failed: {result.get('error', 'unknown')}")
-                    if name in ("edit", "write") and args.get("path"):
-                        files_touched.append(args["path"])
-                    if name == "create_ticket" and result.get("success"):
-                        tickets_created += 1
-                        _scratch_state.context_summary = (
-                            (_scratch_state.context_summary or "") + f"\nTICKET_CREATED: {result.get('output', '')}"
-                        ).strip()[:2000]
-                    _write_bot_status(
-                        bot_name, state_dir,
-                        f"tool:{name}",
-                        f"executing {name} on {args.get('path', 'N/A')}",
-                        files_touched, tool_iterations + 1,
-                    )
-                    _write_taskline(bot_name, state_dir, f"iter{tool_iterations + 1}", f"tool:{name} {_scratch_target(args)}")
-                    tool_msg = {
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": json.dumps(result),
-                    }
-                    messages.append(tool_msg)
-                tool_iterations += 1
-                if _scratch_available and _scratch_state is not None:
-                    _scratch_state.iteration = tool_iterations
-                    _scratch_state.last_tool_call = tool_calls[-1].get("function", {}).get("name", "tool") if tool_calls else ""
-                    _scratch_state.last_tool_result_summary = f"iter={tool_iterations} tools={len(tool_calls)}"
-                    _scratch_state.files_changed = files_touched[-10:]
-                    save_scratchpad(state_dir, _scratch_state)
-                if github_target:
-                    last_tool = tool_calls[-1].get("function", {}).get("name", "tool")
-                    _update_github_progress(
-                        github_target, bot_name, tool_iterations,
-                        f"completed tool `{last_tool}`; continuing implementation",
-                    )
-                continue
-
-            if has_content:
-                result_text = str(content).strip()
-                summary = result_text.replace("\n", " ")[:150]
-                _write_scratchpad(bot_name, state_dir, "completed", summary)
-                _write_taskline(bot_name, state_dir, "done", summary)
-                if _scratch_available and _scratch_state is not None:
-                    _scratch_state.mark_step_complete(f"completed: {summary[:100]}")
-                    _scratch_state.iteration = tool_iterations
-                    _scratch_state.files_changed = files_touched[-10:]
-                    _scratch_state.context_summary = f"Completed {tool_iterations} tool iterations. Last result: {summary[:200]}"
-                    _scratch_state.finish_agent(summary)
-                    save_scratchpad(state_dir, _scratch_state)
-                _log(f"{bot_name}: model returned content, completing ({tool_iterations} tool iterations)")
-                _write_heartbeat(heartbeat_file)
-                _auto_commit(bot_name, files_touched)
-                _write_checkpoint(ckpt_file, bot_name, "completed")
-                exit_reason = "completed"
-                sys.exit(0)
-
-            if continue_nudges < 2:
-                _log(f"{bot_name}: empty response, nudging 'continue' ({continue_nudges + 1}/2)")
-                messages.append({"role": "user", "content": "continue"})
-                continue_nudges += 1
-                continue
+        result = run_agent_loop(bot_name, full_message, _model_responder, state_dir, max_iterations=MAX_TOOL_ITERATIONS)
+        tool_iterations = result.iterations
+        tickets_created = result.tickets_created
+        files_touched = result.files_touched
+        messages = result.messages
+        exit_reason = result.exit_reason
+        final_content = result.final_content
+        if exit_reason == "completed":
+            _log(f"{bot_name}: model returned content, completing ({tool_iterations} tool iterations)")
+            _write_heartbeat(heartbeat_file)
+            _auto_commit(bot_name, files_touched)
+            _write_checkpoint(ckpt_file, bot_name, "completed")
+            sys.exit(0)
+        elif exit_reason == "iteration_limit":
+            _log(f"{bot_name}: FATAL — hit {MAX_TOOL_ITERATIONS} tool iteration limit")
+            if _scratch_available and _scratch_state is not None:
+                _scratch_state.mark_error(f"iteration limit {MAX_TOOL_ITERATIONS}")
+                _scratch_state.iteration = tool_iterations
+                save_scratchpad(state_dir, _scratch_state)
+            sys.exit(1)
+        elif exit_reason == "no_content":
             _log(f"{bot_name}: FATAL — no content after 2 nudges")
-            exit_reason = "no_content"
+            sys.exit(1)
+        elif exit_reason == "drain":
+            _log(f"{bot_name}: drain detected, exiting cleanly")
+            _write_heartbeat(heartbeat_file)
+            sys.exit(0)
+        else:
+            _log(f"{bot_name}: exiting with reason {exit_reason}")
             sys.exit(1)
     finally:
         _stop_heartbeat_thread(hb_thread)
@@ -2041,7 +1932,6 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     marker.write_text(str(time.time()), encoding="utf-8")
                 except OSError:
                     pass
-        # CAP-11: Finalize scratchpad state for handoff or completion record
         if _scratch_available and _scratch_state is not None:
             if exit_reason in ("timeout", "rate_limit", "fatal_error", "token_cap", "iteration_limit", "connection_error"):
                 _scratch_state.mark_error(f"exited: {exit_reason}")

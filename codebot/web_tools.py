@@ -491,6 +491,52 @@ def web_fetch(url: str, max_bytes: int = MAX_FETCH_BYTES) -> dict[str, Any]:
 
 
 def _extract_text_from_html(html: str) -> str:
+    """Extract readable text from HTML.
+
+    Attempts to use beautifulsoup4 (with lxml parser) or lxml directly for robust parsing
+    of malformed HTML. Falls back to stdlib regex-based parsing if neither is available.
+
+    Args:
+        html: Raw HTML string.
+
+    Returns:
+        Extracted plain text.
+    """
+    # Try beautifulsoup4 first (preferred for robustness)
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "lxml")
+        # Remove script and style elements
+        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            script.decompose()
+        text = soup.get_text(separator="\n")
+        # Clean up whitespace similar to fallback
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        lines = [line.strip() for line in text.splitlines()]
+        lines = [line for line in lines if line]
+        return '\n'.join(lines)
+    except ImportError:
+        pass
+
+    # Try lxml directly if bs4 failed but lxml is present (less likely if bs4 isn't there, but possible)
+    try:
+        from lxml import etree, html as lh
+        doc = lh.fromstring(html.encode('utf-8'))
+        # Remove unwanted tags
+        for tag in ["script", "style", "nav", "footer", "header", "aside"]:
+            for element in doc.xpath(f".//{tag}"):
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+        text = etree.tostring(doc, method='text', encoding='unicode')
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        lines = [line.strip() for line in text.splitlines()]
+        lines = [line for line in lines if line]
+        return '\n'.join(lines)
+    except ImportError:
+        pass
+
+    # Fallback to stdlib regex-based parsing
     for tag in ("script", "style", "nav", "footer", "header", "aside"):
         html = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
