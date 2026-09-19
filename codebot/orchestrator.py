@@ -513,7 +513,7 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         lockup_risk="medium",
         heartbeat_multiplier=1.9,
         log_stall_seconds=175,
-        restart_cooldown=6,
+        restart_cooldown=30,
         description="Strong code gen; balanced performance, occasional stall on complex reasoning",
     ),
     "qwen-3.7-plus": ModelProfile(
