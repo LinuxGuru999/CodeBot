@@ -27,6 +27,7 @@ Invariants
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import re
 import socket
