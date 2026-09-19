@@ -12,31 +12,70 @@ CodeBot discovers, plans, implements, reviews, and verifies software changes acr
 ├── constitution.md        # Protected invariants
 └── quality_gates.yaml     # Verification policy
 
-bots/                      # CodeBot core (portable, no project knowledge)
-├── ticket_engine.py       # Normalized ticket schema + state machine
-├── dependency_graph.py    # DAG ordering + cycle detection
-├── risk_classifier.py     # Deterministic risk scoring → autonomy levels
-├── implementation_planner.py  # Depth-scaled plan generation
-├── quality_gate.py        # YAML-driven verification engine
-├── gatekeeper.py          # Central completion authority
-├── role_registry.py       # ROLE + TASK + MODEL + TOOL_POLICY abstraction
-├── cost_tracker.py        # Per-ticket token economics
-├── project_adapter.py     # Abstract interface (ABC)
+codebot/                   # CodeBot core (portable, no project knowledge)
+── __init__.py
+├── __main__.py
+├── adaptive_rate_limiter.py
+├── adaptive_scheduler.py
+├── alignment_events.py
+├── alignment_service.py
+├── anomaly_alerts.py
+├── api_runner.py
+├── api_tools.py           # read/write/edit/bash/grep/glob
+├── auto_revert.py         # Rollback on failure
+├── batch_scheduler.py     # Queue scheduling
+── bot_metrics.py
+├── botop.py
+├── checkpoint_manager.py
+├── codebot_adapter.py
 ├── codebot_bootstrap.py   # Adapter injection entry point
+├── conflict_detector.py
+├── context_compactor.py
+── control_client.py
+├── control_server.py
+├── cost_tracker.py        # Per-ticket token economics
+├── coverage_bridge.py
+├── coverage_runner.py
+├── credentials.py
+├── dependency_graph.py    # DAG ordering + cycle detection
+├── discovery_manager.py
+├── event_log.py           # Event persistence
+├── file_lock.py
+├── findings_log.py        # Findings persistence
+├── gatekeeper.py          # Central completion authority
+├── implementation_planner.py  # Depth-scaled plan generation
+├── integration_queue.py
+├── lease_state.py         # Distributed coordination
+├── manifest_schema.py     # Schema validation
+├── metrics_collector.py   # Per-agent telemetry
+├── migrate_queue.py
+├── model_router.py
+├── monitor_adapter.py
+├── orchestrator.py
+├── pipeline_state.py
+├── pricing_table.py
+├── project_adapter.py     # Abstract interface (ABC)
+├── prompt_gateway.py      # Prompt compression + spawn gating
+── prompt_optimizer.py
+├── quality_gate.py        # YAML-driven verification engine
+├── queue_pressure.py
+├── readiness.py           # Readiness checks
+├── risk_classifier.py     # Deterministic risk scoring → autonomy levels
+├── rl_engine.py           # Epsilon-greedy bandit optimization
+├── role_prompt.py
+├── role_registry.py       # ROLE + TASK + MODEL + TOOL_POLICY abstraction
+├── scheduler_config.py
+├── scheduler_metrics.py
+├── scratchpad.py
+├── stale_branch_detector.py
+├── stats_collector.py
+├── task_splitter.py
+├── telemetry.py
+├── ticket_engine.py       # Normalized ticket schema + state machine
 ├── token_budget.py        # Fleet-wide budget ledger
 ├── tool_policy.py         # Sandbox boundary enforcement
-├── prompt_gateway.py      # Prompt compression + spawn gating
-├── api_tools.py           # read/write/edit/bash/grep/glob
-├── metrics_collector.py   # Per-agent telemetry
-├── rl_engine.py           # Epsilon-greedy bandit optimization
-├── batch_scheduler.py     # Queue scheduling
-├── readiness.py           # Readiness checks
-├── auto_revert.py         # Rollback on failure
-├── event_log.py           # Event persistence
-├── findings_log.py        # Findings persistence
-├── anomaly_alerts.py      # Anomaly detection
-├── lease_state.py         # Distributed coordination
-└── manifest_schema.py     # Schema validation
+├── web_tools.py
+└── work_scorer.py
 ```
 
 ## Quick Start
@@ -49,7 +88,7 @@ pip install -e .
 python3 -m pytest -q
 
 # Bootstrap with a project
-python3 -m bots.codebot_bootstrap --project-root /path/to/your/project
+python3 -m codebot.codebot_bootstrap --project-root /path/to/your/project
 ```
 
 ## How It Works
@@ -71,7 +110,7 @@ python3 -m bots.codebot_bootstrap --project-root /path/to/your/project
 Create a `.codebot/project.yaml` and implement `ProjectAdapter`:
 
 ```python
-from bots.project_adapter import ProjectAdapter
+from codebot.project_adapter import ProjectAdapter
 
 class MyProjectAdapter(ProjectAdapter):
     def project_name(self) -> str:
@@ -81,7 +120,7 @@ class MyProjectAdapter(ProjectAdapter):
 
 Then bootstrap:
 ```python
-from bots.codebot_bootstrap import bootstrap
+from codebot.codebot_bootstrap import bootstrap
 adapter = bootstrap(Path("/path/to/my-project"))
 ```
 

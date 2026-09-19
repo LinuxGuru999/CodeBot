@@ -32,6 +32,19 @@ Reference implementation: `codebot/roles/feature_hunter.md`.
 
 ---
 
+## 1.5 Prompt Size Constraints
+
+Prompt length MUST scale with the model's context window. A prompt that fills too much of a small context window causes mid-session eviction — the model forgets earlier instructions as new tool results push them out.
+
+| Context Size | Max Prompt Length | Guidance |
+|-------------|------------------|----------|
+| SMALL (cheap models) | ≤ 3,000 words | Minimal prose, rely on tables and templates |
+| LARGE (standard/expensive) | ≤ 6,000 words | Can include more explanation but still prefer structure over prose |
+
+Measure prompt size by word count, not line count. Tables are more token-efficient than paragraphs for cheap models.
+
+---
+
 ## 2. Startup Sequence Requirements
 
 Cheap models drift without explicit ordering. The startup sequence MUST:
@@ -59,14 +72,24 @@ read path=/home/kozuka/Work/CodeBot/.codebot/roadmap_index.json
 
 Never say "read the roadmap index" — cheap models will search for it, glob for it, or read the wrong file.
 
-### 2.3 Use Absolute Paths for Critical Files
+### 2.3 Use Portable Path Variables for Critical Files
 
-Relative paths break when CWD varies between orchestrator context (`/home/kozuka/Work/CodeBot`) and api_runner subprocess context (`/home/kozuka/Work/CodeBot/codebot/`). Always use absolute paths for:
-- Input files (index, tickets.json)
-- State files (checkpoint, heartbeat)
-- Search targets (grep paths)
+Hardcoded absolute paths (e.g., `/home/kozuka/Work/CodeBot/.codebot/...`) make prompts non-portable across projects, contradicting CodeBot's core value proposition (ROADMAP.md §18). Prompts MUST use path variables that resolve at runtime via the `ProjectAdapter`.
 
-Exception: source code scanning where the agent intentionally searches relative to project root.
+Define a variable convention in the prompt header:
+```
+PROJECT_ROOT = /home/kozuka/Work/CodeBot  # Resolved by adapter at startup
+STATE_DIR = {PROJECT_ROOT}/.codebot/state
+```
+
+Then reference variables throughout:
+```
+read path={STATE_DIR}/feature_hunter.checkpoint.json
+```
+
+The orchestrator injects the resolved project root into the prompt assembly via `role_prompt.py`. When writing prompts, use `{PROJECT_ROOT}` as the placeholder — never hardcode user-specific or machine-specific paths.
+
+Exception: source code scanning where the agent intentionally searches relative to project root using `grep`/`glob` with patterns rather than absolute file paths.
 
 ---
 
@@ -147,37 +170,32 @@ The prompt MUST explicitly forbid leaving `evidence` and `acceptance_criteria` e
 
 ## 4. Path Resolution Rules
 
-All state files live under `.codebot/state/` at the repository root. Historical bugs placed files in three different directories simultaneously.
+All state files live under `.codebot/state/` at the repository root. Historical bugs placed files in three different directories simultaneously (`state/`, `.codebot/state/`, `codebot/.codebot/state/`), causing agents to read stale data or fail silently.
 
-| Resource | Correct Path | Wrong Paths |
-|----------|-------------|-------------|
-| Tickets | `.codebot/state/tickets.json` | `state/tickets.json`, `codebot/.codebot/state/tickets.json` |
-| Heartbeat | `.codebot/state/{name}.heartbeat` | `state/{name}.heartbeat` |
-| Checkpoint | `.codebot/state/{name}.checkpoint.json` | `state/{name}.checkpoint.json` |
-| Claims | `.codebot/state/claims/` | `state/claims/` |
-| Scratchpad | `.codebot/state/{name}.scratchpad.json` | `state/{name}.scratchpad.json` |
+| Resource | Correct Path Template | Wrong Paths |
+|----------|----------------------|-------------|
+| Tickets | `{STATE_DIR}/tickets.json` | `state/tickets.json`, `codebot/.codebot/state/tickets.json` |
+| Heartbeat | `{STATE_DIR}/{name}.heartbeat` | `state/{name}.heartbeat` |
+| Checkpoint | `{STATE_DIR}/{name}.checkpoint.json` | `state/{name}.checkpoint.json` |
+| Claims | `{STATE_DIR}/claims/` | `state/claims/` |
+| Scratchpad | `{STATE_DIR}/{name}.scratchpad.json` | `state/{name}.scratchpad.json` |
+
+Where `{STATE_DIR}` = `{PROJECT_ROOT}/.codebot/state`.
 
 Resolution chain (`api_runner.py:590-597`):
 1. Default: `Path.cwd() / ".codebot" / "state" / "tickets.json"`
 2. Adapter override: `_adapter_instance.paths().state_dir / "tickets.json"`
 3. Relative path resolution: `(WORK_ROOT / store_path).resolve()`
 
-When `CodeBotAdapter` is loaded, `state_dir` resolves to `{repo_root}/.codebot/state`. Without adapter, CWD determines the base. Prompts MUST use absolute paths to avoid ambiguity.
+When `CodeBotAdapter` is loaded, `state_dir` resolves to `{repo_root}/.codebot/state`. Without adapter, CWD determines the base. Prompts MUST use the `{STATE_DIR}` variable convention (§2.3) to remain portable while resolving correctly.
 
 ---
 
 ## 5. Deduplication Protocol
 
-Every agent that creates tickets MUST check for existing tickets before creating. Failure to do so triggers the noop death spiral:
+Every agent that creates tickets MUST check for existing tickets before creating. Failure to do so wastes tokens on duplicate creation attempts that get swallowed by the dedup engine.
 
-1. Agent finds issue, creates ticket
-2. Next run: same issue found again, creates duplicate
-3. `TicketStore.add()` raises `ValueError` (duplicate evidence hash)
-4. api_runner catches it, returns `{"success": True, "output": "Duplicate: ..."}` (line 611)
-5. But `tickets_created` counter only increments on `result.get("success")` AND non-duplicate (line 1759)
-6. Agent thinks it's working but counter doesn't advance
-7. Eventually hits noop cap, exits with "completed"
-8. Checkpoint says done, agent never restarts
+**Important correction**: `TicketStore.add()` raises `ValueError` on duplicate evidence hash, but `api_runner.py:611` catches it and returns `{"success": True, "output": "Duplicate: ..."}`. The `tickets_created` counter at `api_runner.py:1759` DOES increment because `success` is True. The real cost is not counter stall — it is wasted tokens. Every duplicate attempt consumes a full API round-trip (model generates tool call → api_runner executes → result returned → model reads response) for zero pipeline progress. On cheap models with tight token budgets, this can exhaust the session before any unique tickets are created.
 
 ### 5.1 How to Dedup
 
@@ -235,6 +253,67 @@ Recommend: 20 consecutive noops before exit. Historical default was 10, which pr
 
 ---
 
+## 7.5 Checkpoint Format Standard
+
+Checkpoints persist agent progress across restarts. A malformed checkpoint can permanently kill an agent. The feature_decomposer wrote `{"reason": "completed"}` as its checkpoint, which caused it to read "completed" on every subsequent restart and immediately exit without doing work.
+
+Every checkpoint JSON MUST contain these fields:
+
+```json
+{
+  "processed_ids": ["2.A", "2.D"],
+  "tickets_created": 5,
+  "last_batch": "T0",
+  "updated_at": 1789795066.0
+}
+```
+
+| Field | Type | Purpose |
+|-------|------|--------|
+| `processed_ids` | array of strings | IDs already handled; skip on restart |
+| `tickets_created` | integer | Running count for minimum-output enforcement |
+| `last_batch` | string | Resume point (tier name, section ID, etc.) |
+| `updated_at` | float | Unix timestamp for staleness detection |
+
+The checkpoint MUST NOT contain a `"reason": "completed"` field. Completion is determined by the process logic (all candidates exhausted), not by a checkpoint flag. If an agent writes `"completed"` to its checkpoint, the orchestrator has no mechanism to clear it — the agent is permanently dead until manual intervention.
+
+The prompt MUST instruct the agent to write checkpoints in this exact format and MUST forbid writing terminal status flags.
+
+---
+
+## 7.6 Heartbeat Format Standard
+
+Heartbeats MUST be bare Unix timestamps only. No JSON wrapping, no extra fields, no human-readable dates.
+
+**WRONG:** `{"timestamp": 1789795066.0, "bot": "feature_hunter"}`
+**RIGHT:** `1789795066.6893487`
+
+Evidence: bug_hunter received an evolution patch (`tighten_heartbeat_format`) because it wrote JSON heartbeats. The orchestrator's `read_heartbeat()` function (`orchestrator.py:868-891`) parses the file as a bare float. JSON-formatted heartbeats cause `float(txt)` to throw ValueError, falling through to ISO parsing, which also fails, returning 0.0 — making the agent appear permanently stuck.
+
+The prompt MUST specify: "Write heartbeats as bare Unix timestamps only. Format: write the string `str(time.time())` directly to the heartbeat file."
+
+Note: `api_runner.py:816-817` intercepts `.heartbeat` file writes server-side and injects the real timestamp, so the model's actual content is discarded. But the model still needs to call `write` with the correct path to trigger the interception.
+
+---
+
+## 7.7 Error Recovery Behavior
+
+Tool calls can fail. The prompt MUST define what the agent should do when `api_runner.py:820-822` returns `{"success": False, "error": "..."}`.
+
+| Error Type | Cause | Agent Should |
+|-----------|-------|-------------|
+| `"unknown tool: X"` | Tool name not in `_TOOL_MAP` | Stop using that tool name. Check allowed tools list. |
+| `"bad args for X: ..."` | TypeError from `func(**args)` — wrong parameter names or types | Fix argument format. Re-read the tool's expected parameters. Do NOT retry with same args. |
+| `"store failed: ..."` | OSError during TicketStore write | Retry once after brief pause. If second failure, write checkpoint and exit cleanly. |
+| `"command denied"` | bash command not in allowlist | Stop trying that command. Use allowed alternatives (grep tool instead of bash grep). |
+| File not found | Read/grep on nonexistent path | Skip the file. Do NOT retry. Do NOT count as noop if it was a speculative check. |
+
+Critical rule: **NEVER retry a failed tool call with identical arguments.** The failure is deterministic — same input produces same output. Retrying wastes tokens. Fix the input or move on.
+
+The prompt MUST include at least one anti-pattern entry about retry loops.
+
+---
+
 ## 8. Field Value Constraints
 
 All enum-typed fields MUST use lowercase string values matching the enum definitions in `ticket_engine.py`.
@@ -270,10 +349,16 @@ Every role prompt MUST include an Anti-Patterns section covering known failure m
 | 8 | Reading full large files (ROADMAP.md at 3500 lines) | No index-driven fast path specified | Planning |
 | 9 | Counting dedup skips as noops | Noop definition doesn't exclude legitimate dedup | Discovery |
 | 10 | Wrong state directory (state/ vs .codebot/state/) | Historical path mismatch, pre-adapter defaults | All roles |
+| 11 | Using `bash` to read state files instead of `read`/`grep` tools | Model prefers shell commands; bash allowlist denies them | All roles |
+| 12 | Writing `"reason": "completed"` to checkpoint | Agent marks itself done permanently; orchestrator has no reset mechanism | Discovery, planning |
+| 13 | JSON-wrapped heartbeats instead of bare timestamps | Orchestrator `read_heartbeat()` fails to parse, returns 0.0, agent appears stuck | All roles |
+| 14 | Retrying failed tool calls with identical arguments | Failures are deterministic; retries waste tokens | All roles |
+| 15 | Reading entire tickets.json (300KB+) instead of grepping for specific patterns | Model tries to load full file into context; exceeds token budget | Discovery, planning |
+| 16 | Leaving `affected_modules` empty when index has `[]` | Tool receives empty string, produces ticket with no module routing | Discovery |
 
 ---
 
-## 10. Model Tier Considerations
+## 12. Model Tier Considerations
 
 Prompt verbosity MUST scale inversely with model capability. A prompt that works for qwen-3.8-max-thinking will fail silently on xiaomi-mimo-2.5.
 
@@ -287,7 +372,7 @@ Rule: if a role uses a cheap model profile (`CostClass.CHEAP` in `role_registry.
 
 ---
 
-## 11. Testing and Validation Checklist
+## 13. Testing and Validation Checklist
 
 Before shipping any new or modified role prompt, verify:
 
@@ -304,3 +389,11 @@ Before shipping any new or modified role prompt, verify:
 - [ ] Startup sequence explicitly skips boilerplate files
 - [ ] Title length constrained to < 200 characters
 - [ ] Enum values (severity, risk, ticket_class) specified as lowercase strings
+- [ ] Checkpoint format matches §7.5 standard (no `"reason": "completed"` field)
+- [ ] Heartbeat format specified as bare Unix timestamp per §7.6
+- [ ] Error recovery behavior defined per §7.7 (no retry loops)
+- [ ] Prompt word count within limits for target model context size per §1.5
+- [ ] Path variables used instead of hardcoded absolute paths per §2.3
+- [ ] Role added to queue scaling logic in orchestrator if applicable (`_scale_queue_depth` checks `DISCOVERY_ROLE_NAMES | PLANNING_ROLE_NAMES`)
+- [ ] Role added to no-ticket penalty tracking in orchestrator (exit handler checks at lines ~4158 and ~4269)
+- [ ] `create_ticket` tool policy includes `write` if agent needs checkpoint saving
