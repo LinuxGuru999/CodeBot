@@ -100,8 +100,18 @@ _ANSI = {
     "gray": "\033[90m",
 }
 
-def _supports_color(no_color: bool = False) -> bool:
-    if no_color:
+# Global flag set by main() from --no-color argument
+_GLOBAL_NO_COLOR = False
+
+def _supports_color(no_color: bool | None = None) -> bool:
+    # Explicit argument takes precedence, then global flag, then env var, then TTY
+    if no_color is True:
+        return False
+    if no_color is False:
+        # Caller explicitly wants color, skip global/env checks
+        return sys.stdout.isatty()
+    # no_color is None: check global, env, tty
+    if _GLOBAL_NO_COLOR:
         return False
     if os.environ.get("NO_COLOR"):
         return False

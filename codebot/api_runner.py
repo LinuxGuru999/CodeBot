@@ -165,7 +165,7 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
     # Fail-closed: gatekeeper check is mandatory before any commit
     if _adapter_instance is None:
         _log(f"{bot_name}: gatekeeper unavailable (BLOCKING commit): no project adapter")
-        return
+        return False
 
     try:
         from codebot.gatekeeper import Gatekeeper
@@ -189,13 +189,13 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
         )
         if result.get("decision") != "COMPLETE":
             _log(f"{bot_name}: gatekeeper BLOCKED commit — decision={result.get('decision')} failed_gates={result.get('failed_gates', [])}")
-            return
+            return False
     except ImportError as imp_err:
         _log(f"{bot_name}: gatekeeper unavailable (BLOCKING commit): {imp_err}")
-        return
+        return False
     except Exception as gk_err:
         _log(f"{bot_name}: gatekeeper check failed (BLOCKING commit): {gk_err}")
-        return
+        return False
 
     repos = set()
     for f in files_touched:
@@ -206,7 +206,7 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
             repos.add("Monitor-Client-Python")
 
     if not repos:
-        return
+        return True
 
     for repo in repos:
         # T4.3: resolve via adapter when available, fallback to WORK_ROOT
