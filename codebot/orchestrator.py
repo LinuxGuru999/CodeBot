@@ -3095,6 +3095,44 @@ def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
     return recovered
 
 
+def _advance_ready_to_planning() -> int:
+    """Move READY tickets with plans to PLANNING state."""
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    plans_dir = STATE_DIR / "plans"
+    if not plans_dir.exists():
+        return 0
+
+    ready = ts.list_by_state(TicketState.READY)
+    advanced = 0
+    for ticket in ready:
+        risk_order = _RISK_ORDER.get(ticket.risk.value, 0)
+        threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
+        if risk_order < threshold_order:
+            continue
+        plan_file = plans_dir / f"{ticket.id}.plan.json"
+        if plan_file.exists():
+            try:
+                ts.transition(ticket.id, TicketState.PLANNING)
+                logger.info(f"Advanced {ticket.id} READY -> PLANNING (plan exists)")
+                advanced += 1
+            except Exception as e:
+                logger.debug(f"Failed to advance {ticket.id} to PLANNING: {e}")
+    return advanced
+
+
 def _recover_stuck_planning_tickets() -> int:
     """Advance PLANNING tickets that have been stuck too long."""
     try:
