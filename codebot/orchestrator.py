@@ -1186,10 +1186,19 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
             if risk_val in ("high", "critical") and ticket.state.value == "READY":
                 ts.transition(tid, TicketState.PLANNING)
                 logger.info(f"Ticket {tid} risk={risk_val} -> PLANNING (enforced)")
+                continue
+            elif risk_val == "medium" and ticket.state.value == "READY":
+                try:
+                    ts.transition(tid, TicketState.IMPLEMENTING)
+                except ValueError:
+                    ts.transition(tid, TicketState.PLANNING)
+                    logger.info(f"Ticket {tid} risk=medium needs plan -> PLANNING")
+                    continue
             else:
                 ts.transition(tid, TicketState.IMPLEMENTING)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Ticket {tid} transition failed: {e} — skipping")
+            continue
         bot._assigned_ticket_id = tid
         dispatched += 1
         logger.info(f"Dispatched ticket {tid} ({tc_val}) -> {bot_name}")
@@ -1456,7 +1465,8 @@ def _gatekeeper_verify_tickets() -> int:
                     ts.transition(tid, TicketState.REWORK)
                     logger.info(f"Gatekeeper: {tid} -> REWORK (gates failed, attempt {rework_count + 1})")
                 else:
-                    logger.warning(f"Gatekeeper: {tid} exceeded max reworks ({rework_count}), leaving in VERIFYING")
+                    ts.transition(tid, TicketState.REJECTED)
+                    logger.warning(f"Gatekeeper: {tid} -> REJECTED (exceeded {rework_count} reworks)")
                 advanced += 1
         except Exception as e:
             logger.warning(f"Gatekeeper verification failed for {tid}: {e}")
@@ -4342,14 +4352,18 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                             store_path = Path(".codebot/state/tickets.json")
                         if store_path.exists():
                             ts = TicketStore(store_path)
-                            if base_role in REVIEWER_ROLE_NAMES:
-                                target_state = TicketState.VERIFYING
-                                state_label = "VERIFYING"
-                            else:
-                                target_state = TicketState.REVIEWING
-                                state_label = "REVIEWING"
-                            ts.transition(assigned_tid, target_state)
-                            logger.info(f"Ticket {assigned_tid} -> {state_label} (agent {name} completed)")
+                            t = ts.get(assigned_tid)
+                            if t is not None:
+                                if base_role in REVIEWER_ROLE_NAMES:
+                                    if t.state == TicketState.REVIEWING:
+                                        ts.transition(assigned_tid, TicketState.VERIFYING)
+                                        logger.info(f"Ticket {assigned_tid} -> VERIFYING (reviewer {name} completed)")
+                                else:
+                                    if t.state == TicketState.IMPLEMENTING:
+                                        ts.transition(assigned_tid, TicketState.REVIEWING)
+                                        logger.info(f"Ticket {assigned_tid} -> REVIEWING (agent {name} completed)")
+                                    else:
+                                        logger.info(f"Ticket {assigned_tid} in {t.state.value}, skipping REVIEWING transition")
                             claims_dir = STATE_DIR / "claims"
                             for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
                                 cf.unlink(missing_ok=True)

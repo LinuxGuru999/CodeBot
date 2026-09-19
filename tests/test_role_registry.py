@@ -239,3 +239,38 @@ class TestAdversarialReviewExtended:
         """security_reviewer should challenge architecture_reviewer."""
         role = get_role("security_reviewer")
         assert "architecture_reviewer" in role.adversarial_to
+
+    def test_general_implementer_declares_reviewers(self):
+        """general_implementer should declare which reviewers it's adversarial to."""
+        role = get_role("general_implementer")
+        assert "correctness_reviewer" in role.adversarial_to
+        assert "security_reviewer" in role.adversarial_to
+        assert "architecture_reviewer" in role.adversarial_to
+
+    def test_backend_implementer_declares_reviewers(self):
+        """backend_implementer should declare which reviewers it's adversarial to."""
+        role = get_role("backend_implementer")
+        assert "correctness_reviewer" in role.adversarial_to
+        assert "security_reviewer" in role.adversarial_to
+        assert "architecture_reviewer" in role.adversarial_to
+
+    def test_ux_reviewer_has_npm(self):
+        """ux_reviewer should have npm/npx for consistency with ux_auditor."""
+        role = get_role("ux_reviewer")
+        assert "npm" in role.tool_policy.allowed_commands
+        assert "npx" in role.tool_policy.allowed_commands
+
+    def test_to_dict_includes_max_file_size(self):
+        """to_dict() should include max_file_size_bytes for completeness."""
+        role = get_role("bug_hunter")
+        d = role.to_dict()
+        assert "max_file_size_bytes" in d["tool_policy"]
+        assert d["tool_policy"]["max_file_size_bytes"] == 1_000_000
+
+    def test_all_adversarial_references_are_valid(self):
+        """All adversarial_to references must point to existing roles."""
+        for role in ALL_ROLES:
+            for ref in role.adversarial_to:
+                assert ref in ROLE_REGISTRY, (
+                    f"{role.name}.adversarial_to references '{ref}' which does not exist in ROLE_REGISTRY"
+                )

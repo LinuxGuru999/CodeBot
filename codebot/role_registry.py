@@ -142,6 +142,7 @@ class AgentRole:
                 "filesystem_scope": self.tool_policy.filesystem_scope,
                 "network_access": self.tool_policy.network_access,
                 "git_write": self.tool_policy.git_write,
+                "max_file_size_bytes": self.tool_policy.max_file_size_bytes,
             },
         }
 
@@ -366,7 +367,7 @@ REVIEW_ROLES: list[AgentRole] = [
         category=RoleCategory.REVIEW,
         description="Evaluates UI implementations for usability, accessibility (WCAG), visual consistency, and workflow friction",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node"}), "project_root", network_access=True),
+        tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node", "npm", "npx"}), "project_root", network_access=True),
         incentive="Find usability issues, accessibility violations, and visual regressions introduced by implementation.",
         adversarial_to=("frontend_implementer", "general_implementer"),
     ),
@@ -403,7 +404,7 @@ CONTROL_ROLES: list[AgentRole] = [
         category=RoleCategory.CONTROL,
         description="Detects and resolves merge conflicts between concurrent agents",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS | frozenset({"git"}), "project_root", git_write=True),
+        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Resolve conflicts with minimal information loss.",
     ),
     AgentRole(
