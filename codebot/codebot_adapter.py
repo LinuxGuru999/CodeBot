@@ -153,6 +153,9 @@ class CodeBotAdapter(ProjectAdapter):
             "feature_hunter": "qwen-3.7-plus",
             "feature_decomposer": "xiaomi-mimo-2.5",
             "implementation_planner": "qwen-3.7-plus",
+            "implementation_planner-2": "qwen-3.8-max",
+            "implementation_planner-3": "qwen-3.6-plus",
+            "implementation_planner-4": "xiaomi-mimo-2.5",
             "bug_hunter": "qwen-3.7-max",
         }
         cycle_idx = 0
@@ -184,12 +187,15 @@ class CodeBotAdapter(ProjectAdapter):
             })
             if role.name == "implementation_planner":
                 for i in range(2, 5):
+                    planner_name = f"implementation_planner-{i}"
+                    planner_model = model_overrides.get(planner_name, model)
+                    planner_fallback = _MODEL_FALLBACKS.get(planner_model, "xiaomi-mimo-2.5")
                     registry.append({
-                        "name": f"implementation_planner-{i}",
+                        "name": planner_name,
                         "prompt": f"codebot/roles/{role.name}.md",
                         "interval": interval,
-                        "model": model,
-                        "fallback_model": fallback,
+                        "model": planner_model,
+                        "fallback_model": planner_fallback,
                         "tier": 2,
                         "enabled": True,
                         "max_restarts": 5,
