@@ -1187,15 +1187,7 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
                 ts.transition(tid, TicketState.PLANNING)
                 logger.info(f"Ticket {tid} risk={risk_val} -> PLANNING (enforced)")
                 continue
-            elif risk_val == "medium" and ticket.state.value == "READY":
-                try:
-                    ts.transition(tid, TicketState.IMPLEMENTING)
-                except ValueError:
-                    ts.transition(tid, TicketState.PLANNING)
-                    logger.info(f"Ticket {tid} risk=medium needs plan -> PLANNING")
-                    continue
-            else:
-                ts.transition(tid, TicketState.IMPLEMENTING)
+            ts.transition(tid, TicketState.IMPLEMENTING)
         except Exception as e:
             logger.warning(f"Ticket {tid} transition failed: {e} — skipping")
             continue
@@ -4556,6 +4548,10 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     except Exception as e:
         logger.warning(f"VERIFYING ticket processing failed: {e}")
     try:
+        _process_rework_tickets(bots)
+    except Exception as e:
+        logger.warning(f"Rework processing failed: {e}")
+    try:
         from codebot.prompt_optimizer import consume_triggers
         triggers_dir = STATE_DIR / "alignment_triggers"
         roles_dir = BOTS_DIR / "codebot" / "roles"
@@ -4905,6 +4901,8 @@ def main() -> None:
         logger.warning(f"Starting with drain active {drain_status()} — bots will remain stopped")
     else:
         _clean_stale_heartbeats()
+        for bot in bots.values():
+            bot._assigned_ticket_id = ''
         order = sorted(
             [b for b in bots.values() if b.config.enabled],
             key=lambda b: (TIER_PRIORITY.get(b.config.name, 2), b.config.interval_seconds),

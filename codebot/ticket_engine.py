@@ -525,10 +525,10 @@ class TicketStore:
             ticket = self._tickets.get(ticket_id)
             if ticket is None:
                 raise KeyError(f"ticket not found: {ticket_id}")
-            # Enforce planning prerequisite for medium+ risk tickets
+            # Enforce planning prerequisite for high+ risk tickets
             if (ticket.state == TicketState.READY and
                 new_state == TicketState.IMPLEMENTING and
-                ticket.risk.value in (RiskLevel.MEDIUM.value, RiskLevel.HIGH.value, RiskLevel.CRITICAL.value)):
+                ticket.risk.value in (RiskLevel.HIGH.value, RiskLevel.CRITICAL.value)):
                 if not self._has_plan(ticket_id):
                     raise ValueError(
                         f"ticket {ticket_id} has risk={ticket.risk.value} which requires "
