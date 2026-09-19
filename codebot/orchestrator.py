@@ -4250,7 +4250,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if not alive and bot.process is not None:
             exit_code = bot.process.returncode
             base_role = name.split("-")[0] if "-" in name else name
-            if base_role in DISCOVERY_ROLE_NAMES | PLANNING_ROLE_NAMES:
+            if base_role in DISCOVERY_ROLE_NAMES | (PLANNING_ROLE_NAMES - {"implementation_planner"}):
                 stream_path = LOGS_DIR / f"{name}.stream.json"
                 created_ticket = False
                 if stream_path.exists():
