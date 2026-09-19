@@ -4792,33 +4792,36 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     except Exception as e:
         logger.warning(f"Adaptive schedule gate failed: {e}")
     try:
-        _dispatch_tickets_to_implementers(bots)
+        from codebot.lifecycle_scheduler import dispatch_lifecycle
+        from codebot.ticket_engine import TicketStore
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
+        if store_path.exists():
+            ts = TicketStore(store_path)
+            counts = ts.summary()
+            handler_registry = {
+                "_auto_triage_backlog": _auto_triage_backlog,
+                "_advance_ready_to_planning": _advance_ready_to_planning,
+                "_dispatch_tickets_to_implementers": _dispatch_tickets_to_implementers,
+                "_dispatch_tickets_to_reviewers": _dispatch_tickets_to_reviewers,
+                "_gatekeeper_verify_tickets": _gatekeeper_verify_tickets,
+                "_process_rework_tickets": _process_rework_tickets,
+                "_recover_deferred_tickets": _recover_deferred_tickets,
+            }
+            dispatch_lifecycle(counts, handler_registry, bots)
+    except ImportError:
+        pass
     except Exception as e:
-        logger.warning(f"Ticket dispatch failed: {e}")
-    try:
-        _dispatch_tickets_to_reviewers(bots)
-    except Exception as e:
-        logger.warning(f"Reviewer dispatch failed: {e}")
+        logger.warning(f"Lifecycle dispatch failed: {e}")
     try:
         _advance_reviewed_tickets(bots)
     except Exception as e:
         logger.warning(f"Review advance failed: {e}")
     try:
-        _gatekeeper_verify_tickets()
-    except Exception as e:
-        logger.warning(f"Gatekeeper verify failed: {e}")
-    try:
         _process_verifying_tickets()
     except Exception as e:
         logger.warning(f"VERIFYING ticket processing failed: {e}")
-    try:
-        _process_rework_tickets(bots)
-    except Exception as e:
-        logger.warning(f"Rework processing failed: {e}")
-    try:
-        _recover_deferred_tickets()
-    except Exception as e:
-        logger.warning(f"Deferred recovery failed: {e}")
     try:
         from codebot.prompt_optimizer import consume_triggers
         triggers_dir = STATE_DIR / "alignment_triggers"
