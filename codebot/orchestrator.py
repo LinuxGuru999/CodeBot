@@ -3161,6 +3161,32 @@ def _recover_stuck_planning_tickets() -> int:
     return recovered
 
 
+def _process_rework_tickets(bots: dict[str, BotState]) -> int:
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+        ts = TicketStore(store_path)
+        rework = ts.list_by_state(TicketState.REWORK)
+    except Exception:
+        return 0
+    if not rework:
+        return 0
+    advanced = 0
+    for ticket in rework:
+        tid = ticket.id
+        try:
+            ts.transition(tid, TicketState.IMPLEMENTING)
+            logger.info(f"Rework ticket {tid} -> IMPLEMENTING (re-entering pipeline)")
+            advanced += 1
+        except ValueError as e:
+            logger.warning(f"Rework ticket {tid} transition failed: {e}")
+    return advanced
+
+
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
     now = time.time()
     due = [n for n, b in bots.items()
