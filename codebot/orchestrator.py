@@ -171,6 +171,8 @@ PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
 
 MAX_DISCOVERY_NO_TICKET_RUNS = 10
 RATE_LIMIT_REQUEUE_S = int(os.getenv("CODEBOT_RATE_LIMIT_REQUEUE_S", "300"))
+RATE_LIMIT_BACKOFF_MAX = int(os.getenv("CODEBOT_RATE_LIMIT_BACKOFF_MAX", "3600"))
+RATE_LIMIT_DISABLE_AFTER = int(os.getenv("CODEBOT_RATE_LIMIT_DISABLE_AFTER", "5"))
 _metrics_tick = 0
 
 ALWAYS_RESPAWN = frozenset({
@@ -3695,11 +3697,18 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 bot.consecutive_errors = 0
                 bot.restart_count = 0
             if exit_code == 3:
-                bot.consecutive_errors = 0
-                bot.next_run_at = now + RATE_LIMIT_REQUEUE_S
+                bot.consecutive_errors += 1
+                backoff = min(RATE_LIMIT_REQUEUE_S * (2 ** (bot.consecutive_errors - 1)), RATE_LIMIT_BACKOFF_MAX)
+                import random
+                jitter = random.randint(0, min(60, backoff // 4))
+                bot.next_run_at = now + backoff + jitter
                 update_bot_state(bot, "waiting")
                 _rotate_model_on_error(bot, bots)
-                logger.info(f"Bot '{name}' rate-limited (exit 3) — rotated to {bot.config.model}, requeue in {RATE_LIMIT_REQUEUE_S}s")
+                if bot.consecutive_errors >= RATE_LIMIT_DISABLE_AFTER:
+                    logger.warning(f"Bot '{name}' rate-limited {bot.consecutive_errors}x — rotated to {bot.config.model}, continuing")
+                    bot.consecutive_errors = 0
+                else:
+                    logger.info(f"Bot '{name}' rate-limited (exit 3) — backoff {backoff+jitter}s, rotated to {bot.config.model}, attempt {bot.consecutive_errors}/{RATE_LIMIT_DISABLE_AFTER}")
             elif exit_code != 0:
                 bot.consecutive_errors += 1
                 if bot.consecutive_errors >= 3:
@@ -3708,10 +3717,6 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                     logger.warning(f"Bot '{name}' failed 3 times — rotated to {bot.config.model}")
                 else:
                     logger.warning(f"Bot '{name}' exited with code {exit_code} (attempt {bot.consecutive_errors}/3)")
-                    logger.error(f"Bot '{name}' failed 3 times — disabling (model {bot.config.model})")
-                    bot.config.enabled = False
-                    update_bot_state(bot, "disabled")
-                    continue
             if exit_code == 0 and bot.config.clean_exit_wait:
                 bot.next_run_at = now + bot.config.interval_seconds
                 logger.info(f"Bot '{name}' completed cleanly — next run in {bot.config.interval_seconds}s")
@@ -4110,9 +4115,19 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 logger.warning(f"Alignment pipeline failed for {name}: {e}")
             bot.process = None
             if exit_code == 3:
-                bot.consecutive_errors = 0
-                bot.next_run_at = now + RATE_LIMIT_REQUEUE_S
+                bot.consecutive_errors += 1
+                backoff = min(RATE_LIMIT_REQUEUE_S * (2 ** (bot.consecutive_errors - 1)), RATE_LIMIT_BACKOFF_MAX)
+                import random
+                jitter = random.randint(0, min(60, backoff // 4))
+                bot.next_run_at = now + backoff + jitter
+                _rotate_model_on_error(bot, bots)
                 update_bot_state(bot, "waiting")
+                if bot.consecutive_errors >= RATE_LIMIT_DISABLE_AFTER:
+                    logger.error(f"Bot '{name}' rate-limited {bot.consecutive_errors}x — disabling (model {bot.config.model})")
+                    bot.config.enabled = False
+                    update_bot_state(bot, "disabled")
+                else:
+                    logger.info(f"Bot '{name}' rate-limited (exit 3) — backoff {backoff+jitter}s, attempt {bot.consecutive_errors}/{RATE_LIMIT_DISABLE_AFTER}")
                 continue
             if exit_code == 0:
                 bot.consecutive_errors = 0
@@ -4193,10 +4208,10 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             else:
                 bot.consecutive_errors += 1
                 if bot.consecutive_errors >= 3:
-                    logger.error(f"Bot '{name}' failed 3 times — disabling (model {bot.config.model})")
-                    bot.config.enabled = False
-                    update_bot_state(bot, "disabled")
-                    continue
+                    old_model = bot.config.model
+                    _rotate_model_on_error(bot, bots)
+                    bot.consecutive_errors = 0
+                    logger.warning(f"Bot '{name}' failed 3 times on {old_model} — rotated to {bot.config.model}")
 
             # Immediate alignment pipeline attempted above; periodic sweep remains as idempotent backstop
             if exit_code == 0 and bot.config.clean_exit_wait:

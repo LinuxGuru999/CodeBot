@@ -870,15 +870,15 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
             err = str(a["consecutive_errors"]) if a["consecutive_errors"] is not None else "-"
             print(f"{a['name']:<26s} {_ansi_pad(bucket, 17)} {_ansi_pad(hb, 15, 'right')} {_ansi_pad(loga, 15, 'right')} {str(a['iteration']):>5s} {task:<22s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<14s}")
     else:
-        print(f"{'Agent':<25s} {'Status':<18s} {'HB Age':>18s} {'PID':>8s} {'ITER':>6s} {'TASK':<18s}")
-        print("-" * 100)
+        print(f"{'Agent':<25s} {'Status':<18s} {'HB Age':>18s} {'PID':>8s} {'ITER':>6s} {'TASK':<25s}")
+        print("-" * 105)
         for a in agents:
             bucket = _bucket_color(a["bucket"], enabled)
             pid_s = str(a["pid"]) if a["pid"] else "-"
-            task = (a["current_task"] or "")[:18]
+            task = (a["current_task"] or "")[:25]
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
             hb_c = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("?", "gray", enabled)
-            print(f"{a['name']:<25s} {_ansi_pad(bucket, 18)} {_ansi_pad(hb_c, 18, 'right')} {pid_s:>8s} {iter_s:>6s} {task:<18s}")
+            print(f"{a['name']:<25s} {_ansi_pad(bucket, 18)} {_ansi_pad(hb_c, 18, 'right')} {pid_s:>8s} {iter_s:>6s} {task:<25s}")
     # summary
     cnt = Counter(a["bucket"] for a in agents)
     print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
