@@ -1193,6 +1193,9 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         bot._assigned_ticket_id = tid
         dispatched += 1
         logger.info(f"Dispatched ticket {tid} ({tc_val}) -> {bot_name}")
+        if bot.process is not None and bot.process.poll() is None:
+            stop_bot(bot, f"restarting with ticket {tid}")
+            start_bot(bot, bots=bots)
     return dispatched
 
 
@@ -1285,6 +1288,9 @@ def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
         bot._assigned_ticket_id = tid
         dispatched += 1
         logger.info(f"Dispatched review for ticket {tid} ({tc_val}) -> {bot_name}")
+        if bot.process is not None and bot.process.poll() is None:
+            stop_bot(bot, f"restarting with review {tid}")
+            start_bot(bot, bots=bots)
 
     return dispatched
 
