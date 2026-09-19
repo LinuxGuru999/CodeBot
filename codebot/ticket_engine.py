@@ -464,6 +464,14 @@ class TicketStore:
                         f"an implementation plan before transitioning to IMPLEMENTING. "
                         f"Move to PLANNING state first or generate a plan."
                     )
+            # Enforce gatekeeper approval before VERIFYING -> COMPLETE (GAP-2)
+            if (ticket.state == TicketState.VERIFYING and
+                new_state == TicketState.COMPLETE):
+                if not self._has_gate_approval(ticket_id):
+                    raise ValueError(
+                        f"ticket {ticket_id} cannot transition to COMPLETE: "
+                        f"gatekeeper approval required but not found"
+                    )
             updated = ticket.transition(new_state, reviewer_feedback)
             self._tickets[ticket_id] = updated
             self._save()
