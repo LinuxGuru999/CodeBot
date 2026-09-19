@@ -2966,7 +2966,7 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
                 bot.config.enabled = True
                 logger.info(f"[queue-scale] Enabled '{name}': {reviewing_count} tickets awaiting review")
 
-        elif base_role in DISCOVERY_ROLE_NAMES | PLANNING_ROLE_NAMES:
+        elif base_role in DISCOVERY_ROLE_NAMES | (PLANNING_ROLE_NAMES - {"implementation_planner"}):
             if discovered_count > 50 and bot.process is None:
                 if bot.config.enabled:
                     bot.config.enabled = False
@@ -2977,6 +2977,10 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
                     logger.info(f"[queue-scale] Suppressed '{name}': ready backlog full ({ready_count} > {backlog_high})")
             elif discovered_count <= 50 and ready_count <= backlog_high and not bot.config.enabled:
                 bot.config.enabled = True
+        elif base_role == "implementation_planner":
+            if ready_count > 0 and not bot.config.enabled:
+                bot.config.enabled = True
+                logger.info(f"[queue-scale] Enabled '{name}': {ready_count} tickets need plans")
 
 
 def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
