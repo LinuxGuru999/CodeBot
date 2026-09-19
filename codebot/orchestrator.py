@@ -1191,6 +1191,7 @@ def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
         validating_count=counts.get("VALIDATING", 0),
         triaged_count=counts.get("TRIAGED", 0),
         ready_count=counts.get("READY", 0),
+        decompose_count=counts.get("DECOMPOSE", 0),
         planning_count=counts.get("PLANNING", 0),
         implementing_count=counts.get("IMPLEMENTING", 0),
         reviewing_count=counts.get("REVIEWING", 0),
@@ -5033,17 +5034,18 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if store_path.exists():
             ts = TicketStore(store_path)
             counts = ts.summary()
-            handler_registry = {
-                "_auto_triage_backlog": _auto_triage_backlog,
-                "_route_ready_tickets": _route_ready_tickets,
-                "_dispatch_planning_agents": _dispatch_planning_agents,
-                "_advance_ready_to_planning": _advance_ready_to_planning,
-                "_dispatch_tickets_to_implementers": _dispatch_tickets_to_implementers,
-                "_dispatch_tickets_to_reviewers": _dispatch_tickets_to_reviewers,
-                "_gatekeeper_verify_tickets": _gatekeeper_verify_tickets,
-                "_process_rework_tickets": _process_rework_tickets,
-                "_recover_deferred_tickets": _recover_deferred_tickets,
-            }
+                                handler_registry = {
+                                    "_auto_triage_backlog": _auto_triage_backlog,
+                                    "_route_ready_tickets": _route_ready_tickets,
+                                    "_dispatch_decompose_agents": _dispatch_decompose_agents,
+                                    "_dispatch_planning_agents": _dispatch_planning_agents,
+                                    "_advance_ready_to_planning": _advance_ready_to_planning,
+                                    "_dispatch_tickets_to_implementers": _dispatch_tickets_to_implementers,
+                                    "_dispatch_tickets_to_reviewers": _dispatch_tickets_to_reviewers,
+                                    "_gatekeeper_verify_tickets": _gatekeeper_verify_tickets,
+                                    "_process_rework_tickets": _process_rework_tickets,
+                                    "_recover_deferred_tickets": _recover_deferred_tickets,
+                                }
             dispatch_lifecycle(counts, handler_registry, bots)
     except ImportError:
         pass
