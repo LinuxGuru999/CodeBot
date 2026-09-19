@@ -44,6 +44,38 @@ try:
 except ImportError:
     from codebot.api_tools import bash, read, write, edit, grep, glob
 
+try:
+    from codebot.adaptive_rate_limiter import rate_limiter as _rate_limiter
+    _HAS_RATE_LIMITER = True
+except ImportError:
+    _HAS_RATE_LIMITER = False
+    _rate_limiter = None  # type: ignore
+
+
+def _wait_for_rate_limit(model: str) -> float:
+    """Wait according to adaptive rate limiter, return actual delay."""
+    if not _HAS_RATE_LIMITER or not _rate_limiter:
+        return 0.0
+    can_spawn, reason = _rate_limiter.can_spawn_now(model)
+    if can_spawn:
+        return 0.0
+    state = _rate_limiter._get_state(model)
+    delay = state.effective_interval - (time.time() - state.last_request)
+    if delay > 0:
+        time.sleep(delay)
+        return delay
+    return 0.0
+
+
+def _record_rate_limit(model: str, retry_after: float | None = None) -> None:
+    if _HAS_RATE_LIMITER and _rate_limiter:
+        _rate_limiter.record_rate_limit(model, retry_after)
+
+
+def _record_success(model: str) -> None:
+    if _HAS_RATE_LIMITER and _rate_limiter:
+        _rate_limiter.record_success(model)
+
 
 class _HybridToolCall(dict):
     def __getattr__(self, name: str):
@@ -1823,13 +1855,31 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
             nonlocal active_model, total_retries, timeout_retries, exit_reason
             while True:
                 try:
-                    return _call_api(msgs, active_model, api_key)
+                    _wait_for_rate_limit(active_model)
+                    result = _call_api(msgs, active_model, api_key)
+                    _record_success(active_model)
+                    return result
                 except urllib.error.HTTPError as exc:
                     if exc.code == 429:
+                        retry_after = None
+                        if hasattr(exc, 'headers'):
+                            ra = exc.headers.get('Retry-After') or exc.headers.get('retry-after')
+                            if ra:
+                                try:
+                                    retry_after = float(ra)
+                                except (ValueError, TypeError):
+                                    pass
+                        _record_rate_limit(active_model, retry_after)
                         if total_retries < MAX_429_RETRIES:
-                            delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
+                            if retry_after:
+                                delay = retry_after
+                            elif _HAS_RATE_LIMITER and _rate_limiter:
+                                state = _rate_limiter._get_state(active_model)
+                                delay = state.effective_interval
+                            else:
+                                delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
                             delay = min(delay, MAX_BACKOFF)
-                            _log(f"{bot_name}: 429 rate-limited, retrying in {delay}s ({total_retries+1}/{MAX_429_RETRIES})")
+                            _log(f"{bot_name}: 429 rate-limited, retrying in {delay:.1f}s ({total_retries+1}/{MAX_429_RETRIES})")
                             _write_heartbeat(heartbeat_file)
                             time.sleep(delay)
                             total_retries += 1
@@ -1841,10 +1891,15 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     try:
                         body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
                         if "429" in body or "rate" in body.lower():
+                            _record_rate_limit(active_model, None)
                             if total_retries < MAX_429_RETRIES:
-                                delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
+                                if _HAS_RATE_LIMITER and _rate_limiter:
+                                    state = _rate_limiter._get_state(active_model)
+                                    delay = state.effective_interval
+                                else:
+                                    delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
                                 delay = min(delay, MAX_BACKOFF)
-                                _log(f"{bot_name}: rate-limited (body), retrying in {delay}s ({total_retries+1}/{MAX_429_RETRIES})")
+                                _log(f"{bot_name}: rate-limited (body), retrying in {delay:.1f}s ({total_retries+1}/{MAX_429_RETRIES})")
                                 _write_heartbeat(heartbeat_file)
                                 time.sleep(delay)
                                 total_retries += 1
