@@ -3242,6 +3242,58 @@ def _compute_dynamic_priority(pipeline: dict[str, int]) -> dict[str, int]:
     return priorities
 
 
+def _apply_agent_availability(bots: dict[str, BotState]) -> None:
+    pipeline = _get_pipeline_state()
+    ready = pipeline.get("ready", 0)
+    implementing = pipeline.get("implementing", 0)
+    verifying = pipeline.get("verifying", 0)
+    discovered = pipeline.get("discovered", 0) + pipeline.get("triaged", 0)
+    reviewing = pipeline.get("reviewing", 0)
+
+    planner_names = {"implementation_planner", "implementation_planner-2",
+                     "implementation_planner-3", "implementation_planner-4"}
+    implementer_names = {"general_implementer", "general_implementer-2",
+                         "general_implementer-3", "general_implementer-4",
+                         "backend_implementer", "backend_implementer-2",
+                         "frontend_implementer", "test_implementer",
+                         "migration_implementer", "documentation_implementer"}
+    reviewer_names = {"correctness_reviewer", "security_reviewer",
+                      "architecture_reviewer", "test_reviewer",
+                      "performance_reviewer", "simplicity_reviewer",
+                      "documentation_reviewer"}
+    discovery_names = {"bug_hunter", "security_auditor", "architecture_auditor",
+                       "performance_auditor", "test_gap_auditor",
+                       "documentation_auditor", "dependency_auditor",
+                       "ux_auditor", "feature_hunter"}
+
+    for name, bot in bots.items():
+        if not bot.config.enabled:
+            continue
+
+        should_enable = True
+
+        if name in planner_names:
+            should_enable = ready >= 10
+        elif name in implementer_names:
+            should_enable = implementing > 0 or ready > 50
+        elif name in reviewer_names:
+            should_enable = verifying > 0 or reviewing > 0
+        elif name in discovery_names:
+            should_enable = discovered < 10
+
+        if not should_enable and bot.process is not None and bot.process.poll() is None:
+            try:
+                bot.process.terminate()
+                bot.process.wait(timeout=5)
+            except Exception:
+                try:
+                    bot.process.kill()
+                except Exception:
+                    pass
+            bot.process = None
+            update_bot_state(bot, "disabled")
+
+
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
     now = time.time()
     due = [n for n, b in bots.items()
@@ -4270,6 +4322,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         return
     if USE_MANIFEST_SCHEDULER:
         return _check_all_bots_manifest(bots)
+    _apply_agent_availability(bots)
     rotate_logs()
     _check_prompt_changes(bots)
     _check_code_changes(bots)
