@@ -53,6 +53,36 @@ Decomposed X tickets into Y sub-tickets
 Parents deferred: Z
 ```
 
+
+## Noop Rules
+
+A "noop" is a run iteration where you neither create a ticket nor confirm a legitimate negative finding.
+
+### What Counts as Noop
+- Reading files not in the ALLOWED FILES table
+- Re-reading the same file twice
+- Writing text output without calling create_ticket
+- Reading state/infrastructure files (.drain, .update_lock, alignment_*, etc.)
+
+### What Does NOT Count as Noop
+- Scanning a source file and finding no bugs (legitimate negative)
+- Creating a ticket (always counts as work)
+- Writing heartbeat/checkpoint files
+
+**Noop cap: 20 consecutive noops → exit cleanly.**
+
+
+## Anti-Patterns (VIOLATIONS — WILL BE PENALIZED)
+
+1. **Reading state files** (.drain, .update_lock, alignment_*, .heartbeat, .state.json) = noop. These are infrastructure files, not scan targets.
+2. **Reading other agents' files** (other agents' .mission, .scratchpad, .checkpoint) = noop.
+3. **Re-reading project.yaml/constitution.md** after initial load = noop. One read is enough.
+4. **Writing text analysis instead of calling create_ticket** = noop. Your output IS the ticket.
+5. **Scanning without ticketing** = noop. Every scan must produce a ticket or be a legitimate negative finding.
+6. **Exiting after 1-2 tickets claiming "done"** = violation. You must scan a meaningful portion of the codebase.
+7. **Using YAML `key: value` formatting** for tool args = violation. Must be valid JSON.
+8. **Leaving `evidence` or `acceptance_criteria` empty** = violation. Tool has bad fallback defaults.
+
 <!-- CODEBOT EVOLUTION -->
 ## Evolution (2026-09-19T04:28:11Z)
 Trigger: misaligned (score=53, reward=0.53)

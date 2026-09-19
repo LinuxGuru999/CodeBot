@@ -85,6 +85,7 @@ class TestGateEnforcement:
         t = create_ticket(
             "no gate", TicketClass.BUG, Severity.MEDIUM,
             "test", "ev", "prob", "desired", ["ac"],
+            risk=RiskLevel.LOW,
         )
         store.add(t)
         _advance_to_verifying(store, t.id)
@@ -100,6 +101,7 @@ class TestGateEnforcement:
         t = create_ticket(
             "failed gate", TicketClass.BUG, Severity.MEDIUM,
             "test", "ev", "prob", "desired", ["ac"],
+            risk=RiskLevel.LOW,
         )
         store.add(t)
         _advance_to_verifying(store, t.id)
@@ -117,6 +119,7 @@ class TestGateEnforcement:
         t = create_ticket(
             "passed gate", TicketClass.BUG, Severity.MEDIUM,
             "test", "ev", "prob", "desired", ["ac"],
+            risk=RiskLevel.LOW,
         )
         store.add(t)
         _advance_to_verifying(store, t.id)
@@ -134,6 +137,7 @@ class TestGateEnforcement:
         t = create_ticket(
             "rework without gate", TicketClass.BUG, Severity.MEDIUM,
             "test", "ev", "prob", "desired", ["ac"],
+            risk=RiskLevel.LOW,
         )
         store.add(t)
         _advance_to_verifying(store, t.id)
@@ -229,6 +233,7 @@ class TestOtherTransitionsUnaffected:
         t = create_ticket(
             "rework test", TicketClass.BUG, Severity.LOW,
             "test", "ev", "prob", "desired", ["ac"],
+            risk=RiskLevel.LOW,
         )
         store.add(t)
         _advance_to_verifying(store, t.id)
@@ -244,6 +249,7 @@ class TestOtherTransitionsUnaffected:
         t = create_ticket(
             "verify test", TicketClass.BUG, Severity.LOW,
             "test", "ev", "prob", "desired", ["ac"],
+            risk=RiskLevel.LOW,
         )
         store.add(t)
         store.transition(t.id, TicketState.VALIDATING)
