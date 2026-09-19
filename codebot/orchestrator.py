@@ -243,11 +243,6 @@ _metrics_tick = 0
 
 ALWAYS_RESPAWN = frozenset({
     "scheduler", "conflict_resolver", "budget_controller",
-    "feature_decomposer",
-    "implementation_planner",
-    "implementation_planner-2",
-    "implementation_planner-3",
-    "implementation_planner-4",
 })
 
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
@@ -3024,9 +3019,13 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
             elif discovered_count <= 50 and ready_count <= backlog_high and not bot.config.enabled:
                 bot.config.enabled = True
         elif base_role == "implementation_planner" or base_role.startswith("implementation_planner-"):
-            if ready_count > 0 and not bot.config.enabled:
+            planning_count = len(ts.list_by_state(TicketState.PLANNING)) if hasattr(ts, 'list_by_state') else 0
+            if planning_count > 0 and not bot.config.enabled:
                 bot.config.enabled = True
-                logger.info(f"[queue-scale] Enabled '{name}': {ready_count} tickets need plans")
+                logger.info(f"[queue-scale] Enabled '{name}': {planning_count} tickets need plans")
+            elif planning_count == 0 and bot.config.enabled and bot.process is None:
+                bot.config.enabled = False
+                logger.info(f"[queue-scale] Suppressed '{name}': no tickets in PLANNING")
 
 
 def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
@@ -3146,6 +3145,148 @@ def _advance_ready_to_planning() -> int:
             except Exception as e:
                 logger.debug(f"Failed to advance {ticket.id} to PLANNING: {e}")
     return advanced
+
+
+def _route_ready_tickets() -> int:
+    """Route READY tickets by risk level.
+
+    Risk >= MEDIUM → PLANNING (needs decomposition/plan before implementation).
+    Risk < MEDIUM → IMPLEMENTING (simple enough to skip planning).
+    """
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState, MIN_RISK_FOR_PLANNING, _RISK_ORDER
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    ready = ts.list_by_state(TicketState.READY)
+    routed = 0
+    threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
+
+    for ticket in ready:
+        tid = getattr(ticket, 'id', '')
+        if not tid:
+            continue
+        risk_order = _RISK_ORDER.get(getattr(ticket.risk, 'value', str(ticket.risk)), 0)
+        try:
+            if risk_order >= threshold_order:
+                ts.transition(tid, TicketState.PLANNING)
+                logger.info(f"Routed {tid} READY -> PLANNING (risk={ticket.risk.value})")
+            else:
+                ts.transition(tid, TicketState.IMPLEMENTING)
+                logger.info(f"Routed {tid} READY -> IMPLEMENTING (risk={ticket.risk.value}, skipped planning)")
+            routed += 1
+        except ValueError as e:
+            logger.debug(f"Failed to route {tid}: {e}")
+
+    return routed
+
+
+def _dispatch_planning_agents(bots: dict[str, BotState]) -> int:
+    """Dispatch PLANNING tickets to planner agents, advance to IMPLEMENTING when done.
+
+    For each PLANNING ticket without an active claim: find an idle planner bot,
+    create a claim, and start/restart it. For tickets whose plan file already
+    exists (planner finished): transition PLANNING -> IMPLEMENTING.
+    """
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    planning = ts.list_by_state(TicketState.PLANNING)
+    if not planning:
+        return 0
+
+    plans_dir = STATE_DIR / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+
+    claims_dir = STATE_DIR / "claims"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    active_claims: set[str] = set()
+    for p in claims_dir.glob("*.json"):
+        active_claims.add(p.stem.rsplit(".", 1)[0])
+
+    idle_planners = []
+    unassigned_running = []
+    for name, bot in bots.items():
+        base_name = name.split("-")[0] if "-" in name else name
+        if base_name not in PLANNING_ROLE_NAMES:
+            continue
+        if bot.process is not None and bot.process.poll() is None:
+            if not getattr(bot, '_assigned_ticket_id', ''):
+                unassigned_running.append((name, bot))
+        else:
+            idle_planners.append((name, bot))
+
+    available = idle_planners + unassigned_running
+    dispatched = 0
+
+    for ticket in planning:
+        tid = getattr(ticket, 'id', '')
+        if not tid:
+            continue
+
+        plan_file = plans_dir / f"{tid}.plan.json"
+        if plan_file.exists():
+            try:
+                ts.transition(tid, TicketState.IMPLEMENTING)
+                logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
+                dispatched += 1
+                for cf in claims_dir.glob(f"{tid}.*.json"):
+                    try:
+                        cf.unlink()
+                    except OSError:
+                        pass
+            except ValueError as e:
+                logger.debug(f"Failed to advance {tid} to IMPLEMENTING: {e}")
+            continue
+
+        if tid in active_claims:
+            continue
+
+        if not available:
+            break
+
+        idx, bot_name, bot = available.pop(0)
+        claim_file = claims_dir / f"{tid}.{bot_name}.json"
+        try:
+            claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "planning"}
+            tmp = claim_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
+            tmp.replace(claim_file)
+        except OSError:
+            continue
+
+        bot._assigned_ticket_id = tid
+        dispatched += 1
+        logger.info(f"Dispatched planning for {tid} -> {bot_name}")
+        if bot.process is not None and bot.process.poll() is None:
+            stop_bot(bot, f"restarting with planning {tid}")
+            start_bot(bot, bots=bots)
+
+    return dispatched
 
 
 def _recover_stuck_planning_tickets() -> int:
@@ -4802,6 +4943,8 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             counts = ts.summary()
             handler_registry = {
                 "_auto_triage_backlog": _auto_triage_backlog,
+                "_route_ready_tickets": _route_ready_tickets,
+                "_dispatch_planning_agents": _dispatch_planning_agents,
                 "_advance_ready_to_planning": _advance_ready_to_planning,
                 "_dispatch_tickets_to_implementers": _dispatch_tickets_to_implementers,
                 "_dispatch_tickets_to_reviewers": _dispatch_tickets_to_reviewers,

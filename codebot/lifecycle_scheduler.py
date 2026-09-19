@@ -64,12 +64,20 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         description="Advance tickets through triage pipeline to READY",
     ),
     LifecycleDispatchEntry(
-        phase=LifecyclePhase.PLANNING,
-        ticket_states=("READY", "PLANNING"),
-        agent_roles=("implementation_planner", "feature_decomposer"),
-        handler_name="_advance_ready_to_planning",
+        phase=LifecyclePhase.READY_GATE,
+        ticket_states=("READY",),
+        agent_roles=(),
+        handler_name="_route_ready_tickets",
         requires_bots=False,
-        description="Generate implementation plans for READY tickets, advance PLANNING to IMPLEMENTING",
+        description="Route READY tickets: risk >= MEDIUM to PLANNING, LOW directly to IMPLEMENTING",
+    ),
+    LifecycleDispatchEntry(
+        phase=LifecyclePhase.PLANNING,
+        ticket_states=("PLANNING",),
+        agent_roles=("feature_decomposer", "ticket_decomposer", "implementation_planner"),
+        handler_name="_dispatch_planning_agents",
+        requires_bots=True,
+        description="Decompose features and generate implementation plans, advance to IMPLEMENTING",
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.IMPLEMENTATION,
@@ -111,7 +119,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         ),
         handler_name="_process_rework_tickets",
         requires_bots=True,
-        description="Re-dispatch REWORK tickets back to IMPLEMENTING",
+        description="Re-dispatch REWORK tickets back to IMPLEMENTING or PLANNING based on risk",
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.RECOVERY,
@@ -127,8 +135,6 @@ ALWAYS_ON_AGENTS: frozenset[str] = frozenset({
     "scheduler",
     "conflict_resolver",
     "budget_controller",
-    "feature_decomposer",
-    "implementation_planner",
 })
 
 
