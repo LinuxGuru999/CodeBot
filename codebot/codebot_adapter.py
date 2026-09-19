@@ -150,7 +150,7 @@ class CodeBotAdapter(ProjectAdapter):
             "meta-muse-spark-1.2", "qwen-3.7-max",
         )
         model_overrides = {
-            "feature_hunter": "qwen-3.7-plus",
+            "feature_hunter": "qwen-3.6-plus",
             "feature_decomposer": "xiaomi-mimo-2.5",
             "bug_hunter": "qwen-3.7-max",
         }
