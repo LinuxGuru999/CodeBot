@@ -2065,6 +2065,14 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
         if ticket_ctx:
             prompt_text = f"{prompt_text}\n\n{ticket_ctx}"
     try:
+        from codebot.scratchpad import load_scratchpad, create_handoff_note
+        scratch_state = load_scratchpad(STATE_DIR, bot.config.name)
+        if scratch_state.ticket_id == assigned_tid and scratch_state.completed_steps:
+            handoff = create_handoff_note(scratch_state)
+            prompt_text = f"{prompt_text}\n\n{handoff}\nResume from where the previous agent left off. Do NOT redo completed work."
+    except Exception:
+        pass
+    try:
         bot.prompt_mtime = prompt_file.stat().st_mtime
         bot.last_prompt_mtime = bot.prompt_mtime
     except OSError:
