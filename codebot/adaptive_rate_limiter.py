@@ -89,19 +89,31 @@ class AdaptiveRateLimiter:
         self._file = self._state_dir / "rate_limits.json"
 
         self._default_limits = {
-            "qwen-3.5-plus": 30,
-            "qwen-3.6-plus": 30,
-            "qwen-3.7-plus": 25,
-            "qwen-3.8-max": 20,
-            "qwen-3.7-max": 20,
-            "qwen-3.5-plus-thinking": 15,
-            "qwen-3.6-plus-thinking": 15,
-            "qwen-3.7-max-thinking": 10,
-            "qwen-3.8-max-thinking": 10,
-            "xiaomi-mimo-2.5": 40,
-            "meta-muse-spark-1.2": 20,
-            "meta-muse-spark-1.3": 20,
+            "qwen-3.5-plus": 120,
+            "qwen-3.6-plus": 120,
+            "qwen-3.7-plus": 120,
+            "qwen-3.8-max": 120,
+            "qwen-3.7-max": 120,
+            "qwen-3.5-plus-thinking": 120,
+            "qwen-3.6-plus-thinking": 120,
+            "qwen-3.7-max-thinking": 120,
+            "qwen-3.8-max-thinking": 120,
+            "xiaomi-mimo-2.5": 120,
+            "meta-muse-spark-1.2": 60,
+            "meta-muse-spark-1.3": 60,
         }
+
+        discovered_file = self._state_dir / "discovered_limits.json"
+        if discovered_file.exists():
+            try:
+                import json as _json
+                discovered = _json.loads(discovered_file.read_text())
+                for model, info in discovered.items():
+                    rpm = info.get("measured_rpm")
+                    if rpm and rpm > 0:
+                        self._default_limits[model] = rpm
+            except Exception:
+                pass
 
     def _load(self) -> dict[str, dict]:
         try:
