@@ -824,6 +824,23 @@ def _reap_expired_claims(bot_name: str) -> int:
     return reaped
 
 
+def _clean_stale_heartbeats(max_age: float = 300.0) -> int:
+    """Remove heartbeat files older than max_age seconds from previous orchestrator runs."""
+    cleaned = 0
+    now = time.time()
+    for hb_file in STATE_DIR.glob("*.heartbeat"):
+        try:
+            age = now - hb_file.stat().st_mtime
+            if age > max_age:
+                hb_file.unlink(missing_ok=True)
+                cleaned += 1
+        except Exception:
+            pass
+    if cleaned:
+        logger.info(f"Cleaned {cleaned} stale heartbeat(s)")
+    return cleaned
+
+
 def _sweep_orphan_claims(bots: dict[str, BotState]) -> int:
     """Delete claim files whose owning bot process is dead or timed out.
 
@@ -1706,13 +1723,20 @@ def _retry_disabled_bot(bot: BotState, bots: dict[str, BotState]) -> bool:
     return True
 
 def _is_stuck_starting(bot: BotState, threshold: float = 120.0) -> bool:
-    if bot.process is None or bot.process.poll() is not None:
-        return False
+    # If process is dead, we're definitely stuck (died during startup)
+    if bot.process is not None and bot.process.poll() is not None:
+        return True
     
+    # If no process yet (orchestrator just started), check heartbeat age
+    # Stale heartbeat from previous run = stuck
     last_hb = read_heartbeat(bot.config.name)
     if last_hb > 0:
-        return False
+        # Heartbeat exists — is it fresh or stale?
+        if time.time() - last_hb > threshold:
+            return True  # Stale heartbeat = stuck
+        return False  # Fresh heartbeat = still starting normally
     
+    # No heartbeat at all: check elapsed since orchestrator started this bot
     elapsed = time.time() - (bot.started_at or bot.last_heartbeat or time.time())
     return elapsed > threshold
 
@@ -3536,6 +3560,23 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 logger.info(f"Dequeuing '{name}' — slot available")
                 update_bot_state(bot, "starting")
                 start_bot(bot, bots=bots)
+    # Zombie cleanup: process=None but status.json still shows "starting" or heartbeat is stale
+    for name, bot in list(bots.items()):
+        if not bot.config.enabled or bot.process is not None:
+            continue
+        status_file = STATE_DIR / f"{name}.status.json"
+        if status_file.exists():
+            try:
+                sdata = json.loads(status_file.read_text())
+                if isinstance(sdata, dict) and sdata.get("current_task") in ("starting", ""):
+                    hb_age = time.time() - read_heartbeat(name) if read_heartbeat(name) > 0 else 999
+                    if hb_age > 180 or (time.time() - bot.started_at > 120 if bot.started_at else True):
+                        logger.info(f"Zombie '{name}' — process dead, status='{sdata.get('current_task')}', hb_age={hb_age:.0f}s — resetting to waiting")
+                        update_bot_state(bot, "waiting")
+                        bot.restart_count = 0
+                        bot.consecutive_errors = 0
+            except Exception:
+                pass
     # Exit + stuck handling for all bots (before manifest scheduling)
     for name, bot in list(bots.items()):
         if not bot.config.enabled:
@@ -4445,6 +4486,7 @@ def main() -> None:
     if is_draining():
         logger.warning(f"Starting with drain active {drain_status()} — bots will remain stopped")
     else:
+        _clean_stale_heartbeats()
         order = sorted(
             [b for b in bots.values() if b.config.enabled],
             key=lambda b: (TIER_PRIORITY.get(b.config.name, 2), b.config.interval_seconds),
