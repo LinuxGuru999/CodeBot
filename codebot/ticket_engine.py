@@ -350,7 +350,7 @@ class TicketStore:
             lock_path = self._path.with_suffix(".lock")
             lock_path.touch(exist_ok=True)
             with open(lock_path, "a+") as lock_fd:
-                flock(lock_fd, LOCK_SH)
+                flock(lock_fd, LOCK_EX)
                 try:
                     data = json.loads(self._path.read_text(encoding="utf-8"))
                 finally:

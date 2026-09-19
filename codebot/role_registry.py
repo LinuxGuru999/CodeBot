@@ -22,6 +22,8 @@ Invariants
 - Role definitions are immutable once created
 - Tool policies reference allowlists, not blocklists (fail-closed)
 - Model profiles specify capability requirements, not provider names
+
+Role Count: 29 (8 discovery + 6 implementation + 8 review + 6 control + 1 planning)
 """
 
 from __future__ import annotations
@@ -232,7 +234,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         category=RoleCategory.DISCOVERY,
         description="Evaluates UI for usability, accessibility (WCAG), and workflow friction using static analysis and Playwright browser snapshots",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node"}), "project_root", network_access=True),
+        tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node", "npm", "npx"}), "project_root", network_access=True),
         incentive="Find usability issues, accessibility violations, and workflow friction.",
     ),
 ]
@@ -271,6 +273,7 @@ IMPLEMENTATION_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.SMALL, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Maximize test coverage for the target change.",
+        adversarial_to=("test_reviewer",),
     ),
     AgentRole(
         name="migration_implementer",
@@ -279,6 +282,7 @@ IMPLEMENTATION_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Safe, reversible data transformation.",
+        adversarial_to=("correctness_reviewer", "security_reviewer"),
     ),
     AgentRole(
         name="documentation_implementer",
@@ -308,7 +312,7 @@ REVIEW_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND, security_review=True),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
         incentive="Find a way to exploit or abuse the change. Adversarial to implementer.",
-        adversarial_to=("general_implementer", "backend_implementer", "frontend_implementer"),
+        adversarial_to=("general_implementer", "backend_implementer", "frontend_implementer", "architecture_reviewer"),
     ),
     AgentRole(
         name="architecture_reviewer",
@@ -317,7 +321,7 @@ REVIEW_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
         incentive="Find coupling, boundary violations, or technical debt.",
-        adversarial_to=("general_implementer", "backend_implementer"),
+        adversarial_to=("general_implementer", "backend_implementer", "simplicity_reviewer"),
     ),
     AgentRole(
         name="test_reviewer",

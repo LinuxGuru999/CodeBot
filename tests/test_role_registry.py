@@ -107,7 +107,11 @@ class TestRoleRegistry:
 
     def test_review_roles_read_only(self):
         for role in REVIEW_ROLES:
-            assert role.tool_policy.allowed_tools == READ_ONLY_TOOLS
+            if role.name == "ux_reviewer":
+                # ux_reviewer needs screenshot/a11y_snapshot for visual review
+                assert role.tool_policy.allowed_tools == UX_AUDIT_TOOLS
+            else:
+                assert role.tool_policy.allowed_tools == READ_ONLY_TOOLS
 
     def test_roles_by_category(self):
         discovery = roles_by_category(RoleCategory.DISCOVERY)
