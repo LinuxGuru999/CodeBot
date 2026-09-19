@@ -206,3 +206,51 @@ class TestSecurityHeaders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRateLimiterUnit(unittest.TestCase):
+    """Unit tests for RateLimiter class behavior."""
+
+    def setUp(self):
+        """Import RateLimiter fresh for each test."""
+        from codebot.control_server import RateLimiter
+        self.limiter = RateLimiter()
+
+    def test_initial_allowed(self):
+        """New IP should be allowed."""
+        allowed, reason = self.limiter.is_allowed("192.168.1.1")
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+
+    def test_blocked_after_max_failures(self):
+        """IP should be blocked after recording max failures."""
+        from codebot.control_server import RATE_LIMIT_MAX_ATTEMPTS
+        ip = "10.0.0.1"
+        for _ in range(RATE_LIMIT_MAX_ATTEMPTS):
+            self.limiter.record_failure(ip)
+        allowed, reason = self.limiter.is_allowed(ip)
+        self.assertFalse(allowed)
+        self.assertIn("rate limit exceeded", reason.lower())
+
+    def test_still_allowed_below_limit(self):
+        """IP should still be allowed if below max failures."""
+        from codebot.control_server import RATE_LIMIT_MAX_ATTEMPTS
+        ip = "10.0.0.2"
+        for _ in range(RATE_LIMIT_MAX_ATTEMPTS - 1):
+            self.limiter.record_failure(ip)
+        allowed, reason = self.limiter.is_allowed(ip)
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+
+    def test_per_ip_independence(self):
+        """Rate limiting should be per-IP."""
+        from codebot.control_server import RATE_LIMIT_MAX_ATTEMPTS
+        ip1 = "10.0.0.3"
+        ip2 = "10.0.0.4"
+        for _ in range(RATE_LIMIT_MAX_ATTEMPTS):
+            self.limiter.record_failure(ip1)
+        allowed1, _ = self.limiter.is_allowed(ip1)
+        allowed2, reason2 = self.limiter.is_allowed(ip2)
+        self.assertFalse(allowed1)
+        self.assertTrue(allowed2)
+        self.assertIsNone(reason2)

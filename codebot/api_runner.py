@@ -1563,16 +1563,18 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
         _compaction_available = False
     _compaction_budget = max_tokens_per_run if max_tokens_per_run > 0 else 120_000
 
-    # CAP-09/CAP-11: Structured scratchpad for handoff on failure
+    # CAP-09/CAP-11: Ticket-scoped scratchpad for cross-agent handoff
+    _scratch_ticket_id = bot_name
     try:
-        from codebot.scratchpad import load_scratchpad, save_scratchpad, ScratchpadState
-        _scratch_state = load_scratchpad(state_dir, bot_name)
-        _scratch_state.phase = "running"
-        try:
-            _ticket_match = __import__("re").search(r"ASSIGNED TICKET: (CB-[\w-]+)", mission_prompt or "")
-            _scratch_state.ticket_id = _ticket_match.group(1) if _ticket_match else bot_name
-        except Exception:
-            _scratch_state.ticket_id = bot_name
+        _ticket_match = __import__("re").search(r"ASSIGNED TICKET: (CB-[\w-]+)", mission_prompt or "")
+        if _ticket_match:
+            _scratch_ticket_id = _ticket_match.group(1)
+    except Exception:
+        pass
+    try:
+        from codebot.scratchpad import load_scratchpad, save_scratchpad
+        _scratch_state = load_scratchpad(state_dir, _scratch_ticket_id)
+        _scratch_state.start_agent(bot_name, "IMPLEMENTING")
         save_scratchpad(state_dir, _scratch_state)
         _scratch_available = True
     except ImportError:

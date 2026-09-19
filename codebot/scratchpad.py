@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""Structured scratchpad for agent session persistence and handoff.
+"""Ticket-scoped scratchpad for cross-agent context handoff.
 
 Purpose
 -------
-Provides a JSON-based scratchpad that agents use to persist intermediate
-state between tool calls, survive timeouts, and hand off work to other
-workers when they fail or hit rate limits.
+Every agent at every lifecycle stage reads and writes the SAME scratchpad
+per ticket. When an implementer hands off to a reviewer, the reviewer sees
+exactly what was done. When a rate-limited bot retries, it picks up where
+it left off. When REWORK loops back, the implementer sees reviewer feedback.
 
-Why
----
-The existing `_write_scratchpad` in api_runner.py writes freeform markdown
-lines. For reliable handoff between workers, we need structured JSON with
-schema validation, atomic writes, and explicit fields for resume state.
+File layout: state/{ticket_id}.scratchpad.json
 
 Invariants
 ----------
 - stdlib-only (json, os, time, pathlib)
 - Atomic writes via tmp + os.replace
 - Max 8KB per scratchpad (prevents bloat)
-- Schema versioned for forward compatibility
 - Read is fail-open (corrupt scratchpad = fresh start)
+- Any agent can append; no agent can clobber another's history
 """
 
 from __future__ import annotations
@@ -31,14 +28,27 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
-SCRATCHPAD_VERSION = 1
+SCRATCHPAD_VERSION = 2
 MAX_SCRATCHPAD_BYTES = 8 * 1024
+
+
+@dataclass
+class AgentRecord:
+    agent: str = ""
+    stage: str = ""
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    completed_steps: list[str] = field(default_factory=list)
+    files_changed: list[str] = field(default_factory=list)
+    summary: str = ""
+    error: str = ""
 
 
 @dataclass
 class ScratchpadState:
     ticket_id: str = ""
-    agent_name: str = ""
+    current_agent: str = ""
+    current_stage: str = ""
     phase: str = "init"
     completed_steps: list[str] = field(default_factory=list)
     remaining_steps: list[str] = field(default_factory=list)
@@ -48,6 +58,7 @@ class ScratchpadState:
     error_message: str = ""
     context_summary: str = ""
     iteration: int = 0
+    agent_history: list[dict] = field(default_factory=list)
     started_at: float = 0.0
     updated_at: float = 0.0
     version: int = SCRATCHPAD_VERSION
@@ -84,10 +95,39 @@ class ScratchpadState:
         self.phase = phase
         self.updated_at = time.time()
 
+    def start_agent(self, agent_name: str, stage: str) -> None:
+        self.current_agent = agent_name
+        self.current_stage = stage
+        self.phase = "running"
+        self.iteration = 0
+        self.last_tool_call = ""
+        self.last_tool_result_summary = ""
+        self.error_message = ""
+        self.updated_at = time.time()
+
+    def finish_agent(self, summary: str = "") -> None:
+        rec = AgentRecord(
+            agent=self.current_agent,
+            stage=self.current_stage,
+            started_at=self.started_at,
+            finished_at=time.time(),
+            completed_steps=list(self.completed_steps),
+            files_changed=list(self.files_changed),
+            summary=summary[:500],
+            error=self.error_message,
+        )
+        self.agent_history.append(rec.to_dict())
+        self.current_agent = ""
+        self.current_stage = ""
+        self.phase = "idle"
+        self.updated_at = time.time()
+
     def truncate_for_size(self) -> None:
         serialized = self.to_json()
         while len(serialized.encode("utf-8")) > MAX_SCRATCHPAD_BYTES:
-            if self.context_summary and len(self.context_summary) > 100:
+            if self.agent_history and len(self.agent_history) > 3:
+                self.agent_history = self.agent_history[-3:]
+            elif self.context_summary and len(self.context_summary) > 100:
                 self.context_summary = self.context_summary[:len(self.context_summary) // 2]
             elif self.completed_steps and len(self.completed_steps) > 3:
                 self.completed_steps = self.completed_steps[-3:]
@@ -98,32 +138,37 @@ class ScratchpadState:
             serialized = self.to_json()
 
 
-def load_scratchpad(state_dir: Path, agent_name: str) -> ScratchpadState:
-    path = state_dir / f"{agent_name}.scratchpad.json"
+def _scratchpad_path(state_dir: Path, ticket_id: str) -> Path:
+    return state_dir / f"{ticket_id}.scratchpad.json"
+
+
+def load_scratchpad(state_dir: Path, ticket_id: str) -> ScratchpadState:
+    path = _scratchpad_path(state_dir, ticket_id)
     if not path.exists():
-        return ScratchpadState(agent_name=agent_name, started_at=time.time(), updated_at=time.time())
+        return ScratchpadState(ticket_id=ticket_id, started_at=time.time(), updated_at=time.time())
     try:
         raw = path.read_text(encoding="utf-8")
         state = ScratchpadState.from_json(raw)
         if state.version != SCRATCHPAD_VERSION:
-            return ScratchpadState(agent_name=agent_name, started_at=time.time(), updated_at=time.time())
+            state.ticket_id = ticket_id
+            state.version = SCRATCHPAD_VERSION
         return state
     except (json.JSONDecodeError, KeyError, OSError, TypeError):
-        return ScratchpadState(agent_name=agent_name, started_at=time.time(), updated_at=time.time())
+        return ScratchpadState(ticket_id=ticket_id, started_at=time.time(), updated_at=time.time())
 
 
 def save_scratchpad(state_dir: Path, state: ScratchpadState) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     state.updated_at = time.time()
     state.truncate_for_size()
-    path = state_dir / f"{state.agent_name}.scratchpad.json"
+    path = _scratchpad_path(state_dir, state.ticket_id)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(state.to_json(), encoding="utf-8")
     os.replace(str(tmp), str(path))
 
 
-def clear_scratchpad(state_dir: Path, agent_name: str) -> None:
-    path = state_dir / f"{agent_name}.scratchpad.json"
+def clear_scratchpad(state_dir: Path, ticket_id: str) -> None:
+    path = _scratchpad_path(state_dir, ticket_id)
     try:
         path.unlink(missing_ok=True)
     except OSError:
@@ -132,21 +177,25 @@ def clear_scratchpad(state_dir: Path, agent_name: str) -> None:
 
 def create_handoff_note(state: ScratchpadState) -> str:
     lines = [
-        f"=== HANDOFF NOTE ===",
+        "=== TICKET SCRATCHPAD HANDOFF ===",
         f"Ticket: {state.ticket_id}",
-        f"Agent: {state.agent_name}",
-        f"Phase: {state.phase}",
-        f"Iteration: {state.iteration}",
     ]
+    if state.agent_history:
+        lines.append(f"Agent chain: {' → '.join(h.get('agent', '?') for h in state.agent_history[-5:])}")
+        last = state.agent_history[-1]
+        if last.get("summary"):
+            lines.append(f"Last agent ({last.get('agent')}): {last['summary'][:200]}")
+        if last.get("files_changed"):
+            lines.append(f"Files changed: {', '.join(last['files_changed'][:10])}")
     if state.completed_steps:
         lines.append(f"Completed: {'; '.join(state.completed_steps[-5:])}")
     if state.remaining_steps:
         lines.append(f"Remaining: {'; '.join(state.remaining_steps[:5])}")
     if state.files_changed:
-        lines.append(f"Files changed: {', '.join(state.files_changed)}")
+        lines.append(f"This run files: {', '.join(state.files_changed[-10:])}")
     if state.error_message:
         lines.append(f"Last error: {state.error_message}")
     if state.context_summary:
         lines.append(f"Context: {state.context_summary[:500]}")
-    lines.append("====================")
+    lines.append("=================================")
     return "\n".join(lines)
