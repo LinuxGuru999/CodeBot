@@ -1794,6 +1794,34 @@ def _retry_disabled_bot(bot: BotState, bots: dict[str, BotState]) -> bool:
     update_bot_state(bot, "waiting")
     return True
 
+def _is_stuck_starting(bot: BotState, threshold: float = 120.0) -> bool:
+    state_file = STATE_DIR / f"{bot.config.name}.state.json"
+    try:
+        if state_file.exists():
+            data = json.loads(state_file.read_text())
+            if data.get("status") == "starting":
+                started = data.get("started", 0)
+                if time.time() - started > threshold:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def _retry_stuck_starting(bot: BotState, bots: dict[str, BotState]) -> bool:
+    if not _is_stuck_starting(bot):
+        return False
+    
+    logger.info(f"Retrying bot '{bot.config.name}' stuck in starting >2min")
+    if bot.process is not None:
+        try:
+            bot.process.kill()
+        except Exception:
+            pass
+    bot.process = None
+    bot.consecutive_errors = 0
+    update_bot_state(bot, "waiting")
+    return True
+
 # ---------------------------------------------------------------------------
 # Process Management
 # ---------------------------------------------------------------------------
@@ -3615,6 +3643,11 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
         if not bot.config.enabled and bot.process is None:
             if _retry_disabled_bot(bot, bots):
                 logger.info(f"Retrying '{name}' after disabled cooldown")
+    # Retry bots stuck in starting >2min
+    for name, bot in bots.items():
+        if bot.config.enabled and bot.process is not None:
+            if _retry_stuck_starting(bot, bots):
+                logger.info(f"Retrying '{name}' stuck in starting")
     # Queued dequeue (same as legacy, keep kill switches intact)
     for name, bot in bots.items():
         if not bot.config.enabled:
