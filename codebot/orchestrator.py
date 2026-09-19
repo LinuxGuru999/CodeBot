@@ -3495,10 +3495,10 @@ def _plan_manifest_batches(
     ready_ordered.extend(extra)
 
     budget_state = _manifest_get_budget_state()
-    packed = _pb(ready_ordered, max_per_batch=8, max_batches=3, budget_state=budget_state, stagger_s=5)
+    packed = _pb(ready_ordered, max_per_batch=10, max_batches=3, budget_state=budget_state, stagger_s=3)
     # Apply model/slot caps
     try:
-        capped = _ac(packed, thinking_cap=3, qwen38max_cap=2, slot_cap=24)
+        capped = _ac(packed, thinking_cap=6, qwen38max_cap=4, slot_cap=30)
         return capped
     except Exception as e:
         logger.warning(f"apply_caps failed: {e}")
