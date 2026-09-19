@@ -1676,77 +1676,80 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
 
     # agents table
-    cnt = Counter(a["bucket"] for a in agents)
-    lines.append(_c(f"┌─ Agents ({len(agents)})  RUN {cnt.get('RUNNING',0)}  STALE {cnt.get('STALE',0)}  DEAD {cnt.get('DEAD',0)}  PAUSED {cnt.get('PAUSED',0)} ──────────────────", "bold", enabled))
-    if not agents:
-        lines.append("│ No agents found.")
-    else:
-        lines.append(f"│ {'Agent':<24s} {'State':<10s} {'HB':>8s} {'LOG':>8s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s} {'MODEL':<20s}")
-        lines.append(_c("│ " + "─"*101, "dim", enabled))
-        for a in agents[:20]:
-            bucket = _bucket_color(a["bucket"], enabled)
-            hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
-            loga = _age_str(a["log_age"], enabled) if a["log_age"] is not None else _c("-", "gray", enabled)
-            task = (a["current_task"] or "-")[:20]
-            pid_s = str(a["pid"]) if a["pid"] else "-"
-            err = str(a["consecutive_errors"]) if a.get("consecutive_errors") not in (None, "") else "-"
-            iter_s = str(a["iteration"]) if a["iteration"] else "-"
-            name = a["name"][:24]
-            model = (a["model"] or "-")[:20]
-            lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s} {model:<20s}")
-        if len(agents) > 32:
-            lines.append(f"│ ... +{len(agents)-20} more (use botop status --verbose)")
-    lines.append(_c("└──────────────────────────────────────────────────────────────────────────", "dim", enabled))
+    if view in ("both", "agents"):
+        cnt = Counter(a["bucket"] for a in agents)
+        lines.append(_c(f"┌─ Agents ({len(agents)})  RUN {cnt.get('RUNNING',0)}  STALE {cnt.get('STALE',0)}  DEAD {cnt.get('DEAD',0)}  PAUSED {cnt.get('PAUSED',0)} ──────────────────", "bold", enabled))
+        if not agents:
+            lines.append("│ No agents found.")
+        else:
+            lines.append(f"│ {'Agent':<24s} {'State':<10s} {'HB':>8s} {'LOG':>8s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s} {'MODEL':<20s}")
+            lines.append(_c("│ " + "─"*101, "dim", enabled))
+            for a in agents[:20]:
+                bucket = _bucket_color(a["bucket"], enabled)
+                hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
+                loga = _age_str(a["log_age"], enabled) if a["log_age"] is not None else _c("-", "gray", enabled)
+                task = (a["current_task"] or "-")[:20]
+                pid_s = str(a["pid"]) if a["pid"] else "-"
+                err = str(a["consecutive_errors"]) if a.get("consecutive_errors") not in (None, "") else "-"
+                iter_s = str(a["iteration"]) if a["iteration"] else "-"
+                name = a["name"][:24]
+                model = (a["model"] or "-")[:20]
+                lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s} {model:<20s}")
+            if len(agents) > 32:
+                lines.append(f"│ ... +{len(agents)-20} more (use botop status --verbose)")
+        lines.append(_c("└──────────────────────────────────────────────────────────────────────────", "dim", enabled))
 
     # tickets
-    lines.append(_c(f"┌─ Tickets — total {thr['total']} ────────────────────────────────────────────────", "bold", enabled))
-    if summary:
-        states_line = "  ".join(f"{_state_color(k, enabled)}={v}" for k,v in summary.items())
-        lines.append(f"│ {states_line}")
-    if thr["total"]:
-        lines.append(f"│ 24h +{thr['throughput_24h']}  7d +{thr['throughput_7d']}  avg age {thr['avg_age_h']}h  rework {thr['rework_rate']*100:.1f}%  oldest {thr['oldest_h']}h")
-    # show top tickets per state (compact)
-    def _tid(t):
-        return (t.get("id") if isinstance(t, dict) else getattr(t,"id",""))  # type: ignore
-    def _tstate(t):
-        if isinstance(t, dict):
-            return str(t.get("state",""))
-        try:
-            v = getattr(t,"state","")
-            return v.value if hasattr(v,"value") else str(v)
-        except Exception:
-            return ""
-    def _ttitle(t):
-        if isinstance(t, dict):
-            return str(t.get("title",""))[:42]
-        return str(getattr(t,"title",""))[:42]
-    def _tsev(t):
-        if isinstance(t, dict):
-            return str(t.get("severity",""))
-        try:
-            v = getattr(t,"severity","")
-            return v.value if hasattr(v,"value") else str(v)
-        except Exception:
-            return ""
-    for st_key in ["READY","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE"]:
-        subset = [t for t in tickets if _tstate(t).upper()==st_key]
-        if subset:
-            sev_order = {"critical":0,"high":1,"medium":2,"low":3}
-            if st_key=="READY":
-                subset = sorted(subset, key=lambda x: sev_order.get(_tsev(x).lower(),99))
-            lines.append(f"│ {st_key} ({len(subset)}):")
-            for t in subset[:3]:
-                sev = _tsev(t)
-                sev_c = _severity_color(sev, enabled)
-                lines.append(f"│   {_ansi_pad(sev_c, 18)} {_tid(t)[:18]:<18s} {_ttitle(t)}")
-            if len(subset)>3:
-                lines.append(f"│   ... +{len(subset)-3} more")
-    lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
-    lines.append(_c(" botop live — q quit │ <enter> refresh │ botop term for interactive terminal │ botop health for full diagnostics", "dim", enabled))
+    if view in ("both", "tickets"):
+        lines.append(_c(f"┌─ Tickets — total {thr['total']} ────────────────────────────────────────────────", "bold", enabled))
+        if summary:
+            states_line = "  ".join(f"{_state_color(k, enabled)}={v}" for k,v in summary.items())
+            lines.append(f"│ {states_line}")
+        if thr["total"]:
+            lines.append(f"│ 24h +{thr['throughput_24h']}  7d +{thr['throughput_7d']}  avg age {thr['avg_age_h']}h  rework {thr['rework_rate']*100:.1f}%  oldest {thr['oldest_h']}h")
+        # show top tickets per state (compact)
+        def _tid(t):
+            return (t.get("id") if isinstance(t, dict) else getattr(t,"id",""))  # type: ignore
+        def _tstate(t):
+            if isinstance(t, dict):
+                return str(t.get("state",""))
+            try:
+                v = getattr(t,"state","")
+                return v.value if hasattr(v,"value") else str(v)
+            except Exception:
+                return ""
+        def _ttitle(t):
+            if isinstance(t, dict):
+                return str(t.get("title",""))[:42]
+            return str(getattr(t,"title",""))[:42]
+        def _tsev(t):
+            if isinstance(t, dict):
+                return str(t.get("severity",""))
+            try:
+                v = getattr(t,"severity","")
+                return v.value if hasattr(v,"value") else str(v)
+            except Exception:
+                return ""
+        for st_key in ["READY","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE"]:
+            subset = [t for t in tickets if _tstate(t).upper()==st_key]
+            if subset:
+                sev_order = {"critical":0,"high":1,"medium":2,"low":3}
+                if st_key=="READY":
+                    subset = sorted(subset, key=lambda x: sev_order.get(_tsev(x).lower(),99))
+                lines.append(f"│ {st_key} ({len(subset)}):")
+                for t in subset[:3]:
+                    sev = _tsev(t)
+                    sev_c = _severity_color(sev, enabled)
+                    lines.append(f"│   {_ansi_pad(sev_c, 18)} {_tid(t)[:18]:<18s} {_ttitle(t)}")
+                if len(subset)>3:
+                    lines.append(f"│   ... +{len(subset)-3} more")
+        lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
+    lines.append(_c(" botop live — q quit │ <enter> refresh │ 1 agents │ 2 tickets │ 3 both │ botop term for interactive terminal │ botop health for full diagnostics", "dim", enabled))
     return "\n".join(lines)
 
 
-def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_color: bool = False, json_out: bool = False) -> int:
+def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both") -> int:
+    """Live dashboard with view switching (1=agents, 2=tickets, 3=both)."""
     if json_out:
         # single snapshot as json
         agents = _collect_agents(project_root)

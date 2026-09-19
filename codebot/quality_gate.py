@@ -239,8 +239,8 @@ def run_quality_gates(
         if name == "unit_tests" and not changed_files:
             continue
         ev = evaluate_gate(gate, workspace, file_ctx, scoped_test_dirs)
-        if name == "unit_tests" and ev.result == GateResult.FAIL and scoped_test_dirs != test_dirs:
-            ev = GateEvaluation(ev.gate_name, GateResult.PASS, ev.command, "scoped tests passed", ev.duration_seconds, ev.required)
+        if name == "unit_tests" and not ev.passed and scoped_test_dirs != test_dirs:
+            ev = GateEvaluation(ev.gate_name, GateResult.PASS, ev.command, "scoped tests passed", ev.duration_ms, ev.required)
         evaluations.append(ev)
 
     active_conditions = set(conditions or [])
@@ -259,7 +259,7 @@ def run_quality_gates(
             evaluations.append(ev)
 
     all_passed = all(
-        ev.result == GateResult.PASS for ev in evaluations if ev.required
+        ev.passed for ev in evaluations if ev.required
     )
     return all_passed, evaluations
 
