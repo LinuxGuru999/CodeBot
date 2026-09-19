@@ -32,7 +32,7 @@ from pathlib import Path
 
 logger = logging.getLogger("prompt_gateway")
 
-MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "22")))
+MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "45")))
 MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", os.getenv("CODEBOT_MIN_SPAWN_GAP", "8")))
 
 _last_spawn_ts = 0.0

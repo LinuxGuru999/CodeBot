@@ -929,6 +929,20 @@ def _execute_provider_session(
     def _backoff():
         return BACKOFFS[min(total_retries, len(BACKOFFS) - 1)] if BACKOFFS else 2
 
+    def _is_provider_error(resp: dict) -> tuple[bool, str]:
+        error = resp.get("error")
+        if isinstance(error, dict):
+            msg = error.get("message", "").lower()
+            error_type = error.get("type", "").lower()
+            if any(x in msg for x in ["overloaded", "capacity", "rate limit", "too many", "try again"]):
+                return True, msg
+            if any(x in error_type for x in ["rate_limit", "overloaded", "capacity"]):
+                return True, error_type
+        elif isinstance(error, str):
+            if any(x in error.lower() for x in ["overloaded", "capacity", "rate limit", "too many"]):
+                return True, error.lower()
+        return False, ""
+
     if _drain():
         _write_heartbeat(hb_path)
         return _result("drain")
@@ -979,6 +993,16 @@ def _execute_provider_session(
                     total_retries += 1
                     continue
                 return _result("unexpected_error")
+        is_provider_err, err_msg = _is_provider_error(resp_json)
+        if is_provider_err:
+            if total_retries < MAX_RETRIES:
+                _log(f"{bot_name}: provider error: {err_msg} — retrying")
+                _sleep(min(_backoff(), MAX_BACKOFF))
+                total_retries += 1
+                continue
+            _write_heartbeat(hb_path)
+            _write_checkpoint(ck_path, bot_name, "provider_error")
+            return _result("provider_error", err_msg)
         try:
             u = _extract_provider_usage(resp_json)
             for k in usage:

@@ -407,6 +407,11 @@ class TicketStore:
         return ticket
 
     def get(self, ticket_id: str) -> Ticket | None:
+        """Alias for get_by_id for backward compatibility."""
+        return self.get_by_id(ticket_id)
+
+    def get_by_id(self, ticket_id: str) -> Ticket | None:
+        """Return the ticket with the given ID, or None if not found."""
         with self._lock:
             return self._tickets.get(ticket_id)
 
