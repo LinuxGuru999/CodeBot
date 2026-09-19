@@ -3969,10 +3969,9 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             try:
                 sdata = json.loads(status_file.read_text())
                 if isinstance(sdata, dict) and sdata.get("current_task") in ("starting", ""):
-                    logger.info(f"Zombie '{name}' — process dead, status='{sdata.get('current_task')}' — resetting to waiting")
-                    update_bot_state(bot, "waiting")
-                    bot.restart_count = 0
-                    bot.consecutive_errors = 0
+                    sdata["current_task"] = "idle"
+                    sdata["task_description"] = "process exited"
+                    _write_json_atomic(status_file, sdata)
             except Exception:
                 pass
 

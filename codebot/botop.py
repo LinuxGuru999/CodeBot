@@ -116,6 +116,25 @@ def _strip_ansi(s: str) -> str:
     return re.sub(r"\033\[[0-9;]*m", "", s)
 
 
+def _visible_width(s: str) -> int:
+    """Return the visible character width of *s*, ignoring ANSI escape codes."""
+    return len(_strip_ansi(s))
+
+
+def _ansi_pad(s: str, width: int, align: str = "left") -> str:
+    """Pad *s* to *width* visible characters, ANSI-aware.
+
+    *align* is ``'left'`` (default) or ``'right'``.
+    When the visible text is already wider than *width* the string is
+    returned unchanged (no truncation).
+    """
+    vw = _visible_width(s)
+    if vw >= width:
+        return s
+    pad = " " * (width - vw)
+    return s + pad if align == "left" else pad + s
+
+
 # ---------------------------------------------------------------------------
 # Safe readers
 # ---------------------------------------------------------------------------
@@ -849,7 +868,7 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
             model = a["model"] or "-"
             rst = str(a["restart_count"]) if a["restart_count"] is not None else "-"
             err = str(a["consecutive_errors"]) if a["consecutive_errors"] is not None else "-"
-            print(f"{a['name']:<26s} {bucket:<17s} {hb:>15s} {loga:>15s} {str(a['iteration']):>5s} {task:<22s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<14s}")
+            print(f"{a['name']:<26s} {_ansi_pad(bucket, 17)} {_ansi_pad(hb, 15, 'right')} {_ansi_pad(loga, 15, 'right')} {str(a['iteration']):>5s} {task:<22s} {pid_s:>7s} {rst:>4s} {err:>4s} {model:<14s}")
     else:
         print(f"{'Agent':<25s} {'Status':<10s} {'HB Age':>8s} {'PID':>8s} {'ITER':>6s} {'TASK':<18s}")
         print("-" * 90)
@@ -859,7 +878,7 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
             task = (a["current_task"] or "")[:18]
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
             hb_c = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("?", "gray", enabled)
-            print(f"{a['name']:<25s} {bucket:<18s} {hb_c:>18s} {pid_s:>8s} {iter_s:>6s} {task:<18s}")
+            print(f"{a['name']:<25s} {_ansi_pad(bucket, 18)} {_ansi_pad(hb_c, 18, 'right')} {pid_s:>8s} {iter_s:>6s} {task:<18s}")
     # summary
     cnt = Counter(a["bucket"] for a in agents)
     print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
@@ -1032,7 +1051,7 @@ def cmd_claims(project_root: Path, json_out: bool = False) -> int:
         tid = c["ticket_id"][:16]
         cl = c["class"][:10]
         # strip ansi for file col? keep simple
-        print(f"{c['file']:<45s} {worker:<22s} {tid:<16s} {age_c:>18s} {cl:<10s}")
+        print(f"{c['file']:<45s} {worker:<22s} {tid:<16s} {_ansi_pad(age_c, 18, 'right')} {cl:<10s}")
     stale = [c for c in claims if c["age"] > 7200]
     if stale:
         print(_c(f"\nStale claims (>2h): {len(stale)} — may be orphaned, consider lease inspect", "yellow", enabled))
@@ -1146,7 +1165,7 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             sev = _ticket_sev(t)
             rw = _ticket_rework(t)
             rw_s = f" R{rw}" if rw else ""
-            print(f"  [{_severity_color(sev, enabled):<10s}] {_ticket_id(t):<18s}{rw_s} {_ticket_title(t)}")
+            print(f"  [{_ansi_pad(_severity_color(sev, enabled), 10)}] {_ticket_id(t):<18s}{rw_s} {_ticket_title(t)}")
             # strip ansi for width? ignore
     else:
         for st in ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]:
@@ -1166,7 +1185,7 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
                 title = _ticket_title(t)
                 rw = _ticket_rework(t)
                 rw_s = f" R{rw}" if rw else ""
-                print(f"  [{_severity_color(sev, enabled):<18s}] {tid:<20s}{rw_s} {title}")
+                print(f"  [{_ansi_pad(_severity_color(sev, enabled), 18)}] {tid:<20s}{rw_s} {title}")
             if len(subset) > limit:
                 print(f"  ... +{len(subset)-limit} more (use --limit {limit*2})")
     return 0
@@ -1275,7 +1294,7 @@ def cmd_metrics(project_root: Path, json_out: bool = False) -> int:
             avg = b.get("avg_reward", 0)
             hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else "-"
             task = (a["current_task"] or "")[:20]
-            print(f"{a['name']:<26s} {str(runs):>5s} {str(succ):>5s} {str(fail):>5s} {f'{float(avg):.2f}' if avg else '-':>6s} {hb:>15s} {task:<20s}")
+            print(f"{a['name']:<26s} {str(runs):>5s} {str(succ):>5s} {str(fail):>5s} {f'{float(avg):.2f}' if avg else '-':>6s} {_ansi_pad(hb, 15, 'right')} {task:<20s}")
     # ledger per-model
     if ledger:
         print(f"\nToken ledger day {ledger.get('day_utc','?')} total {ledger.get('total_actual',0):,}")
@@ -1334,7 +1353,7 @@ def cmd_events(project_root: Path, limit: int = 20, json_out: bool = False, even
         data = e.get("data",{})
         # sanitize preview
         preview = json.dumps(data, ensure_ascii=False)[:100].replace("\n"," ")
-        print(f"{dt}  {_c(typ, 'cyan', enabled):<18s} {preview}")
+        print(f"{dt}  {_ansi_pad(_c(typ, 'cyan', enabled), 18)} {preview}")
     return 0
 
 
@@ -1354,7 +1373,7 @@ def cmd_findings(project_root: Path, limit: int = 20, json_out: bool = False) ->
         mod = f.get("module","")
         txt = str(f.get("finding",""))[:80]
         sev_c = _severity_color(sev, enabled)
-        print(f"[{sev_c:<18s}] {bot:<22s} {mod:<20s} {txt}")
+        print(f"[{_ansi_pad(sev_c, 18)}] {bot:<22s} {mod:<20s} {txt}")
     return 0
 
 
@@ -1733,6 +1752,9 @@ def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_c
     enabled = _supports_color(no_color)
     ticker = 0
     interval = max(0.5, float(interval))
+    # If stdout is not a TTY (piped), automatically behave like --once to prevent unbounded output
+    if not sys.stdout.isatty():
+        once = True
     if once:
         frame = _render_live_snapshot(project_root, enabled, ticker, interval)
         # don't clear screen in once mode
@@ -2150,11 +2172,11 @@ def main() -> None:
     project_root = Path(args.project).resolve()
     # global no-color flag is used by helpers via _supports_color check of env/no_color param passed explicitly
 
-    # if no command, default to live once (show snapshot) then hint for term
+    # if no command, show a clean hint and exit 0 (not error)
     if args.cmd is None:
-        parser.print_help()
-        print("\nHint: try `botop live --once` for a snapshot, or `botop term` for interactive terminal, or `botop health`.", file=sys.stderr)
-        sys.exit(2)
+        print(f"CodeBot Operations CLI — {_find_project_name(project_root)}", file=sys.stderr)
+        print("Hint: try `botop live --once` for a snapshot, `botop term` for interactive terminal, or `botop health` for diagnostics.", file=sys.stderr)
+        sys.exit(0)
 
     cmd = args.cmd
 
