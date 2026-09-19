@@ -24,7 +24,6 @@ Invariants
 - Max restarts per bot per hour: configurable (default 5)
 """
 
-import fcntl
 import json
 import logging
 import os
@@ -38,6 +37,49 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from codebot import alignment_service
+
+# ---------------------------------------------------------------------------
+# Cross-platform file locking
+# ---------------------------------------------------------------------------
+
+def _get_flock_function():
+    """Return a flock-like function compatible with the current platform."""
+    try:
+        import fcntl
+        def _unix_flock(fd, operation):
+            fcntl.flock(fd, operation)
+        return _unix_flock
+    except ImportError:
+        pass
+
+    try:
+        import msvcrt
+        def _windows_flock(fd, operation):
+            # msvcrt.locking takes fd, mode, length
+            # LOCK_EX equivalent is LK_LOCK (0x1) which locks the region
+            # We lock the first byte as a proxy for the whole file
+            if operation == 2:  # LOCK_EX
+                msvcrt.locking(fd, 1, 1)  # LK_LOCK = 1
+            elif operation == 8:  # LOCK_UN
+                msvcrt.locking(fd, 2, 1)  # LK_UNLCK = 2
+        return _windows_flock
+    except ImportError:
+        pass
+
+    def _noop_flock(fd, operation):
+        pass
+    return _noop_flock
+
+_flock = _get_flock_function()
+
+# Define constants if fcntl is not available
+try:
+    import fcntl
+    LOCK_EX = fcntl.LOCK_EX
+    LOCK_UN = fcntl.LOCK_UN
+except ImportError:
+    LOCK_EX = 2
+    LOCK_UN = 8
 
 # ---------------------------------------------------------------------------
 # Paths — resolved via ProjectAdapter; fallback to CODEBOT_PROJECT_ROOT env or cwd
@@ -2231,11 +2273,11 @@ def _state_write_lock(bot_name: str) -> Iterator[None]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = STATE_DIR / f"{bot_name}.state.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _flock(lock.fileno(), LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            _flock(lock.fileno(), LOCK_UN)
 
 
 def _read_state_file(bot_name: str) -> dict:
