@@ -242,22 +242,22 @@ class TestTruncateForSize:
         assert len(s.context_summary) < 10000
 
     def test_large_completed_steps_trimmed_to_three(self):
-        # Use a large context_summary to push serialized size over 8KB.
-        # The truncation loop first halves context_summary repeatedly (until ≤100),
-        # then trims completed_steps to last 3.
+        # truncate_for_size only trims completed_steps when >3 items AND
+        # serialized size exceeds MAX_SCRATCHPAD_BYTES. Use very long strings
+        # to ensure we exceed 8KB even after context_summary is halved.
+        long_step = "x" * 500
         s = sp.ScratchpadState(
-            completed_steps=[f"completed_step_{i}_with_long_description_xxxx" for i in range(50)],
-            context_summary="x" * 30000,
+            completed_steps=[f"step_{i}_{long_step}" for i in range(50)],
+            context_summary="short",
         )
         s.truncate_for_size()
         assert len(s.completed_steps) <= 3
 
     def test_large_remaining_steps_trimmed_to_three(self):
-        # No completed_steps, so after context_summary is small enough,
-        # the truncation falls through to the remaining_steps branch.
+        long_step = "x" * 500
         s = sp.ScratchpadState(
-            remaining_steps=[f"remaining_step_{i}_with_long_description_xxxx" for i in range(50)],
-            context_summary="x" * 30000,
+            remaining_steps=[f"step_{i}_{long_step}" for i in range(50)],
+            context_summary="short",
         )
         s.truncate_for_size()
         assert len(s.remaining_steps) <= 3

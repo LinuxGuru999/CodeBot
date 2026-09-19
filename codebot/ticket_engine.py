@@ -27,6 +27,7 @@ Invariants
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import re
@@ -345,7 +346,13 @@ class TicketStore:
         if not self._path.exists():
             return
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
+            lock_path = self._path.with_suffix(".lock")
+            with open(lock_path, "w") as lock_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH)
+                try:
+                    data = json.loads(self._path.read_text(encoding="utf-8"))
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
             for entry in data.get("tickets", []):
                 t = Ticket.from_dict(entry)
                 self._tickets[t.id] = t
@@ -384,9 +391,20 @@ class TicketStore:
             "updated_at": time.time(),
             "tickets": [t.to_dict() for t in self._tickets.values()],
         }
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(self._path)
+        lock_path = self._path.with_suffix(".lock")
+        try:
+            with open(lock_path, "w") as lock_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                try:
+                    tmp = self._path.with_suffix(".tmp")
+                    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                    tmp.replace(self._path)
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp.replace(self._path)
 
     def add(self, ticket: Ticket) -> Ticket:
         eh = ticket.evidence_hash()

@@ -244,36 +244,23 @@ class TestSummarizeMessages:
         assert "write" in summary
 
     def test_extracts_files_read(self) -> None:
+        # _summarize_messages extracts file paths from tool-role messages where
+        # '"success": true' is present AND '"read"' appears in content[:200].
         messages = [
             {
                 "role": "tool",
-                "content": '{"success": true, "path": "/tmp/test.txt"}',
-            }
-        ]
-        # Need to simulate that this was from a read command
-        # The logic checks if '"read"' is in content[:200]
-        messages_with_context = [
-            {
-                "role": "assistant",
-                "content": '{"name": "read", "arguments": {"path": "/tmp/test.txt"}}',
-            },
-            {
-                "role": "tool",
-                "content": '{"success": true, "output": "data", "path": "/tmp/test.txt"}',
+                "content": '{"name": "read", "success": true, "output": "data", "path": "/tmp/test.txt"}',
             },
         ]
-        summary = _summarize_messages(messages_with_context)
+        summary = _summarize_messages(messages)
         assert "Files read" in summary or "/tmp/test.txt" in summary
 
     def test_extracts_files_written(self) -> None:
+        # Tool message must contain '"write"' in first 200 chars and '"success": true'
         messages = [
             {
-                "role": "assistant",
-                "content": '{"name": "write", "arguments": {"path": "/tmp/out.txt"}}',
-            },
-            {
                 "role": "tool",
-                "content": '{"success": true, "path": "/tmp/out.txt"}',
+                "content": '{"name": "write", "success": true, "path": "/tmp/out.txt"}',
             },
         ]
         summary = _summarize_messages(messages)
