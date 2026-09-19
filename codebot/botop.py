@@ -1668,7 +1668,6 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
             pid_s = str(a["pid"]) if a["pid"] else "-"
             err = str(a["consecutive_errors"]) if a.get("consecutive_errors") not in (None, "") else "-"
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
-            # pad bucket ansi-aware: we need visual width; use raw bucket for spacing then color
             name = a["name"][:24]
             # use _ansi_pad for ANSI-aware column alignment
             lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 18)} {_ansi_pad(hb, 15, 'right')} {_ansi_pad(loga, 15, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s}")
