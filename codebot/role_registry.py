@@ -23,7 +23,7 @@ Invariants
 - Tool policies reference allowlists, not blocklists (fail-closed)
 - Model profiles specify capability requirements, not provider names
 
-Role Count: 29 (8 discovery + 6 implementation + 8 review + 6 control + 1 planning)
+Role Count: 30 (9 discovery + 6 implementation + 8 review + 6 control + 1 planning)
 """
 
 from __future__ import annotations
@@ -237,6 +237,14 @@ DISCOVERY_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node", "npm", "npx"}), "project_root", network_access=True),
         incentive="Find usability issues, accessibility violations, and workflow friction.",
+    ),
+    AgentRole(
+        name="feature_hunter",
+        category=RoleCategory.DISCOVERY,
+        description="Reads roadmap index and creates feature tickets for pending deliverables",
+        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(frozenset({"read", "grep", "glob", "bash", "create_ticket"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
+        incentive="Find roadmap gaps and create actionable feature tickets. Maximize coverage of pending deliverables.",
     ),
 ]
 

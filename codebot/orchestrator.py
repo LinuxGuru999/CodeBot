@@ -165,6 +165,7 @@ IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
 DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
     "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
     "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
+    "feature_hunter",
 })
 
 REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
@@ -185,7 +186,7 @@ _metrics_tick = 0
 ALWAYS_RESPAWN = frozenset({
     "bug_hunter", "security_auditor", "architecture_auditor",
     "performance_auditor", "test_gap_auditor", "documentation_auditor",
-    "dependency_auditor", "ux_auditor",
+    "dependency_auditor", "ux_auditor", "feature_hunter",
     "general_implementer", "backend_implementer", "frontend_implementer",
     "test_implementer", "migration_implementer", "documentation_implementer",
     "scheduler", "conflict_resolver", "budget_controller",
