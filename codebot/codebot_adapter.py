@@ -140,37 +140,16 @@ class CodeBotAdapter(ProjectAdapter):
             "security_auditor", "architecture_auditor", "security_reviewer",
             "architecture_reviewer", "correctness_reviewer", "ux_reviewer",
         })
-        thinking_models = (
-            "qwen-3.8-max", "qwen-3.7-max",
-            "qwen-3.6-plus", "qwen-3.5-plus",
-        )
-        non_thinking_cycle = (
+        all_models = (
             "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.8-max",
             "qwen-3.6-plus", "qwen-3.5-plus", "meta-muse-spark-1.3",
             "meta-muse-spark-1.2", "qwen-3.7-max",
         )
-        model_overrides = {
-            "feature_hunter": "qwen-3.7-plus",
-            "feature_decomposer": "xiaomi-mimo-2.5",
-            "bug_hunter": "qwen-3.7-max",
-        }
         cycle_idx = 0
-        think_idx = 0
-        planner_idx = 0
         for role in ALL_ROLES:
             interval = interval_map.get(role.category.value, 600)
-            if role.name in thinking_roles:
-                model = thinking_models[think_idx % len(thinking_models)]
-                think_idx += 1
-            elif role.name in model_overrides:
-                model = model_overrides[role.name]
-                cycle_idx += 1
-            elif role.name.startswith("implementation_planner"):
-                model = non_thinking_cycle[planner_idx % len(non_thinking_cycle)]
-                planner_idx += 1
-            else:
-                model = non_thinking_cycle[cycle_idx % len(non_thinking_cycle)]
-                cycle_idx += 1
+            model = all_models[cycle_idx % len(all_models)]
+            cycle_idx += 1
             fallback = _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
             registry.append({
                 "name": role.name,
@@ -188,8 +167,8 @@ class CodeBotAdapter(ProjectAdapter):
             if role.name == "implementation_planner":
                 for i in range(2, 5):
                     planner_name = f"implementation_planner-{i}"
-                    planner_model = non_thinking_cycle[planner_idx % len(non_thinking_cycle)]
-                    planner_idx += 1
+                    planner_model = all_models[cycle_idx % len(all_models)]
+                    cycle_idx += 1
                     planner_fallback = _MODEL_FALLBACKS.get(planner_model, "xiaomi-mimo-2.5")
                     registry.append({
                         "name": planner_name,
