@@ -67,9 +67,9 @@ class ModelRateState:
         self.total_rate_limits += 1
 
         if retry_after:
-            self.min_interval = max(self.min_interval, retry_after)
+            self.min_interval = max(self.min_interval, min(retry_after, 3.0))
         else:
-            self.min_interval = min(self.min_interval * 1.5, 5.0)
+            self.min_interval = min(self.min_interval * 1.2, 3.0)
 
         self.learned_rpm = max(1.0, 60.0 / self.min_interval)
 
