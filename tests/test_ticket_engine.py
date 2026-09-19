@@ -244,10 +244,15 @@ class TestTicketStore:
 
     def test_dedup_allows_after_complete(self, tmp_path):
         store = TicketStore(tmp_path / "tickets.json")
-        t1 = create_ticket("t1", TicketClass.BUG, Severity.LOW, "s", "same evidence", "same problem", "d", ["a"])
+        t1 = create_ticket("t1", TicketClass.BUG, Severity.LOW, "s", "same evidence", "same problem", "d", ["a"], risk=RiskLevel.LOW)
         store.add(t1)
         for state in [TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
                        TicketState.IMPLEMENTING, TicketState.REVIEWING, TicketState.VERIFYING, TicketState.COMPLETE]:
+            if state == TicketState.COMPLETE:
+                # need gate approval for COMPLETE
+                import json as _json, time as _time
+                gate_path = tmp_path / "gate_results.jsonl"
+                gate_path.write_text(_json.dumps({"ticket_id": t1.id, "passed": True, "timestamp": _time.time(), "gates": []}) + "\n", encoding="utf-8")
             store.transition(t1.id, state)
         t2 = create_ticket("t2", TicketClass.BUG, Severity.LOW, "s", "same evidence", "same problem", "d", ["a"])
         store.add(t2)
@@ -333,6 +338,17 @@ class TestGatekeeperEnforcement:
 
     def _move_to_verifying(self, store, ticket_id):
         """Move a ticket through states to VERIFYING."""
+        from codebot.implementation_planner import PlanStore
+        # Ensure READY->IMPLEMENTING passes planning check if needed (use LOW risk or create plan)
+        # If ticket is medium risk, create plan on the fly
+        t = store.get(ticket_id)
+        if t and t.risk != RiskLevel.LOW:
+            try:
+                plan_store = PlanStore(store._path.parent)
+                if not plan_store.exists(ticket_id):
+                    plan_store.save(ticket_id, {"steps": ["auto plan for test"]})
+            except Exception:
+                pass
         store.transition(ticket_id, TicketState.VALIDATING)
         store.transition(ticket_id, TicketState.TRIAGED)
         store.transition(ticket_id, TicketState.READY)

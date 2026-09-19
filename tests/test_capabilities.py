@@ -190,7 +190,7 @@ class TestScratchpadState:
         s = ScratchpadState()
         assert s.phase == "init"
         assert s.completed_steps == []
-        assert s.version == 1
+        assert s.version == 2
 
     def test_mark_step_complete(self):
         s = ScratchpadState(remaining_steps=["a", "b", "c"])
@@ -220,19 +220,19 @@ class TestScratchpadState:
 
 class TestScratchpadPersistence:
     def test_save_and_load(self, tmp_path):
-        s = ScratchpadState(ticket_id="CB-1", agent_name="worker-1", phase="running")
+        s = ScratchpadState(ticket_id="CB-1", current_agent="worker-1", phase="running")
         save_scratchpad(tmp_path, s)
-        loaded = load_scratchpad(tmp_path, "worker-1")
+        loaded = load_scratchpad(tmp_path, "CB-1")
         assert loaded.ticket_id == "CB-1"
         assert loaded.phase == "running"
 
     def test_load_missing_returns_fresh(self, tmp_path):
         loaded = load_scratchpad(tmp_path, "nonexistent")
         assert loaded.phase == "init"
-        assert loaded.agent_name == "nonexistent"
+        assert loaded.ticket_id == "nonexistent"
 
     def test_clear(self, tmp_path):
-        s = ScratchpadState(agent_name="w1")
+        s = ScratchpadState(ticket_id="w1", current_agent="w1")
         save_scratchpad(tmp_path, s)
         clear_scratchpad(tmp_path, "w1")
         loaded = load_scratchpad(tmp_path, "w1")
@@ -242,7 +242,7 @@ class TestScratchpadPersistence:
 class TestHandoffNote:
     def test_contains_key_info(self):
         s = ScratchpadState(
-            ticket_id="CB-1", agent_name="worker-1", phase="error",
+            ticket_id="CB-1", current_agent="worker-1", phase="error",
             completed_steps=["step1"], remaining_steps=["step2", "step3"],
             error_message="timeout",
         )
@@ -266,12 +266,19 @@ class TestShouldSplit:
         return create_ticket(**defaults)
 
     def test_no_split_on_complete(self, tmp_path):
-        from codebot.ticket_engine import TicketState, TicketStore
-        t = self._make_ticket()
+        from codebot.ticket_engine import TicketState, TicketStore, RiskLevel
+        from codebot.implementation_planner import PlanStore
+        t = self._make_ticket(risk=RiskLevel.LOW)
         store = TicketStore(tmp_path / "tickets.json")
         store.add(t)
         for s in [TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
                    TicketState.IMPLEMENTING, TicketState.REVIEWING, TicketState.VERIFYING, TicketState.COMPLETE]:
+            if s == TicketState.COMPLETE:
+                # need gate pass
+                import json, os, time
+                gate_path = tmp_path / "gate_results.jsonl"
+                record = {"ticket_id": t.id, "passed": True, "timestamp": time.time(), "gates": []}
+                gate_path.write_text(json.dumps(record)+"\n", encoding="utf-8")
             store.transition(t.id, s)
         t = store.get(t.id)
         assert should_split(t, exit_reason="timeout") is False
