@@ -53,6 +53,14 @@ class LifecycleDispatchEntry:
     handler_name: str
     requires_bots: bool
     description: str
+    tickets_per_agent: int = 1
+
+
+def compute_agent_demand(ticket_counts: dict[str, int], entry: LifecycleDispatchEntry) -> int:
+    total_tickets = sum(ticket_counts.get(state, 0) for state in entry.ticket_states)
+    if total_tickets == 0:
+        return 0
+    return max(1, (total_tickets + entry.tickets_per_agent - 1) // entry.tickets_per_agent)
 
 
 LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
@@ -79,6 +87,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         handler_name="_dispatch_decompose_agents",
         requires_bots=True,
         description="Decompose tickets into sub-tickets, advance to PLANNING when done",
+        tickets_per_agent=3,
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.PLANNING,
@@ -87,6 +96,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         handler_name="_dispatch_planning_agents",
         requires_bots=True,
         description="Generate implementation plans, advance to IMPLEMENTING when done",
+        tickets_per_agent=3,
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.IMPLEMENTATION,
@@ -98,6 +108,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         handler_name="_dispatch_tickets_to_implementers",
         requires_bots=True,
         description="Dispatch IMPLEMENTING tickets to role-matched implementers",
+        tickets_per_agent=2,
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.REVIEW,
@@ -110,6 +121,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         handler_name="_dispatch_tickets_to_reviewers",
         requires_bots=True,
         description="Dispatch REVIEWING tickets to role-matched reviewers",
+        tickets_per_agent=2,
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.VERIFICATION,
@@ -147,13 +159,24 @@ ALWAYS_ON_AGENTS: frozenset[str] = frozenset({
 })
 
 
-def get_queue_demands(ticket_counts: dict[str, int]) -> list[LifecycleDispatchEntry]:
-    entries_with_work: list[LifecycleDispatchEntry] = []
+@dataclass(frozen=True)
+class PhaseDemand:
+    entry: LifecycleDispatchEntry
+    ticket_count: int
+    agents_needed: int
+
+
+def get_queue_demands(ticket_counts: dict[str, int]) -> list[PhaseDemand]:
+    demands: list[PhaseDemand] = []
     for entry in LIFECYCLE_DISPATCH_TABLE:
         total = sum(ticket_counts.get(state, 0) for state in entry.ticket_states)
         if total > 0:
-            entries_with_work.append(entry)
-    return entries_with_work
+            demands.append(PhaseDemand(
+                entry=entry,
+                ticket_count=total,
+                agents_needed=compute_agent_demand(ticket_counts, entry),
+            ))
+    return demands
 
 
 def dispatch_lifecycle(
@@ -164,7 +187,8 @@ def dispatch_lifecycle(
     demands = get_queue_demands(ticket_counts)
     results: dict[str, int] = {}
 
-    for entry in demands:
+    for demand in demands:
+        entry = demand.entry
         handler = handler_registry.get(entry.handler_name)
         if handler is None:
             logger.warning("No handler registered for %s", entry.handler_name)
@@ -172,15 +196,26 @@ def dispatch_lifecycle(
 
         try:
             if entry.requires_bots and bots is not None:
-                count = handler(bots)
+                count = handler(bots, demand.agents_needed)
             else:
                 count = handler()
             results[entry.handler_name] = count or 0
             if count:
                 logger.info(
-                    "%s: dispatched %d ticket(s) via %s",
+                    "%s: dispatched %d ticket(s) via %s (queue=%d, agents_needed=%d)",
                     entry.phase.value, count, entry.handler_name,
+                    demand.ticket_count, demand.agents_needed,
                 )
+        except TypeError:
+            try:
+                if entry.requires_bots and bots is not None:
+                    count = handler(bots)
+                else:
+                    count = handler()
+                results[entry.handler_name] = count or 0
+            except Exception as e:
+                logger.warning("%s handler %s failed: %s", entry.phase.value, entry.handler_name, e)
+                results[entry.handler_name] = 0
         except Exception as e:
             logger.warning("%s handler %s failed: %s", entry.phase.value, entry.handler_name, e)
             results[entry.handler_name] = 0

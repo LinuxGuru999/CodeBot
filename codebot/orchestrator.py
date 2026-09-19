@@ -3154,7 +3154,7 @@ DECOMPOSER_ROLE_NAMES: frozenset[str] = frozenset({
 })
 
 
-def _dispatch_decompose_agents(bots: dict[str, BotState]) -> int:
+def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -> int:
     """Dispatch DECOMPOSE tickets to decomposer agents, advance to PLANNING when done.
 
     For each DECOMPOSE ticket without an active claim: find an idle decomposer bot,
@@ -3203,6 +3203,8 @@ def _dispatch_decompose_agents(bots: dict[str, BotState]) -> int:
             idle_decomposers.append((name, bot))
 
     available = idle_decomposers + unassigned_running
+    if max_agents > 0:
+        available = available[:max_agents]
     dispatched = 0
 
     for ticket in decomposing:
@@ -3251,7 +3253,7 @@ def _dispatch_decompose_agents(bots: dict[str, BotState]) -> int:
     return dispatched
 
 
-def _dispatch_planning_agents(bots: dict[str, BotState]) -> int:
+def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) -> int:
     """Dispatch PLANNING tickets to planner agents, advance to IMPLEMENTING when done.
 
     For each PLANNING ticket without an active claim: find an idle planner bot,
@@ -3300,6 +3302,8 @@ def _dispatch_planning_agents(bots: dict[str, BotState]) -> int:
             idle_planners.append((name, bot))
 
     available = idle_planners + unassigned_running
+    if max_agents > 0:
+        available = available[:max_agents]
     dispatched = 0
 
     for ticket in planning:
@@ -3487,29 +3491,33 @@ def _compute_dynamic_priority(pipeline: dict[str, int]) -> dict[str, int]:
 
 def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
     ready = pipeline.get("READY", 0)
-    implementing = pipeline.get("IMPLEMENTING", 0)
-    verifying = pipeline.get("VERIFYING", 0)
-    discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("TRIAGED", 0)
-    reviewing = pipeline.get("REVIEWING", 0)
+    decompose = pipeline.get("DECOMPOSE", 0)
     planning = pipeline.get("PLANNING", 0)
+    implementing = pipeline.get("IMPLEMENTING", 0)
+    reviewing = pipeline.get("REVIEWING", 0)
+    verifying = pipeline.get("VERIFYING", 0)
 
     always_on = {"scheduler", "conflict_resolver", "budget_controller"}
     if name in always_on:
         return True
+    if name == "decomposer" or name.startswith("decomposer-"):
+        return decompose > 0 or ready > 0
     if name in {"implementation_planner", "implementation_planner-2",
                 "implementation_planner-3", "implementation_planner-4"}:
-        return ready >= 10
+        return planning > 0
     if name in {"general_implementer", "general_implementer-2",
                 "general_implementer-3", "general_implementer-4",
                 "backend_implementer", "backend_implementer-2",
                 "frontend_implementer", "test_implementer",
                 "migration_implementer", "documentation_implementer"}:
-        return planning > 0
+        return implementing > 0
     if name in {"correctness_reviewer", "security_reviewer",
                 "architecture_reviewer", "test_reviewer",
                 "performance_reviewer", "simplicity_reviewer",
-                "documentation_reviewer"}:
-        return verifying > 0 or reviewing > 0
+                "documentation_reviewer", "ux_reviewer"}:
+        return reviewing > 0
+    if name in {"quality_gate"}:
+        return verifying > 0
     if name in {"bug_hunter", "security_auditor", "architecture_auditor",
                 "performance_auditor", "test_gap_auditor",
                 "documentation_auditor", "dependency_auditor",
@@ -4634,16 +4642,6 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         _recover_stuck_implementing_tickets(bots)
     except Exception as e:
         logger.warning(f"Stuck ticket recovery failed: {e}")
-    try:
-        _recover_stuck_planning_tickets()
-    except Exception as e:
-        logger.warning(f"Planning recovery failed: {e}")
-    try:
-        n = _advance_ready_to_planning()
-        if n:
-            logger.info(f"Advanced {n} READY tickets to PLANNING (plan exists)")
-    except Exception as e:
-        logger.warning(f"Ready->Planning advance failed: {e}")
 
     for name, bot in bots.items():
         if not bot.config.enabled:
@@ -4962,18 +4960,17 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if store_path.exists():
             ts = TicketStore(store_path)
             counts = ts.summary()
-                                handler_registry = {
-                                    "_auto_triage_backlog": _auto_triage_backlog,
-                                    "_route_ready_tickets": _route_ready_tickets,
-                                    "_dispatch_decompose_agents": _dispatch_decompose_agents,
-                                    "_dispatch_planning_agents": _dispatch_planning_agents,
-                                    "_advance_ready_to_planning": _advance_ready_to_planning,
-                                    "_dispatch_tickets_to_implementers": _dispatch_tickets_to_implementers,
-                                    "_dispatch_tickets_to_reviewers": _dispatch_tickets_to_reviewers,
-                                    "_gatekeeper_verify_tickets": _gatekeeper_verify_tickets,
-                                    "_process_rework_tickets": _process_rework_tickets,
-                                    "_recover_deferred_tickets": _recover_deferred_tickets,
-                                }
+            handler_registry = {
+                "_auto_triage_backlog": _auto_triage_backlog,
+                "_route_ready_tickets": _route_ready_tickets,
+                "_dispatch_decompose_agents": _dispatch_decompose_agents,
+                "_dispatch_planning_agents": _dispatch_planning_agents,
+                "_dispatch_tickets_to_implementers": _dispatch_tickets_to_implementers,
+                "_dispatch_tickets_to_reviewers": _dispatch_tickets_to_reviewers,
+                "_gatekeeper_verify_tickets": _gatekeeper_verify_tickets,
+                "_process_rework_tickets": _process_rework_tickets,
+                "_recover_deferred_tickets": _recover_deferred_tickets,
+            }
             dispatch_lifecycle(counts, handler_registry, bots)
     except ImportError:
         pass

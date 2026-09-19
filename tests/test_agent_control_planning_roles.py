@@ -1,7 +1,7 @@
 """Tests for control and planning agent roles using the scripted model harness.
 
-Covers: feature_decomposer, ticket_triager, scheduler, quality_gate,
-budget_controller, conflict_resolver, ticket_decomposer.
+Covers: decomposer, ticket_triager, scheduler, quality_gate,
+budget_controller, conflict_resolver.
 
 Control/planning agents have varied tool access depending on role.
 Each test verifies the specific contract of that role.
@@ -21,13 +21,12 @@ from tests.agent_harness import (
 )
 
 CONTROL_PLANNING_ROLES = [
-    "feature_decomposer",
+    "decomposer",
     "ticket_triager",
     "scheduler",
     "quality_gate",
     "budget_controller",
     "conflict_resolver",
-    "ticket_decomposer",
 ]
 
 
@@ -48,10 +47,10 @@ class TestControlPlanningPromptsLoad:
                 pytest.skip(f"{role} has no .md prompt file")
 
 
-class TestFeatureDecomposer:
+class TestDecomposer:
     @pytest.fixture
     def prompt(self):
-        return load_role_prompt("feature_decomposer")
+        return load_role_prompt("decomposer")
 
     def test_reads_tickets_json_first(self, prompt: str, state_dir: Path):
         tickets_path = str(state_dir / "tickets.json")
@@ -61,7 +60,7 @@ class TestFeatureDecomposer:
                 "title": "Sub-task 1",
                 "ticket_class": "feature",
                 "severity": "medium",
-                "source": "feature_decomposer",
+                "source": "decomposer",
                 "evidence": "Parent: CB-123",
                 "problem_statement": "Decomposed sub-task",
                 "desired_state": "Done",
@@ -72,7 +71,7 @@ class TestFeatureDecomposer:
             content_response("Decomposed"),
         ])
 
-        result = run_agent_loop("feature_decomposer", prompt, model, state_dir)
+        result = run_agent_loop("decomposer", prompt, model, state_dir)
 
         assert result.exit_reason == "completed"
         first_call = result.tool_calls[0]
@@ -85,7 +84,7 @@ class TestFeatureDecomposer:
                 "title": "Sub-task A",
                 "ticket_class": "feature",
                 "severity": "medium",
-                "source": "feature_decomposer",
+                "source": "decomposer",
                 "evidence": "Parent: CB-100",
                 "problem_statement": "Sub-task",
                 "desired_state": "Done",
@@ -97,11 +96,11 @@ class TestFeatureDecomposer:
             content_response("done"),
         ])
 
-        result = run_agent_loop("feature_decomposer", prompt, model, state_dir)
+        result = run_agent_loop("decomposer", prompt, model, state_dir)
 
         assert result.tickets_created == 1
         args = result.create_ticket_args()[0]
-        assert args.get("source") == "feature_decomposer"
+        assert args.get("source") == "decomposer"
 
     def test_does_not_read_roadmap_index(self, prompt: str, state_dir: Path):
         model = ScriptedModel([
@@ -109,7 +108,7 @@ class TestFeatureDecomposer:
             content_response("done"),
         ])
 
-        result = run_agent_loop("feature_decomposer", prompt, model, state_dir)
+        result = run_agent_loop("decomposer", prompt, model, state_dir)
 
         reads = result.calls_to("read")
         roadmap_reads = [r for r in reads if "roadmap_index" in r.args.get("path", "")]
