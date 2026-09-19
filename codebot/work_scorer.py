@@ -372,7 +372,7 @@ def score_ticket(
     cfg = _AgingCfg()
     cfg.aging_start_seconds = aging_start_seconds
     cfg.aging_rate_per_hour = aging_rate_per_hour
-    cfg.max_age_bonus = max_aging_bonus
+    cfg.max_aging_bonus = max_aging_bonus
     cfg.priority_aging = cfg
 
     has_conflict = False

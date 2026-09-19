@@ -299,3 +299,51 @@ class TestRankWorkItems:
         d = {"id": t.id, "severity": Severity.CRITICAL, "state": TicketState.READY, "created_at": now - 1000, "ticket_class": TicketClass.BUG, "risk": RiskLevel.MEDIUM}
         scored = score_ticket(d, now=now)
         assert scored.score > 0
+
+    def test_per_ticket_token_limit_enforced(self):
+        """Verify per_ticket_token_limit penalizes tickets exceeding the limit."""
+        now = time.time()
+        # Ticket with high estimated cost
+        t_high_cost = make_ticket(severity=Severity.MEDIUM, state=TicketState.READY, cost=500000)
+        # Ticket with low estimated cost
+        t_low_cost = make_ticket(severity=Severity.MEDIUM, state=TicketState.READY, cost=10000)
+        
+        # With a low token limit, high-cost ticket should score lower
+        scored_high = score_ticket(t_high_cost, now=now, per_ticket_token_limit=100000)
+        scored_low = score_ticket(t_low_cost, now=now, per_ticket_token_limit=100000)
+        
+        # High cost ticket should be penalized more than low cost ticket
+        assert scored_low.score > scored_high.score
+
+    def test_per_ticket_token_limit_in_rank_work_items(self):
+        """Verify rank_work_items respects per_ticket_token_limit when sorting."""
+        now = time.time()
+        t1 = make_ticket(severity=Severity.HIGH, state=TicketState.READY, cost=500000)
+        t2 = make_ticket(severity=Severity.HIGH, state=TicketState.READY, cost=10000)
+        
+        # With strict token limit, lower-cost ticket should rank higher despite same severity
+        ranked = rank_work_items([t1, t2], now=now, per_ticket_token_limit=100000)
+        
+        # t2 (low cost) should rank before t1 (high cost) due to token limit penalty
+        assert ranked[0].ticket_id == t2.id
+        assert ranked[1].ticket_id == t1.id
+
+    def test_score_ticket_with_aged_ticket_no_attribute_error(self):
+        """Test that score_ticket works with aged tickets without AttributeError.
+        
+        Regression test for CB-2978742-4AE6: max_age_bonus vs max_aging_bonus mismatch.
+        """
+        now = 200000.0
+        # Create a ticket older than aging_start_seconds (86400s = 24h)
+        created_at = now - 100000  # ~27.8 hours old
+        t = make_ticket(created_at=created_at, state=TicketState.READY)
+        
+        # This should not raise AttributeError
+        scored = score_ticket(t, now=now, aging_start_seconds=86400, aging_rate_per_hour=1.0, max_aging_bonus=30.0)
+        
+        assert scored.ticket_id == t.id
+        assert scored.score > 0
+        # Verify aging bonus was actually computed (should be > 0 since ticket is older than start threshold)
+        assert scored.components["aging_bonus"] > 0.0
+        # Verify it's capped at max_aging_bonus
+        assert scored.components["aging_bonus"] <= 30.0

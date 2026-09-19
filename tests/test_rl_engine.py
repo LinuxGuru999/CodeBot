@@ -345,3 +345,70 @@ class TestIsSelfTarget:
     def test_not_self(self):
         assert is_self_target("bug_hunter") is False
         assert is_self_target("general_implementer", "codebot/roles/general_implementer.md") is False
+
+
+class TestScoreEventNoTicketsPenalty:
+    """Tests for score_event no_tickets_penalty path in discovery roles."""
+
+    def test_discovery_role_with_marker_applies_penalty(self, tmp_path, monkeypatch):
+        """score_event must apply 15-point penalty when no_tickets marker exists."""
+        # Arrange: set up STATE_DIR to our tmp_path so unlink doesn't touch real state
+        monkeypatch.setattr(rl, "STATE_DIR", tmp_path)
+        # Create the marker file that triggers the penalty
+        marker = tmp_path / "bug_hunter.no_tickets"
+        marker.write_text("no tickets found", encoding="utf-8")
+        # Create required dirs/files to avoid exceptions in score_event
+        (tmp_path / "logs").mkdir(exist_ok=True)
+        event = {
+            "bot": "bug_hunter",
+            "exit_code": 0,
+            "exit_reason": "clean",
+            "stream_path": "logs/bug_hunter.stream.json",
+            "log_path": "logs/bug_hunter.log",
+        }
+        # Act
+        result = rl.score_event(event, bots_dir=tmp_path)
+        # Assert: penalty was applied and reflected in evidence
+        assert "no_tickets_pen=15" in result["evidence"]
+        # Score should be reduced by 15 compared to a run without marker
+        assert result["score"] <= 85  # max possible minus 15 penalty
+
+    def test_score_event_idempotent_no_unlink_side_effect(self, tmp_path, monkeypatch):
+        """Scoring twice must apply penalty both times — no unlink side effect allowed."""
+        monkeypatch.setattr(rl, "STATE_DIR", tmp_path)
+        marker = tmp_path / "security_auditor.no_tickets"
+        marker.write_text("marker", encoding="utf-8")
+        (tmp_path / "logs").mkdir(exist_ok=True)
+        event = {
+            "bot": "security_auditor",
+            "exit_code": 0,
+            "exit_reason": "clean",
+            "stream_path": "logs/security_auditor.stream.json",
+            "log_path": "logs/security_auditor.log",
+        }
+        # First scoring
+        result1 = rl.score_event(event, bots_dir=tmp_path)
+        # Marker must still exist after first call (no unlink side effect)
+        assert marker.exists(), "score_event must not delete the no_tickets marker file"
+        # Second scoring must produce identical penalty
+        result2 = rl.score_event(event, bots_dir=tmp_path)
+        assert "no_tickets_pen=15" in result1["evidence"]
+        assert "no_tickets_pen=15" in result2["evidence"]
+        assert result1["score"] == result2["score"]
+
+    def test_non_discovery_role_no_penalty(self, tmp_path, monkeypatch):
+        """Non-discovery roles (e.g., general_implementer) must not get no_tickets penalty."""
+        monkeypatch.setattr(rl, "STATE_DIR", tmp_path)
+        # Even if marker exists, non-discovery role should ignore it
+        marker = tmp_path / "general_implementer.no_tickets"
+        marker.write_text("marker", encoding="utf-8")
+        (tmp_path / "logs").mkdir(exist_ok=True)
+        event = {
+            "bot": "general_implementer",
+            "exit_code": 0,
+            "exit_reason": "clean",
+            "stream_path": "logs/general_implementer.stream.json",
+            "log_path": "logs/general_implementer.log",
+        }
+        result = rl.score_event(event, bots_dir=tmp_path)
+        assert "no_tickets_pen=0" in result["evidence"]
