@@ -117,6 +117,7 @@ class HysteresisState:
     last_allocation: dict[str, int] = field(default_factory=dict)
     last_change_time: float = 0.0
     rolling_pressures: list[dict[str, float]] = field(default_factory=list)
+    discovery_active: bool = False
 
     def should_shift(
         self,
@@ -227,7 +228,10 @@ class AdaptiveScheduler:
             total_slots=pipeline.total_slots,
             backlog_low_watermark=self.config.backlog.low_watermark,
             backlog_target=self.config.backlog.target,
+            discovery_currently_active=self.hysteresis.discovery_active,
         )
+
+        self.hysteresis.discovery_active = pressure.discovery_pressure > 0.0
 
         # Determine mode
         mode = determine_mode(
@@ -562,6 +566,7 @@ class AdaptiveScheduler:
             integration_queue_count=getattr(pipeline, "integration_queue_count", getattr(pipeline, "integration_queue_depth", 0)),
             active_by_role=pipeline.active_by_role(),
             total_slots=pipeline.total_slots,
+            discovery_currently_active=self.hysteresis.discovery_active,
         )
 
         completed_ids = self._completed_tickets

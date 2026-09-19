@@ -1253,7 +1253,7 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         ts = TicketStore(store_path)
     except Exception:
         return 0
-    ready = ts.list_ready()
+    ready = ts.list_by_state(TicketState.PLANNING)
     if not ready:
         return 0
     claims_dir = STATE_DIR / "claims"
@@ -3341,7 +3341,7 @@ def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
                 "backend_implementer", "backend_implementer-2",
                 "frontend_implementer", "test_implementer",
                 "migration_implementer", "documentation_implementer"}:
-        return False
+        return planning > 0
     if name in {"correctness_reviewer", "security_reviewer",
                 "architecture_reviewer", "test_reviewer",
                 "performance_reviewer", "simplicity_reviewer",
@@ -3394,7 +3394,7 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
         if name in planner_names:
             should_enable = ready >= 10
         elif name in implementer_names:
-            should_enable = False
+            should_enable = planning > 0
         elif name in reviewer_names:
             should_enable = verifying > 0 or reviewing > 0
         elif name in discovery_names:
@@ -5199,7 +5199,8 @@ def main() -> None:
                           "backend_implementer", "backend_implementer-2",
                           "frontend_implementer", "test_implementer",
                           "migration_implementer", "documentation_implementer"}:
-                continue
+                if planning == 0:
+                    continue
             elif name in {"correctness_reviewer", "security_reviewer",
                           "architecture_reviewer", "test_reviewer",
                           "performance_reviewer", "simplicity_reviewer",

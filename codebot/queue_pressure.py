@@ -127,6 +127,8 @@ def calculate_pressure(
     backlog_low_watermark: int = 20,
     backlog_target: int = 50,
     backlog_high_watermark: int = 100,
+    discovery_currently_active: bool = False,
+    discovery_close_threshold: int = 20,
 ) -> QueuePressure:
     if pipeline_state is not None and ready_count is None:
         ps = pipeline_state
@@ -217,8 +219,12 @@ def calculate_pressure(
     target = backlog_target
     high = backlog_high_watermark
 
-    if non_complete_total > 0:
-        # Pipeline still has work — suppress discovery entirely
+    if discovery_currently_active:
+        discovery_should_suppress = non_complete_total >= discovery_close_threshold
+    else:
+        discovery_should_suppress = non_complete_total > 0
+
+    if discovery_should_suppress:
         discovery_pressure = 0.0
         if backlog >= high:
             backlog_ratio = 1.0
