@@ -147,6 +147,60 @@ Deployed telemetry drives new tickets through normal pipeline.
 **Current state**: Architecture designed (telemetry → structured evidence → ticket candidate → pipeline). Not implemented.
 **Gap**: No telemetry ingestion endpoint. No production monitoring integration.
 
+### Goal 13: Frontend Architecture and UI Engineering (ROADMAP §25)
+CodeBot must build complete, production-quality frontend applications with component architecture, design system integration, responsive layouts, and animation/motion design.
+
+**Current state**: No frontend-specific roles, prompts, or quality gates exist. Discovery agents don't audit UI.
+**Gap**: Need frontend_implementer role with CSS/HTML/JS tool policies, UX auditor integration into ticket pipeline, design token enforcement, responsive layout generation, and Core Web Vitals quality gates.
+
+### Goal 14: Accessibility Engineering (ROADMAP §26)
+Every web application CodeBot produces must meet WCAG 2.2 AA compliance. Semantic HTML, keyboard navigation, ARIA attributes, color contrast, and form accessibility are mandatory, not optional.
+
+**Current state**: ux_auditor role exists but isn't wired into the quality gate pipeline. No automated a11y scanning in CI.
+**Gap**: Wire ux_auditor findings into ticket creation, add axe-core or equivalent to quality gates, enforce contrast ratios and keyboard accessibility in review criteria.
+
+### Goal 15: Web Security Hardening (ROADMAP §27)
+Security must be structural. Input validation, auth/session management, authorization, HTTP security headers, CSRF protection, and injection prevention are baseline requirements for every web app.
+
+**Current state**: security_auditor and security_reviewer roles exist. SSRF guard in web_tools.py. Tool policy sandboxing.
+**Gap**: No CSP generation, no auth flow scaffolding, no automated OWASP scanning in quality gates, no session management templates. Security review is adversarial but not generative.
+
+### Goal 16: API Design and Backend Engineering (ROADMAP §28)
+RESTful API design, versioning, rate limiting, middleware pipelines, and WebSocket support must be first-class capabilities.
+
+**Current state**: backend_implementer role exists. API tools (read/write/edit/bash/grep/glob) available.
+**Gap**: No API contract generation, no middleware pipeline scaffolding, no rate limiter implementation, no WebSocket support in tool surface.
+
+### Goal 17: Comprehensive Testing Strategy (ROADMAP §29)
+Unit, integration, E2E, performance, and security testing must be generated alongside every feature. Coverage thresholds enforced in CI.
+
+**Current state**: test_implementer and test_gap_auditor roles exist. pytest configured. coverage_bridge generates tickets from gaps.
+**Gap**: No E2E test generation (Playwright/Cypress), no performance test scaffolding, no security test automation, no visual regression testing.
+
+### Goal 18: Performance Optimization (ROADMAP §30)
+Core Web Vitals, backend caching, asset optimization, and database query performance must be engineered proactively.
+
+**Current state**: performance_auditor and performance_reviewer roles exist.
+**Gap**: No bundle analysis, no caching layer generation, no CDN configuration, no database query profiling in quality gates.
+
+### Goal 19: State Management and Data Flow (ROADMAP §31)
+Client-side state architecture, server-side caching, and form state management must follow established patterns.
+
+**Current state**: No state management roles or templates.
+**Gap**: Need state management scaffolding (Redux/Zustand/Pinia patterns), cache invalidation strategies, form state persistence.
+
+### Goal 20: Error Handling and Resilience (ROADMAP §32)
+Error boundaries, network resilience, graceful degradation, and circuit breakers must be standard patterns.
+
+**Current state**: auto_revert.py handles build gate failures. Task splitter decomposes oversized work.
+**Gap**: No error boundary generation, no retry/backoff scaffolding, no circuit breaker patterns, no offline-first support.
+
+### Goal 21: i18n, Deployment, DX, SEO, and Data Engineering (ROADMAP §33-37)
+Internationalization, containerization, CI/CD pipelines, code quality enforcement, SEO optimization, and data layer engineering round out the full-stack capability.
+
+**Current state**: Dockerfile exists. CI/CD partially configured (Fly.io). Linting configured per-project.
+**Gap**: No i18n extraction, no CI/CD pipeline generation, no OpenAPI spec generation, no structured data/SEO scaffolding, no database migration safety patterns.
+
 ---
 
 ## Version Milestones

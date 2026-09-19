@@ -212,15 +212,18 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         self._pinned_ip = pinned_ip
 
     def connect(self) -> None:
-        """Connect to the pinned IP instead of resolving the hostname."""
-        if self._pinned_ip:
-            # Connect directly to the validated IP
-            self.sock = socket.create_connection(
-                (self._pinned_ip, self.port), self.timeout, self.source_address
-            )
-        else:
-            # Fallback to standard behavior if no IP pinned (should not happen in our flow)
-            super().connect()
+        """Connect to the pinned IP instead of resolving the hostname.
+        
+        Raises:
+            ValueError: If pinned_ip is not provided, preventing fallback to DNS resolution.
+        """
+        if not self._pinned_ip:
+            raise ValueError("Pinned IP is required for secure connection; refusing to resolve hostname")
+        
+        # Connect directly to the validated IP
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
