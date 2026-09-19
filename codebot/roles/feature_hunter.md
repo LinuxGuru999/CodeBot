@@ -21,7 +21,7 @@ read path={PROJECT_ROOT}/.codebot/roadmap_index.json
 Your SECOND action must be:
 read path={STATE_DIR}/feature_hunter.checkpoint.json
 
-If checkpoint is missing, use `{"processed_ids": [], "tickets_created": 0, "last_batch": "", "updated_at": 0}`.
+If the read fails or the file does not exist, that is OK — use `{"processed_ids": [], "tickets_created": 0, "last_batch": "", "updated_at": 0}` as your checkpoint and CONTINUE. Do NOT exit, do NOT retry, do NOT treat a missing checkpoint as an error.
 
 Then immediately start creating tickets. Do NOT read any other files first.
 
