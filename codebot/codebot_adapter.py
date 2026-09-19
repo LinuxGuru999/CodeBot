@@ -182,6 +182,21 @@ class CodeBotAdapter(ProjectAdapter):
                 "runner_mode": "api",
                 "category": role.category.value,
             })
+            if role.name == "implementation_planner":
+                for i in range(2, 5):
+                    registry.append({
+                        "name": f"implementation_planner-{i}",
+                        "prompt": f"codebot/roles/{role.name}.md",
+                        "interval": interval,
+                        "model": model,
+                        "fallback_model": fallback,
+                        "tier": 2,
+                        "enabled": True,
+                        "max_restarts": 5,
+                        "clean_exit_wait": True,
+                        "runner_mode": "api",
+                        "category": role.category.value,
+                    })
         return registry
 
     def model_profiles(self) -> dict[str, dict[str, Any]]:

@@ -253,6 +253,9 @@ ALWAYS_RESPAWN = frozenset({
     "documentation_reviewer",
     "feature_decomposer",
     "implementation_planner",
+    "implementation_planner-2",
+    "implementation_planner-3",
+    "implementation_planner-4",
 })
 
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
@@ -2977,7 +2980,7 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
                     logger.info(f"[queue-scale] Suppressed '{name}': ready backlog full ({ready_count} > {backlog_high})")
             elif discovered_count <= 50 and ready_count <= backlog_high and not bot.config.enabled:
                 bot.config.enabled = True
-        elif base_role == "implementation_planner":
+        elif base_role == "implementation_planner" or base_role.startswith("implementation_planner-"):
             if ready_count > 0 and not bot.config.enabled:
                 bot.config.enabled = True
                 logger.info(f"[queue-scale] Enabled '{name}': {ready_count} tickets need plans")
