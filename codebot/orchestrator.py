@@ -242,15 +242,7 @@ RATE_LIMIT_DISABLE_AFTER = int(os.getenv("CODEBOT_RATE_LIMIT_DISABLE_AFTER", "20
 _metrics_tick = 0
 
 ALWAYS_RESPAWN = frozenset({
-    "bug_hunter", "security_auditor", "architecture_auditor",
-    "performance_auditor", "test_gap_auditor", "documentation_auditor",
-    "dependency_auditor", "ux_auditor", "feature_hunter",
-    "general_implementer", "backend_implementer", "frontend_implementer",
-    "test_implementer", "migration_implementer", "documentation_implementer",
     "scheduler", "conflict_resolver", "budget_controller",
-    "correctness_reviewer", "security_reviewer", "architecture_reviewer",
-    "test_reviewer", "performance_reviewer", "simplicity_reviewer",
-    "documentation_reviewer",
     "feature_decomposer",
     "implementation_planner",
     "implementation_planner-2",
@@ -2096,7 +2088,7 @@ def _count_running_by_category(bots: dict[str, BotState] | None) -> tuple[int, i
 
 
 _last_spawn_time: float = 0.0
-_SPAWN_STAGGER_SECONDS: float = 3.0
+_SPAWN_STAGGER_SECONDS: float = 20.0
 
 
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False, runner_mode: str = "api", bot_model: str = "", bot_name: str = "", is_overture: bool = False) -> tuple[bool, str]:
@@ -3196,6 +3188,7 @@ def _get_pipeline_state() -> dict[str, int]:
         from codebot.ticket_engine import TicketStore, TicketState
         store_path = STATE_DIR / "tickets.json"
         if not store_path.exists():
+            logger.info("_get_pipeline_state: tickets.json not found at %s", store_path)
             return {}
         store = TicketStore(store_path)
         counts: dict[str, int] = {}
@@ -3203,20 +3196,22 @@ def _get_pipeline_state() -> dict[str, int]:
             tickets = store.list_by_state(state)
             if tickets:
                 counts[state.value] = len(tickets)
+        logger.info("_get_pipeline_state: %s", counts)
         return counts
-    except Exception:
+    except Exception as e:
+        logger.info("_get_pipeline_state failed: %s %s", type(e).__name__, e)
         return {}
 
 
 def _compute_dynamic_priority(pipeline: dict[str, int]) -> dict[str, int]:
-    ready = pipeline.get("ready", 0)
-    planning = pipeline.get("planning", 0)
-    implementing = pipeline.get("implementing", 0)
-    reviewing = pipeline.get("reviewing", 0)
-    verifying = pipeline.get("verifying", 0)
-    discovered = pipeline.get("discovered", 0)
-    triaged = pipeline.get("triaged", 0)
-    complete = pipeline.get("complete", 0)
+    ready = pipeline.get("READY", 0)
+    planning = pipeline.get("PLANNING", 0)
+    implementing = pipeline.get("IMPLEMENTING", 0)
+    reviewing = pipeline.get("REVIEWING", 0)
+    verifying = pipeline.get("VERIFYING", 0)
+    discovered = pipeline.get("DISCOVERED", 0)
+    triaged = pipeline.get("TRIAGED", 0)
+    complete = pipeline.get("COMPLETE", 0)
     total_non_complete = ready + planning + implementing + reviewing + verifying + discovered + triaged
 
     priorities: dict[str, int] = {}
@@ -3274,13 +3269,47 @@ def _compute_dynamic_priority(pipeline: dict[str, int]) -> dict[str, int]:
     return priorities
 
 
+def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
+    ready = pipeline.get("READY", 0)
+    implementing = pipeline.get("IMPLEMENTING", 0)
+    verifying = pipeline.get("VERIFYING", 0)
+    discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("TRIAGED", 0)
+    reviewing = pipeline.get("REVIEWING", 0)
+    planning = pipeline.get("PLANNING", 0)
+
+    always_on = {"scheduler", "conflict_resolver", "budget_controller", "feature_decomposer"}
+    if name in always_on:
+        return True
+    if name in {"implementation_planner", "implementation_planner-2",
+                "implementation_planner-3", "implementation_planner-4"}:
+        return ready >= 10
+    if name in {"general_implementer", "general_implementer-2",
+                "general_implementer-3", "general_implementer-4",
+                "backend_implementer", "backend_implementer-2",
+                "frontend_implementer", "test_implementer",
+                "migration_implementer", "documentation_implementer"}:
+        return implementing > 0 or planning > 0
+    if name in {"correctness_reviewer", "security_reviewer",
+                "architecture_reviewer", "test_reviewer",
+                "performance_reviewer", "simplicity_reviewer",
+                "documentation_reviewer"}:
+        return verifying > 0 or reviewing > 0
+    if name in {"bug_hunter", "security_auditor", "architecture_auditor",
+                "performance_auditor", "test_gap_auditor",
+                "documentation_auditor", "dependency_auditor",
+                "ux_auditor", "feature_hunter"}:
+        return ready == 0 and discovered >= 20
+    return True
+
+
 def _apply_agent_availability(bots: dict[str, BotState]) -> None:
     pipeline = _get_pipeline_state()
-    ready = pipeline.get("ready", 0)
-    implementing = pipeline.get("implementing", 0)
-    verifying = pipeline.get("verifying", 0)
-    discovered = pipeline.get("discovered", 0) + pipeline.get("triaged", 0)
-    reviewing = pipeline.get("reviewing", 0)
+    ready = pipeline.get("READY", 0)
+    implementing = pipeline.get("IMPLEMENTING", 0)
+    verifying = pipeline.get("VERIFYING", 0)
+    discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("TRIAGED", 0)
+    reviewing = pipeline.get("REVIEWING", 0)
+    planning = pipeline.get("PLANNING", 0)
 
     planner_names = {"implementation_planner", "implementation_planner-2",
                      "implementation_planner-3", "implementation_planner-4"}
@@ -3297,9 +3326,14 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
                        "performance_auditor", "test_gap_auditor",
                        "documentation_auditor", "dependency_auditor",
                        "ux_auditor", "feature_hunter"}
+    always_on = {"scheduler", "conflict_resolver", "budget_controller",
+                 "feature_decomposer"}
 
     for name, bot in bots.items():
         if not bot.config.enabled:
+            continue
+
+        if name in always_on:
             continue
 
         should_enable = True
@@ -3307,11 +3341,11 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
         if name in planner_names:
             should_enable = ready >= 10
         elif name in implementer_names:
-            should_enable = implementing > 0 or ready > 50
+            should_enable = implementing > 0 or planning > 0
         elif name in reviewer_names:
             should_enable = verifying > 0 or reviewing > 0
         elif name in discovery_names:
-            should_enable = discovered >= 20
+            should_enable = ready == 0 and discovered >= 20
 
         if not should_enable and bot.process is not None and bot.process.poll() is None:
             try:
@@ -4613,7 +4647,11 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 logger.info(f"Bot '{name}' completed cleanly — next run in {bot.config.interval_seconds}s")
                 update_bot_state(bot, "waiting")
             else:
-                start_bot(bot, bots=bots)
+                pipeline = _get_pipeline_state()
+                if _is_needed_bot(name, pipeline):
+                    start_bot(bot, bots=bots)
+                else:
+                    logger.info(f"Bot '{name}' skipped respawn — not needed (pipeline ready={pipeline.get('READY',0)})")
             continue
         if not alive and bot.process is None:
             if is_draining():
@@ -4621,13 +4659,18 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             if bot.next_run_at and now < bot.next_run_at:
                 continue
             if bot.next_run_at and now >= bot.next_run_at:
-                ok, why = _spawn_gate(bots=bots, is_queued=False, bot_name=name)
-                if ok:
-                    logger.info(f"Bot '{name}' interval elapsed — respawning (model {bot.config.model})")
-                    start_bot(bot, bots=bots)
+                pipeline = _get_pipeline_state()
+                if _is_needed_bot(name, pipeline):
+                    ok, why = _spawn_gate(bots=bots, is_queued=False, bot_name=name)
+                    if ok:
+                        logger.info(f"Bot '{name}' interval elapsed — respawning (model {bot.config.model})")
+                        start_bot(bot, bots=bots)
+                    else:
+                        logger.info(f"Bot '{name}' interval elapsed — queued ({why})")
+                        update_bot_state(bot, "queued")
                 else:
-                    logger.info(f"Bot '{name}' interval elapsed — queued ({why})")
-                    update_bot_state(bot, "queued")
+                    bot.next_run_at = now + bot.config.interval_seconds
+                    update_bot_state(bot, "waiting")
             continue
         if alive and is_stuck(bot):
             eff = effective_heartbeat_timeout(bot)
@@ -5050,12 +5093,51 @@ def main() -> None:
         _clean_stale_heartbeats()
         for bot in bots.values():
             bot._assigned_ticket_id = ''
+        pipeline = _get_pipeline_state()
+        dynamic = _compute_dynamic_priority(pipeline)
+        ready = pipeline.get("READY", 0)
+        implementing = pipeline.get("IMPLEMENTING", 0)
+        verifying = pipeline.get("VERIFYING", 0)
+        discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("TRIAGED", 0)
+        planning = pipeline.get("PLANNING", 0)
+        logger.info(f"Overture: pipeline ready={ready} plan={planning} impl={implementing} verify={verifying} disc={discovered}")
         order = sorted(
             [b for b in bots.values() if b.config.enabled],
-            key=lambda b: (TIER_PRIORITY.get(b.config.name, 2), b.config.interval_seconds),
+            key=lambda b: (dynamic.get(b.config.name, TIER_PRIORITY.get(b.config.name, 2)), b.config.interval_seconds),
         )
-        logger.info(f"Overture: {len(order)} bots tier-ordered, staggered start ({_SPAWN_STAGGER_SECONDS}s interval)")
+        needed = []
+        always_on = {"scheduler", "conflict_resolver", "budget_controller", "feature_decomposer"}
         for bot in order:
+            name = bot.config.name
+            if name in always_on:
+                needed.append(bot)
+                continue
+            if name in {"implementation_planner", "implementation_planner-2",
+                        "implementation_planner-3", "implementation_planner-4"}:
+                if ready < 10:
+                    continue
+            elif name in {"general_implementer", "general_implementer-2",
+                          "general_implementer-3", "general_implementer-4",
+                          "backend_implementer", "backend_implementer-2",
+                          "frontend_implementer", "test_implementer",
+                          "migration_implementer", "documentation_implementer"}:
+                if implementing == 0 and planning == 0:
+                    continue
+            elif name in {"correctness_reviewer", "security_reviewer",
+                          "architecture_reviewer", "test_reviewer",
+                          "performance_reviewer", "simplicity_reviewer",
+                          "documentation_reviewer"}:
+                if verifying == 0:
+                    continue
+            elif name in {"bug_hunter", "security_auditor", "architecture_auditor",
+                          "performance_auditor", "test_gap_auditor",
+                          "documentation_auditor", "dependency_auditor",
+                          "ux_auditor", "feature_hunter"}:
+                if ready > 0:
+                    continue
+            needed.append(bot)
+        logger.info(f"Overture: {len(needed)}/{len(order)} bots needed, staggered start ({_SPAWN_STAGGER_SECONDS}s interval)")
+        for bot in needed:
             start_bot(bot, bots=bots, is_overture=True)
             time.sleep(_SPAWN_STAGGER_SECONDS)
 
