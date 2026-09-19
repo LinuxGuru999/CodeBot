@@ -359,11 +359,11 @@ class TestAutoCommitGatekeeperFailClosed:
         adapter = self._make_adapter(tmp_path)
         (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
         (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
-        mock_gk = MagicMock()
-        mock_gk.verify_ticket.side_effect = RuntimeError("gatekeeper crashed")
+        mock_gk_cls = MagicMock()
+        mock_gk_cls.return_value.verify_ticket.side_effect = RuntimeError("gatekeeper crashed")
         with patch("codebot.api_runner._adapter_instance", adapter), \
              patch("codebot.api_runner.WORK_ROOT", tmp_path), \
-             patch("codebot.api_runner.Gatekeeper", mock_gk, create=True), \
+             patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
              patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
             _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
             # bash should NOT have been called for git add/commit since gatekeeper crashed
@@ -376,15 +376,15 @@ class TestAutoCommitGatekeeperFailClosed:
         adapter = self._make_adapter(tmp_path)
         (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
         (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
-        mock_gk = MagicMock()
-        mock_gk.verify_ticket.return_value = {
+        mock_gk_cls = MagicMock()
+        mock_gk_cls.return_value.verify_ticket.return_value = {
             "decision": "REWORK",
             "failed_gates": ["pytest"],
             "passed": False,
         }
         with patch("codebot.api_runner._adapter_instance", adapter), \
              patch("codebot.api_runner.WORK_ROOT", tmp_path), \
-             patch("codebot.api_runner.Gatekeeper", return_value=mock_gk, create=True), \
+             patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
              patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
             _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
             # bash should NOT have been called for git add since gatekeeper returned REWORK
@@ -397,15 +397,15 @@ class TestAutoCommitGatekeeperFailClosed:
         adapter = self._make_adapter(tmp_path)
         (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
         (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
-        mock_gk = MagicMock()
-        mock_gk.verify_ticket.return_value = {
+        mock_gk_cls = MagicMock()
+        mock_gk_cls.return_value.verify_ticket.return_value = {
             "decision": "COMPLETE",
             "failed_gates": [],
             "passed": True,
         }
         with patch("codebot.api_runner._adapter_instance", adapter), \
              patch("codebot.api_runner.WORK_ROOT", tmp_path), \
-             patch("codebot.api_runner.Gatekeeper", return_value=mock_gk, create=True), \
+             patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
              patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
             _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
             # bash SHOULD have been called for git add since gatekeeper returned COMPLETE

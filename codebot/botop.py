@@ -1165,23 +1165,21 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             rw = _ticket_rework(t)
             rw_s = f" R{rw}" if rw else ""
             print(f"  [{_ansi_pad(_severity_color(sev, enabled), 10)}] {_ticket_id(t):<18s}{rw_s} {_ticket_title(t)}")
-            # ANSI-aware padding via _ansi_pad()
     else:
-        for st in ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]:
+        pipeline = ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE"]
+        side_states = ["REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]
+
+        def _show_state(st: str) -> None:
             subset = [t for t in tickets if _ticket_state(t).upper() == st]
             count = len(subset)
             indicator = _c("●", "green", enabled) if count > 0 else _c("○", "gray", enabled)
-            if count == 0:
-                print(f"\n{indicator} {st} (0):")
-                print("  (empty)")
-                continue
             print(f"\n{indicator} {st} ({count}):")
-            # sort READY by severity
+            if count == 0:
+                print("  (empty)")
+                return
             if st == "READY":
                 sev_order = {"critical":0,"high":1,"medium":2,"low":3}
-                def _sev_key(x):
-                    return sev_order.get(_ticket_sev(x).lower(), 99)
-                subset = sorted(subset, key=_sev_key)
+                subset = sorted(subset, key=lambda x: sev_order.get(_ticket_sev(x).lower(), 99))
             for t in subset[:limit]:
                 sev = _ticket_sev(t)
                 tid = _ticket_id(t)
@@ -1189,8 +1187,17 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
                 rw = _ticket_rework(t)
                 rw_s = f" R{rw}" if rw else ""
                 print(f"  [{_ansi_pad(_severity_color(sev, enabled), 18)}] {tid:<20s}{rw_s} {title}")
-            if len(subset) > limit:
-                print(f"  ... +{len(subset)-limit} more (use --limit {limit*2})")
+            if count > limit:
+                print(f"  ... +{count-limit} more (use --limit {limit*2})")
+
+        print(_c("\n── Pipeline ──", "bold", enabled))
+        for st in pipeline:
+            _show_state(st)
+
+        print(_c("\n── Side States ──", "bold", enabled))
+        for st in side_states:
+            _show_state(st)
+
     return 0
 
 

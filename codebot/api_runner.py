@@ -178,10 +178,12 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> None:
             if result.get("decision") != "COMPLETE":
                 _log(f"{bot_name}: gatekeeper BLOCKED commit — decision={result.get('decision')} failed_gates={result.get('failed_gates', [])}")
                 return
-        except ImportError:
-            pass
+        except ImportError as imp_err:
+            _log(f"{bot_name}: gatekeeper unavailable (BLOCKING commit): {imp_err}")
+            return
         except Exception as gk_err:
-            _log(f"{bot_name}: gatekeeper check failed (allowing commit): {gk_err}")
+            _log(f"{bot_name}: gatekeeper check failed (BLOCKING commit): {gk_err}")
+            return
 
     repos = set()
     for f in files_touched:
