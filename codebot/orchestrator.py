@@ -3425,6 +3425,7 @@ def _get_pipeline_state() -> dict[str, int]:
 
 def _compute_dynamic_priority(pipeline: dict[str, int]) -> dict[str, int]:
     ready = pipeline.get("READY", 0)
+    decompose = pipeline.get("DECOMPOSE", 0)
     planning = pipeline.get("PLANNING", 0)
     implementing = pipeline.get("IMPLEMENTING", 0)
     reviewing = pipeline.get("REVIEWING", 0)
@@ -3432,7 +3433,7 @@ def _compute_dynamic_priority(pipeline: dict[str, int]) -> dict[str, int]:
     discovered = pipeline.get("DISCOVERED", 0)
     triaged = pipeline.get("TRIAGED", 0)
     complete = pipeline.get("COMPLETE", 0)
-    total_non_complete = ready + planning + implementing + reviewing + verifying + discovered + triaged
+    total_non_complete = ready + decompose + planning + implementing + reviewing + verifying + discovered + triaged
 
     priorities: dict[str, int] = {}
 
@@ -3518,22 +3519,20 @@ def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
         return reviewing > 0
     if name in {"quality_gate"}:
         return verifying > 0
-    if name in {"bug_hunter", "security_auditor", "architecture_auditor",
-                "performance_auditor", "test_gap_auditor",
-                "documentation_auditor", "dependency_auditor",
-                "ux_auditor", "feature_hunter"}:
-        return False
-    return True
+    if name == "ticket_triager":
+        discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("VALIDATING", 0) + pipeline.get("TRIAGED", 0)
+        return discovered > 0
+    return False
 
 
 def _apply_agent_availability(bots: dict[str, BotState]) -> None:
     pipeline = _get_pipeline_state()
     ready = pipeline.get("READY", 0)
-    implementing = pipeline.get("IMPLEMENTING", 0)
-    verifying = pipeline.get("VERIFYING", 0)
-    discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("TRIAGED", 0)
-    reviewing = pipeline.get("REVIEWING", 0)
+    decompose = pipeline.get("DECOMPOSE", 0)
     planning = pipeline.get("PLANNING", 0)
+    implementing = pipeline.get("IMPLEMENTING", 0)
+    reviewing = pipeline.get("REVIEWING", 0)
+    verifying = pipeline.get("VERIFYING", 0)
 
     planner_names = {"implementation_planner", "implementation_planner-2",
                      "implementation_planner-3", "implementation_planner-4"}
@@ -3545,7 +3544,7 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
     reviewer_names = {"correctness_reviewer", "security_reviewer",
                       "architecture_reviewer", "test_reviewer",
                       "performance_reviewer", "simplicity_reviewer",
-                      "documentation_reviewer"}
+                      "documentation_reviewer", "ux_reviewer"}
     discovery_names = {"bug_hunter", "security_auditor", "architecture_auditor",
                        "performance_auditor", "test_gap_auditor",
                        "documentation_auditor", "dependency_auditor",
@@ -3561,12 +3560,14 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
 
         should_enable = True
 
-        if name in planner_names:
-            should_enable = ready >= 10
-        elif name in implementer_names:
+        if name == "decomposer" or name.startswith("decomposer-"):
+            should_enable = decompose > 0 or ready > 0
+        elif name in planner_names:
             should_enable = planning > 0
+        elif name in implementer_names:
+            should_enable = implementing > 0
         elif name in reviewer_names:
-            should_enable = verifying > 0 or reviewing > 0
+            should_enable = reviewing > 0
         elif name in discovery_names:
             should_enable = False
 
@@ -5339,45 +5340,20 @@ def main() -> None:
         pipeline = _get_pipeline_state()
         dynamic = _compute_dynamic_priority(pipeline)
         ready = pipeline.get("READY", 0)
+        decompose = pipeline.get("DECOMPOSE", 0)
         implementing = pipeline.get("IMPLEMENTING", 0)
         verifying = pipeline.get("VERIFYING", 0)
         discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("TRIAGED", 0)
         planning = pipeline.get("PLANNING", 0)
-        logger.info(f"Overture: pipeline ready={ready} plan={planning} impl={implementing} verify={verifying} disc={discovered}")
+        logger.info(f"Overture: pipeline ready={ready} decomp={decompose} plan={planning} impl={implementing} verify={verifying} disc={discovered}")
         order = sorted(
             [b for b in bots.values() if b.config.enabled],
             key=lambda b: (dynamic.get(b.config.name, TIER_PRIORITY.get(b.config.name, 2)), b.config.interval_seconds),
         )
         needed = []
-        always_on = {"scheduler", "conflict_resolver", "budget_controller"}
         for bot in order:
-            name = bot.config.name
-            if name in always_on:
+            if _is_needed_bot(bot.config.name, pipeline):
                 needed.append(bot)
-                continue
-            if name in {"implementation_planner", "implementation_planner-2",
-                        "implementation_planner-3", "implementation_planner-4"}:
-                if ready < 10:
-                    continue
-            elif name in {"general_implementer", "general_implementer-2",
-                          "general_implementer-3", "general_implementer-4",
-                          "backend_implementer", "backend_implementer-2",
-                          "frontend_implementer", "test_implementer",
-                          "migration_implementer", "documentation_implementer"}:
-                if planning == 0:
-                    continue
-            elif name in {"correctness_reviewer", "security_reviewer",
-                          "architecture_reviewer", "test_reviewer",
-                          "performance_reviewer", "simplicity_reviewer",
-                          "documentation_reviewer"}:
-                if verifying == 0:
-                    continue
-            elif name in {"bug_hunter", "security_auditor", "architecture_auditor",
-                          "performance_auditor", "test_gap_auditor",
-                          "documentation_auditor", "dependency_auditor",
-                          "ux_auditor", "feature_hunter"}:
-                continue
-            needed.append(bot)
         logger.info(f"Overture: {len(needed)}/{len(order)} bots needed, staggered start ({_SPAWN_STAGGER_SECONDS}s interval)")
         for bot in needed:
             start_bot(bot, bots=bots, is_overture=True)
