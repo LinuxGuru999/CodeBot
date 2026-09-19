@@ -76,6 +76,8 @@ def allowlisted_command(command: str) -> list[str] | None:
         if len(argv) >= 4 and argv[1] == "-C":
             if ".." in argv[2]:
                 return None
+            if argv[2].startswith("/"):
+                return None
             offset = 3
         if len(argv) < offset + 1 or argv[offset] not in ALLOWED_GIT_SUBCOMMANDS:
             return None
@@ -91,6 +93,8 @@ def allowlisted_command(command: str) -> list[str] | None:
                 return None
             if ".." in token:
                 return None
+            if token.startswith("/"):
+                return None
         return argv
     if argv[0] in ("pytest", "python3", "python") or argv[0] in ALLOWED_PYTHON_COMMANDS:
         for token in argv[1:]:
@@ -99,10 +103,14 @@ def allowlisted_command(command: str) -> list[str] | None:
                     return None
             elif ".." in token:
                 return None
+            elif token.startswith("/"):
+                return None
         return argv
     if argv[0] in ALLOWED_BARE_COMMANDS:
         for token in argv[1:]:
             if ".." in token:
+                return None
+            if token.startswith("/"):
                 return None
         return argv
     if argv[0] == "gh":
@@ -110,6 +118,8 @@ def allowlisted_command(command: str) -> list[str] | None:
             return None
         for token in argv[2:]:
             if ".." in token:
+                return None
+            if token.startswith("/"):
                 return None
             if token in DANGEROUS_GH_ARGS:
                 return None
