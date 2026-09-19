@@ -759,11 +759,23 @@ class Handler(BaseHTTPRequestHandler):
         Validates the signal, creates a ticket candidate in DISCOVERED state,
         stores the event for trend analysis, and triggers anomaly detection.
         """
+        # Get client IP for rate limiting
+        client_ip = self.client_address[0] if self.client_address else "unknown"
+
+        # Check rate limit before processing auth
+        allowed, reason = _rate_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning("Rate limit exceeded for telemetry from %s: %s", client_ip, reason)
+            self._json(429, {"error": "too many requests", "reason": reason})
+            return
+
         # Check telemetry-specific auth using constant-time comparison (Constitution §2)
         if TELEMETRY_TOKEN:
             auth = self.headers.get("Authorization", "")
             expected = f"Bearer {TELEMETRY_TOKEN}"
             if not hmac.compare_digest(auth.strip(), expected):
+                _rate_limiter.record_failure(client_ip)
+                logger.warning("Telemetry authentication failed for %s", client_ip)
                 self._json(401, {"error": "unauthorized"})
                 return
         elif not CONTROL_TOKEN:

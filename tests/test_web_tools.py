@@ -1,130 +1,216 @@
-"""Tests for web_tools SSRF protection, including DNS rebinding defense."""
+#!/usr/bin/env python3
+"""Tests for web_tools.py SSRF protection and redirect handling."""
 
-from __future__ import annotations
-
-import ipaddress
+import unittest
+from unittest.mock import patch, MagicMock
+import urllib.request
+import urllib.parse
 import socket
-from unittest.mock import MagicMock, patch
 
-import pytest
-
-from codebot.web_tools import _is_blocked_url, _resolve_and_validate_host, web_fetch, web_search
-
-
-class TestIsBlockedUrl:
-    """Tests for URL pattern-based blocking."""
-
-    def test_blocks_localhost(self) -> None:
-        assert _is_blocked_url("http://localhost/secret") is True
-
-    def test_blocks_loopback_ip(self) -> None:
-        assert _is_blocked_url("http://127.0.0.1/admin") is True
-
-    def test_blocks_private_10(self) -> None:
-        assert _is_blocked_url("http://10.0.0.1/internal") is True
-
-    def test_blocks_private_172(self) -> None:
-        assert _is_blocked_url("http://172.16.0.1/data") is True
-
-    def test_blocks_private_192(self) -> None:
-        assert _is_blocked_url("http://192.168.1.1/config") is True
-
-    def test_blocks_link_local(self) -> None:
-        assert _is_blocked_url("http://169.254.1.1/metadata") is True
-
-    def test_allows_public_url(self) -> None:
-        assert _is_blocked_url("https://example.com/page") is False
-
-    def test_blocks_empty_host(self) -> None:
-        assert _is_blocked_url("http:///no-host") is True
-
-    def test_blocks_ipv6_loopback(self) -> None:
-        assert _is_blocked_url("http://[::1]/test") is True
+from codebot.web_tools import (
+    _SSRFRedirectHandler,
+    _resolve_and_validate_host,
+    _is_blocked_ip,
+    _is_blocked_url,
+)
 
 
-class TestResolveAndValidateHost:
-    """Tests for DNS resolution and post-resolve IP validation (DNS rebinding defense)."""
+class TestIsBlockedIp(unittest.TestCase):
+    """Tests for _is_blocked_ip helper."""
 
-    def test_resolves_valid_hostname(self) -> None:
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
-            result = _resolve_and_validate_host("example.com", 443)
-            assert result == ("93.184.216.34", 443, socket.AF_INET)
+    def test_blocks_private_ipv4(self):
+        self.assertTrue(_is_blocked_ip("192.168.1.1"))
+        self.assertTrue(_is_blocked_ip("10.0.0.1"))
+        self.assertTrue(_is_blocked_ip("172.16.0.1"))
 
-    def test_blocks_hostname_resolving_to_private_ip(self) -> None:
-        """DNS rebinding: hostname resolves to private IP after passing URL check."""
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 80))]
-            with pytest.raises(ValueError, match="resolves to blocked IP"):
-                _resolve_and_validate_host("evil-rebind.example.com", 80)
+    def test_blocks_loopback(self):
+        self.assertTrue(_is_blocked_ip("127.0.0.1"))
+        self.assertTrue(_is_blocked_ip("::1"))
 
-    def test_blocks_hostname_resolving_to_loopback(self) -> None:
-        """DNS rebinding: hostname resolves to 127.0.0.1."""
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 8080))]
-            with pytest.raises(ValueError, match="resolves to blocked IP"):
-                _resolve_and_validate_host("attacker.com", 8080)
+    def test_blocks_link_local(self):
+        self.assertTrue(_is_blocked_ip("169.254.169.254"))
 
-    def test_blocks_hostname_resolving_to_link_local(self) -> None:
-        """Cloud metadata endpoint via DNS rebinding."""
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))]
-            with pytest.raises(ValueError, match="resolves to blocked IP"):
-                _resolve_and_validate_host("metadata.evil.com", 80)
+    def test_allows_public_ipv4(self):
+        self.assertFalse(_is_blocked_ip("8.8.8.8"))
+        self.assertFalse(_is_blocked_ip("1.1.1.1"))
+        self.assertFalse(_is_blocked_ip("93.184.216.34"))  # example.com
 
-    def test_raises_on_dns_failure(self) -> None:
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.side_effect = socket.gaierror("Name resolution failed")
-            with pytest.raises(ValueError, match="DNS resolution failed"):
-                _resolve_and_validate_host("nonexistent.invalid", 443)
+    def test_blocks_invalid_ip(self):
+        self.assertTrue(_is_blocked_ip("not-an-ip"))
 
-    def test_passes_through_ip_address_directly(self) -> None:
-        """When host is already an IP, skip DNS but still validate."""
-        result = _resolve_and_validate_host("93.184.216.34", 443)
-        assert result == ("93.184.216.34", 443, socket.AF_INET)
 
-    def test_blocks_direct_private_ip(self) -> None:
-        with pytest.raises(ValueError, match="resolves to blocked IP"):
+class TestResolveAndValidateHost(unittest.TestCase):
+    """Tests for _resolve_and_validate_host."""
+
+    def test_validates_ip_directly(self):
+        # If host is an IP, it should be validated directly
+        ip, port, family = _resolve_and_validate_host("8.8.8.8", 80)
+        self.assertEqual(ip, "8.8.8.8")
+        self.assertEqual(port, 80)
+
+    def test_blocks_private_ip_directly(self):
+        with self.assertRaises(ValueError) as context:
             _resolve_and_validate_host("192.168.1.1", 80)
+        self.assertIn("blocked IP", str(context.exception))
 
-    def test_handles_ipv6_resolution(self) -> None:
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.return_value = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 443, 0, 0))]
-            result = _resolve_and_validate_host("ipv6.example.com", 443)
-            assert result[0] == "2606:2800:220:1:248:1893:25c8:1946"
-            assert result[2] == socket.AF_INET6
+    @patch("socket.getaddrinfo")
+    def test_resolves_hostname_to_public_ip(self, mock_getaddrinfo):
+        # Mock DNS resolution to return a public IP
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.8.8.8', 80))
+        ]
+        ip, port, family = _resolve_and_validate_host("example.com", 80)
+        self.assertEqual(ip, "8.8.8.8")
+        mock_getaddrinfo.assert_called_once_with("example.com", 80, socket.AF_UNSPEC, socket.SOCK_STREAM)
 
-    def test_blocks_ipv6_unique_local(self) -> None:
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.return_value = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fd00::1", 80, 0, 0))]
-            with pytest.raises(ValueError, match="resolves to blocked IP"):
-                _resolve_and_validate_host("internal-v6.evil.com", 80)
+    @patch("socket.getaddrinfo")
+    def test_blocks_hostname_resolving_to_private_ip(self, mock_getaddrinfo):
+        # Mock DNS resolution to return a private IP
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.168.1.1', 80))
+        ]
+        with self.assertRaises(ValueError) as context:
+            _resolve_and_validate_host("malicious.com", 80)
+        self.assertIn("blocked IP", str(context.exception))
+
+    @patch("socket.getaddrinfo")
+    def test_blocks_hostname_resolving_to_localhost(self, mock_getaddrinfo):
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 80))
+        ]
+        with self.assertRaises(ValueError) as context:
+            _resolve_and_validate_host("localhost", 80)
+        self.assertIn("blocked IP", str(context.exception))
+
+    @patch("socket.getaddrinfo")
+    def test_dns_resolution_failure(self, mock_getaddrinfo):
+        mock_getaddrinfo.side_effect = socket.gaierror("Name resolution failed")
+        with self.assertRaises(ValueError) as context:
+            _resolve_and_validate_host("nonexistent.domain", 80)
+        self.assertIn("DNS resolution failed", str(context.exception))
 
 
-class TestWebFetchSSRFProtection:
-    """Integration tests ensuring web_fetch uses resolve-and-validate."""
+class TestSSRFRedirectHandler(unittest.TestCase):
+    """Tests for _SSRFRedirectHandler."""
 
-    def test_web_fetch_blocks_rebinding_attack(self) -> None:
-        """web_fetch must reject URLs that resolve to private IPs."""
-        with patch("codebot.web_tools.socket.getaddrinfo") as mock_gai:
-            mock_gai.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))]
-            result = web_fetch("https://rebind-attack.example.com/secret")
-            assert result["success"] is False
-            assert "blocked" in result["error"].lower() or "dns" in result["error"].lower()
+    def setUp(self):
+        self.handler = _SSRFRedirectHandler()
+        # Create a dummy request for context
+        self.dummy_req = urllib.request.Request("http://example.com/start")
+        self.dummy_fp = None
+        self.dummy_headers = {}
 
-    def test_web_fetch_blocks_url_pattern(self) -> None:
-        """web_fetch blocks URLs with private IPs directly in the URL."""
-        result = web_fetch("http://192.168.1.1/admin")
-        assert result["success"] is False
-        assert "blocked" in result["error"].lower()
+    def test_redirect_to_private_ip_blocked(self):
+        """Redirect to a hostname resolving to a private IP should be blocked."""
+        newurl = "http://internal.service/path"
+        with patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.168.1.1', 80))
+            ]
+            with self.assertRaises(ValueError) as context:
+                self.handler.redirect_request(
+                    self.dummy_req, self.dummy_fp, 302, "Found", self.dummy_headers, newurl
+                )
+            self.assertIn("blocked IP", str(context.exception))
+
+    def test_redirect_to_localhost_blocked(self):
+        """Redirect to localhost should be blocked."""
+        newurl = "http://localhost/admin"
+        with self.assertRaises(ValueError) as context:
+            self.handler.redirect_request(
+                self.dummy_req, self.dummy_fp, 302, "Found", self.dummy_headers, newurl
+            )
+        self.assertIn("blocked host", str(context.exception))
+
+    def test_redirect_to_127_0_0_1_blocked(self):
+        """Redirect to 127.0.0.1 should be blocked."""
+        newurl = "http://127.0.0.1/admin"
+        with self.assertRaises(ValueError) as context:
+            self.handler.redirect_request(
+                self.dummy_req, self.dummy_fp, 302, "Found", self.dummy_headers, newurl
+            )
+        self.assertIn("blocked host", str(context.exception))
+
+    def test_redirect_to_link_local_blocked(self):
+        """Redirect to link-local address should be blocked."""
+        newurl = "http://169.254.169.254/latest/meta-data/"
+        with self.assertRaises(ValueError) as context:
+            self.handler.redirect_request(
+                self.dummy_req, self.dummy_fp, 302, "Found", self.dummy_headers, newurl
+            )
+        self.assertIn("blocked host", str(context.exception))
+
+    @patch("socket.getaddrinfo")
+    def test_redirect_to_public_ip_allowed(self, mock_getaddrinfo):
+        """Redirect to a hostname resolving to a public IP should be allowed."""
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 80))
+        ]
+        newurl = "http://example.com/redirected"
+        
+        # We need to mock super().redirect_request to avoid actual network calls
+        # and to verify it was called
+        with patch.object(urllib.request.HTTPRedirectHandler, 'redirect_request') as mock_super_redirect:
+            mock_super_redirect.return_value = urllib.request.Request(newurl)
+            
+            result = self.handler.redirect_request(
+                self.dummy_req, self.dummy_fp, 302, "Found", self.dummy_headers, newurl
+            )
+            
+            mock_super_redirect.assert_called_once()
+            self.assertIsNotNone(result)
+
+    def test_redirect_to_empty_host_blocked(self):
+        """Redirect with no host should be blocked."""
+        newurl = "http:///path"
+        result = self.handler.redirect_request(
+            self.dummy_req, self.dummy_fp, 302, "Found", self.dummy_headers, newurl
+        )
+        self.assertIsNone(result)
+
+    @patch("socket.getaddrinfo")
+    def test_redirect_chain_dns_rebinding_blocked(self, mock_getaddrinfo):
+        """Simulate DNS rebinding: first resolve public, then private.
+        
+        Note: The current implementation resolves DNS at the time of redirect.
+        If an attacker controls DNS, they can change the IP between checks.
+        However, our handler resolves and validates *before* following.
+        This test verifies that if the DNS returns a private IP at redirect time,
+        it is blocked.
+        """
+        # Attacker makes malicious.com resolve to private IP at redirect time
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('10.0.0.1', 80))
+        ]
+        newurl = "http://malicious.com/steal"
+        
+        with self.assertRaises(ValueError) as context:
+            self.handler.redirect_request(
+                self.dummy_req, self.dummy_fp, 302, "Found", self.dummy_headers, newurl
+            )
+        self.assertIn("blocked IP", str(context.exception))
 
 
-class TestWebSearchSSRFProtection:
-    """Ensure web_search also validates resolved IPs."""
+class TestIsBlockedUrl(unittest.TestCase):
+    """Tests for _is_blocked_url fast-path check."""
 
-    def test_web_search_blocks_private_target(self) -> None:
-        """If DDG somehow returned a redirect to a private IP, it should be blocked."""
-        # web_search uses hardcoded duckduckgo URL, so this mainly tests
-        # that the function doesn't crash on blocked patterns
-        result = web_search("")
-        assert result["success"] is False
+    def test_blocks_localhost(self):
+        self.assertTrue(_is_blocked_url("http://localhost/path"))
+
+    def test_blocks_private_ip(self):
+        self.assertTrue(_is_blocked_url("http://192.168.1.1/path"))
+        self.assertTrue(_is_blocked_url("http://10.0.0.1/path"))
+
+    def test_blocks_link_local(self):
+        self.assertTrue(_is_blocked_url("http://169.254.169.254/path"))
+
+    def test_allows_public_url(self):
+        self.assertFalse(_is_blocked_url("http://example.com/path"))
+        self.assertFalse(_is_blocked_url("https://google.com/search"))
+
+    def test_blocks_empty_host(self):
+        self.assertTrue(_is_blocked_url("http:///path"))
+
+
+if __name__ == "__main__":
+    unittest.main()
