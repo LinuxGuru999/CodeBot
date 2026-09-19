@@ -1778,6 +1778,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     tool_iterations = 0
     total_retries = 0
     timeout_retries = 0
+    MAX_429_RETRIES = 5
     continue_nudges = 0
     exit_reason = "unknown"
     tickets_created = 0
