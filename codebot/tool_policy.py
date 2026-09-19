@@ -97,7 +97,14 @@ def allowlisted_command(command: str) -> list[str] | None:
                 return None
         return argv
     if argv[0] in ("pytest", "python3", "python") or argv[0] in ALLOWED_PYTHON_COMMANDS:
+        in_c_string = False
         for token in argv[1:]:
+            if token == "-c":
+                in_c_string = True
+                continue
+            if in_c_string:
+                in_c_string = False
+                continue
             if token.startswith("-"):
                 if token not in ALLOWED_PYTEST_ARGS and token not in ALLOWED_PYTHON_FLAGS and not token.startswith("--tb=") and not token.startswith("-k"):
                     return None
