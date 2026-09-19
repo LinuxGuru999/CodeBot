@@ -221,6 +221,25 @@ class TestScoreWorkItem:
         assert item_conflict.is_schedulable is False
 
 
+class TestTotalScore:
+    """Regression tests for CB-2987638-E5C0: single total_score property returning .score."""
+
+    @pytest.mark.parametrize("score", [0.0, 10.0, 42.1, 87.3, -5.5, 150.75])
+    def test_total_score_equals_score(self, score):
+        item = ScoredWorkItem(ticket_id="T-001", stage="implementation", score=score, components={})
+        assert item.total_score == item.score
+        assert item.total_score == score
+
+    def test_total_score_matches_scored_item(self):
+        t = make_ticket(severity=Severity.CRITICAL, risk=RiskLevel.LOW)
+        item = score_work_item(t, "implementation", None, AgingCfg(), now=time.time())
+        assert item.total_score == item.score
+
+    def test_single_total_score_definition(self):
+        source = Path(__file__).parent.parent.joinpath("codebot", "work_scorer.py").read_text()
+        assert source.count("def total_score") == 1
+
+
 class TestDependencyUnlock:
     def test_no_graph_returns_zero(self):
         assert compute_dependency_unlock_value("T-001", None, None) == 0.0

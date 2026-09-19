@@ -1788,9 +1788,9 @@ def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_c
     while True:
         ticker += 1
         frame = _render_live_snapshot(project_root, enabled, ticker, interval)
-        # clear screen
+        # clear screen (scroll-safe: omit \033[2J to preserve scrollback/screen-reader buffer)
         if sys.stdout.isatty():
-            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.write("\033[H")  # Move cursor home, but do not clear screen buffer
         else:
             sys.stdout.write("\n" + "="*80 + "\n")
         sys.stdout.write(frame + "\n")
