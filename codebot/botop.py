@@ -1639,8 +1639,11 @@ def cmd_health(project_root: Path, json_out: bool = False) -> int:
 # Live dashboard
 # ---------------------------------------------------------------------------
 
-def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interval: float, detail_lines: int = 0) -> str:
-    """Return a full live frame as string."""
+def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interval: float, detail_lines: int = 0, view: str = "both") -> str:
+    """Return a full live frame as string.
+
+    view: "both" (default), "agents", or "tickets"
+    """
     now = time.time()
     now_h = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     state_dir = _find_state_dir(project_root)

@@ -38,3 +38,11 @@ def test_exception_logging_before_handling():
     assert "log" in source.lower() or "print" in source.lower(), (
         "Exception handling should include logging"
     )
+
+
+def test_process_data_rejects_empty_string():
+    """UX finding: empty strings should be rejected just like None to prevent silent failures."""
+    from codebot.module import process_data
+    
+    with pytest.raises(ValueError, match="Data cannot be empty"):
+        process_data("")
