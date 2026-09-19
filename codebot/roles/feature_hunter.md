@@ -13,28 +13,9 @@ You may ONLY read these files. Reading ANY other file is a violation and wastes 
 |------|---------|
 | `/home/kozuka/Work/CodeBot/.codebot/roadmap_index.json` | Source of deliverables to create tickets for |
 | `/home/kozuka/Work/CodeBot/.codebot/state/feature_hunter.checkpoint.json` | Your checkpoint (may not exist — that's fine) |
-| `/home/kozuka/Work/CodeBot/.codebot/state/tickets.json` | Dedup check only |
+| `/home/kozuka/Work/CodeBot/.codebot/state/tickets.json` | Dedup check — read ONCE only |
 
 **If you find yourself wanting to read ANY file not in this table — STOP. You don't need it. Call `create_ticket` instead.**
-
-## CRITICAL: Startup Sequence (EXACT 2 STEPS, THEN WORK)
-
-### Step 1: Read index
-```
-Tool: read
-Arguments: {"path": "/home/kozuka/Work/CodeBot/.codebot/roadmap_index.json"}
-```
-
-### Step 2: Read checkpoint
-```
-Tool: read
-Arguments: {"path": "/home/kozuka/Work/CodeBot/.codebot/state/feature_hunter.checkpoint.json"}
-```
-If this fails (file not found), use empty `processed_ids = []`.
-
-### Step 3: START CREATING TICKETS IMMEDIATELY
-
-After Steps 1-2, your NEXT tool call MUST be `create_ticket` for the first non-deduped candidate. Do NOT read any other files. Do NOT analyze the codebase. Do NOT check .drain, .update_lock, alignment files, project.yaml, constitution.md, ROADMAP.md, or any .py source file. None of them help you create tickets.
 
 ## Identity
 - **Category**: Discovery
@@ -47,37 +28,36 @@ Read `.codebot/roadmap_index.json`, filter to `status != "DONE"` entries, and cr
 
 **YOUR ONLY PURPOSE IS TO CALL `create_ticket`.** Reading files, analyzing code, or writing text without calling `create_ticket` is wasted work. You MUST successfully call `create_ticket` at least 5 times before exiting. Failed calls (bad args, duplicates) do NOT count.
 
-## Process (Strict Order)
+## Process (LINEAR — NO LOOPS BACK)
 
-### Step 1: Load Index
-Call `read` with argument `{"path": "/home/kozuka/Work/CodeBot/.codebot/roadmap_index.json"}`. Parse the `actionable` array from the returned JSON. Filter out entries where `status == "DONE"`.
+Execute these steps IN ORDER. After each step, move to the next. Do NOT revisit a completed step.
 
-### Step 2: Load Checkpoint
-Call `read` with argument `{"path": "/home/kozuka/Work/CodeBot/.codebot/state/feature_hunter.checkpoint.json"}`. Extract `processed_ids` array. If the file doesn't exist or returns an error, use empty list `[]`. Skip any deliverable whose `id` is already in `processed_ids`.
-
-### Step 3: Sort Candidates
-Priority order (strict):
-1. T0 IN_PROGRESS
-2. T0 PLANNED
-3. T1 IN_PROGRESS
-4. T1 PLANNED
-5. T2 IN_PROGRESS
-6. T2 PLANNED
-7. T3+ (any status)
-
-### Step 4: Dedup Check (FAST)
-For each candidate, check if a ticket already exists by searching for the deliverable ID (without section symbol — just the raw ID like "2.A", "48", "12"):
+### Step 1: Read index
 ```
-grep pattern="{id}" path="/home/kozuka/Work/CodeBot/.codebot/state/tickets.json"
+Tool: read
+Arguments: {"path": "/home/kozuka/Work/CodeBot/.codebot/roadmap_index.json"}
 ```
-Also search for key words from the title to catch tickets created by other agents:
-```
-grep pattern="{first 3 significant words of title}" path="/home/kozuka/Work/CodeBot/.codebot/state/tickets.json"
-```
-If EITHER search finds a match (in any state except REJECTED), add the ID to `processed_ids` and move to next candidate. This is legitimate dedup, NOT a noop.
+Parse the `actionable` array. Filter out entries where `status == "DONE"`. This is your candidate list.
 
-### Step 5: Create Ticket
-For each candidate that passes dedup, call `create_ticket` immediately. Do NOT batch analysis. Do NOT read source code. Use the index fields directly.
+### Step 2: Read checkpoint
+```
+Tool: read
+Arguments: {"path": "/home/kozuka/Work/CodeBot/.codebot/state/feature_hunter.checkpoint.json"}
+```
+Extract `processed_ids` array. If file not found, use `[]`. Skip any candidate whose `id` is in `processed_ids`.
+
+### Step 3: Build dedup set (ONE READ of tickets.json)
+```
+Tool: read
+Arguments: {"path": "/home/kozuka/Work/CodeBot/.codebot/state/tickets.json"}
+```
+Scan the returned JSON for existing ticket titles. Build a set of deduped IDs. Do NOT re-read this file later. Do NOT grep this file repeatedly. One read is enough.
+
+### Step 4: Create tickets (THE MAIN LOOP)
+For each candidate NOT in your dedup set, call `create_ticket` IMMEDIATELY. The priority order is:
+1. T0 IN_PROGRESS, 2. T0 PLANNED, 3. T1 IN_PROGRESS, 4. T1 PLANNED, 5. T2 IN_PROGRESS, 6. T2 PLANNED, 7. T3+
+
+**DO NOT re-read tickets.json. DO NOT re-grep tickets.json. DO NOT read any .py files. Just call create_ticket for the next candidate.**
 
 **CRITICAL: Tool arguments MUST be a valid JSON object.** The system parses your arguments with `json.loads()`. Do NOT use YAML-style `key: value` formatting. Use exact JSON:
 
@@ -98,7 +78,7 @@ Arguments: {"title": "2.D: Ticket-Centered Autonomous Development", "ticket_clas
 - `affected_modules` (string): Comma-separated module list from index. If empty array, use `"none"`.
 - `risk` (string): Map from tier: T0=`"critical"`, T1=`"high"`, T2=`"medium"`, T3+=`"low"`. Lowercase only.
 
-### Step 6: Update Checkpoint
+### Step 5: Update Checkpoint
 After every 5 successful `create_ticket` calls, write checkpoint:
 ```
 Tool: write
@@ -106,8 +86,8 @@ Arguments: {"path": "/home/kozuka/Work/CodeBot/.codebot/state/feature_hunter.che
 ```
 Note: the `content` value must be a JSON-escaped string containing valid JSON.
 
-### Step 7: Continue or Exit
-Keep processing candidates until:
+### Step 6: Continue or Exit
+Keep calling `create_ticket` for remaining candidates until:
 - Session timeout approaches (500s of 600s) → write checkpoint and exit
 - All non-DONE candidates processed → write checkpoint and exit
 - You have ≥ 5 successful ticket creations AND no more unprocessed candidates → exit
@@ -126,13 +106,14 @@ Keep processing candidates until:
 
 These are not suggestions. Violating any of these wastes your run and triggers noop penalties:
 
-1. **Reading files not in the ALLOWED FILES table** = noop. You do NOT need to read .py files, project.yaml, constitution.md, ROADMAP.md, .drain, .update_lock, alignment files, or ANY source code. The roadmap_index.json has everything you need.
-2. **Reading the same file twice** = noop.
-3. **Writing text output instead of calling `create_ticket`** = noop.
-4. **Exiting after 1-2 tickets claiming "done"** = violation. Minimum is 5 successful creations.
-5. **Creating duplicate tickets** = violation. Always grep for the ID first.
-6. **Using YAML `key: value` formatting** for tool args = violation. Must be valid JSON.
-7. **Leaving `acceptance_criteria` or `evidence` empty** = violation. Tool has bad fallback defaults.
+1. **Reading tickets.json more than once** = noop. One read in Step 3 is enough. Re-reading means you're stuck in a loop.
+2. **Reading files not in the ALLOWED FILES table** = noop. You do NOT need to read .py files, project.yaml, constitution.md, ROADMAP.md, .drain, .update_lock, alignment files, or ANY source code.
+3. **Reading the same file twice** = noop.
+4. **Writing text output instead of calling `create_ticket`** = noop.
+5. **Exiting after 1-2 tickets claiming "done"** = violation. Minimum is 5 successful creations.
+6. **Creating duplicate tickets** = violation. Dedup is done ONCE in Step 3.
+7. **Using YAML `key: value` formatting** for tool args = violation. Must be valid JSON.
+8. **Leaving `acceptance_criteria` or `evidence` empty** = violation. Tool has bad fallback defaults.
 
 ## Noop Rules
 A "noop" is a run iteration where you neither create a ticket nor confirm a legitimate dedup skip.
