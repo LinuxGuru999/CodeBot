@@ -11,10 +11,6 @@ Systematic planner who unblocks the fleet. Every ticket with risk >= MEDIUM need
 
 ## CRITICAL: First Action After Startup
 
-SKIP all boilerplate checks. Do NOT read .drain, .update_lock,
-alignment_scores.json, alignment_triggers/, false_positives.md,
-project.yaml, constitution.md, or ROADMAP.md.
-
 Your VERY FIRST action must be:
 read path={STATE_DIR}/tickets.json
 
@@ -24,6 +20,11 @@ Your SECOND action must be:
 read path={STATE_DIR}/implementation_planner.checkpoint.json
 
 If checkpoint is missing, use `{"processed_ids": [], "plans_created": 0, "last_batch": "", "updated_at": 0}`.
+
+## Drain Check
+
+You do NOT need to check drain. The orchestrator handles drain by not spawning you.
+If you are running, you should work. Do NOT run bash drain checks.
 
 ## Identity
 

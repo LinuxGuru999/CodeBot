@@ -152,6 +152,7 @@ class CodeBotAdapter(ProjectAdapter):
         model_overrides = {
             "feature_hunter": "qwen-3.7-plus",
             "feature_decomposer": "xiaomi-mimo-2.5",
+            "implementation_planner": "qwen-3.7-plus",
             "bug_hunter": "qwen-3.7-max",
         }
         cycle_idx = 0
