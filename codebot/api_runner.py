@@ -1561,7 +1561,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
         _scratch_state = load_scratchpad(state_dir, bot_name)
         _scratch_state.phase = "running"
         try:
-            _ticket_match = __import__("re").search(r"ASSIGNED TICKET: (CB-\w+)", mission_prompt or "")
+            _ticket_match = __import__("re").search(r"ASSIGNED TICKET: (CB-[\w-]+)", mission_prompt or "")
             _scratch_state.ticket_id = _ticket_match.group(1) if _ticket_match else bot_name
         except Exception:
             _scratch_state.ticket_id = bot_name
