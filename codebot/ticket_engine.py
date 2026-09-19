@@ -88,7 +88,7 @@ class RiskLevel(str, Enum):
 
 # Minimum risk level that requires an implementation plan before IMPLEMENTING.
 # Configurable: raise to HIGH to exempt medium-risk tickets from planning.
-MIN_RISK_FOR_PLANNING = RiskLevel.HIGH
+MIN_RISK_FOR_PLANNING = RiskLevel.MEDIUM
 
 # Ordered risk levels for threshold comparison
 _RISK_ORDER: dict[str, int] = {
@@ -527,6 +527,18 @@ class TicketStore:
                         f"ticket {ticket_id} cannot transition to COMPLETE: "
                         f"gatekeeper approval required but not found"
                     )
+            # Enforce planning prerequisite before READY -> IMPLEMENTING
+            if (ticket.state == TicketState.READY and
+                new_state == TicketState.IMPLEMENTING):
+                ticket_risk_order = _RISK_ORDER.get(ticket.risk.value, 0)
+                threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
+                if ticket_risk_order >= threshold_order:
+                    if not self._has_plan(ticket_id):
+                        raise ValueError(
+                            f"ticket {ticket_id} risk={ticket.risk.value} "
+                            f"requires an implementation plan before IMPLEMENTING; "
+                            f"create plan in PLANNING state"
+                        )
             updated = ticket.transition(new_state, reviewer_feedback)
             self._tickets[ticket_id] = updated
             self._save()

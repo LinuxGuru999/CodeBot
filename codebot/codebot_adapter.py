@@ -149,6 +149,10 @@ class CodeBotAdapter(ProjectAdapter):
             "qwen-3.6-plus", "qwen-3.5-plus", "meta-muse-spark-1.3",
             "meta-muse-spark-1.2", "qwen-3.7-max",
         )
+        model_overrides = {
+            "feature_hunter": "xiaomi-mimo-2.5",
+            "feature_decomposer": "xiaomi-mimo-2.5",
+        }
         cycle_idx = 0
         think_idx = 0
         for role in ALL_ROLES:
@@ -156,6 +160,9 @@ class CodeBotAdapter(ProjectAdapter):
             if role.name in thinking_roles:
                 model = thinking_models[think_idx % len(thinking_models)]
                 think_idx += 1
+            elif role.name in model_overrides:
+                model = model_overrides[role.name]
+                cycle_idx += 1
             else:
                 model = non_thinking_cycle[cycle_idx % len(non_thinking_cycle)]
                 cycle_idx += 1
