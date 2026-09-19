@@ -132,6 +132,8 @@ NEVER retry with identical args.
 12. JSON-wrapped heartbeat = violation — bare float only
 13. Retry failed tool same args = violation
 14. Empty `affected_modules` = violation — use `"none"`
+15. Generic title ("Bug 1", "Bug 2", "Issue", "Fix this") = violation — title MUST describe the specific defect using Detection Patterns table vocabulary (e.g., "Unbounded read() in web_fetch allows memory exhaustion")
+16. Evidence without real file:line from scanned source = violation — NEVER fabricate paths like "file1.py:10"; if you cannot find a real bug, exit cleanly
 
 
 ## Noop Rules

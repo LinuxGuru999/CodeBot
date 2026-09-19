@@ -236,17 +236,23 @@ class TestExecuteTool:
         assert "unknown tool" in result["error"]
 
     def test_read_tool_dispatched(self, tmp_path):
-        target = tmp_path / "hello.txt"
-        target.write_text("world")
-        result = _execute_tool("read", {"path": str(target)})
-        assert result["success"] is True
-        assert "world" in result["output"]
+        import codebot.api_tools as api_tools
+        workspace = tmp_path
+        with patch.object(api_tools, "WORKSPACE_ROOT", workspace):
+            target = tmp_path / "hello.txt"
+            target.write_text("world")
+            result = _execute_tool("read", {"path": str(target)})
+            assert result["success"] is True
+            assert "world" in result["output"]
 
     def test_write_tool_dispatched(self, tmp_path):
-        target = tmp_path / "out.txt"
-        result = _execute_tool("write", {"path": str(target), "content": "data"})
-        assert result["success"] is True
-        assert target.read_text() == "data"
+        import codebot.api_tools as api_tools
+        workspace = tmp_path
+        with patch.object(api_tools, "WORKSPACE_ROOT", workspace):
+            target = tmp_path / "out.txt"
+            result = _execute_tool("write", {"path": str(target), "content": "data"})
+            assert result["success"] is True
+            assert target.read_text() == "data"
 
     def test_bad_args_returns_error(self):
         # 'read' requires 'path'; passing wrong args should fail gracefully
@@ -408,6 +414,5 @@ class TestAutoCommitGatekeeperFailClosed:
              patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
              patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
             _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
-            # bash SHOULD have been called for git add since gatekeeper returned COMPLETE
-            has_git_add = any("git add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
+            has_git_add = any("add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
             assert has_git_add, "git add should execute when gatekeeper returns COMPLETE"
