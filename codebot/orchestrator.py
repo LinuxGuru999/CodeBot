@@ -1431,6 +1431,14 @@ def _gatekeeper_verify_tickets() -> int:
             if passed:
                 ts.transition(tid, TicketState.COMPLETE)
                 logger.info(f"Gatekeeper: {tid} -> COMPLETE (all gates passed)")
+                try:
+                    from codebot.scratchpad import clear_scratchpad
+                    for name in bots:
+                        base = name.split("-")[0] if "-" in name else name
+                        if base in IMPLEMENTER_ROLE_NAMES:
+                            clear_scratchpad(STATE_DIR, name)
+                except Exception:
+                    pass
                 advanced += 1
             else:
                 rework_count = getattr(ticket, 'rework_count', 0)

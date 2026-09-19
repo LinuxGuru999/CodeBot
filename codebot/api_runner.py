@@ -1560,7 +1560,11 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
         from codebot.scratchpad import load_scratchpad, save_scratchpad, ScratchpadState
         _scratch_state = load_scratchpad(state_dir, bot_name)
         _scratch_state.phase = "running"
-        _scratch_state.ticket_id = bot_name
+        try:
+            _ticket_match = __import__("re").search(r"ASSIGNED TICKET: (CB-\w+)", mission_prompt or "")
+            _scratch_state.ticket_id = _ticket_match.group(1) if _ticket_match else bot_name
+        except Exception:
+            _scratch_state.ticket_id = bot_name
         save_scratchpad(state_dir, _scratch_state)
         _scratch_available = True
     except ImportError:
@@ -1756,6 +1760,12 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     }
                     messages.append(tool_msg)
                 tool_iterations += 1
+                if _scratch_available and _scratch_state is not None:
+                    _scratch_state.iteration = tool_iterations
+                    _scratch_state.last_tool_call = tool_calls[-1].get("function", {}).get("name", "tool") if tool_calls else ""
+                    _scratch_state.last_tool_result_summary = f"iter={tool_iterations} tools={len(tool_calls)}"
+                    _scratch_state.files_changed = files_touched[-10:]
+                    save_scratchpad(state_dir, _scratch_state)
                 if github_target:
                     last_tool = tool_calls[-1].get("function", {}).get("name", "tool")
                     _update_github_progress(
@@ -1769,6 +1779,12 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                 summary = result_text.replace("\n", " ")[:150]
                 _write_scratchpad(bot_name, state_dir, "completed", summary)
                 _write_taskline(bot_name, state_dir, "done", summary)
+                if _scratch_available and _scratch_state is not None:
+                    _scratch_state.mark_step_complete(f"completed: {summary[:100]}")
+                    _scratch_state.phase = "completed"
+                    _scratch_state.iteration = tool_iterations
+                    _scratch_state.context_summary = f"Completed {tool_iterations} tool iterations. Last result: {summary[:200]}"
+                    save_scratchpad(state_dir, _scratch_state)
                 _log(f"{bot_name}: model returned content, completing ({tool_iterations} tool iterations)")
                 _write_heartbeat(heartbeat_file)
                 _auto_commit(bot_name, files_touched)
