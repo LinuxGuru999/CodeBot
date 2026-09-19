@@ -77,6 +77,11 @@ def _record_success(model: str) -> None:
         _rate_limiter.record_success(model)
 
 
+def _record_request(model: str) -> None:
+    if _HAS_RATE_LIMITER and _rate_limiter:
+        _rate_limiter.record_request(model)
+
+
 class _HybridToolCall(dict):
     def __getattr__(self, name: str):
         try:
@@ -1856,6 +1861,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
             while True:
                 try:
                     _wait_for_rate_limit(active_model)
+                    _record_request(active_model)
                     result = _call_api(msgs, active_model, api_key)
                     _record_success(active_model)
                     return result
