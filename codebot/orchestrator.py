@@ -3279,7 +3279,7 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
         elif name in reviewer_names:
             should_enable = verifying > 0 or reviewing > 0
         elif name in discovery_names:
-            should_enable = discovered < 10
+            should_enable = discovered >= 20
 
         if not should_enable and bot.process is not None and bot.process.poll() is None:
             try:
