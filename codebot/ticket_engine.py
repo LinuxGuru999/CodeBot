@@ -426,27 +426,44 @@ class TicketStore:
             return False
 
     def _save(self) -> None:
+        """Atomically save ticket store with lock retry on contention.
+        
+        Retries lock acquisition up to 3 times with exponential backoff (0.1s, 0.2s, 0.4s).
+        If lock remains unavailable after retries, raises RuntimeError rather than
+        risking data corruption via unlocked write.
+        """
         payload = {
             "schema_version": SCHEMA_VERSION,
             "updated_at": time.time(),
             "tickets": [t.to_dict() for t in self._tickets.values()],
         }
         lock_path = self._path.with_suffix(".lock")
-        try:
-            with open(lock_path, "a+") as lock_fd:
-                flock(lock_fd, LOCK_EX)
-                try:
-                    self._backup()
-                    tmp = self._path.with_suffix(".tmp")
-                    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-                    tmp.replace(self._path)
-                finally:
-                    flock(lock_fd, LOCK_UN)
-        except OSError:
-            self._backup()
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            tmp.replace(self._path)
+        max_retries = 3
+        base_delay = 0.1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                with open(lock_path, "a+") as lock_fd:
+                    flock(lock_fd, LOCK_EX)
+                    try:
+                        self._backup()
+                        tmp = self._path.with_suffix(".tmp")
+                        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                        tmp.replace(self._path)
+                    finally:
+                        flock(lock_fd, LOCK_UN)
+                return  # Success
+            except OSError as e:
+                if attempt < max_retries - 1:
+                    # Exponential backoff before retry
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+                else:
+                    # Final attempt failed - raise error rather than corrupt data
+                    raise RuntimeError(
+                        f"TicketStore._save failed after {max_retries} lock retries: {e}. "
+                        f"Data may be at risk if concurrent writes occurred."
+                    ) from e
 
     def add(self, ticket: Ticket) -> Ticket:
         eh = ticket.evidence_hash()
