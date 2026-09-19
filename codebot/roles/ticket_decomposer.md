@@ -52,3 +52,12 @@ When you complete decomposition, output:
 Decomposed X tickets into Y sub-tickets
 Parents deferred: Z
 ```
+
+<!-- CODEBOT EVOLUTION -->
+## Evolution (2026-09-19T04:28:11Z)
+Trigger: misaligned (score=53, reward=0.53)
+Reason: exit=3 reason=error dur=33.93s hb_age=30.8 reb=0 err=0 ckpt=False eff=5 prod=0 no_tickets_pen=0
+Pattern: tighten_heartbeat_format
+
+Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
+<!-- END EVOLUTION -->
