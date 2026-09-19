@@ -1668,10 +1668,8 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     if not agents:
         lines.append("│ No agents found.")
     else:
-        # column widths: adjust for terminal width?
-        # header
-        lines.append(f"│ {'Agent':<24s} {'State':<8s} {'HB':>7s} {'LOG':>7s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s}")
-        lines.append(_c("│ " + "─"*88, "dim", enabled))
+        lines.append(f"│ {'Agent':<24s} {'State':<10s} {'HB':>8s} {'LOG':>8s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s} {'MODEL':<14s}")
+        lines.append(_c("│ " + "─"*95, "dim", enabled))
         for a in agents[:20]:
             bucket = _bucket_color(a["bucket"], enabled)
             hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
@@ -1681,8 +1679,8 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
             err = str(a["consecutive_errors"]) if a.get("consecutive_errors") not in (None, "") else "-"
             iter_s = str(a["iteration"]) if a["iteration"] else "-"
             name = a["name"][:24]
-            # use _ansi_pad for ANSI-aware column alignment
-            lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 18)} {_ansi_pad(hb, 15, 'right')} {_ansi_pad(loga, 15, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s}")
+            model = a["model"] or "-"
+            lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s} {model:<14s}")
         if len(agents) > 32:
             lines.append(f"│ ... +{len(agents)-20} more (use botop status --verbose)")
     lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))

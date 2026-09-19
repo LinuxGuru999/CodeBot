@@ -3011,6 +3011,128 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
                 bot.config.enabled = True
 
 
+def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
+    """Sweep IMPLEMENTING tickets whose workers have exited and advance them.
+
+    Catches tickets stuck in IMPLEMENTING because the worker exited with a
+    non-zero code (rate limit, error) before the completion handler could
+    transition them. Also releases stale claims blocking dispatch.
+    """
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    implementing = ts.list_by_state(TicketState.IMPLEMENTING)
+    if not implementing:
+        return 0
+
+    active_ticket_ids = set()
+    for name, bot in bots.items():
+        base_role = name.split("-")[0] if "-" in name else name
+        if base_role in IMPLEMENTER_ROLE_NAMES:
+            if bot.process is not None and bot.process.poll() is None:
+                tid = getattr(bot, '_assigned_ticket_id', '')
+                if tid:
+                    active_ticket_ids.add(tid)
+
+    claims_dir = STATE_DIR / "claims"
+    recovered = 0
+    for ticket in implementing:
+        tid = getattr(ticket, 'id', '')
+        if not tid or tid in active_ticket_ids:
+            continue
+
+        has_active_claim = False
+        if claims_dir.exists():
+            for cf in claims_dir.glob(f"{tid}.*.json"):
+                try:
+                    data = json.loads(cf.read_text(encoding="utf-8"))
+                    worker = data.get("bot", "")
+                    bot = bots.get(worker)
+                    if bot and bot.process is not None and bot.process.poll() is None:
+                        has_active_claim = True
+                        break
+                except Exception:
+                    pass
+
+        if has_active_claim:
+            continue
+
+        try:
+            ts.transition(tid, TicketState.REVIEWING)
+            logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> REVIEWING (worker exited)")
+            recovered += 1
+        except ValueError:
+            try:
+                ts.transition(tid, TicketState.READY)
+                logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> READY (transition to REVIEWING failed)")
+                recovered += 1
+            except ValueError as e:
+                logger.warning(f"Cannot recover ticket {tid}: {e}")
+
+        if claims_dir.exists():
+            for cf in claims_dir.glob(f"{tid}.*.json"):
+                try:
+                    cf.unlink()
+                except OSError:
+                    pass
+
+        for name, bot in bots.items():
+            if getattr(bot, '_assigned_ticket_id', '') == tid:
+                bot._assigned_ticket_id = ''
+
+    return recovered
+
+
+def _recover_stuck_planning_tickets() -> int:
+    """Advance PLANNING tickets that have been stuck too long."""
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    planning = ts.list_by_state(TicketState.PLANNING)
+    if not planning:
+        return 0
+
+    now = time.time()
+    recovered = 0
+    for ticket in planning:
+        age_minutes = (now - ticket.updated_at) / 60
+        if age_minutes > 30:
+            try:
+                ts.transition(ticket.id, TicketState.READY)
+                logger.info(f"Recovered stuck planning ticket {ticket.id}: PLANNING -> READY (stuck {age_minutes:.0f}m)")
+                recovered += 1
+            except ValueError:
+                pass
+
+    return recovered
+
+
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
     now = time.time()
     due = [n for n, b in bots.items()
@@ -4017,7 +4139,43 @@ def _process_verifying_tickets() -> None:
                     rework_count=ticket.rework_count,
                 )
 
-                logger.info(f"Gatekeeper decision for {ticket.id}: {result.get('decision')}")
+                decision = result.get('decision', '')
+                if decision == 'COMPLETE' or result.get('passed'):
+                    try:
+                        from codebot.ticket_engine import TicketState as TS
+                        ts_obj = TicketStore(store_path)
+                        t = ts_obj.get(ticket.id)
+                        if t and t.state == TicketState.VERIFYING:
+                            ts_obj.transition(ticket.id, TS.COMPLETE)
+                            logger.info(f"Gatekeeper: {ticket.id} -> COMPLETE")
+                    except Exception as e:
+                        logger.warning(f"Gatekeeper transition failed for {ticket.id}: {e}")
+                elif decision == 'REWORK':
+                    rework_count = ticket.rework_count
+                    if rework_count < 3:
+                        try:
+                            from codebot.ticket_engine import TicketState as TS
+                            ts_obj = TicketStore(store_path)
+                            t = ts_obj.get(ticket.id)
+                            if t and t.state == TicketState.VERIFYING:
+                                ts_obj.transition(ticket.id, TS.REWORK)
+                                logger.info(f"Gatekeeper: {ticket.id} -> REWORK (attempt {rework_count + 1})")
+                        except Exception as e:
+                            logger.warning(f"Gatekeeper rework transition failed for {ticket.id}: {e}")
+                    else:
+                        logger.warning(f"Gatekeeper: {ticket.id} exceeded max reworks ({rework_count})")
+                else:
+                    logger.info(f"Gatekeeper: {ticket.id} verdict={decision}, advancing to COMPLETE")
+                    try:
+                        from codebot.ticket_engine import TicketState as TS
+                        ts_obj = TicketStore(store_path)
+                        t = ts_obj.get(ticket.id)
+                        if t and t.state == TicketState.VERIFYING:
+                            ts_obj.transition(ticket.id, TS.COMPLETE)
+                    except Exception:
+                        pass
+
+                logger.info(f"Gatekeeper decision for {ticket.id}: {decision}")
 
             except Exception as e:
                 logger.error(f"Failed to process VERIFYING ticket {ticket.id}: {e}")
@@ -4048,6 +4206,14 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         _dynamic_scale_bots(bots)
     except Exception as e:
         logger.warning(f"Dynamic scaling failed: {e}")
+    try:
+        _recover_stuck_implementing_tickets(bots)
+    except Exception as e:
+        logger.warning(f"Stuck ticket recovery failed: {e}")
+    try:
+        _recover_stuck_planning_tickets()
+    except Exception as e:
+        logger.warning(f"Planning recovery failed: {e}")
 
     for name, bot in bots.items():
         if not bot.config.enabled:
@@ -4247,6 +4413,29 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                     _rotate_model_on_error(bot, bots)
                     bot.consecutive_errors = 0
                     logger.warning(f"Bot '{name}' failed 3 times on {old_model} — rotated to {bot.config.model}")
+                assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+                if assigned_tid:
+                    try:
+                        from codebot.ticket_engine import TicketStore, TicketState
+                        store_path = STATE_DIR / "tickets.json"
+                        if not store_path.exists():
+                            store_path = Path(".codebot/state/tickets.json")
+                        if store_path.exists():
+                            ts = TicketStore(store_path)
+                            ticket = ts.get(assigned_tid)
+                            if ticket and ticket.state == TicketState.IMPLEMENTING:
+                                ts.transition(assigned_tid, TicketState.REVIEWING)
+                                logger.info(f"Bot '{name}' errored but completed ticket {assigned_tid} -> REVIEWING")
+                            bot._assigned_ticket_id = ''
+                    except Exception as e:
+                        logger.warning(f"Failed to transition ticket {assigned_tid} on error exit: {e}")
+                    claims_dir = STATE_DIR / "claims"
+                    if claims_dir.exists():
+                        for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
+                            try:
+                                cf.unlink()
+                            except OSError:
+                                pass
 
             # Immediate alignment pipeline attempted above; periodic sweep remains as idempotent backstop
             if exit_code == 0 and bot.config.clean_exit_wait:
