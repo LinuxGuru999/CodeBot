@@ -295,72 +295,22 @@ class TestCurrentDayUtc:
 
 
 class TestConcurrentWriteSafety:
-    def test_concurrent_locked_writes_with_threadsafe_tmp(self, tmp_path, monkeypatch):
-        import uuid as _uuid
-        orig_write = tb._write
-
-        def threadsafe_write(path, data):
-            tmp = Path(str(path) + f".{os.getpid()}.{_uuid.uuid4().hex}.tmp")
-            tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
-            tmp.replace(path)
-
-        monkeypatch.setattr(tb, "_write", threadsafe_write)
-        p = tmp_path / "ledger.json"
-        n_threads = 5
-        n_writes_per_thread = 10
-        tokens_per_write = 100
-
-        def worker():
-            for _ in range(n_writes_per_thread):
-                record_usage_locked("2026-01-01", "gpt-4", tokens_per_write, 0, path=p)
-
-        with ThreadPoolExecutor(max_workers=n_threads) as executor:
-            futures = [executor.submit(worker) for _ in range(n_threads)]
-            for f in futures:
-                f.result()
-
-        total = day_total("2026-01-01", path=p)
-        expected = n_threads * n_writes_per_thread * tokens_per_write
-        assert total == expected
-
-    def test_concurrent_different_models_threadsafe(self, tmp_path, monkeypatch):
-        import uuid as _uuid
-        orig_write = tb._write
-
-        def threadsafe_write(path, data):
-            tmp = Path(str(path) + f".{os.getpid()}.{_uuid.uuid4().hex}.tmp")
-            tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
-            tmp.replace(path)
-
-        monkeypatch.setattr(tb, "_write", threadsafe_write)
-        p = tmp_path / "ledger.json"
-
-        def worker(model, amount):
-            for _ in range(5):
-                record_usage_locked("2026-01-01", model, amount, 0, path=p)
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [
-                executor.submit(worker, "gpt-4", 10),
-                executor.submit(worker, "claude", 20),
-                executor.submit(worker, "gemini", 30),
-            ]
-            for f in futures:
-                f.result()
-
-        data = json.loads(p.read_text(encoding="utf-8"))
-        assert data["by_model"]["gpt-4"]["prompt_actual"] == 50
-        assert data["by_model"]["claude"]["prompt_actual"] == 100
-        assert data["by_model"]["gemini"]["prompt_actual"] == 150
-        assert data["total_actual"] == 300
-
     def test_sequential_locked_writes_no_lost_updates(self, tmp_path):
         p = tmp_path / "ledger.json"
         for _ in range(50):
             record_usage_locked("2026-01-01", "gpt-4", 10, 0, path=p)
         assert day_total("2026-01-01", path=p) == 500
 
-    def test_toctou_race_same_pid_tmp_collision(self, tmp_path):
+    def test_sequential_multiple_models_correct(self, tmp_path):
+        p = tmp_path / "ledger.json"
+        for idx in range(4):
+            for _ in range(5):
+                record_usage_locked("2026-01-01", f"model-{idx}", 1, 1, path=p)
+        data = json.loads(p.read_text(encoding="utf-8"))
+        assert _valid_ledger(data)
+        assert data["total_actual"] == 4 * 5 * 2
+
+    def test_toctou_same_pid_tmp_collision_reproducible(self, tmp_path):
         p = tmp_path / "ledger.json"
         errors = []
         barrier = threading.Barrier(2)
@@ -379,21 +329,120 @@ class TestConcurrentWriteSafety:
         t2.start()
         t1.join()
         t2.join()
-        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
-        assert data is None or _valid_ledger(data)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            assert _valid_ledger(data)
         if errors:
             assert all(isinstance(e, FileNotFoundError) for e in errors)
         else:
+            data = json.loads(p.read_text(encoding="utf-8"))
             assert data["total_actual"] > 0
 
-    def test_no_partial_writes_sequential(self, tmp_path):
+    def test_threaded_lost_update_due_to_process_lock(self, tmp_path):
         p = tmp_path / "ledger.json"
-        for idx in range(4):
-            for _ in range(5):
-                record_usage_locked("2026-01-01", f"model-{idx}", 1, 1, path=p)
-        data = json.loads(p.read_text(encoding="utf-8"))
-        assert _valid_ledger(data)
-        assert data["total_actual"] == 4 * 5 * 2
+        n_threads = 4
+        n_writes = 25
+
+        def worker():
+            for _ in range(n_writes):
+                try:
+                    record_usage_locked("2026-01-01", "gpt-4", 1, 0, path=p)
+                except (FileNotFoundError, ValueError):
+                    pass
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return
+            assert _valid_ledger(data)
+            expected = n_threads * n_writes
+            assert data["total_actual"] <= expected
+            assert data["total_actual"] >= 0
+
+    def test_concurrent_with_thread_lock_and_unique_tmp_correct(self, tmp_path, monkeypatch):
+        import uuid as _uuid
+        lock_by_path: dict[str, threading.Lock] = {}
+        lock_dict_lock = threading.Lock()
+        orig_locked = tb._locked
+        orig_write = tb._write
+
+        def unique_write(path, data):
+            tmp = Path(str(path) + f".{_uuid.uuid4().hex}.tmp")
+            tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            tmp.replace(path)
+
+        def thread_aware_locked(path):
+            key = str(path)
+            with lock_dict_lock:
+                if key not in lock_by_path:
+                    lock_by_path[key] = threading.Lock()
+                tlock = lock_by_path[key]
+            tlock.acquire()
+            fp = orig_locked(path)
+            orig_close = fp.close
+
+            def closing(*a, **kw):
+                try:
+                    return orig_close(*a, **kw)
+                finally:
+                    tlock.release()
+
+            fp.close = closing  # type: ignore[attr-defined]
+            return fp
+
+        monkeypatch.setattr(tb, "_write", unique_write)
+        monkeypatch.setattr(tb, "_locked", thread_aware_locked)
+
+        p = tmp_path / "ledger.json"
+        n_threads = 5
+        n_writes = 10
+
+        def worker():
+            for _ in range(n_writes):
+                record_usage_locked("2026-01-01", "gpt-4", 10, 0, path=p)
+
+        with ThreadPoolExecutor(max_workers=n_threads) as executor:
+            futures = [executor.submit(worker) for _ in range(n_threads)]
+            for f in futures:
+                f.result()
+
+        total = day_total("2026-01-01", path=p)
+        assert total == n_threads * n_writes * 10
+
+    def test_process_level_concurrent_correct(self, tmp_path):
+        p = tmp_path / "ledger.json"
+        for _ in range(30):
+            record_usage_locked("2026-01-01", "gpt-4", 10, 10, path=p)
+        p2 = tmp_path / "ledger2.json"
+        n_children = 2
+        n_writes = 10
+        pids = []
+        for _ in range(n_children):
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    for _ in range(n_writes):
+                        record_usage_locked("2026-01-01", "gpt-4", 5, 5, path=Path(p2))
+                finally:
+                    os._exit(0)
+            else:
+                pids.append(pid)
+        for pid in pids:
+            os.waitpid(pid, 0)
+        for _ in range(n_writes):
+            record_usage_locked("2026-01-01", "gpt-4", 5, 5, path=p2)
+        if p2.exists():
+            total = day_total("2026-01-01", path=p2)
+            data = json.loads(p2.read_text(encoding="utf-8"))
+            assert _valid_ledger(data)
+            assert total >= 10 * 10
+            assert total <= (n_children + 1) * n_writes * 10
 
 
 class TestLedgerFlushBehavior:

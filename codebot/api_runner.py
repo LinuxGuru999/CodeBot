@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,89 @@ try:
     from bots.api_tools import bash, read, write, edit, grep, glob
 except ImportError:
     from codebot.api_tools import bash, read, write, edit, grep, glob
+
+
+class _HybridToolCall(dict):
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def __setattr__(self, name: str, value):
+        self[name] = value
+
+
+@dataclass
+class AgentResult:
+    """Captures the outcome of an agent loop execution for testing."""
+    exit_reason: str  # "completed", "iteration_limit", "no_content", "error"
+    tool_calls: list[dict] = field(default_factory=list)  # [{"name": str, "args": dict, "result": dict}]
+    tickets_created: int = 0
+    files_touched: list[str] = field(default_factory=list)
+    iterations: int = 0
+    messages: list[dict] = field(default_factory=list)  # Full conversation history
+    final_content: str = ""  # Model's final text response (if completed)
+
+    @property
+    def tool_call_count(self) -> int:
+        return len(self.tool_calls)
+
+    @property
+    def tool_names(self) -> list[str]:
+        names: list[str] = []
+        for tc in self.tool_calls:
+            if isinstance(tc, dict):
+                names.append(tc.get("name", ""))
+            else:
+                names.append(getattr(tc, "name", ""))
+        return names
+
+    def calls_to(self, tool_name: str) -> list[dict]:
+        out = []
+        for tc in self.tool_calls:
+            n = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if n == tool_name:
+                out.append(tc)
+        return out
+
+    def create_ticket_args(self) -> list[dict]:
+        return [
+            (tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {}))
+            for tc in self.calls_to("create_ticket")
+        ]
+
+    def successful_ticket_creations(self) -> int:
+        cnt = 0
+        for tc in self.calls_to("create_ticket"):
+            res = tc.get("result", {}) if isinstance(tc, dict) else getattr(tc, "result", {})
+            if isinstance(res, dict) and res.get("success"):
+                cnt += 1
+        return cnt
+
+    def has_forbidden_call(self, forbidden_tools: set[str]) -> list[str]:
+        out: list[str] = []
+        for tc in self.tool_calls:
+            n = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            if n in forbidden_tools:
+                out.append(n)
+        return out
+
+    def bash_commands(self) -> list[str]:
+        cmds: list[str] = []
+        for tc in self.calls_to("bash"):
+            args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+            if isinstance(args, dict):
+                cmds.append(args.get("command", ""))
+        return cmds
+
+    @property
+    def bot_name(self) -> str:
+        return getattr(self, "_bot_name", "")
+
+    @bot_name.setter
+    def bot_name(self, value: str) -> None:
+        object.__setattr__(self, "_bot_name", value)
 
 
 def _log(msg: str) -> None:
@@ -1498,7 +1582,131 @@ def run_batch(manifests: list[dict], batch_ctx: dict) -> dict:
     }
 
 
-
+def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_iterations=50):
+    state_dir = Path(state_dir)
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    responder = model_responder
+    if not callable(responder) and hasattr(model_responder, "respond") and callable(getattr(model_responder, "respond")):
+        responder = getattr(model_responder, "respond")
+    if not callable(responder):
+        raise TypeError("model_responder must be callable or have .respond()")
+    messages: list[dict] = [{"role": "user", "content": mission_prompt}]
+    tool_calls: list[dict] = []
+    files_touched: list[str] = []
+    tickets_created = 0
+    iterations = 0
+    final_content = ""
+    exit_reason = "unknown"
+    continue_nudges = 0
+    while True:
+        if iterations >= max_iterations:
+            exit_reason = "iteration_limit"
+            break
+        try:
+            resp_json = responder(messages)
+        except Exception as exc:
+            _log(f"{bot_name}: model_responder raised {exc}, continuing")
+            tool_calls.append({"name": "__responder_error__", "args": {}, "result": {"success": False, "output": "", "error": str(exc)}})
+            if continue_nudges < 2:
+                messages.append({"role": "user", "content": "continue"})
+                continue_nudges += 1
+                continue
+            exit_reason = "error"
+            break
+        try:
+            choices = resp_json.get("choices") or []
+            msg = choices[0].get("message", {}) if choices else {}
+        except Exception:
+            msg = {}
+        if not isinstance(msg, dict):
+            msg = {}
+        tool_calls_raw = msg.get("tool_calls")
+        content = msg.get("content")
+        has_tool_calls = bool(tool_calls_raw) and isinstance(tool_calls_raw, list) and len(tool_calls_raw) > 0
+        has_content = bool(content is not None and str(content).strip() != "")
+        if has_tool_calls:
+            messages.append(msg)
+            for tc in tool_calls_raw:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = tc.get("id", "") if isinstance(tc.get("id"), str) else ""
+                func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                if not isinstance(func, dict):
+                    func = {}
+                name = func.get("name", "") if isinstance(func.get("name"), str) else ""
+                args_raw = func.get("arguments", "{}")
+                if isinstance(args_raw, dict):
+                    args = args_raw
+                else:
+                    try:
+                        args = json.loads(args_raw) if args_raw else {}
+                    except Exception:
+                        args = {}
+                    if not isinstance(args, dict):
+                        args = {}
+                try:
+                    result = _execute_tool(name, args)
+                except Exception as exc:
+                    result = {"success": False, "output": "", "error": str(exc)}
+                if not result.get("success", True):
+                    _log(f"{bot_name}: tool '{name}' failed: {result.get('error', 'unknown')}")
+                touched = args.get("path") or args.get("filePath") or args.get("file")
+                if name in ("edit", "write") and touched and isinstance(touched, str):
+                    files_touched.append(touched)
+                if name == "create_ticket" and result.get("success"):
+                    tickets_created += 1
+                rec = _HybridToolCall({"name": name, "args": args, "result": result})
+                tool_calls.append(rec)
+                tool_msg = {
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": json.dumps(result),
+                }
+                messages.append(tool_msg)
+                try:
+                    _write_bot_status(bot_name, state_dir, f"tool:{name}", f"executing {name} on {touched or 'N/A'}", files_touched, iterations + 1)
+                except Exception:
+                    pass
+            iterations += 1
+            continue_nudges = 0
+            continue
+        if has_content:
+            final_content = str(content).strip()
+            try:
+                messages.append(msg)
+            except Exception:
+                pass
+            exit_reason = "completed"
+            break
+        if continue_nudges < 2:
+            _log(f"{bot_name}: empty response, nudging 'continue' ({continue_nudges + 1}/2)")
+            messages.append({"role": "user", "content": "continue"})
+            continue_nudges += 1
+            continue
+        _log(f"{bot_name}: no content after 2 nudges")
+        exit_reason = "no_content"
+        break
+    result = AgentResult(
+        exit_reason=exit_reason,
+        tool_calls=tool_calls,
+        tickets_created=tickets_created,
+        files_touched=files_touched,
+        iterations=iterations,
+        messages=messages,
+        final_content=final_content,
+    )
+    try:
+        result.bot_name = bot_name
+    except Exception:
+        pass
+    try:
+        object.__setattr__(result, "_bot_name", bot_name)
+    except Exception:
+        pass
+    return result
 
 
 def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback_model="", max_tokens_per_run=0, fallback_models=None):

@@ -1,12 +1,14 @@
 # CodeBot Roles Reference
 
-Last updated: 2026-09-18
+Last updated: 2026-09-19
 
-CodeBot defines 37 role prompts across 5 categories. Each role specifies identity, incentives, tool constraints, operational protocols, and safety rules. Roles are loaded from `codebot/roles/*.md` and assembled with project context from the `ProjectAdapter` at runtime.
+CodeBot defines 38 role prompts across 5 categories. Each role specifies identity, incentives, tool constraints, operational protocols, and safety rules. Roles are loaded from `codebot/roles/*.md` and assembled with project context from the `ProjectAdapter` at runtime.
+
+All prompts follow the hardened authoring standard in `docs/ROLE_PROMPT_STANDARDS.md`. Reference implementations per category: `bug_hunter.md` (discovery), `general_implementer.md` (implementation), `correctness_reviewer.md` (review), `scheduler.md` (control), `feature_decomposer.md` (planning).
 
 Legacy Monitor bot names are mapped to CodeBot roles via `LEGACY_ROLE_MAP` in `role_prompt.py`.
 
-## Discovery Roles (8)
+## Discovery Roles (9)
 
 Discovery agents scan source code for issues. All are READ-ONLY — they never modify source files.
 
@@ -20,8 +22,9 @@ Discovery agents scan source code for issues. All are READ-ONLY — they never m
 | `documentation_auditor` | — | Find claims that are no longer true | documentation_implementer |
 | `dependency_auditor` | `dependency` | Find supply chain risks | — |
 | `ux_auditor` | `ui_improve` | Find usability and accessibility issues | — |
+| `feature_hunter` | — | Convert roadmap deliverables into tickets | — |
 
-## Planning Roles (4)
+## Planning Roles (6)
 
 Planning agents analyze, decompose, and order work items. They produce tickets and plans but never modify source code.
 
@@ -49,13 +52,15 @@ Implementation agents write code, tests, and documentation. They follow TDD (red
 
 ### Operational Protocols (all implementers)
 
-1. **Claim**: Write `state/claims/{ticket_id}.{agent_name}.json` before starting work. Delete on completion or failure.
-2. **Heartbeat**: Write Unix timestamp to `state/{agent_name}.heartbeat` after every atomic task and at least every 60s.
-3. **Checkpoint**: Write JSON to `state/{agent_name}.checkpoint.json` after every atomic task.
+1. **Claim**: Write `{STATE_DIR}/claims/{ticket_id}.{agent_name}.json` before starting work. Delete on completion or failure.
+2. **Heartbeat**: Write bare Unix timestamp to `{STATE_DIR}/{agent_name}.heartbeat` after every atomic task and at least every 60s.
+3. **Checkpoint**: Write JSON to `{STATE_DIR}/{agent_name}.checkpoint.json` after every atomic task. Format per ROLE_PROMPT_STANDARDS.md §7.5.
 4. **Auto-commit**: `git add -A → git commit -m "[{ticket_id}] {type}: {desc}" → git push`
-5. **Noop cap**: Track consecutive empty scans. Exit cleanly at ≥ 10.
+5. **Noop cap**: Track consecutive empty scans. Exit cleanly at ≥ 20.
 
-## Review Roles (7)
+Where `{STATE_DIR}` = `{PROJECT_ROOT}/.codebot/state`.
+
+## Review Roles (7 + 1 registered without prompt)
 
 Review agents evaluate implementations. All are READ-ONLY. Their incentives intentionally conflict with implementers.
 
@@ -69,13 +74,15 @@ Review agents evaluate implementations. All are READ-ONLY. Their incentives inte
 | `simplicity_reviewer` | Find unnecessary complexity | general/backend/architecture_auditor |
 | `documentation_reviewer` | Find claims no longer true | documentation_implementer |
 
+Note: `ux_reviewer` is registered in `role_registry.py` but has no `.md` prompt file. Tests assert this absence (`test_agent_review_roles.py::TestUxReviewerSpecific`). Do not create it without updating the test.
+
 ### Verdicts
 
 - **APPROVE** → transition to VERIFYING
 - **REWORK** → document findings, transition to REWORK
 - **ESCALATE/BLOCK** → transition to REWORK
 
-## Control Roles (7)
+## Control Roles (10)
 
 Control agents manage infrastructure, scheduling, economics, and learning.
 
@@ -85,6 +92,7 @@ Control agents manage infrastructure, scheduling, economics, and learning.
 | `quality_gate` | `build` | Central gate evaluation, COMPLETE authority |
 | `budget_controller` | `prompt_opt` | Token spend tracking, budget enforcement |
 | `conflict_resolver` | — | Merge conflict detection and resolution |
+| `ticket_decomposer` | — | Break complex rework tickets into atomic sub-tickets |
 | `github_mirror` | `github_bot` | Mirror issue files to GitHub Issues via `gh` CLI |
 | `git_sync` | (implicit gitsync) | Auto-commit, push, vendor sync |
 | `release_manager` | `release` | Staged rollout with gate-driven progression |

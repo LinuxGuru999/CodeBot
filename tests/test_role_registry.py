@@ -99,6 +99,10 @@ class TestRoleRegistry:
             elif role.name in ("bug_hunter", "security_auditor", "architecture_auditor",
                                "performance_auditor", "test_gap_auditor", "dependency_auditor"):
                 assert role.tool_policy.allowed_tools == RESEARCH_TOOLS
+            elif role.name == "feature_hunter":
+                # feature_hunter needs create_ticket, write (checkpoints), bash, grep, glob, read
+                assert "create_ticket" in role.tool_policy.allowed_tools
+                assert "read" in role.tool_policy.allowed_tools
             else:
                 assert role.tool_policy.allowed_tools == READ_ONLY_TOOLS
 
@@ -161,8 +165,8 @@ class TestRoleCounts:
         assert len(CONTROL_ROLES) >= 3
 
     def test_total_role_count(self):
-        """Total roles should be 29 (8 discovery + 6 implementation + 8 review + 6 control + 1 planning)."""
-        assert len(ALL_ROLES) == 29
+        """Total roles should be 30 (9 discovery + 6 implementation + 8 review + 6 control + 1 planning)."""
+        assert len(ALL_ROLES) == 30
 
     def test_planning_role_exists(self):
         assert len(PLANNING_ROLES) >= 1
@@ -284,8 +288,13 @@ class TestAdversarialReviewExtended:
                 )
 
     def test_all_discovery_roles_are_standard_or_premium(self):
-        """All discovery roles should use STANDARD or PREMIUM models (no CHEAP)."""
+        """All discovery roles should use STANDARD or PREMIUM models, except feature_hunter which is intentionally CHEAP."""
         for role in DISCOVERY_ROLES:
+            if role.name == "feature_hunter":
+                assert role.required_model.cost_class == CostClass.CHEAP, (
+                    f"feature_hunter should be CHEAP cost for fast roadmap scanning"
+                )
+                continue
             assert role.required_model.cost_class in (CostClass.STANDARD, CostClass.PREMIUM), (
                 f"Discovery role {role.name} has {role.required_model.cost_class.value} cost — expected STANDARD or PREMIUM"
             )

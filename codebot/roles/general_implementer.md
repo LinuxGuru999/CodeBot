@@ -148,11 +148,3 @@ NEVER retry a failed call with identical arguments.
 
 If REVIEWER FEEDBACK section appears, address every item: locate code, fix, run tests, do not skip. Document disagreement but still fix.
 
-<!-- CODEBOT EVOLUTION -->
-## Evolution (2026-09-18T20:03:30Z)
-Trigger: misaligned (score=53, reward=0.53)
-Reason: exit=3 reason=error dur=30.43s hb_age=24.3 reb=0 err=0 ckpt=False eff=5 prod=0 no_tickets_pen=0
-Pattern: tighten_heartbeat_format
-
-Write heartbeats as bare Unix timestamps only. No JSON wrapping, no extra fields. Format: write the string `str(time.time())` directly to the heartbeat file. Any other format causes parsing failures in the health check loop.
-<!-- END EVOLUTION -->
