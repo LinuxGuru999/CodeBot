@@ -116,31 +116,40 @@ class AlignmentServiceProtocol(Protocol):
     def run_alignment_pipeline_for_all(self) -> None: ...
 
 
-class DefaultAlignmentService:
-    """Default implementation that lazily imports alignment_service."""
-    def run_alignment_pipeline(self, bot_name: str, timeout: int = 120) -> bool:
+def _lazy_run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
+    """Lazy import helper for run_alignment_pipeline to avoid circular deps."""
+    try:
+        from codebot import alignment_service
+        return alignment_service.run_alignment_pipeline(bot_name, timeout)
+    except ImportError:
         try:
-            from codebot import alignment_service
+            import alignment_service  # type: ignore
             return alignment_service.run_alignment_pipeline(bot_name, timeout)
         except ImportError:
-            try:
-                import alignment_service
-                return alignment_service.run_alignment_pipeline(bot_name, timeout)
-            except ImportError:
-                logger.warning("alignment_service not available, skipping alignment pipeline")
-                return False
+            logger.warning("alignment_service not available, skipping alignment pipeline")
+            return False
 
-    def run_alignment_pipeline_for_all(self) -> None:
+
+def _lazy_run_alignment_pipeline_for_all() -> None:
+    """Lazy import helper for run_alignment_pipeline_for_all to avoid circular deps."""
+    try:
+        from codebot import alignment_service
+        alignment_service.run_alignment_pipeline_for_all()
+    except ImportError:
         try:
-            from codebot import alignment_service
+            import alignment_service  # type: ignore
             alignment_service.run_alignment_pipeline_for_all()
         except ImportError:
-            try:
-                import alignment_service
-                alignment_service.run_alignment_pipeline_for_all()
-            except ImportError:
-                logger.warning("alignment_service not available, skipping alignment sweep")
-                return
+            logger.warning("alignment_service not available, skipping alignment sweep")
+
+
+class DefaultAlignmentService:
+    """Minimal wrapper delegating to lazy-import helpers."""
+    def run_alignment_pipeline(self, bot_name: str, timeout: int = 120) -> bool:
+        return _lazy_run_alignment_pipeline(bot_name, timeout)
+
+    def run_alignment_pipeline_for_all(self) -> None:
+        _lazy_run_alignment_pipeline_for_all()
 
 
 def get_alignment_service() -> AlignmentServiceProtocol:

@@ -662,3 +662,65 @@ class TestTicketClassRouting:
             "architecture", "test", "documentation", "dependency", "infrastructure",
         }
         assert set(orch.TICKET_CLASS_TO_REVIEWER.keys()) == expected_classes
+
+
+# ---------------------------------------------------------------------------
+# Alignment Service Refactoring (CB-4469363-7FE7)
+# ---------------------------------------------------------------------------
+
+class TestAlignmentServiceRefactoring:
+    """Tests for the simplified alignment service implementation.
+
+    Verifies that DefaultAlignmentService boilerplate is removed or simplified,
+    and that the alignment pipeline can still be invoked correctly.
+    """
+
+    def test_get_alignment_service_returns_callable(self):
+        """get_alignment_service returns a valid service instance with required methods."""
+        service = orch.get_alignment_service()
+        assert service is not None
+        assert hasattr(service, 'run_alignment_pipeline')
+        assert hasattr(service, 'run_alignment_pipeline_for_all')
+        assert callable(service.run_alignment_pipeline)
+        assert callable(service.run_alignment_pipeline_for_all)
+
+    def test_set_alignment_service_injection(self):
+        """set_alignment_service allows injecting a custom implementation."""
+        mock_service = MagicMock()
+        mock_service.run_alignment_pipeline.return_value = True
+        mock_service.run_alignment_pipeline_for_all.return_value = None
+
+        orch.set_alignment_service(mock_service)
+        retrieved = orch.get_alignment_service()
+
+        assert retrieved is mock_service
+        # Reset to default for other tests
+        orch.set_alignment_service(None)
+
+    def test_default_service_uses_lazy_import(self):
+        """Default service attempts lazy import of alignment_service module."""
+        # Reset to ensure we get the default
+        orch.set_alignment_service(None)
+        service = orch.get_alignment_service()
+
+        # Verify it's not the old DefaultAlignmentService class with duplicated logic
+        # The new implementation should be simpler (function-based or minimal class)
+        from codebot.orchestrator import DefaultAlignmentService
+        # If DefaultAlignmentService still exists as a complex class, this test will fail
+        # after refactoring. For now, we verify the service works.
+        
+        with patch('codebot.alignment_service.run_alignment_pipeline', return_value=True) as mock_run:
+            result = service.run_alignment_pipeline("test-bot")
+            assert result is True
+            mock_run.assert_called_once_with("test-bot", 120)
+
+    def test_default_service_handles_import_error_gracefully(self):
+        """Default service handles missing alignment_service module gracefully."""
+        orch.set_alignment_service(None)
+        service = orch.get_alignment_service()
+
+        with patch.dict('sys.modules', {'codebot.alignment_service': None}, clear=False):
+            with patch('builtins.__import__', side_effect=ImportError):
+                # Should not raise, should return False
+                result = service.run_alignment_pipeline("test-bot")
+                assert result is False

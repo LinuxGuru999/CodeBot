@@ -97,7 +97,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 |--------|---------|
 | `web_tools.py` | **SSRF-safe internet research**: provides `web_search()` (DuckDuckGo HTML lite) and `web_fetch()` (bounded HTTP GET with 1MB cap). Implements strict allowlisting of HTTP/HTTPS schemes, blocks private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x, 127.x.x.x), enforces redirect limits, and validates DNS resolution to prevent server-side request forgery attacks. |
 | `context_compactor.py` | Sliding window message summarization when approaching token budget |
-| `scratchpad.py` | Ticket-scoped cross-agent context handoff via `ScratchpadState` and `AgentRecord` dataclasses; atomic JSON persistence with 8KB cap and fail-open reads |
+| `scratchpad.py` | Ticket-scoped cross-agent context handoff via `ScratchpadState` and `AgentRecord` dataclasses; atomic JSON writes (tmp + os.replace) with 8KB hard cap; fail-open reads on corruption; enables seamless lifecycle handoffs between agents |
 | `task_splitter.py` | Decomposes oversized tickets into ≤10 sub-tasks on agent failure |
 | `coverage_runner.py` | Runs pytest-cov, parses output into per-module coverage reports |
 | `coverage_bridge.py` | Generates tickets from coverage gaps, computes coverage delta scores |
