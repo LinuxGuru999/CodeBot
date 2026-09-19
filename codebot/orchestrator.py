@@ -2095,14 +2095,24 @@ def _count_running_by_category(bots: dict[str, BotState] | None) -> tuple[int, i
     return implementers, discovery, reviewers, other
 
 
+_last_spawn_time: float = 0.0
+_SPAWN_STAGGER_SECONDS: float = 3.0
+
+
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False, runner_mode: str = "api", bot_model: str = "", bot_name: str = "", is_overture: bool = False) -> tuple[bool, str]:
+    global _last_spawn_time
     now = time.time()
     running = _count_api_runner_processes()
-    
+
     cap = GATEWAY_MAX_CONCURRENT
     if running >= cap:
         return False, f"cap {running}/{cap} running"
-    
+
+    if not is_overture:
+        since_last = now - _last_spawn_time
+        if since_last < _SPAWN_STAGGER_SECONDS:
+            return False, f"stagger {since_last:.1f}s < {_SPAWN_STAGGER_SECONDS}s"
+
     if runner_mode == "api":
         available = _get_available_memory_mb()
         if available < CODEBOT_MIN_MEMORY_MB:
@@ -2291,6 +2301,8 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
         # Parent's copy of the fd is unused after Popen inherits it; close to prevent fd leak
         log_fh.close()
 
+        global _last_spawn_time
+        _last_spawn_time = time.time()
         try:
             (STATE_DIR / ".last_spawn").write_text(str(time.time()))
         except OSError:
