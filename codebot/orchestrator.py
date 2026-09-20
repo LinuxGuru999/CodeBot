@@ -780,9 +780,9 @@ def _peek_ticket_classes() -> list[str]:
         pass
     return []
 
-
 def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> list[BotConfig]:
     demand = _count_actionable_queue_items()
+
     def _is_planning_role(name: str) -> bool:
         base = name.split("-")[0] if "-" in name else name
         return base in ("decomposer", "implementation_planner")
@@ -793,15 +793,15 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     if not base_impl and not base_planning:
         return registry
 
-    depths = _get_pipeline_state()
-    decomp_demand = min(depths.get("DECOMPOSE", 0), 3)
-    plan_demand = min(depths.get("PLANNING", 0), 3)
-    planning_slots = 0
-    if decomp_demand > 0:
-        planning_slots += min(decomp_demand, 3)
-    if plan_demand > 0:
-        planning_slots += min(plan_demand, 3)
+    seen_planning_bases: set[str] = set()
+    unique_planning: list[Any] = []
+    for cfg in base_planning:
+        base = cfg.name.split("-")[0] if "-" in cfg.name else cfg.name
+        if base not in seen_planning_bases:
+            seen_planning_bases.add(base)
+            unique_planning.append(cfg)
 
+    planning_slots = len(unique_planning)
     impl_budget = max_concurrent - len(non_impl) - planning_slots
     target = min(demand, max(impl_budget, 0))
     target = max(target, min(len(base_impl), max(impl_budget, 0)))
@@ -830,30 +830,14 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         ))
         TIER_PRIORITY[name] = tier
 
-    seen_planning_bases: set[str] = set()
-    unique_planning: list[Any] = []
-    for cfg in base_planning:
-        base = cfg.name.split("-")[0] if "-" in cfg.name else cfg.name
-        if base not in seen_planning_bases:
-            seen_planning_bases.add(base)
-            unique_planning.append(cfg)
-
     for role_cfg in unique_planning:
-        extra = decomp_demand if role_cfg.name == "decomposer" else plan_demand
-        if extra <= 0:
-            continue
-        extra = min(extra, max_concurrent - len(out))
-        for i in range(max(0, extra)):
-            count = name_counts.get(role_cfg.name, 0)
-            name_counts[role_cfg.name] = count + 1
-            name = role_cfg.name if count == 0 else f"{role_cfg.name}-{count+1}"
-            out.append(BotConfig(
-                name, role_cfg.prompt_file, role_cfg.interval_seconds, role_cfg.heartbeat_timeout,
-                role_cfg.model, fallback_model=role_cfg.fallback_model,
-                clean_exit_wait=False, runner_mode="api", tier=11,
-                max_restarts=role_cfg.max_restarts,
-            ))
-            TIER_PRIORITY[name] = 11
+        out.append(BotConfig(
+            role_cfg.name, role_cfg.prompt_file, role_cfg.interval_seconds, role_cfg.heartbeat_timeout,
+            role_cfg.model, fallback_model=role_cfg.fallback_model,
+            clean_exit_wait=False, runner_mode="api", tier=11,
+            max_restarts=role_cfg.max_restarts,
+        ))
+        TIER_PRIORITY[role_cfg.name] = 11
 
     return out
 
