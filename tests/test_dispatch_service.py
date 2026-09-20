@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from codebot.dispatch_service import (
     transition_ticket_on_success,
     transition_ticket_on_error,
+    batch_read_bot_statuses,
 )
 from codebot.ticket_engine import TicketState, TicketClass, Severity, RiskLevel, create_ticket, TicketStore
 from codebot.process_manager import BotConfig, BotState
@@ -280,3 +281,62 @@ class TestTransitionTicketOnSuccess:
         updated = store2.get(t.id)
         assert updated.state == TicketState.VERIFYING
         store2.close()
+
+
+# -----------------------------------------------------------------------
+# batch_read_bot_statuses
+# -----------------------------------------------------------------------
+class TestBatchReadBotStatuses:
+    """Tests for batch_read_bot_statuses() — single-pass status reading."""
+
+    def test_reads_valid_status_json(self, tmp_path):
+        """Returns parsed dict for bots with valid .status.json files."""
+        for name in ["bot-a", "bot-b"]:
+            data = {"status": "running", "current_task": "coding", "iteration": 3}
+            (tmp_path / f"{name}.status.json").write_text(json.dumps(data))
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            result = batch_read_bot_statuses(["bot-a", "bot-b"])
+        assert result["bot-a"]["status"] == "running"
+        assert result["bot-a"]["current_task"] == "coding"
+        assert result["bot-b"]["iteration"] == 3
+
+    def test_missing_file_returns_none(self, tmp_path):
+        """Missing .status.json files produce None entries."""
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            result = batch_read_bot_statuses(["no-such-bot"])
+        assert result["no-such-bot"] is None
+
+    def test_corrupt_json_returns_none(self, tmp_path):
+        """Corrupt JSON files produce None entries."""
+        (tmp_path / "bad-bot.status.json").write_text("not json")
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            result = batch_read_bot_statuses(["bad-bot"])
+        assert result["bad-bot"] is None
+
+    def test_empty_list_returns_empty_dict(self, tmp_path):
+        """Empty input returns empty dict."""
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            result = batch_read_bot_statuses([])
+        assert result == {}
+
+    def test_non_dict_json_returns_none(self, tmp_path):
+        """Non-dict JSON (e.g., a list) produces None."""
+        (tmp_path / "list-bot.status.json").write_text('[1, 2, 3]')
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            result = batch_read_bot_statuses(["list-bot"])
+        assert result["list-bot"] is None
+
+    def test_mixed_valid_and_missing(self, tmp_path):
+        """Mix of existing and missing status files handled correctly."""
+        data = {"status": "running"}
+        (tmp_path / "exists.status.json").write_text(json.dumps(data))
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            result = batch_read_bot_statuses(["exists", "missing"])
+        assert result["exists"]["status"] == "running"
+        assert result["missing"] is None

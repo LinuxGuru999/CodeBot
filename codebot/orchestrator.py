@@ -34,6 +34,7 @@ from codebot.process_manager import (
     _write_json_atomic, log_mtime,
     BOTS_DIR, STATE_DIR, LOGS_DIR, GATEWAY_MAX_CONCURRENT,
     _get_code_mtimes,
+    batch_read_heartbeats,
 )
 from codebot.alignment_coordinator import write_alignment_event
 from codebot.alignment_service import (
@@ -45,7 +46,7 @@ from codebot.ticket_dispatcher import (
     gatekeeper_verify_tickets, route_ready_tickets,
     process_rework_tickets, recover_deferred_tickets,
     _sweep_orphan_claims, clear_ticket_store_cache,
-    TICKET_CLASS_TO_IMPLEMENTER,
+    TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER,
 )
 from codebot.dispatch_service import (
     get_pipeline_state, is_needed_bot, apply_agent_availability,
@@ -53,6 +54,7 @@ from codebot.dispatch_service import (
     transition_ticket_on_error, compute_rate_limit_backoff,
     retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
     IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
+    batch_read_bot_statuses,
 )
 from codebot.scratchpad import load_scratchpad, save_scratchpad
 from codebot.state_manager import (
@@ -111,9 +113,11 @@ logger = logging.getLogger("orchestrator")
 def get_status(bots: dict[str, BotState]) -> dict:
     """Return a dict of bot statuses for display or API."""
     out: dict[str, dict[str, Any]] = {}
+    # Batch-read all heartbeats once
+    heartbeat_cache = batch_read_heartbeats([b.config.name for b in bots.values()])
     for n, b in bots.items():
         pid = b.process.pid if b.process and b.process.poll() is None else None
-        hb = read_heartbeat(b.config.name)
+        hb = heartbeat_cache.get(b.config.name, 0.0)
         ha = max(0.0, time.time() - hb) if hb > 0 else None
         pr = model_profile(b.config.model)
         out[n] = {
@@ -151,13 +155,20 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 
     now = time.time()
 
+    # --- Batch-read all heartbeats and statuses once per tick ---
+    bot_names = list(bots.keys())
+    heartbeat_cache = batch_read_heartbeats(bot_names)
+    running_names = [n for n, b in bots.items()
+                     if b.process is not None and b.process.poll() is None]
+    status_cache = batch_read_bot_statuses(running_names) if running_names else {}
+
     # Retry disabled or stuck-starting bots
     for name, bot in bots.items():
         if not bot.config.enabled and bot.process is None:
             if retry_disabled_bot(bot):
                 update_bot_state(bot, "waiting")
         if bot.config.enabled and bot.process is not None:
-            if retry_stuck_starting(bot):
+            if retry_stuck_starting(bot, heartbeat_cache=heartbeat_cache):
                 logger.info(f"Retrying '{name}' stuck in starting")
 
     # Handle exited bots
@@ -206,13 +217,13 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             bot.next_run_at = now + 5
             update_bot_state(bot, "waiting")
 
-    # Handle stuck bots
+    # Handle stuck bots — use cached heartbeats
     for name, bot in bots.items():
         if not bot.config.enabled or bot.process is None or bot.process.poll() is not None:
             continue
-        if is_stuck(bot):
+        if is_stuck(bot, heartbeat_cache=heartbeat_cache):
             eff = effective_heartbeat_timeout(bot)
-            hb = read_heartbeat(bot.config.name)
+            hb = heartbeat_cache.get(bot.config.name, 0.0)
             hb_age = now - hb if hb else 0
             prof = model_profile(bot.config.model)
             logger.warning(f"Bot '{name}' stuck (hb {hb_age:.0f}s > {eff}s, risk={prof.lockup_risk if prof else '?'})")
@@ -223,7 +234,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 logger.warning(f"Alignment failed for {name}: {e}")
             restart_bot(bot, reason="stuck", bots=bots)
 
-    log_bot_statuses(bots)
+    log_bot_statuses(bots, preloaded_statuses=status_cache)
 
     # Run dispatcher tasks
     for fn, label in [

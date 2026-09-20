@@ -233,7 +233,7 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         responses = []
         handler._json = lambda code, data, r=responses: r.append((code, data))
         handler._auth = lambda: True
-        handler._read_json_body = lambda: ({"bots": ["valid-bot", "evil; rm -rf /"]}, None, None)
+        handler._read_json_body = lambda: ({"bots": ["valid-bot", "evil; rm -rf /"], "force": True}, None, None)
 
         ControlHandler.do_POST(handler)
 
@@ -379,12 +379,12 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         from codebot.control_server import ControlHandler
 
         handler = self._make_handler(
-            "POST", "/bots/stop", body={"bots": [".*"]}
+            "POST", "/bots/stop", body={"bots": [".*"], "force": True}
         )
         responses = []
         handler._json = lambda code, data, r=responses: r.append((code, data))
         handler._auth = lambda: True
-        handler._read_json_body = lambda: ({"bots": [".*"]}, None, None)
+        handler._read_json_body = lambda: ({"bots": [".*"], "force": True}, None, None)
 
         with patch("codebot.control_server.subprocess.run") as mock_run:
             ControlHandler.do_POST(handler)
@@ -401,12 +401,12 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         from codebot.control_server import ControlHandler
 
         handler = self._make_handler(
-            "POST", "/bots/stop", body={"bots": ["python3"]}
+            "POST", "/bots/stop", body={"bots": ["python3"], "force": True}
         )
         responses = []
         handler._json = lambda code, data, r=responses: r.append((code, data))
         handler._auth = lambda: True
-        handler._read_json_body = lambda: ({"bots": ["python3"]}, None, None)
+        handler._read_json_body = lambda: ({"bots": ["python3"], "force": True}, None, None)
 
         with patch("codebot.control_server.subprocess.run") as mock_run:
             ControlHandler.do_POST(handler)
@@ -428,12 +428,12 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
             with patch("codebot.control_server.subprocess.run") as mock_run:
                 handler = self._make_handler(
-                    "POST", "/bots/stop", body={"bots": ["my-bot"]}
+                    "POST", "/bots/stop", body={"bots": ["my-bot"], "force": True}
                 )
                 responses = []
                 handler._json = lambda code, data, r=responses: r.append((code, data))
                 handler._auth = lambda: True
-                handler._read_json_body = lambda: ({"bots": ["my-bot"]}, None, None)
+                handler._read_json_body = lambda: ({"bots": ["my-bot"], "force": True}, None, None)
 
                 ControlHandler.do_POST(handler)
 

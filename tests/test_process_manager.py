@@ -13,6 +13,8 @@ from codebot.process_manager import (
     BotState,
     _prepare_prompt_with_context,
     _prompt_read_lock,
+    batch_read_heartbeats,
+    read_heartbeat,
 )
 
 
@@ -148,3 +150,76 @@ def test_prepare_prompt_with_context_locks_file(tmp_path):
 
     # Should get the content (may have git context appended)
     assert "locked content test" in content
+
+
+# -----------------------------------------------------------------------
+# batch_read_heartbeats
+# -----------------------------------------------------------------------
+class TestBatchReadHeartbeats:
+    """Tests for batch_read_heartbeats() — single-pass heartbeat reading."""
+
+    def test_returns_correct_timestamps(self, tmp_path):
+        """Returns correct timestamps for multiple bots."""
+        now = time.time()
+        for name, ts in [("bot-a", now - 5), ("bot-b", now - 10)]:
+            (tmp_path / f"{name}.heartbeat").write_text(str(ts))
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            result = batch_read_heartbeats(["bot-a", "bot-b"])
+        assert result["bot-a"] == pytest.approx(now - 5, abs=0.01)
+        assert result["bot-b"] == pytest.approx(now - 10, abs=0.01)
+
+    def test_missing_file_returns_zero(self, tmp_path):
+        """Missing heartbeat files produce 0.0 entries."""
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            result = batch_read_heartbeats(["no-such-bot"])
+        assert result["no-such-bot"] == 0.0
+
+    def test_corrupt_file_returns_zero(self, tmp_path):
+        """Corrupt heartbeat files produce 0.0 entries."""
+        (tmp_path / "bad-bot.heartbeat").write_text("not-a-timestamp")
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            result = batch_read_heartbeats(["bad-bot"])
+        assert result["bad-bot"] == 0.0
+
+    def test_empty_list_returns_empty_dict(self, tmp_path):
+        """Empty input returns empty dict."""
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            result = batch_read_heartbeats([])
+        assert result == {}
+
+    def test_empty_file_returns_zero(self, tmp_path):
+        """Empty heartbeat file produces 0.0."""
+        (tmp_path / "empty-bot.heartbeat").write_text("")
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            result = batch_read_heartbeats(["empty-bot"])
+        assert result["empty-bot"] == 0.0
+
+    def test_matches_individual_read(self, tmp_path):
+        """batch_read_heartbeats produces same result as individual read_heartbeat calls."""
+        now = time.time()
+        bots = ["match-a", "match-b", "match-c"]
+        for name in bots:
+            (tmp_path / f"{name}.heartbeat").write_text(str(now - 20))
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            batch_result = batch_read_heartbeats(bots)
+            individual_results = {name: read_heartbeat(name) for name in bots}
+        for name in bots:
+            assert batch_result[name] == pytest.approx(individual_results[name], abs=0.01)
+
+    def test_mixed_valid_and_missing(self, tmp_path):
+        """Mix of existing and missing heartbeat files handled correctly."""
+        now = time.time()
+        (tmp_path / "exists.heartbeat").write_text(str(now))
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            result = batch_read_heartbeats(["exists", "missing"])
+        assert result["exists"] == pytest.approx(now, abs=0.01)
+        assert result["missing"] == 0.0
+
+    def test_consistency_with_individual_read(self, tmp_path):
+        """Each entry in batch result matches read_heartbeat for same bot."""
+        now = time.time()
+        (tmp_path / "consistency.heartbeat").write_text(str(now))
+        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+            batch_result = batch_read_heartbeats(["consistency"])
+            individual = read_heartbeat("consistency")
+        assert batch_result["consistency"] == pytest.approx(individual, abs=0.01)

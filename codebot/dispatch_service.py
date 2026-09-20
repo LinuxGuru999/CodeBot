@@ -402,13 +402,22 @@ def retry_disabled_bot(bot: Any) -> bool:
     return False
 
 
-def retry_stuck_starting(bot: Any) -> bool:
-    """Check if a bot stuck in 'starting' state should be retried."""
+def retry_stuck_starting(bot: Any,
+                         heartbeat_cache: dict[str, float] | None = None) -> bool:
+    """Check if a bot stuck in 'starting' state should be retried.
+
+    Args:
+        bot: BotState to check.
+        heartbeat_cache: Optional preloaded heartbeats from batch_read_heartbeats().
+    """
     if bot.process is not None and bot.process.poll() is not None:
         return True
     try:
-        from codebot.process_manager import read_heartbeat
-        last_hb = read_heartbeat(bot.config.name)
+        if heartbeat_cache is not None and bot.config.name in heartbeat_cache:
+            last_hb = heartbeat_cache[bot.config.name]
+        else:
+            from codebot.process_manager import read_heartbeat
+            last_hb = read_heartbeat(bot.config.name)
         if last_hb > 0:
             if time.time() - last_hb > 120.0:
                 return True
@@ -423,22 +432,56 @@ def retry_stuck_starting(bot: Any) -> bool:
 # Status Logging
 # ---------------------------------------------------------------------------
 
-def log_bot_statuses(bots: dict[str, Any]) -> None:
-    """Log current activity for all running bots."""
-    for name, bot in bots.items():
-        alive = bot.process is not None and bot.process.poll() is None
-        if not alive:
-            continue
+def batch_read_bot_statuses(bot_names: list[str]) -> dict[str, dict | None]:
+    """Read .status.json files for all bots in a single pass.
+
+    Returns {name: parsed_dict_or_None}. Bots with missing/unreadable status
+    files get None.
+    """
+    results: dict[str, dict | None] = {}
+    for name in bot_names:
         status_path = STATE_DIR / f"{name}.status.json"
         try:
             if status_path.exists():
                 data = json.loads(status_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    task = data.get("current_task", "unknown")
-                    iteration = data.get("iteration", 0)
-                    files = data.get("files_touched", [])
-                    files_str = ", ".join(files[-3:]) if files else "none"
-                    age_s = time.time() - data.get("updated_at", 0)
-                    logger.info(f"[status] {name}: task={task} iter={iteration} files=[{files_str}] age={age_s:.0f}s")
+                results[name] = data if isinstance(data, dict) else None
+            else:
+                results[name] = None
         except Exception:
-            pass
+            results[name] = None
+    return results
+
+
+def log_bot_statuses(bots: dict[str, Any],
+                     preloaded_statuses: dict[str, dict | None] | None = None) -> None:
+    """Log current activity for all running bots.
+
+    Args:
+        bots: Dict of bot name to BotState.
+        preloaded_statuses: Optional preloaded .status.json data from
+            batch_read_bot_statuses(). If provided, used instead of per-file reads.
+    """
+    now = time.time()
+    for name, bot in bots.items():
+        alive = bot.process is not None and bot.process.poll() is None
+        if not alive:
+            continue
+        if preloaded_statuses is not None:
+            data = preloaded_statuses.get(name)
+        else:
+            status_path = STATE_DIR / f"{name}.status.json"
+            data = None
+            try:
+                if status_path.exists():
+                    data = json.loads(status_path.read_text(encoding="utf-8"))
+                    if not isinstance(data, dict):
+                        data = None
+            except Exception:
+                data = None
+        if data is not None:
+            task = data.get("current_task", "unknown")
+            iteration = data.get("iteration", 0)
+            files = data.get("files_touched", [])
+            files_str = ", ".join(files[-3:]) if files else "none"
+            age_s = now - data.get("updated_at", 0)
+            logger.info(f"[status] {name}: task={task} iter={iteration} files=[{files_str}] age={age_s:.0f}s")

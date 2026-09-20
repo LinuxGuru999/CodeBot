@@ -438,11 +438,11 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         """Stop endpoint must reject bot names containing ampersands."""
         from codebot.control_server import ControlHandler
 
-        handler = self._make_handler("POST", "/bots/stop", body={"bots": ["test&wget evil.com"]})
+        handler = self._make_handler("POST", "/bots/stop", body={"bots": ["test&wget evil.com"], "force": True})
         responses = []
         handler._json = lambda code, data, r=responses: r.append((code, data))
         handler._auth = lambda: True
-        handler._read_json_body = lambda: ({"bots": ["test&wget evil.com"]}, None, None)
+        handler._read_json_body = lambda: ({"bots": ["test&wget evil.com"], "force": True}, None, None)
 
         with patch("codebot.control_server.subprocess.run") as mock_run:
             ControlHandler.do_POST(handler)

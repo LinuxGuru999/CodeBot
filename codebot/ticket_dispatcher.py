@@ -92,6 +92,19 @@ REVIEWER_TYPES = (
     "documentation_reviewer",
 )
 
+TICKET_CLASS_TO_REVIEWER: dict[str, str] = {
+    "bug": "correctness_reviewer",
+    "feature": "correctness_reviewer",
+    "refactor": "simplicity_reviewer",
+    "security": "security_reviewer",
+    "performance": "performance_reviewer",
+    "architecture": "architecture_reviewer",
+    "test": "test_reviewer",
+    "documentation": "documentation_reviewer",
+    "dependency": "correctness_reviewer",
+    "infrastructure": "correctness_reviewer",
+}
+
 WORKER_MODEL_CYCLE = (
     "xiaomi-mimo-2.5", "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.7-plus",
     "qwen-3.8-max", "qwen-3.8-max", "qwen-3.6-plus", "qwen-3.5-plus",

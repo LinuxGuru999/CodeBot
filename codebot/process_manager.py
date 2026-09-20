@@ -256,6 +256,40 @@ def read_heartbeat(bot_name: str) -> float:
         return 0.0
 
 
+def batch_read_heartbeats(bot_names: list[str]) -> dict[str, float]:
+    """Read heartbeat files for all bots in a single pass.
+
+    Returns {name: timestamp} where timestamp is the last heartbeat time.
+    Bots with missing/corrupt heartbeat files get 0.0.
+    """
+    results: dict[str, float] = {}
+    for name in bot_names:
+        hb = heartbeat_path(name)
+        if not hb.exists():
+            results[name] = 0.0
+            continue
+        txt = hb.read_text().strip()
+        ts = 0.0
+        try:
+            ts = float(txt)
+        except (ValueError, OSError):
+            try:
+                import datetime
+                token = txt.split()[0]
+                token = token.replace("Z", "+00:00")
+                dt = datetime.datetime.fromisoformat(token)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                ts = dt.timestamp()
+                now = time.time()
+                if ts > now + 60 or ts < now - 86400:
+                    ts = 0.0
+            except Exception:
+                ts = 0.0
+        results[name] = ts
+    return results
+
+
 def log_path(bot_name: str) -> Path:
     return LOGS_DIR / f"{bot_name}.log"
 
@@ -278,9 +312,12 @@ def is_log_stalled(bot: BotState) -> bool:
     return (time.time() - mtime) > stall
 
 
-def is_stuck(bot: BotState) -> bool:
+def is_stuck(bot: BotState, heartbeat_cache: dict[str, float] | None = None) -> bool:
     eff = effective_heartbeat_timeout(bot)
-    last = read_heartbeat(bot.config.name)
+    if heartbeat_cache is not None and bot.config.name in heartbeat_cache:
+        last = heartbeat_cache[bot.config.name]
+    else:
+        last = read_heartbeat(bot.config.name)
     if last == 0.0:
         if bot.process and bot.process.poll() is None:
             elapsed = time.time() - bot.last_heartbeat
@@ -566,20 +603,27 @@ def _should_skip_run(bot: BotState, last_run_mtime: float, is_demand: bool = Fal
 def _prepare_prompt_with_context(bot: BotState) -> str:
     """Read prompt file and inject ticket context + scratchpad handoff.
 
-    Acquires an exclusive lock on the prompt file before reading to prevent
-    race conditions with concurrent writes that could cause stale/inconsistent reads.
+    Acquires an exclusive lock on the prompt file before stat() and holds it
+    through read() to prevent race conditions with concurrent writes that
+    could cause stale/inconsistent reads or mismatched mtime/content.
     """
     prompt_path = BOTS_DIR / bot.config.prompt_file
 
-    # Read prompt content while holding exclusive lock
+    # Acquire lock, then stat() and read() atomically
     try:
         with _prompt_read_lock(prompt_path):
+            bot.prompt_mtime = prompt_path.stat().st_mtime
+            bot.last_prompt_mtime = bot.prompt_mtime
             prompt_text = prompt_path.read_text()
     except FileNotFoundError:
         logger.warning(f"Prompt file not found: {prompt_path}")
+        bot.prompt_mtime = 0.0
+        bot.last_prompt_mtime = 0.0
         return ""
     except Exception as e:
         logger.error(f"Failed to read prompt file {prompt_path}: {e}")
+        bot.prompt_mtime = 0.0
+        bot.last_prompt_mtime = 0.0
         return ""
 
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
@@ -726,12 +770,6 @@ def _init_and_prepare_bot(bot: BotState, resume_checkpoint: bool) -> tuple[Path,
     bot.last_heartbeat = time.time()
 
     prompt_text = _prepare_prompt_with_context(bot)
-    try:
-        bot.prompt_mtime = prompt_file.stat().st_mtime
-        bot.last_prompt_mtime = bot.prompt_mtime
-    except OSError:
-        bot.prompt_mtime = 0.0
-        bot.last_prompt_mtime = 0.0
     if not bot.last_code_mtimes:
         bot.last_code_mtimes = _get_code_mtimes()
 

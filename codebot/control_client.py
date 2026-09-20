@@ -196,11 +196,11 @@ def main():
     elif cmd == "resume" and len(sys.argv) >= 3:
         code, j = req("POST", f"/bots/{sys.argv[2]}/resume", {}); print(j)
     elif cmd in ("drain", "safe-stop"):
-        code, j = req("POST", "/control/drain", {}); print(j)
+        code, j = req("POST", "/control/drain", {"force": True}); print(j)
     elif cmd in ("clear-drain", "undrain"):
         code, j = req("POST", "/control/clear-drain", {}); print(j)
     elif cmd == "update":
-        code, j = req("POST", "/control/update", {}); print(json.dumps(j, indent=2)[:8000])
+        code, j = req("POST", "/control/update", {"force": True}); print(json.dumps(j, indent=2)[:8000])
     elif cmd == "state":
         code, j = req("GET", "/state"); print(json.dumps(j, indent=2))
     else:
