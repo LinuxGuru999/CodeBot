@@ -143,6 +143,69 @@ class TestGetStats:
         assert "gpt-4:code" in result
 
 
+class TestRecordCallEdgeCases:
+    """Edge case tests for record_call."""
+
+    def test_zero_cost_and_tokens(self, tmp_path):
+        """Boundary: zero cost and zero tokens should work."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("gpt-4", "code", True, 0.0, 0, 0)
+        key = "gpt-4:code"
+        assert sc._cache[key]["total_calls"] == 1
+        assert sc._cache[key]["total_cost"] == 0.0
+        assert sc._cache[key]["total_tokens_in"] == 0
+        assert sc._cache[key]["total_tokens_out"] == 0
+
+    def test_empty_string_model_and_task(self, tmp_path):
+        """Edge: empty strings as model_name and task_type."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("", "", True, 0.01, 5, 2)
+        # key becomes ":" which has exactly one colon
+        key = ":"
+        assert sc._cache[key]["total_calls"] == 1
+        assert sc._cache[key]["successful_calls"] == 1
+
+    def test_model_name_with_colon(self, tmp_path):
+        """Edge: model_name containing a colon — split(':', 1) must handle it."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("provider:model-v1", "code", True, 0.10, 200, 100)
+        key = "provider:model-v1:code"
+        assert sc._cache[key]["total_calls"] == 1
+        # get_stats must still filter correctly on the first segment
+        result = sc.get_stats(model_name="provider:model-v1")
+        assert len(result) == 1
+        assert key in result
+
+    def test_separate_task_types_same_model(self, tmp_path):
+        """Same model, different task types produce separate entries."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("gpt-4", "code_generation", True, 0.05, 100, 50)
+        sc.record_call("gpt-4", "summarization", True, 0.02, 40, 20)
+        sc.record_call("gpt-4", "code_generation", True, 0.03, 60, 30)
+        # code_generation should accumulate
+        key_cg = "gpt-4:code_generation"
+        assert sc._cache[key_cg]["total_calls"] == 2
+        assert sc._cache[key_cg]["total_tokens_in"] == 160
+        # summarization stays separate
+        key_sum = "gpt-4:summarization"
+        assert sc._cache[key_sum]["total_calls"] == 1
+
+    def test_mixed_success_failure_accumulation(self, tmp_path):
+        """Mixed success/failure across many calls accumulates correctly."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        for _ in range(10):
+            sc.record_call("gpt-4", "code", True, 0.01, 10, 5)
+        for _ in range(3):
+            sc.record_call("gpt-4", "code", False, 0.005, 10, 0)
+        key = "gpt-4:code"
+        assert sc._cache[key]["total_calls"] == 13
+        assert sc._cache[key]["successful_calls"] == 10
+        assert sc._cache[key]["failed_calls"] == 3
+        assert sc._cache[key]["total_cost"] == pytest.approx(0.115)
+        assert sc._cache[key]["total_tokens_in"] == 130
+        assert sc._cache[key]["total_tokens_out"] == 50
+
+
 class TestSaveLoad:
     """Atomic persistence tests."""
 
