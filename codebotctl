@@ -80,7 +80,7 @@ cmd_start() {
     _clear_drain
     mkdir -p "$LOG_DIR" "$BOT_LOG_DIR" "$STATE_DIR" \
              "$STATE_DIR/alignment_events" "$STATE_DIR/alignment_triggers"
-    setsid env GITHUB_DRY_RUN=1 CODEBOT_PROJECT_ROOT="$PROJECT_ROOT" \
+    setsid env GITHUB_DRY_RUN=0 CODEBOT_PROJECT_ROOT="$PROJECT_ROOT" \
         python3 -m codebot serve --project "$PROJECT_ROOT" \
         >> "$LOG_FILE" 2>&1 &
     local pid=$!

@@ -6,7 +6,7 @@ primary_region = "iad"
 
 [env]
   CODEBOT_PROJECT_ROOT = "/project"
-  GITHUB_DRY_RUN = "1"
+  GITHUB_DRY_RUN = "0"
   # 1GB Fly profile for 20 concurrent bots: 20 x ~31MB RSS ~= 620MB
   # plus orchestrator (~30MB) + control_server (~30MB), leaving ~300MB headroom.
   CODEBOT_MAX_CONCURRENT = "22"
