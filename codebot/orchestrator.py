@@ -241,7 +241,7 @@ RATE_LIMIT_DISABLE_AFTER = int(os.getenv("CODEBOT_RATE_LIMIT_DISABLE_AFTER", "20
 _metrics_tick = 0
 
 ALWAYS_RESPAWN = frozenset({
-    "scheduler", "conflict_resolver", "budget_controller",
+    "scheduler", "conflict_resolver",
 })
 
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
@@ -804,7 +804,7 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         return {}
 
     depths = _read_depths()
-    always_on_names = {"scheduler", "conflict_resolver", "budget_controller"}
+    always_on_names = {"scheduler", "conflict_resolver"}
 
     def _role_has_demand(name: str) -> bool:
         base = name.split("-")[0] if "-" in name else name
@@ -3798,7 +3798,7 @@ def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
     reviewing = pipeline.get("REVIEWING", 0)
     verifying = pipeline.get("VERIFYING", 0)
 
-    always_on = {"scheduler", "conflict_resolver", "budget_controller"}
+    always_on = {"scheduler", "conflict_resolver"}
     if name in always_on:
         return True
     if name == "decomposer" or name.startswith("decomposer-"):
@@ -3826,7 +3826,7 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
     implementing = pipeline.get("IMPLEMENTING", 0)
     reviewing = pipeline.get("REVIEWING", 0)
 
-    always_on = {"scheduler", "conflict_resolver", "budget_controller"}
+    always_on = {"scheduler", "conflict_resolver"}
 
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name
@@ -4897,11 +4897,59 @@ def _process_verifying_tickets() -> None:
         logger.error(f"Failed to process VERIFYING tickets: {e}")
 
 
+def _evaluate_budget() -> str:
+    ledger_path = STATE_DIR / "token_ledger.json"
+    daily_limit_tokens = 500_000
+    try:
+        from codebot.scheduler_config import load_scheduler_config
+        cfg = load_scheduler_config()
+        daily_limit_usd = cfg.cost.daily_limit_usd
+        if daily_limit_usd > 0:
+            daily_limit_tokens = int(daily_limit_usd * 10_000)
+    except Exception:
+        pass
+
+    total_actual = 0
+    if ledger_path.exists():
+        try:
+            data = json.loads(ledger_path.read_text(encoding="utf-8"))
+            total_actual = int(data.get("total_actual", 0))
+        except Exception:
+            pass
+
+    pct = (total_actual / daily_limit_tokens * 100) if daily_limit_tokens > 0 else 0.0
+
+    if pct >= 100:
+        status = "halt"
+    elif pct >= 80:
+        status = "throttle"
+    else:
+        status = "ok"
+
+    status_path = STATE_DIR / "budget_controller.status.json"
+    try:
+        status_data = {
+            "status": status,
+            "daily_pct": round(pct, 2),
+            "total_actual": total_actual,
+            "per_ticket_flags": [],
+            "updated_at": time.time(),
+        }
+        tmp = status_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(status_data), encoding="utf-8")
+        tmp.replace(status_path)
+    except OSError:
+        pass
+
+    return status
+
+
 def check_all_bots(bots: dict[str, BotState]) -> None:
     if _check_self_restart(bots):
         return
     if USE_MANIFEST_SCHEDULER:
         return _check_all_bots_manifest(bots)
+    _evaluate_budget()
     _apply_agent_availability(bots)
     _sweep_orphan_claims(bots)
     rotate_logs()
