@@ -1768,6 +1768,34 @@ def _gatekeeper_verify_tickets() -> int:
             record_gate_results(STATE_DIR, tid, passed, evaluations)
 
             if passed:
+                changed_files = ticket.affected_modules if ticket.affected_modules else []
+                files_actually_modified = False
+                if not changed_files:
+                    files_actually_modified = False
+                else:
+                    for mod in changed_files[:5]:
+                        try:
+                            r = subprocess.run(
+                                ["git", "diff", "--name-only", "HEAD~5", "--", mod],
+                                capture_output=True, text=True,
+                                cwd=str(Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))),
+                                timeout=10,
+                            )
+                            if r.stdout.strip():
+                                files_actually_modified = True
+                                break
+                        except Exception:
+                            pass
+                if not files_actually_modified:
+                    rework_count = getattr(ticket, 'rework_count', 0)
+                    if rework_count < 3:
+                        ts.transition(tid, TicketState.REWORK)
+                        logger.info(f"Gatekeeper: {tid} -> REWORK (gates passed but no files modified in git)")
+                    else:
+                        ts.transition(tid, TicketState.REJECTED)
+                        logger.warning(f"Gatekeeper: {tid} -> REJECTED (no modifications after {rework_count} reworks)")
+                    advanced += 1
+                    continue
                 ts.transition(tid, TicketState.COMPLETE)
                 logger.info(f"Gatekeeper: {tid} -> COMPLETE (all gates passed)")
                 try:
