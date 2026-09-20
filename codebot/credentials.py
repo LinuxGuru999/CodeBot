@@ -23,6 +23,7 @@ Invariants
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -60,11 +61,24 @@ def get_ssh_auth_sock() -> str:
     return os.environ.get("SSH_AUTH_SOCK", "")
 
 
+def _get_known_hosts_path() -> str:
+    """Return absolute path to the bundled GitHub known_hosts file."""
+    return str(Path(__file__).resolve().parent / "resources" / "github_known_hosts")
+
+
 def get_git_ssh_command() -> str:
     key_path = get_ssh_key_path()
+    known_hosts = _get_known_hosts_path()
+    base = (
+        f"ssh -o StrictHostKeyChecking=yes "
+        f"-o UserKnownHostsFile={shlex.quote(known_hosts)}"
+    )
     if key_path:
-        return f"ssh -i {key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-    return "ssh -o StrictHostKeyChecking=accept-new"
+        # Quote the key path to prevent shell injection.
+        # Note: pathlib normalizes paths (e.g. stripping trailing slashes),
+        # so we quote whatever string representation it provides.
+        return f"{base} -o IdentitiesOnly=yes -i {shlex.quote(str(key_path))}"
+    return base
 
 
 def get_dry_run() -> bool:
@@ -99,10 +113,9 @@ def _read_secret_file(name: str) -> str:
                 # Check file size before reading
                 file_size = path.stat().st_size
                 if file_size > max_size:
-                    # Log warning via print/stderr since we can't import logging easily without context
-                    # In a real app, use proper logging. Here we just truncate.
-                    pass  # We will read only first 4KB below
-                
+                    # Reject oversized files to prevent partial reads and potential memory issues
+                    continue
+
                 # Read with size bound
                 with open(path, "r", encoding="utf-8") as f:
                     text = f.read(max_size)
