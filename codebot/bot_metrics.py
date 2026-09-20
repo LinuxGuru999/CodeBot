@@ -101,15 +101,18 @@ def record_bot_metric(name: str, alive: bool, exit_code: Optional[int],
         
         serialized = json.dumps(data, indent=2)
         
-        # Prune if file exceeds budget
+        # Prune if file exceeds budget — iteratively halve runs until under limit
         if len(serialized.encode("utf-8")) > _MAX_METRICS_FILE_BYTES:
-            for bot_key in data:
-                runs_list = data[bot_key].get("runs", [])
-                if len(runs_list) > 10:
-                    data[bot_key]["runs"] = runs_list[-10:]
-            serialized = json.dumps(data, indent=2)
+            max_runs = 10
+            while len(serialized.encode("utf-8")) > _MAX_METRICS_FILE_BYTES and max_runs >= 1:
+                for bot_key in data:
+                    runs_list = data[bot_key].get("runs", [])
+                    if len(runs_list) > max_runs:
+                        data[bot_key]["runs"] = runs_list[-max_runs:]
+                serialized = json.dumps(data, indent=2)
+                max_runs = max(1, max_runs // 2)
         
-        _write_json_atomic(metrics_path, serialized)
+        _write_json_atomic(metrics_path, data)
     except Exception as e:
         logger.warning(f"Failed to record metric for '{name}': {e}")
 

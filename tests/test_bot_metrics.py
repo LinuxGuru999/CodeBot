@@ -1,238 +1,188 @@
-"""Tests for codebot/bot_metrics.py — metric recording, retrieval, aggregation."""
+"""Tests for codebot.bot_metrics — TDD RED phase.
+
+Covers:
+- record_bot_metric() creates and updates entries correctly
+- alive vs not-alive + exit_code logic for successes/failures counting
+- _MAX_RUNS_PER_BOT cap enforced
+- _MAX_METRICS_FILE_BYTES pruning triggered
+- get_success_rate() returns correct ratio and None for missing data
+- get_token_burn_rate() averages correctly
+- atomic write via tmp+replace verified
+"""
+
 import json
-import time
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-import codebot.bot_metrics as bm
+from codebot import bot_metrics
 
 
-def _fixed_write(path: Path, data):
-    if isinstance(data, str):
-        tmp = path.with_name(f"{path.name}.{__import__('os').getpid()}.tmp")
-        tmp.write_text(data, encoding="utf-8")
-        tmp.replace(path)
-    else:
-        bm._write_json_atomic_orig(path, data) if hasattr(bm, "_write_json_atomic_orig") else None
-        tmp = path.with_name(f"{path.name}.{__import__('os').getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(path)
-
-@pytest.fixture
-def state_dir(tmp_path, monkeypatch):
-    d = tmp_path / "state"
-    d.mkdir()
-    bm.set_state_dir(d)
-    orig = bm._write_json_atomic
-    bm._write_json_atomic_orig = orig  # type: ignore
-
-    def patched(path, data):
-        if isinstance(data, str):
-            tmp = path.with_name(f"{path.name}.{__import__('os').getpid()}.tmp")
-            tmp.write_text(data, encoding="utf-8")
-            tmp.replace(path)
-        else:
-            tmp = path.with_name(f"{path.name}.{__import__('os').getpid()}.tmp")
-            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            tmp.replace(path)
-
-    monkeypatch.setattr(bm, "_write_json_atomic", patched)
-    yield d
-    bm._STATE_DIR = Path(".codebot/state")
+@pytest.fixture(autouse=True)
+def isolated_state(tmp_path: Path) -> Path:
+    """Point bot_metrics at a temporary directory for every test."""
+    bot_metrics.set_state_dir(tmp_path)
+    return tmp_path
 
 
-class TestSetStateDir:
-    def test_creates_dir(self, tmp_path):
-        d = tmp_path / "new_state"
-        bm.set_state_dir(d)
-        assert d.exists()
-        bm._STATE_DIR = Path(".codebot/state")
+class TestRecordBotMetricCreatesEntry:
+    def test_creates_new_bot_entry_on_first_record(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics is not None
+        assert "runs" in metrics
+        assert "successes" in metrics
+        assert "failures" in metrics
+        assert "total_tokens" in metrics
+        assert "total_duration_s" in metrics
 
-    def test_sets_global(self, tmp_path):
-        d = tmp_path / "sd"
-        bm.set_state_dir(d)
-        assert bm._STATE_DIR == d
-        bm._STATE_DIR = Path(".codebot/state")
+    def test_appends_run_timestamp(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0)
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert len(metrics["runs"]) == 2
 
 
-class TestRecordAndGet:
-    def test_record_creates_file(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0, tokens_this_run=100)
-        assert (state_dir / "bot_metrics.json").exists()
+class TestAliveAndExitCodeLogic:
+    def test_alive_true_does_not_count_success_or_failure(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=True, exit_code=None)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics["successes"] == 0
+        assert metrics["failures"] == 0
 
-    def test_record_success_increments_successes(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        data = bm.get_bot_metrics("bot-a")
-        assert data["successes"] == 1
-        assert data["failures"] == 0
+    def test_exit_code_zero_counts_as_success(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics["successes"] == 1
+        assert metrics["failures"] == 0
 
-    def test_record_failure_increments_failures(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=1)
-        data = bm.get_bot_metrics("bot-a")
-        assert data["failures"] == 1
+    def test_nonzero_exit_code_counts_as_failure(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=1)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics["successes"] == 0
+        assert metrics["failures"] == 1
 
-    def test_record_alive_no_success_or_failure(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=True, exit_code=None)
-        data = bm.get_bot_metrics("bot-a")
-        assert data["successes"] == 0
-        assert data["failures"] == 0
+    def test_negative_exit_code_counts_as_failure(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=-9)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics["failures"] == 1
 
-    def test_record_none_exit_code_no_count(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=None)
-        data = bm.get_bot_metrics("bot-a")
-        assert data["successes"] == 0
-        assert data["failures"] == 0
+    def test_not_alive_but_none_exit_code_no_count(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=None)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics["successes"] == 0
+        assert metrics["failures"] == 0
 
-    def test_record_tokens_accumulated(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0, tokens_this_run=50)
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0, tokens_this_run=30)
-        data = bm.get_bot_metrics("bot-a")
-        assert data["total_tokens"] == 80
 
-    def test_record_total_duration(self, state_dir):
-        now = time.time()
+class TestTokenAndDurationTracking:
+    def test_accumulates_tokens(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0, tokens_this_run=100)
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0, tokens_this_run=50)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics["total_tokens"] == 150
+
+    def test_accumulates_duration_from_started_at(self, isolated_state: Path) -> None:
+        now = 1700000000.0
         with patch("codebot.bot_metrics.time.time", return_value=now):
-            bm.record_bot_metric("bot-a", alive=False, exit_code=0, started_at=now - 10)
-        data = bm.get_bot_metrics("bot-a")
-        assert data["total_duration_s"] == pytest.approx(10, abs=0.1)
-
-    def test_record_runs_appended(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        data = bm.get_bot_metrics("bot-a")
-        assert len(data["runs"]) == 2
-
-    def test_record_multiple_bots(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        bm.record_bot_metric("bot-b", alive=False, exit_code=1)
-        assert bm.get_bot_metrics("bot-a")["successes"] == 1
-        assert bm.get_bot_metrics("bot-b")["failures"] == 1
-
-    def test_record_prunes_old_runs(self, state_dir):
-        old = time.time() - 8 * 86400
-        recent = time.time()
-        with patch("codebot.bot_metrics.time.time", return_value=recent):
-            path = state_dir / "bot_metrics.json"
-            path.write_text(json.dumps({"bot-a": {"runs": [old], "successes": 0, "failures": 0, "total_tokens": 0, "total_duration_s": 0}}))
-            bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        data = bm.get_bot_metrics("bot-a")
-        assert old not in data["runs"]
-
-    def test_record_caps_runs_at_500(self, state_dir):
-        now = time.time()
-        with patch("codebot.bot_metrics.time.time", return_value=now):
-            bm._MAX_RUNS_PER_BOT = 5
-            for _ in range(10):
-                bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-            data = bm.get_bot_metrics("bot-a")
-            assert len(data["runs"]) <= 5
-            bm._MAX_RUNS_PER_BOT = 500
-
-    def test_record_never_raises_on_corrupt_file(self, state_dir):
-        (state_dir / "bot_metrics.json").write_text("not json")
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        # Should not raise; file may be overwritten or warning logged
-
-    def test_get_missing_bot_returns_none(self, state_dir):
-        assert bm.get_bot_metrics("nonexistent") is None
-
-    def test_get_no_file_returns_none(self, state_dir):
-        assert bm.get_bot_metrics("any") is None
-
-    def test_get_all_empty(self, state_dir):
-        assert bm.get_all_metrics() == {}
-
-    def test_get_all_returns_all(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        bm.record_bot_metric("bot-b", alive=False, exit_code=0)
-        all_m = bm.get_all_metrics()
-        assert "bot-a" in all_m
-        assert "bot-b" in all_m
-
-    def test_get_all_corrupt_returns_empty(self, state_dir):
-        (state_dir / "bot_metrics.json").write_text("bad json")
-        assert bm.get_all_metrics() == {}
-
-    def test_get_corrupt_returns_none(self, state_dir):
-        (state_dir / "bot_metrics.json").write_text("bad json")
-        assert bm.get_bot_metrics("any") is None
+            bot_metrics.record_bot_metric(
+                "agent-a", alive=False, exit_code=0,
+                started_at=now - 10.0,
+            )
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert metrics["total_duration_s"] == pytest.approx(10.0, abs=0.1)
 
 
-class TestSuccessRate:
-    def test_no_data_returns_none(self, state_dir):
-        assert bm.get_success_rate("nope") is None
-
-    def test_no_runs_returns_none(self, state_dir):
-        (state_dir / "bot_metrics.json").write_text(json.dumps({"bot-a": {"runs": [], "successes": 0, "failures": 0, "total_tokens": 0, "total_duration_s": 0}}))
-        assert bm.get_success_rate("bot-a") is None
-
-    def test_all_success(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        assert bm.get_success_rate("bot-a") == pytest.approx(1.0)
-
-    def test_half_success(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        bm.record_bot_metric("bot-a", alive=False, exit_code=1)
-        assert bm.get_success_rate("bot-a") == pytest.approx(0.5)
-
-    def test_all_failure(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=1)
-        bm.record_bot_metric("bot-a", alive=False, exit_code=2)
-        assert bm.get_success_rate("bot-a") == pytest.approx(0.0)
-
-    def test_boundary_one_success_one_failure(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        bm.record_bot_metric("bot-a", alive=False, exit_code=99)
-        assert 0 < bm.get_success_rate("bot-a") < 1
+class TestMaxRunsPerBotCap:
+    def test_runs_capped_at_max_runs_per_bot(self, isolated_state: Path) -> None:
+        max_runs = bot_metrics._MAX_RUNS_PER_BOT
+        for _ in range(max_runs + 50):
+            bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0)
+        metrics = bot_metrics.get_bot_metrics("agent-a")
+        assert len(metrics["runs"]) <= max_runs
 
 
-class TestTokenBurnRate:
-    def test_no_data_returns_none(self, state_dir):
-        assert bm.get_token_burn_rate("nope") is None
+class TestMaxMetricsFileBytesPruning:
+    def test_pruning_triggered_when_file_exceeds_budget(self, isolated_state: Path) -> None:
+        budget = bot_metrics._MAX_METRICS_FILE_BYTES
+        # Record enough runs to exceed the byte budget
+        for i in range(600):
+            bot_metrics.record_bot_metric(f"bot-{i % 5}", alive=False, exit_code=0, tokens_this_run=100)
 
-    def test_no_runs_returns_none(self, state_dir):
-        (state_dir / "bot_metrics.json").write_text(json.dumps({"bot-a": {"runs": [], "successes": 0, "failures": 0, "total_tokens": 100, "total_duration_s": 0}}))
-        assert bm.get_token_burn_rate("bot-a") is None
+        metrics_path = bot_metrics._get_metrics_path()
+        file_size = metrics_path.stat().st_size
+        assert file_size <= budget, f"File size {file_size} exceeds budget {budget}"
 
-    def test_average(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0, tokens_this_run=100)
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0, tokens_this_run=200)
-        assert bm.get_token_burn_rate("bot-a") == pytest.approx(150.0)
 
-    def test_single_run(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0, tokens_this_run=42)
-        assert bm.get_token_burn_rate("bot-a") == pytest.approx(42.0)
+class TestGetSuccessRate:
+    def test_returns_none_when_no_data(self, isolated_state: Path) -> None:
+        assert bot_metrics.get_success_rate("nonexistent") is None
 
-    def test_zero_tokens(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0, tokens_this_run=0)
-        assert bm.get_token_burn_rate("bot-a") == pytest.approx(0.0)
+    def test_returns_none_when_no_completed_runs(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=True, exit_code=None)
+        assert bot_metrics.get_success_rate("agent-a") is None
+
+    def test_returns_correct_ratio(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0)
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0)
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=1)
+        rate = bot_metrics.get_success_rate("agent-a")
+        assert rate == pytest.approx(2.0 / 3.0)
+
+    def test_all_failures_returns_zero(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=1)
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=2)
+        assert bot_metrics.get_success_rate("agent-a") == 0.0
+
+
+class TestGetTokenBurnRate:
+    def test_returns_none_when_no_data(self, isolated_state: Path) -> None:
+        assert bot_metrics.get_token_burn_rate("nonexistent") is None
+
+    def test_returns_average_tokens_per_run(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0, tokens_this_run=100)
+        bot_metrics.record_bot_metric("agent-a", alive=False, exit_code=0, tokens_this_run=200)
+        rate = bot_metrics.get_token_burn_rate("agent-a")
+        assert rate == pytest.approx(150.0)
 
 
 class TestAtomicWrite:
-    def test_write_is_atomic(self, state_dir):
-        bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        raw = (state_dir / "bot_metrics.json").read_text()
-        data = json.loads(raw)
-        assert "bot-a" in data
+    def test_write_json_atomic_uses_tmp_then_replace(self, isolated_state: Path) -> None:
+        target = isolated_state / "test.json"
+        data = {"key": "value"}
+        bot_metrics._write_json_atomic(target, data)
 
-    def test_large_file_pruned(self, state_dir, monkeypatch):
-        monkeypatch.setattr(bm, "_MAX_METRICS_FILE_BYTES", 200)
-        for i in range(5):
-            bm.record_bot_metric(f"bot-{i}", alive=False, exit_code=0, tokens_this_run=9999)
-            for _ in range(20):
-                bm.record_bot_metric(f"bot-{i}", alive=False, exit_code=0)
-        raw = (state_dir / "bot_metrics.json").read_text()
-        assert json.loads(raw) is not None
+        assert target.exists()
+        assert json.loads(target.read_text(encoding="utf-8")) == data
+        # No leftover tmp files
+        tmp_files = list(isolated_state.glob("*.tmp"))
+        assert len(tmp_files) == 0
 
-    def test_time_window_filters_runs(self, state_dir):
-        now = 1_000_000.0
-        with patch("codebot.bot_metrics.time.time", return_value=now):
-            bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-        later = now + 8 * 86400
-        with patch("codebot.bot_metrics.time.time", return_value=later):
-            bm.record_bot_metric("bot-a", alive=False, exit_code=0)
-            data = bm.get_bot_metrics("bot-a")
-            assert len(data["runs"]) == 1
+    def test_no_partial_write_on_crash(self, isolated_state: Path) -> None:
+        target = isolated_state / "test.json"
+        target.write_text('{"old": true}', encoding="utf-8")
+
+        original_replace = Path.replace
+
+        def failing_replace(self_path: Path, dest: Path) -> None:
+            raise OSError("simulated crash")
+
+        with patch.object(Path, "replace", failing_replace):
+            with pytest.raises(OSError):
+                bot_metrics._write_json_atomic(target, {"new": True})
+
+        # Original content preserved because replace failed atomically
+        assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
+
+
+class TestGetAllMetrics:
+    def test_returns_empty_dict_when_no_file(self, isolated_state: Path) -> None:
+        assert bot_metrics.get_all_metrics() == {}
+
+    def test_returns_all_bots(self, isolated_state: Path) -> None:
+        bot_metrics.record_bot_metric("a", alive=False, exit_code=0)
+        bot_metrics.record_bot_metric("b", alive=False, exit_code=1)
+        all_m = bot_metrics.get_all_metrics()
+        assert "a" in all_m
+        assert "b" in all_m

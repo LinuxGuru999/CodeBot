@@ -97,6 +97,54 @@ _MANIFEST_SNAPSHOT: tuple[Path, tuple[tuple[str, float], ...], dict[str, dict]] 
 _CHECKPOINT_SNAPSHOTS: dict[Path, tuple[float, list[str] | int]] = {}
 ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
 
+# ---------------------------------------------------------------------------
+# Per-tick TicketStore cache — avoids repeated disk reads in health loop
+# ---------------------------------------------------------------------------
+_TICKET_STORE_CACHE: Any = None
+_TICKET_STORE_CACHE_MTIME: float = 0.0
+_TICKET_STORE_CACHE_PATH: Path | None = None
+
+
+def _get_ticket_store() -> Any:
+    """Return a cached TicketStore instance, reloading only when tickets.json changes.
+
+    This eliminates the 4-5 full disk reads and JSON parses per health check tick
+    that occurred when multiple functions each instantiated their own TicketStore.
+    The cache checks mtime before reloading, so it stays fresh across ticks while
+    avoiding redundant I/O within a single tick.
+    """
+    global _TICKET_STORE_CACHE, _TICKET_STORE_CACHE_MTIME, _TICKET_STORE_CACHE_PATH
+    try:
+        from codebot.ticket_engine import TicketStore
+    except ImportError:
+        return None
+
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return None
+
+    try:
+        current_mtime = store_path.stat().st_mtime
+    except OSError:
+        return None
+
+    if (
+        _TICKET_STORE_CACHE is not None
+        and _TICKET_STORE_CACHE_PATH == store_path
+        and _TICKET_STORE_CACHE_MTIME == current_mtime
+    ):
+        return _TICKET_STORE_CACHE
+
+    try:
+        _TICKET_STORE_CACHE = TicketStore(store_path)
+        _TICKET_STORE_CACHE_MTIME = current_mtime
+        _TICKET_STORE_CACHE_PATH = store_path
+        return _TICKET_STORE_CACHE
+    except Exception:
+        return None
+
 # T4.3 incremental adapter seam: when a ProjectAdapter is provided, its paths
 # override the defaults above.
 _adapter_instance: Any = None
@@ -1553,15 +1601,22 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
     if budget <= 0:
         return spawned
 
-    review_budget = min(len(reviewing) * len(REVIEWER_TYPES), budget)
-    for ticket in reviewing[:max(1, len(reviewing))]:
-        if spawned >= budget + (len(reviewing) * len(REVIEWER_TYPES) - review_budget):
+    max_concurrent_reviewers = 8
+    running_reviewers = sum(
+        1 for name, b in bots.items()
+        if b.process is not None and b.process.poll() is None
+        and ((name.split("-")[0] if "-" in name else name) in REVIEWER_ROLE_NAMES or name == "ux_reviewer")
+    )
+    review_budget = min(len(reviewing) * len(REVIEWER_TYPES), budget, max(0, max_concurrent_reviewers - running_reviewers))
+    reviewer_spawned = 0
+    for ticket in reviewing:
+        if reviewer_spawned >= review_budget:
             break
         tid = getattr(ticket, "id", "")
         if not tid or tid in active_claims:
             continue
         for rtype in REVIEWER_TYPES:
-            if spawned >= max_concurrent:
+            if reviewer_spawned >= review_budget:
                 break
             assigned = False
             for name, bot in bots.items():
@@ -1576,6 +1631,7 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
                     continue
                 if _assign_and_spawn(bot, tid):
                     assigned = True
+                    reviewer_spawned += 1
                     break
             if assigned:
                 continue
@@ -1587,9 +1643,10 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
             suffix = str(len(existing) + 1) if existing else ""
             bot = _get_or_create_bot(rtype, suffix)
             if bot and _is_idle(bot):
-                _assign_and_spawn(bot, tid)
+                if _assign_and_spawn(bot, tid):
+                    reviewer_spawned += 1
 
-    return spawned
+    return spawned + reviewer_spawned
 
 
 def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
