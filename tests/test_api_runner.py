@@ -34,6 +34,7 @@ from codebot.api_runner import (
     _extract_provider_usage,
     _write_bot_status,
     _auto_commit,
+    _log,
     HIGH_RISK_TOKEN_MANIFESTS,
 )
 
