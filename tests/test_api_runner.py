@@ -38,7 +38,7 @@ from codebot.api_runner import (
     _log,
     HIGH_RISK_TOKEN_MANIFESTS,
 )
-from codebot.ticket_engine import TicketStore, TicketClass, Severity, RiskLevel
+from codebot.ticket_engine import TicketStore, TicketClass, TicketState, Severity, RiskLevel
 
 
 class TestParseToolArgs:
@@ -518,7 +518,7 @@ class TestCreateTicketTool:
         store_path = adapter.paths().state_dir / "tickets.json"
         assert store_path.exists(), "tickets.json store file must exist"
         store = TicketStore(store_path)
-        tickets = store.list_all()
+        tickets = store.list_by_state(TicketState.DISCOVERED)
         assert len(tickets) >= 1, "At least one ticket must be in the store"
         # Find our ticket
         matching = [t for t in tickets if t.title == "Test bug from investigation"]
@@ -542,7 +542,7 @@ class TestCreateTicketTool:
         assert result["success"] is True
         store_path = adapter.paths().state_dir / "tickets.json"
         store = TicketStore(store_path)
-        tickets = store.list_all()
+        tickets = store.list_by_state(TicketState.DISCOVERED)
         ticket = [t for t in tickets if t.title == "Test bug from investigation"][0]
         # Verify fields
         assert ticket.title == "Test bug from investigation"

@@ -786,7 +786,7 @@ def _count_actionable_queue_items() -> int:
         ts = _get_ticket_store()
         if ts is not None:
             return (
-                len(ts.list_ready())
+                len(ts.list_ready_raw())
                 + len(ts.list_by_state(TicketState.DECOMPOSE))
                 + len(ts.list_by_state(TicketState.REWORK))
             )
@@ -1260,13 +1260,9 @@ def _sweep_orphan_claims(bots: dict[str, BotState]) -> int:
 
 def _load_ticket_context(ticket_id: str) -> str:
     try:
-        from codebot.ticket_engine import TicketStore
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if not store_path.exists():
+        ts = _get_ticket_store()
+        if ts is None:
             return ""
-        ts = TicketStore(store_path)
         t = ts.get(ticket_id)
         if t is None:
             return ""
@@ -1325,7 +1321,7 @@ def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
         from codebot.adaptive_scheduler import AdaptiveScheduler
         from codebot.scheduler_config import SchedulerConfig
         from codebot.pipeline_state import PipelineState, WorkerSlot
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_engine import TicketState
     except ImportError:
         return
 
@@ -1336,14 +1332,11 @@ def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
         except Exception:
             return
 
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
+    ts = _get_ticket_store()
+    if ts is None:
         return
 
     try:
-        ts = TicketStore(store_path)
         counts = ts.summary()
     except Exception:
         return
@@ -1423,17 +1416,11 @@ REVIEWER_TYPES = (
 
 def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
 
     implementing = ts.list_by_state(TicketState.IMPLEMENTING)
