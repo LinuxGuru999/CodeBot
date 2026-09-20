@@ -933,7 +933,11 @@ def gatekeeper_verify_tickets() -> int:
 
 
 def route_ready_tickets() -> int:
-    """Route READY tickets: decomposer sub-tickets to PLANNING, originals to DECOMPOSE."""
+    """Route READY tickets: decomposer sub-tickets to PLANNING, originals to DECOMPOSE.
+
+    Uses batch_transition to apply all state changes in memory and save once,
+    avoiding O(K*N) serialization cost per dispatch cycle.
+    """
     try:
         from codebot.ticket_engine import TicketStore, TicketState
     except ImportError:
@@ -951,29 +955,51 @@ def route_ready_tickets() -> int:
         return 0
 
     ready = ts.list_by_state(TicketState.READY)
-    routed = 0
+    if not ready:
+        return 0
 
+    # Collect all transitions first, then apply in a single batch
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
     for ticket in ready:
         tid = getattr(ticket, 'id', '')
         if not tid:
             continue
         source = getattr(ticket, 'source', '')
-        try:
-            if source == 'decomposer':
-                ts.transition(tid, TicketState.PLANNING)
-                logger.info(f"Routed {tid} READY -> PLANNING (decomposer sub-ticket)")
-            else:
-                ts.transition(tid, TicketState.DECOMPOSE)
-                logger.info(f"Routed {tid} READY -> DECOMPOSE")
-            routed += 1
-        except ValueError as e:
-            logger.debug(f"Failed to route {tid}: {e}")
+        if source == 'decomposer':
+            transitions.append((tid, TicketState.PLANNING, None))
+        else:
+            transitions.append((tid, TicketState.DECOMPOSE, None))
+
+    if not transitions:
+        return 0
+
+    routed = 0
+    try:
+        results = ts.batch_transition(transitions)
+        routed = len(results)
+        for i, (tid, target_state, _) in enumerate(transitions):
+            logger.info(f"Routed {tid} READY -> {target_state.value}" +
+                        (" (decomposer sub-ticket)" if target_state == TicketState.PLANNING else ""))
+    except (ValueError, KeyError) as e:
+        # Fallback: apply individually if batch fails (e.g., one invalid transition)
+        logger.warning(f"Batch route failed ({e}), falling back to individual transitions")
+        for tid, target_state, _ in transitions:
+            try:
+                ts.transition(tid, target_state)
+                logger.info(f"Routed {tid} READY -> {target_state.value}")
+                routed += 1
+            except ValueError as ve:
+                logger.debug(f"Failed to route {tid}: {ve}")
 
     return routed
 
 
 def process_rework_tickets(bots: dict[str, Any]) -> int:
-    """Process REWORK tickets by routing them back to PLANNING or DECOMPOSE."""
+    """Process REWORK tickets by routing them back to PLANNING or DECOMPOSE.
+
+    Uses batch_transition to apply all state changes in memory and save once,
+    avoiding O(K*N) serialization cost per dispatch cycle.
+    """
     store_path = STATE_DIR / "tickets.json"
     if not store_path.exists():
         store_path = Path(".codebot/state/tickets.json")
@@ -988,31 +1014,58 @@ def process_rework_tickets(bots: dict[str, Any]) -> int:
     if not rework:
         return 0
     plans_dir = STATE_DIR / "plans"
-    advanced = 0
+
+    # Collect transitions into batches; high-rework tickets need special handling
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
+    reject_fallbacks: list[str] = []
+
     for ticket in rework:
         tid = ticket.id
         rework_count = getattr(ticket, 'rework_count', 0)
         if rework_count >= 3:
+            transitions.append((tid, TicketState.DECOMPOSE, None))
+            reject_fallbacks.append(tid)
+        else:
+            plan_file = plans_dir / f"{tid}.plan.json"
+            target_state = TicketState.PLANNING if plan_file.exists() else TicketState.DECOMPOSE
+            transitions.append((tid, target_state, None))
+
+    if not transitions:
+        return 0
+
+    advanced = 0
+    try:
+        results = ts.batch_transition(transitions)
+        advanced = len(results)
+        for i, (tid, target_state, _) in enumerate(transitions):
+            rc = getattr(rework[i], 'rework_count', 0) if i < len(rework) else 0
+            if target_state == TicketState.DECOMPOSE and rc >= 3:
+                logger.warning(f"Rework ticket {tid} -> DECOMPOSE (failed {rc} implementations, needs fresh decomposition)")
+            else:
+                logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rc})")
+    except (ValueError, KeyError) as e:
+        # Fallback: apply individually if batch fails
+        logger.warning(f"Batch rework failed ({e}), falling back to individual transitions")
+        for i, (tid, target_state, _) in enumerate(transitions):
+            rc = getattr(rework[i], 'rework_count', 0) if i < len(rework) else 0
             try:
-                ts.transition(tid, TicketState.DECOMPOSE)
-                logger.warning(f"Rework ticket {tid} -> DECOMPOSE (failed {rework_count} implementations, needs fresh decomposition)")
+                ts.transition(tid, target_state)
+                if target_state == TicketState.DECOMPOSE and rc >= 3:
+                    logger.warning(f"Rework ticket {tid} -> DECOMPOSE (failed {rc} implementations, needs fresh decomposition)")
+                else:
+                    logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rc})")
                 advanced += 1
-            except ValueError as e:
-                try:
-                    ts.transition(tid, TicketState.REJECTED)
-                    logger.warning(f"Rework ticket {tid} -> REJECTED (decompose transition failed: {e})")
-                    advanced += 1
-                except ValueError:
-                    pass
-            continue
-        plan_file = plans_dir / f"{tid}.plan.json"
-        target_state = TicketState.PLANNING if plan_file.exists() else TicketState.DECOMPOSE
-        try:
-            ts.transition(tid, target_state)
-            logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rework_count})")
-            advanced += 1
-        except ValueError as e:
-            logger.warning(f"Rework ticket {tid} transition failed: {e}")
+            except ValueError as ve:
+                if tid in reject_fallbacks:
+                    try:
+                        ts.transition(tid, TicketState.REJECTED)
+                        logger.warning(f"Rework ticket {tid} -> REJECTED (decompose transition failed: {ve})")
+                        advanced += 1
+                    except ValueError:
+                        pass
+                else:
+                    logger.warning(f"Rework ticket {tid} transition failed: {ve}")
+
     return advanced
 
 

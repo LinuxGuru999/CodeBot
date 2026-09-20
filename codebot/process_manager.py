@@ -327,7 +327,7 @@ def _count_api_runner_processes() -> int:
 
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False,
                 runner_mode: str = "api", bot_model: str = "", bot_name: str = "",
-                is_overture: bool = False) -> tuple[bool, str]:
+                is_overture: bool = False, is_demand: bool = False) -> tuple[bool, str]:
     global _last_spawn_time
     now = time.time()
     running = _count_api_runner_processes()
@@ -351,10 +351,13 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
                         break
                 except OSError:
                     pass
-    if has_assignment:
+    if has_assignment or is_demand:
         cap = GATEWAY_MAX_CONCURRENT + 2
         if running >= cap:
             return False, f"cap {running}/{cap} running (with assignment)"
+
+    if is_demand or is_overture or has_assignment:
+        return True, "slot available"
 
     if now - _last_spawn_time < _SPAWN_STAGGER_SECONDS:
         gap = now - _last_spawn_time
@@ -530,7 +533,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
     is_queued = _is_queued(bot)
     ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api",
                           bot_model=bot.config.model, bot_name=bot.config.name,
-                          is_overture=is_overture or is_demand)
+                          is_overture=is_overture, is_demand=is_demand)
     if not ok:
         if due:
             bot.next_run_at = due
