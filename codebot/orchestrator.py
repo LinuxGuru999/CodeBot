@@ -849,8 +849,9 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     planning_instances = min(planning_instances, max(0, max_concurrent - len(non_impl) - 1))
 
     impl_budget = max_concurrent - len(non_impl) - planning_instances
-    target = min(impl_queue, max(impl_budget, 0))
-    if impl_queue > 0:
+    impl_demand = impl_queue + plan_queue
+    target = min(impl_demand, max(impl_budget, 0))
+    if impl_demand > 0:
         target = max(target, min(len(base_impl), max(impl_budget, 0)))
     role_map = {c.name: c for c in base_impl}
     ticket_classes = _peek_ticket_classes()
@@ -905,8 +906,10 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     review_names = ["correctness_reviewer", "security_reviewer", "architecture_reviewer",
                     "test_reviewer", "performance_reviewer", "simplicity_reviewer",
                     "documentation_reviewer", "ux_reviewer"]
+    impl_queue = depths.get("IMPLEMENTING", 0) + depths.get("REWORK", 0)
+    needs_reviewers = review_queue > 0 or impl_queue > 0
     for rname in review_names:
-        if review_queue > 0 and len(out) < max_concurrent:
+        if needs_reviewers and len(out) < max_concurrent:
             role_cfg = next((c for c in registry if c.name == rname), None)
             if role_cfg:
                 out.append(BotConfig(
@@ -917,7 +920,8 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
                 ))
                 TIER_PRIORITY[rname] = 12
 
-    if verify_queue > 0 and len(out) < max_concurrent:
+    needs_verifier = verify_queue > 0 or review_queue > 0
+    if needs_verifier and len(out) < max_concurrent:
         qg_cfg = next((c for c in registry if c.name == "quality_gate"), None)
         if qg_cfg:
             out.append(BotConfig(
