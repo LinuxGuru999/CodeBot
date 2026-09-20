@@ -170,7 +170,7 @@ class TestSplitTicket:
         result = split_ticket(t, store)
         assert result == []
 
-    def test_split_with_timeout(self, tmp_path):
+    def test_split_with_timeout_creates_independently_ready_children(self, tmp_path):
         store = TicketStore(tmp_path / "tickets.json")
         t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
         store.add(t)
@@ -179,7 +179,7 @@ class TestSplitTicket:
         assert len(sub_ids) <= MAX_SUB_TASKS
         for sid in sub_ids:
             assert store.get(sid) is not None
-            assert store.get(sid).dependencies[0] == t.id
+            assert t.id not in store.get(sid).dependencies
 
     def test_split_with_scratchpad(self, tmp_path):
         store = TicketStore(tmp_path / "tickets.json")
@@ -229,8 +229,8 @@ class TestSplitTicket:
         sub_ids = split_ticket(t, store, exit_reason="timeout")
         if len(sub_ids) >= 2:
             second = store.get(sub_ids[1])
-            assert t.id in second.dependencies
             assert sub_ids[0] in second.dependencies
+            assert t.id not in second.dependencies
 
     def test_terminal_ticket_no_split(self, tmp_path):
         store = TicketStore(tmp_path / "tickets.json")
@@ -239,3 +239,280 @@ class TestSplitTicket:
         t_rej = t.transition(TicketState.REJECTED)
         result = split_ticket(t_rej, store, exit_reason="timeout")
         assert result == []
+
+    def test_split_handles_duplicate_sub_tickets_gracefully(self, tmp_path):
+        """When create_ticket raises duplicate ValueError, split_ticket should skip and continue."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
+        store.add(t)
+        # Move parent to PLANNING so BLOCKED transition is allowed
+        store.transition(t.id, TicketState.VALIDATING)
+        store.transition(t.id, TicketState.TRIAGED)
+        store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.PLANNING)
+        t_updated = store.get(t.id)
+
+        # Create scratchpad that will generate chunks
+        sp = make_scratchpad(remaining=["step1", "step2", "step3", "step4", "step5", "step6"])
+
+        # Mock create_ticket to simulate one duplicate error among successful creations
+        with patch('codebot.ticket_engine.create_ticket') as mock_create:
+            # Create mock sub-tickets for each chunk
+            mock_subs = []
+            for i in range(3):
+                mock_sub = make_ticket(title=f"[SPLIT {i+1}/3] {t.title}", source=f"split:{t.id}")
+                mock_sub.id = f"CB-SUB-{i:03d}"
+                mock_subs.append(mock_sub)
+            
+            # Simulate: first succeeds, second is duplicate (raises), third succeeds
+            mock_create.side_effect = [
+                mock_subs[0],
+                ValueError("duplicate ticket detected"),
+                mock_subs[2],
+            ]
+            
+            sub_ids = split_ticket(t_updated, store, scratchpad=sp, exit_reason="timeout")
+
+            # Should have created 2 sub-tickets (skipped the duplicate)
+            assert len(sub_ids) == 2
+            # Parent should be blocked since sub-tickets were created
+            assert store.get(t_updated.id).state == TicketState.BLOCKED
+
+    def test_split_creates_exact_number_of_sub_tickets_matching_chunks(self, tmp_path):
+        """Verify split_ticket creates exactly the right number of sub-tickets."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(6)])
+        store.add(t)
+
+        # Move to PLANNING to allow BLOCKED transition
+        store.transition(t.id, TicketState.VALIDATING)
+        store.transition(t.id, TicketState.TRIAGED)
+        store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.PLANNING)
+        t_updated = store.get(t.id)
+
+        chunks = _compute_chunks(t_updated, None)
+        expected_count = len(chunks)
+
+        sub_ids = split_ticket(t_updated, store, exit_reason="timeout")
+
+        # Should create exactly as many sub-tickets as chunks
+        assert len(sub_ids) == expected_count
+        assert len(sub_ids) <= MAX_SUB_TASKS
+
+    def test_split_handoff_note_contains_required_fields(self, tmp_path):
+        """Verify handoff note in sub-ticket evidence contains all required information."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=["a.py", "b.py", "c.py"])
+        store.add(t)
+
+        sp = ScratchpadState(
+            ticket_id=t.id,
+            remaining_steps=["implement_x", "implement_y", "test_z"],
+            completed_steps=["analyze"],
+        )
+        sp.files_changed = ["module_a.py", "module_b.py"]
+        sp.current_agent = "implementation_planner"
+        sp.current_stage = "PLANNING"
+
+        sub_ids = split_ticket(t, store, scratchpad=sp, exit_reason="timeout")
+
+        assert len(sub_ids) >= 1
+        for sid in sub_ids:
+            sub_ticket = store.get(sid)
+            evidence = sub_ticket.evidence
+
+            # Must contain parent reference
+            assert f"Parent: {t.id}" in evidence
+
+            # Must contain split reason
+            assert "Split reason: timeout" in evidence
+
+            # Must contain handoff section
+            assert "Handoff:" in evidence
+
+            # Handoff should contain agent info
+            assert "Current agent: implementation_planner" in evidence
+            assert "Current stage: PLANNING" in evidence
+
+            # Handoff should contain completed/remaining steps
+            assert "Completed:" in evidence or "Remaining:" in evidence
+
+    def test_split_returns_empty_when_no_chunks(self, tmp_path):
+        """When compute_chunks returns empty list, split_ticket should return empty."""
+        store = TicketStore(tmp_path / "tickets.json")
+        # Create ticket with minimal data that won't trigger chunking
+        t = make_ticket(
+            affected_modules=[],
+            acceptance_criteria=["only one criterion"],
+        )
+        store.add(t)
+
+        # Verify compute_chunks returns empty
+        chunks = _compute_chunks(t, None)
+        assert chunks == []
+
+        # split_ticket should return empty list
+        result = split_ticket(t, store, exit_reason="timeout")
+        assert result == []
+
+    def test_split_sub_tickets_have_correct_parent_reference_in_evidence(self, tmp_path):
+        """Each sub-ticket must reference the parent ticket ID in its evidence."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
+        store.add(t)
+
+        sub_ids = split_ticket(t, store, exit_reason="timeout")
+
+        for sid in sub_ids:
+            sub_ticket = store.get(sid)
+            assert f"Parent: {t.id}" in sub_ticket.evidence
+            assert sub_ticket.source == f"split:{t.id}"
+
+    def test_split_preserves_ticket_class_and_severity(self, tmp_path):
+        """Sub-tickets should inherit ticket_class and severity from parent."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(
+            ticket_class=TicketClass.SECURITY,
+            severity=Severity.CRITICAL,
+            affected_modules=[f"m{i}.py" for i in range(5)],
+        )
+        store.add(t)
+
+        sub_ids = split_ticket(t, store, exit_reason="timeout")
+
+        for sid in sub_ids:
+            sub_ticket = store.get(sid)
+            assert sub_ticket.ticket_class == TicketClass.SECURITY
+            assert sub_ticket.severity == Severity.CRITICAL
+
+    def test_split_with_rate_limit_exit_reason(self, tmp_path):
+        """Test split triggered by rate_limit exit reason."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
+        store.add(t)
+
+        sub_ids = split_ticket(t, store, exit_reason="rate_limit")
+
+        assert len(sub_ids) >= 1
+        for sid in sub_ids:
+            sub_ticket = store.get(sid)
+            assert "Split reason: rate_limit" in sub_ticket.evidence
+
+    def test_split_with_fatal_error_exit_reason(self, tmp_path):
+        """Test split triggered by fatal_error exit reason."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
+        store.add(t)
+
+        sub_ids = split_ticket(t, store, exit_reason="fatal_error")
+
+        assert len(sub_ids) >= 1
+        for sid in sub_ids:
+            sub_ticket = store.get(sid)
+            assert "Split reason: fatal_error" in sub_ticket.evidence
+
+    def test_split_does_not_block_parent_when_no_subtasks_created(self, tmp_path):
+        """If no sub-tickets are created, parent should not be blocked."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=["a.py"], acceptance_criteria=["ac1"])
+        store.add(t)
+        store.transition(t.id, TicketState.VALIDATING)
+        store.transition(t.id, TicketState.TRIAGED)
+        store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.PLANNING)
+
+        initial_state = store.get(t.id).state
+        result = split_ticket(store.get(t.id), store, exit_reason="timeout")
+
+        assert result == []
+        assert store.get(t.id).state == initial_state
+
+    def test_split_sub_tickets_have_unique_ids(self, tmp_path):
+        """All sub-tickets created by split_ticket should have unique IDs."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(10)])
+        store.add(t)
+
+        sub_ids = split_ticket(t, store, exit_reason="timeout")
+
+        # All IDs should be unique
+        assert len(sub_ids) == len(set(sub_ids))
+
+    def test_split_with_empty_affected_modules_uses_acceptance_criteria(self, tmp_path):
+        """When affected_modules is empty but acceptance_criteria has multiple items, split by criteria."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(
+            affected_modules=[],
+            acceptance_criteria=["crit1", "crit2", "crit3", "crit4"],
+        )
+        store.add(t)
+
+        chunks = _compute_chunks(t, None)
+        assert len(chunks) == 2  # Should split into 2 parts
+
+        sub_ids = split_ticket(t, store, exit_reason="timeout")
+        assert len(sub_ids) == 2
+
+    def test_duplicate_sub_ticket_handling(self, tmp_path):
+        """Test that duplicate sub-tickets are skipped gracefully without failing the split."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
+        store.add(t)
+        # Move parent to PLANNING so BLOCKED transition is allowed
+        store.transition(t.id, TicketState.VALIDATING)
+        store.transition(t.id, TicketState.TRIAGED)
+        store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.PLANNING)
+        t_updated = store.get(t.id)
+
+        # Mock create_ticket where it's actually used (inside ticket_engine module)
+        with patch('codebot.ticket_engine.create_ticket') as mock_create:
+            # First call succeeds
+            mock_sub = make_ticket(title="[SPLIT 1/2] Big ticket", source=f"split:{t.id}")
+            mock_sub.id = "CB-SUB-001"
+            # Second call raises duplicate error
+            mock_create.side_effect = [
+                mock_sub,
+                ValueError("duplicate ticket detected"),
+            ]
+            sub_ids = split_ticket(t_updated, store, exit_reason="timeout")
+            # Should have at least one sub-ticket (the first one succeeded)
+            # Duplicate was skipped gracefully
+            assert len(sub_ids) >= 1
+
+    def test_split_empty_chunks_returns_empty(self, tmp_path):
+        """Test that split_ticket returns empty list when compute_chunks yields nothing."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=["a.py"], acceptance_criteria=["only_one"])
+        store.add(t)
+        # Force should_split to return True but compute_chunks to return empty
+        with patch('codebot.task_splitter.compute_chunks', return_value=[]):
+            result = split_ticket(t, store, exit_reason="timeout")
+            assert result == []
+
+    def test_split_preserves_parent_ticket_class_and_severity(self, tmp_path):
+        """Verify sub-tickets inherit parent's ticket_class and severity."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(
+            affected_modules=[f"m{i}.py" for i in range(5)],
+            ticket_class=TicketClass.BUG,
+            severity=Severity.HIGH,
+        )
+        store.add(t)
+        sub_ids = split_ticket(t, store, exit_reason="timeout")
+        for sid in sub_ids:
+            sub = store.get(sid)
+            assert sub.ticket_class == TicketClass.BUG
+            assert sub.severity == Severity.HIGH
+
+    def test_split_evidence_contains_parent_id_and_reason(self, tmp_path):
+        """Verify evidence field includes parent ticket ID and split reason."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
+        store.add(t)
+        sub_ids = split_ticket(t, store, exit_reason="rate_limit")
+        for sid in sub_ids:
+            sub = store.get(sid)
+            assert f"Parent: {t.id}" in sub.evidence
+            assert "Split reason: rate_limit" in sub.evidence
