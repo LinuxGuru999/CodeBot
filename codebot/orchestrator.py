@@ -4663,16 +4663,16 @@ def _dispatch_manifest_batches(packed: dict, bots: dict[str, BotState]) -> None:
         api_manifests = [m for m in leased_batch if isinstance(m, dict) and m.get("runner") == "api"]
         opencode_manifests = [m for m in leased_batch if isinstance(m, dict) and m.get("runner") != "api"]
         # Gate drain before each batch
-        if is_draining() or UPDATE_LOCK.exists():
+        if is_draining() or _paths.update_lock.exists():
             logger.info(f"manifest dispatch aborted at batch {idx}: drain active")
             break
         if api_manifests and run_batch_fn is not None:
             batch_ctx: dict = {
                 "pool_per_manifest": 50,
                 "heartbeat_max_gap_s": 120,
-                "heartbeat_dir": str(STATE_DIR),
-                "state_dir": str(STATE_DIR),
-                "drain_check_cb": lambda: is_draining() or UPDATE_LOCK.exists(),
+                "heartbeat_dir": str(_paths.state_dir),
+                "state_dir": str(_paths.state_dir),
+                "drain_check_cb": lambda: is_draining() or _paths.update_lock.exists(),
                 "budget_check_cb": lambda: _manifest_get_budget_state(),
             }
             try:

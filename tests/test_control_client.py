@@ -400,13 +400,15 @@ class TestCmdSchedulerEvents(unittest.TestCase):
         call_args = mock_req.call_args
         self.assertIn("limit=100", call_args[0][1])
 
+    @patch('codebot.control_client.sys.exit')
     @patch('codebot.control_client.req')
-    def test_cmd_scheduler_events_invalid_limit(self, mock_req):
+    def test_cmd_scheduler_events_invalid_limit(self, mock_req, mock_exit):
         """Test cmd_scheduler_events() handles invalid limit gracefully."""
         control_client.cmd_scheduler_events(limit="invalid")
         output = self.held_output.getvalue()
         
         self.assertIn("must be an integer", output)
+        mock_exit.assert_called_once_with(1)
 
     @patch('codebot.control_client.req')
     def test_cmd_scheduler_events_with_type_filter(self, mock_req):
