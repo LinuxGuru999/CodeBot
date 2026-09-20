@@ -423,6 +423,97 @@ class TestTicketStore:
             # Old state should be empty (ticket left it)
         assert store.summary().get("DISCOVERED", 0) == 0
 
+    def test_wal_replay_state_index_consistency(self, tmp_path):
+        """State index must be consistent after WAL replay when ticket
+        transitions between saves (CB-4418574-630E).
+
+        If a ticket is saved in the WAL in multiple states (e.g., first
+        DISCOVERED then VALIDATING), replay must not leave the ticket in
+        both states in the index.
+        """
+        path = tmp_path / "tickets.json"
+        store1 = TicketStore(path)
+
+        # Add tickets and transition one through multiple states
+        t1 = create_ticket("t1", TicketClass.BUG, Severity.LOW, "s", "e1", "p", "d", ["a"],
+                           risk=RiskLevel.LOW)
+        t2 = create_ticket("t2", TicketClass.BUG, Severity.LOW, "s", "e2", "p", "d", ["a"],
+                           risk=RiskLevel.LOW)
+        store1.add(t1)
+        store1.add(t2)
+
+        # Flush: compacts main JSON with both in DISCOVERED state
+        store1.flush()
+
+        # Now transition t1 through multiple states without flushing
+        # Each transition writes WAL entries
+        store1.transition(t1.id, TicketState.VALIDATING)
+        store1.transition(t1.id, TicketState.TRIAGED)
+        store1.transition(t1.id, TicketState.READY)
+
+        # Flush to persist all WAL entries
+        store1.flush()
+        store1.close()
+
+        # Reload store — WAL replay must rebuild state index correctly
+        store2 = TicketStore(path)
+
+        # t1 should only be in READY, not in DISCOVERED/VALIDATING/TRIAGED
+        assert len(store2.list_by_state(TicketState.DISCOVERED)) == 1  # t2
+        assert len(store2.list_by_state(TicketState.VALIDATING)) == 0
+        assert len(store2.list_by_state(TicketState.TRIAGED)) == 0
+        assert len(store2.list_by_state(TicketState.READY)) == 1  # t1
+
+        # Summary must match
+        s = store2.summary()
+        assert s.get("DISCOVERED", 0) == 1
+        assert s.get("VALIDATING", 0) == 0
+        assert s.get("TRIAGED", 0) == 0
+        assert s.get("READY", 0) == 1
+
+        # No duplicate ticket appearances
+        total = sum(s.values())
+        assert total == 2  # exactly 2 tickets across all states
+
+        store2.close()
+
+    def test_wal_replay_no_compaction_state_index(self, tmp_path):
+        """State index is correct after WAL-only replay (no main JSON).
+
+        When tickets.json does not exist but .wal.jsonl does, the store
+        must still maintain correct state indexes from WAL entries alone.
+        """
+        path = tmp_path / "tickets.json"
+        store1 = TicketStore(path)
+
+        # Add tickets
+        t1 = create_ticket("t1", TicketClass.BUG, Severity.LOW, "s", "e1", "p", "d", ["a"],
+                           risk=RiskLevel.LOW)
+        store1.add(t1)
+        store1.flush()  # This compacts (path didn't exist), creates tickets.json
+
+        # Transition t1, then flush — WAL-only write (not enough for compaction)
+        store1.transition(t1.id, TicketState.VALIDATING)
+        store1.flush()
+
+        # Delete main JSON so _load falls through to WAL-only path
+        path.unlink(missing_ok=True)
+        (tmp_path / "tickets.lock").unlink(missing_ok=True)
+        store1.close()
+
+        # New store: _load sees no tickets.json → _replay_wal() only
+        store2 = TicketStore(path)
+        # Only t1 should be present (from WAL), in VALIDATING state
+        assert store2.count() == 1
+        assert len(store2.list_by_state(TicketState.VALIDATING)) == 1
+        assert len(store2.list_by_state(TicketState.DISCOVERED)) == 0
+        s = store2.summary()
+        assert s.get("VALIDATING", 0) == 1
+        assert s.get("DISCOVERED", 0) == 0
+        total = sum(s.values())
+        assert total == 1
+        store2.close()
+
 
 class TestGatekeeperEnforcement:
     """Tests for VERIFYING -> COMPLETE requiring gatekeeper approval (CB-3814750-10D2)."""
