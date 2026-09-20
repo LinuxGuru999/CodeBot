@@ -35,6 +35,36 @@ class TestTicketIdGeneration:
         ids = {generate_ticket_id() for _ in range(100)}
         assert len(ids) == 100
 
+    def test_rapid_fire_1000_unique_after_cold_start(self):
+        """Verify 1000 rapid-fire creates produce unique IDs (CB-9226297-8627)."""
+        # Simulate cold start by reimporting the module
+        import importlib
+        from codebot import ticket_engine
+        importlib.reload(ticket_engine)
+        
+        # Generate 1000 IDs rapidly
+        ids = {ticket_engine.generate_ticket_id() for _ in range(1000)}
+        assert len(ids) == 1000, f"Expected 1000 unique IDs, got {len(ids)}"
+
+    def test_module_reimport_no_collision(self):
+        """Verify module reimport does not cause ID collision (CB-9226297-8627)."""
+        import importlib
+        from codebot import ticket_engine
+        
+        # Generate some IDs before reimport
+        ids_before = {ticket_engine.generate_ticket_id() for _ in range(100)}
+        
+        # Reimport module (simulates process restart)
+        importlib.reload(ticket_engine)
+        
+        # Generate IDs after reimport
+        ids_after = {ticket_engine.generate_ticket_id() for _ in range(100)}
+        
+        # No collisions between before and after
+        assert ids_before.isdisjoint(ids_after), "ID collision detected after module reimport"
+        assert len(ids_before) == 100
+        assert len(ids_after) == 100
+
 
 class TestCreateTicket:
     def test_basic_creation(self):
