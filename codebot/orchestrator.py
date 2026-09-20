@@ -3358,6 +3358,23 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
         else:
             start_bot(bot, bots=bots)
 
+    for bot_name, bot in bots.items():
+        if not _is_decomposer_role(bot_name):
+            continue
+        assigned = getattr(bot, '_assigned_ticket_id', '')
+        if assigned and bot.process is None:
+            alive = False
+            for p in claims_dir.glob(f"{assigned}.{bot_name}.json"):
+                try:
+                    age = time.time() - p.stat().st_mtime
+                    if age < 120:
+                        alive = True
+                        break
+                except OSError:
+                    pass
+            if alive:
+                start_bot(bot, bots=bots)
+
     return dispatched
 
 
@@ -3493,6 +3510,24 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
             pass
         else:
             start_bot(bot, bots=bots)
+
+    for bot_name, bot in bots.items():
+        base = bot_name.split("-")[0] if "-" in bot_name else bot_name
+        if base not in PLANNING_ROLE_NAMES:
+            continue
+        assigned = getattr(bot, '_assigned_ticket_id', '')
+        if assigned and bot.process is None:
+            alive = False
+            for p in claims_dir.glob(f"{assigned}.{bot_name}.json"):
+                try:
+                    age = time.time() - p.stat().st_mtime
+                    if age < 120:
+                        alive = True
+                        break
+                except OSError:
+                    pass
+            if alive:
+                start_bot(bot, bots=bots)
 
     return dispatched
 
