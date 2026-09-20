@@ -359,6 +359,8 @@ class TicketStore:
         self._word_index: dict[str, set[str]] = {}
         # Per-state index: state -> set of ticket IDs for O(k) list_by_state lookups
         self._state_index: dict[TicketState, set[str]] = {}
+        # Cached per-state counts for O(1) summary() lookups
+        self._state_counts: dict[str, int] = {}
         # In-memory cache for gate approvals: ticket_id -> bool (latest passed status)
         self._approval_cache: dict[str, bool] = {}
         # Dirty ticket tracking: IDs modified since last save (for incremental saves)
@@ -372,6 +374,10 @@ class TicketStore:
         self._save_timer: threading.Timer | None = None
         self._shutdown = False
         self._load()
+        # Build initial state counts cache from loaded state index
+        with self._lock:
+            for state, ticket_ids in self._state_index.items():
+                self._state_counts[state.value] = len(ticket_ids)
         self._save_queue: list[dict] = []
         self._save_condition = threading.Condition(self._save_lock)
         self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
@@ -699,8 +705,9 @@ class TicketStore:
                     )
             self._tickets[ticket.id] = ticket
             self._evidence_index[eh] = ticket.id
-            # Maintain per-state index
+            # Maintain per-state index and counts cache
             self._state_index.setdefault(ticket.state, set()).add(ticket.id)
+            self._state_counts[ticket.state.value] = len(self._state_index[ticket.state])
             # Track dirty for incremental save
             self._dirty_ids.add(ticket.id)
             self._queue_save()
@@ -821,7 +828,11 @@ class TicketStore:
                 self._state_index[old_state].discard(ticket_id)
                 if not self._state_index[old_state]:
                     del self._state_index[old_state]
+                    self._state_counts.pop(old_state.value, None)
+                else:
+                    self._state_counts[old_state.value] = len(self._state_index[old_state])
             self._state_index.setdefault(new_state, set()).add(ticket_id)
+            self._state_counts[new_state.value] = len(self._state_index[new_state])
             # Track dirty for incremental save
             self._dirty_ids.add(ticket_id)
             self._queue_save()
@@ -955,13 +966,11 @@ class TicketStore:
             return len(self._tickets)
 
     def summary(self) -> dict[str, int]:
-        """Return count of tickets per state using state index for O(S) lookup.
+        """Return count of tickets per state in O(1) using cached counts.
 
-        S is the number of distinct states (constant ~14), making this
-        significantly faster than O(N) iteration for large stores.
+        The _state_counts cache is maintained atomically alongside _state_index
+        during add/transition/remove operations, avoiding any iteration over
+        states on each call.
         """
         with self._lock:
-            counts: dict[str, int] = {}
-            for state, ticket_ids in self._state_index.items():
-                counts[state.value] = len(ticket_ids)
-            return counts
+            return dict(self._state_counts)

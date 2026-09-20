@@ -422,63 +422,66 @@ def checkpoint_path(bot_name: str) -> Path:
     return STATE_DIR / f"{bot_name}.checkpoint.json"
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint Helpers
+# ---------------------------------------------------------------------------
+
+def _load_json_file(path: Path) -> tuple[dict | None, str]:
+    """Read and parse a JSON file. Returns (data, raw_text) or (None, '')."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        return data, raw
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return None, ""
+
+
+def _discard_and_read_backup(p: Path, bak: Path) -> dict | None:
+    """Move corrupt p to bak, then try reading bak. Returns dict or None."""
+    try:
+        p.rename(bak)
+    except OSError:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    if not bak.exists():
+        return None
+    data, _ = _load_json_file(bak)
+    return data if isinstance(data, dict) else None
+
+
 def read_checkpoint(bot_name: str) -> dict | None:
     p = checkpoint_path(bot_name)
     bak = p.with_suffix(".bak") if p.suffix == ".json" else Path(str(p) + ".bak")
+
+    # Main file missing — try backup
     if not p.exists():
         if bak.exists():
-            try:
-                raw = bak.read_text(encoding="utf-8")
-                data = json.loads(raw)
-                if isinstance(data, dict):
-                    logger.info(f"Restored last-good checkpoint for '{bot_name}' from .bak")
-                    return data
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                pass
+            data, _ = _load_json_file(bak)
+            if isinstance(data, dict):
+                logger.info(f"Restored last-good checkpoint for '{bot_name}' from .bak")
+                return data
         return None
-    try:
-        raw = p.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        logger.warning(f"Checkpoint corrupt for '{bot_name}': {exc} — falling back to .bak")
-        try:
-            p.rename(bak)
-        except OSError:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        if bak.exists():
-            try:
-                fallback_raw = bak.read_text(encoding="utf-8")
-                fallback_data = json.loads(fallback_raw)
-                if isinstance(fallback_data, dict):
-                    return fallback_data
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                pass
-        return None
-    except Exception:
-        return None
+
+    # Read and parse main file
+    data, raw = _load_json_file(p)
+    if data is None and not raw:
+        # File exists but couldn't read at all
+        if not p.exists():
+            # _load_json_file might have failed mid-read
+            return _discard_and_read_backup(p, bak) if p.exists() else None
+    if data is None:
+        logger.warning(f"Checkpoint corrupt for '{bot_name}' — falling back to .bak")
+        return _discard_and_read_backup(p, bak)
+
     if not isinstance(data, dict):
         logger.warning(f"Checkpoint for '{bot_name}' is not a JSON object — falling back to .bak")
-        try:
-            p.rename(bak)
-        except OSError:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        if bak.exists():
-            try:
-                fallback_raw = bak.read_text(encoding="utf-8")
-                fallback_data = json.loads(fallback_raw)
-                if isinstance(fallback_data, dict):
-                    return fallback_data
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                pass
-        return None
+        return _discard_and_read_backup(p, bak)
+
+    # Check size and backup good copy
     if len(raw.encode("utf-8")) > 4096:
-        logger.warning(f"Checkpoint for '{bot_name}' exceeds 4KB ({len(raw.encode('utf-8'))} bytes) — truncating")
+        logger.warning(f"Checkpoint for '{bot_name}' exceeds 4KB — truncating")
     try:
         bak.write_text(raw, encoding="utf-8")
     except OSError:
@@ -486,19 +489,17 @@ def read_checkpoint(bot_name: str) -> dict | None:
     return data
 
 
-def start_bot(bot: BotState, resume_checkpoint: bool = True,
-              checkpoint_reason: str | None = None,
-              bots: dict[str, BotState] | None = None,
-              is_overture: bool = False, is_demand: bool = False) -> bool:
-    """Spawn a bot as a subprocess. Returns True on success."""
-    if (STATE_DIR / f"{bot.config.name}.paused").exists():
-        update_bot_state(bot, "paused")
-        return False
+# ---------------------------------------------------------------------------
+# Start Bot Helpers
+# ---------------------------------------------------------------------------
 
-    ckpt = checkpoint_path(bot.config.name)
-    last_run_mtime = ckpt.stat().st_mtime if ckpt.exists() else 0.0
-    inputs_changed = False
+_ALWAYS_RESPAWN: frozenset[str] = frozenset()
 
+
+def _check_inputs_changed(bot: BotState, last_run_mtime: float) -> bool:
+    """Check if manifest inputs or prompt file changed since last run."""
+    if last_run_mtime <= 0:
+        return True
     # Check manifest inputs
     try:
         manifest_path = BOTS_DIR / "manifests" / f"{bot.config.name.replace('-', '_')}.json"
@@ -509,64 +510,37 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
                 if not ipath.is_absolute():
                     ipath = BOTS_DIR / ipath
                 if ipath.exists() and ipath.stat().st_mtime > last_run_mtime:
-                    inputs_changed = True
-                    break
+                    return True
     except Exception:
-        inputs_changed = True
-
+        return True
     # Check prompt file
     prompt_path = BOTS_DIR / bot.config.prompt_file
     if prompt_path.exists() and prompt_path.stat().st_mtime > last_run_mtime:
-        inputs_changed = True
+        return True
+    return False
 
-    # Skip if no changes and not a worker/demand bot
-    if not inputs_changed and last_run_mtime > 0 and bot.config.name not in ALWAYS_RESPAWN and not is_demand:
-        # Check if it's a worker
-        is_worker = bot.config.name.startswith("worker-")
-        if not is_worker:
-            logger.info(f"Bot '{bot.config.name}' skipped — no input change since last run")
-            bot.next_run_at = time.time() + bot.config.interval_seconds
-            update_bot_state(bot, "noop")
-            return False
 
-    due = bot.next_run_at
-    is_queued = _is_queued(bot)
-    ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api",
-                          bot_model=bot.config.model, bot_name=bot.config.name,
-                          is_overture=is_overture, is_demand=is_demand)
-    if not ok:
-        if due:
-            bot.next_run_at = due
-        logger.info(f"Queued '{bot.config.name}' ({why})")
-        update_bot_state(bot, "queued")
+def _should_skip_run(bot: BotState, last_run_mtime: float) -> bool:
+    """Determine if bot should skip this run (no input changes, not worker/demand)."""
+    if _check_inputs_changed(bot, last_run_mtime):
         return False
-
-    prompt_file = BOTS_DIR / bot.config.prompt_file
-    if not prompt_file.exists():
-        logger.error(f"Prompt file not found: {prompt_file}")
+    if last_run_mtime <= 0:
         return False
+    if bot.config.name in _ALWAYS_RESPAWN:
+        return False
+    # Workers always run
+    if bot.config.name.startswith("worker-"):
+        return False
+    return True
 
-    log_file = LOGS_DIR / f"{bot.config.name}.log"
-    state_file = STATE_DIR / f"{bot.config.name}.state.json"
 
-    # Write initial state
-    state_data = {
-        "bot": bot.config.name,
-        "started": time.time(),
-        "session": 0,
-        "status": "starting",
-    }
-    _write_json_atomic(state_file, state_data)
-
-    # Write initial heartbeat
-    write_heartbeat(bot.config.name)
-    bot.last_heartbeat = time.time()
-
-    prompt_text = prompt_file.read_text()
+def _prepare_prompt_with_context(bot: BotState) -> str:
+    """Read prompt file and inject ticket context + scratchpad handoff."""
+    prompt_path = BOTS_DIR / bot.config.prompt_file
+    prompt_text = prompt_path.read_text()
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
     logger.info(f"start_bot '{bot.config.name}': assigned_tid='{assigned_tid}', prompt={len(prompt_text)} chars")
 
-    # Inject ticket context if assigned
     if assigned_tid:
         ticket_ctx = _load_ticket_context(assigned_tid)
         if ticket_ctx:
@@ -585,36 +559,31 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
                 prompt_text = f"{prompt_text}\n\n{handoff}\nResume from where the previous agent left off. Do NOT redo completed work."
     except Exception:
         pass
+    return prompt_text
 
+
+def _build_checkpoint_block(bot_name: str, ckpt: dict | None, ckpt_file: Path) -> str:
+    """Build the checkpoint handoff text block for the mission message."""
+    if not ckpt:
+        return ""
     try:
-        bot.prompt_mtime = prompt_file.stat().st_mtime
-        bot.last_prompt_mtime = bot.prompt_mtime
-    except OSError:
-        bot.prompt_mtime = 0.0
-        bot.last_prompt_mtime = 0.0
+        return (
+            f"\n--- CHECKPOINT HANDOFF (previous agent stalled) ---\n"
+            f"The previous agent for '{bot_name}' left this checkpoint at "
+            f"{ckpt.get('updated_at', '?')} (reason: {ckpt.get('reason', 'lockup')}).\n"
+            f"Resume from here first \u2014 do NOT redo completed work:\n"
+            f"```json\n{json.dumps(ckpt, indent=2)[:6000]}\n```\n"
+            f"Checkpoint file: {ckpt_file}\n"
+            f"After resuming, update the checkpoint with your progress.\n"
+        )
+    except Exception:
+        return ""
 
-    if not bot.last_code_mtimes:
-        bot.last_code_mtimes = _get_code_mtimes()
 
-    heartbeat_file = STATE_DIR / f"{bot.config.name}.heartbeat"
-    ckpt_file = checkpoint_path(bot.config.name)
-    ckpt = read_checkpoint(bot.config.name) if resume_checkpoint else None
-    ckpt_block = ""
-    if ckpt:
-        try:
-            ckpt_block = (
-                f"\n--- CHECKPOINT HANDOFF (previous agent stalled) ---\n"
-                f"The previous agent for '{bot.config.name}' left this checkpoint at "
-                f"{ckpt.get('updated_at', '?')} (reason: {ckpt.get('reason', 'lockup')}).\n"
-                f"Resume from here first \u2014 do NOT redo completed work:\n"
-                f"```json\n{json.dumps(ckpt, indent=2)[:6000]}\n```\n"
-                f"Checkpoint file: {ckpt_file}\n"
-                f"After resuming, update the checkpoint with your progress.\n"
-            )
-        except Exception:
-            ckpt_block = ""
-
-    # Build mission message
+def _build_mission_message(bot: BotState, prompt_text: str, heartbeat_file: Path,
+                           ckpt_file: Path, ckpt_block: str) -> str:
+    """Build the full mission message for the bot subprocess."""
+    prompt_path = BOTS_DIR / bot.config.prompt_file
     try:
         from codebot.prompt_gateway import build_message as _gateway_build_message
         _GATEWAY = True
@@ -622,82 +591,159 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
         _GATEWAY = False
 
     if _GATEWAY:
-        message = _gateway_build_message(
+        return _gateway_build_message(
             bot.config.name, bot.config.model, prompt_text,
             str(heartbeat_file), str(ckpt_file), ckpt_block,
-            str(STATE_DIR), str(LOGS_DIR), prompt_file.name)
-    else:
-        message = (
-            f"Sisyphus \u2014 delegated task: '{bot.config.name}' workflow (model {bot.config.model}).\n"
-            f"Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
-            f"- At startup and after every atomic task, write Unix timestamp to {heartbeat_file} using the `write` tool.\n"
-            f"- After every atomic task, write <4KB checkpoint to {ckpt_file} using the `write` tool (atomic tmp->replace).\n"
-            f"- Before each atomic task, run `bash` with `test -f {STATE_DIR}/.drain || test -f {STATE_DIR}/.update_lock && echo DRAIN` to check for drain. If output contains DRAIN, exit 0. Do NOT use the `read` tool for drain checks.\n"
-            f"- State dir: {STATE_DIR}  Log dir: {LOGS_DIR}  Prompt: {prompt_file.name}\n"
-            f"{ckpt_block}\n"
-            f"--- Task Specification ({prompt_file.name}) ---\n"
-            f"{prompt_text}"
-        )
+            str(STATE_DIR), str(LOGS_DIR), prompt_path.name)
 
+    return (
+        f"Sisyphus \u2014 delegated task: '{bot.config.name}' workflow (model {bot.config.model}).\n"
+        f"Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
+        f"- At startup and after every atomic task, write Unix timestamp to {heartbeat_file} using the `write` tool.\n"
+        f"- After every atomic task, write <4KB checkpoint to {ckpt_file} using the `write` tool (atomic tmp->replace).\n"
+        f"- Before each atomic task, run `bash` with `test -f {STATE_DIR}/.drain || test -f {STATE_DIR}/.update_lock && echo DRAIN` to check for drain. If output contains DRAIN, exit 0. Do NOT use the `read` tool for drain checks.\n"
+        f"- State dir: {STATE_DIR}  Log dir: {LOGS_DIR}  Prompt: {prompt_path.name}\n"
+        f"{ckpt_block}\n"
+        f"--- Task Specification ({prompt_path.name}) ---\n"
+        f"{prompt_text}"
+    )
+
+
+def _build_popen_args(bot: BotState, heartbeat_file: Path,
+                      ckpt_file: Path, mission_file: Path) -> list[str]:
+    """Build the argument list for the api_runner subprocess."""
+    fb_models = ",".join(bot.config.fallback_models) if bot.config.fallback_models else ""
+    return [
+        sys.executable, "-m", "codebot.api_runner",
+        bot.config.name, bot.config.model,
+        str(heartbeat_file), str(ckpt_file), str(mission_file),
+        bot.config.fallback_model, str(bot.config.max_tokens_per_run), fb_models,
+    ]
+
+
+def _update_bot_after_launch(bot: BotState, state_data: dict) -> None:
+    """Update bot state fields after successful subprocess launch."""
+    bot.last_heartbeat = time.time()
+    bot.last_log_mtime = time.time()
+    bot.next_run_at = time.time() + bot.config.interval_seconds
+    bot.consecutive_errors = 0
+    bot.started_at = state_data["started"]
+    global _last_spawn_time
+    _last_spawn_time = time.time()
+    try:
+        (STATE_DIR / ".last_spawn").write_text(str(time.time()))
+    except OSError:
+        pass
+
+
+def _launch_bot_subprocess(bot: BotState, message: str, heartbeat_file: Path,
+                           ckpt_file: Path, state_data: dict) -> bool:
+    """Launch bot subprocess with mission message. Returns True on success."""
+    mission_file = LOGS_DIR / f"{bot.config.name}.mission"
+    mission_file.write_text(message, encoding="utf-8")
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(BOTS_DIR)
+    log_file = LOGS_DIR / f"{bot.config.name}.log"
     try:
         log_fh = open(log_file, "a")
-
-        mission_file = LOGS_DIR / f"{bot.config.name}.mission"
-        mission_file.write_text(message, encoding="utf-8")
-        child_env = os.environ.copy()
-        child_env["PYTHONPATH"] = str(BOTS_DIR)
+        args = _build_popen_args(bot, heartbeat_file, ckpt_file, mission_file)
         process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m", "codebot.api_runner",
-                bot.config.name,
-                bot.config.model,
-                str(heartbeat_file),
-                str(ckpt_file),
-                str(mission_file),
-                bot.config.fallback_model,
-                str(bot.config.max_tokens_per_run),
-                ",".join(bot.config.fallback_models) if bot.config.fallback_models else "",
-            ],
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            cwd=str(BOTS_DIR),
-            env=child_env,
-            start_new_session=True,
+            args, stdout=log_fh, stderr=subprocess.STDOUT,
+            cwd=str(BOTS_DIR), env=child_env, start_new_session=True,
         )
-
         bot.process = process
-        bot.last_heartbeat = time.time()
-        bot.last_log_mtime = time.time()
-        bot.next_run_at = time.time() + bot.config.interval_seconds
-        bot.consecutive_errors = 0
-        bot.started_at = state_data["started"]
-
+        _update_bot_after_launch(bot, state_data)
         log_fh.close()
-
-        global _last_spawn_time
-        _last_spawn_time = time.time()
-        try:
-            (STATE_DIR / ".last_spawn").write_text(str(time.time()))
-        except OSError:
-            pass
-
         logger.info(f"Started bot '{bot.config.name}' (PID {process.pid})")
         return True
+    except (FileNotFoundError, Exception) as e:
+        if isinstance(e, FileNotFoundError):
+            logger.error(f"Prompt runner not found for '{bot.config.name}'")
+        else:
+            logger.error(f"Failed to start bot '{bot.config.name}': {e}")
+        if 'log_fh' in locals():
+            log_fh.close()
+        return False
 
-    except FileNotFoundError:
-        if 'log_fh' in locals():
-            log_fh.close()
+
+# ---------------------------------------------------------------------------
+# Main Start/Stop/Restart
+# ---------------------------------------------------------------------------
+
+def _init_and_prepare_bot(bot: BotState, resume_checkpoint: bool) -> tuple[Path, Path, str]:
+    """Initialize state, prepare prompt, and build mission message. Returns (heartbeat_file, ckpt_file, message)."""
+    prompt_file = BOTS_DIR / bot.config.prompt_file
+    if not prompt_file.exists():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
+
+    state_data = {"bot": bot.config.name, "started": time.time(), "session": 0, "status": "starting"}
+    _write_json_atomic(STATE_DIR / f"{bot.config.name}.state.json", state_data)
+    write_heartbeat(bot.config.name)
+    bot.last_heartbeat = time.time()
+
+    prompt_text = _prepare_prompt_with_context(bot)
+    try:
+        bot.prompt_mtime = prompt_file.stat().st_mtime
+        bot.last_prompt_mtime = bot.prompt_mtime
+    except OSError:
+        bot.prompt_mtime = 0.0
+        bot.last_prompt_mtime = 0.0
+    if not bot.last_code_mtimes:
+        bot.last_code_mtimes = _get_code_mtimes()
+
+    heartbeat_file = heartbeat_path(bot.config.name)
+    ckpt_file = checkpoint_path(bot.config.name)
+    ckpt = read_checkpoint(bot.config.name) if resume_checkpoint else None
+    ckpt_block = _build_checkpoint_block(bot.config.name, ckpt, ckpt_file)
+    message = _build_mission_message(bot, prompt_text, heartbeat_file, ckpt_file, ckpt_block)
+
+    # Stash state_data on the function object for the caller
+    _init_and_prepare_bot._last_state = state_data
+    return heartbeat_file, ckpt_file, message
+
+
+def start_bot(bot: BotState, resume_checkpoint: bool = True,
+              checkpoint_reason: str | None = None,
+              bots: dict[str, BotState] | None = None,
+              is_overture: bool = False, is_demand: bool = False) -> bool:
+    """Spawn a bot as a subprocess. Returns True on success."""
+    if (STATE_DIR / f"{bot.config.name}.paused").exists():
+        update_bot_state(bot, "paused")
         return False
-    except Exception as e:
-        logger.error(f"Failed to start bot '{bot.config.name}': {e}")
-        if 'log_fh' in locals():
-            log_fh.close()
+
+    ckpt = checkpoint_path(bot.config.name)
+    last_run_mtime = ckpt.stat().st_mtime if ckpt.exists() else 0.0
+
+    if _should_skip_run(bot, last_run_mtime):
+        logger.info(f"Bot '{bot.config.name}' skipped \u2014 no input change since last run")
+        bot.next_run_at = time.time() + bot.config.interval_seconds
+        update_bot_state(bot, "noop")
         return False
+
+    due = bot.next_run_at
+    is_queued = _is_queued(bot)
+    ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api",
+                          bot_model=bot.config.model, bot_name=bot.config.name,
+                          is_overture=is_overture, is_demand=is_demand)
+    if not ok:
+        if due:
+            bot.next_run_at = due
+        logger.info(f"Queued '{bot.config.name}' ({why})")
+        update_bot_state(bot, "queued")
+        return False
+
+    try:
+        heartbeat_file, ckpt_file, message = _init_and_prepare_bot(bot, resume_checkpoint)
+        state_data = _init_and_prepare_bot._last_state
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return False
+
+    return _launch_bot_subprocess(bot, message, heartbeat_file, ckpt_file, state_data)
 
 
 def stop_bot(bot: BotState, reason: str = "manual") -> bool:
-    """Stop a bot gracefully. SIGTERM \u2192 5s \u2192 SIGKILL."""
+    """Stop a bot gracefully. SIGTERM → 5s → SIGKILL."""
     if not bot.process:
         return True
 
