@@ -508,3 +508,92 @@ class TestYieldAccessibility:
         assert '<button' in html_output
         assert 'tabindex="0"' in html_output
         assert 'aria-sort=' in html_output
+
+
+# ---------------------------------------------------------------------------
+# Cooldown O(1) lookup performance and correctness regression tests
+# ---------------------------------------------------------------------------
+
+class TestCooldownPerformanceAndIndexConsistency:
+    """Regression tests for CB-2498252-95A6: O(1) cooldown lookup guarantee."""
+
+    def test_cooldown_lookup_benchmark_500(self, tmp_path):
+        """is_on_cooldown must complete 10 lookups with 500 entries in <1ms."""
+        import inspect as inspect_mod
+
+        mgr = dm.DiscoveryManager(state_dir=tmp_path)
+        now = 10000.0
+        # Populate 500 cooldown entries across multiple (role, scope) pairs
+        scopes = [f"scope_{i}" for i in range(100)]
+        for i in range(500):
+            role = dm.DISCOVERY_ROLES[i % len(dm.DISCOVERY_ROLES)]
+            scope = scopes[i % len(scopes)]
+            mgr.record_completion(
+                role=role, scope=scope, commit_sha=f"sha_{i}",
+                findings=1, duplicates=0, rejected=0, cost_tokens=50,
+                now=now + i,
+            )
+
+        # Verify list is capped
+        assert len(mgr._cooldowns) == 500
+
+        # Time 10 is_on_cooldown calls across different roles
+        start = time.perf_counter()
+        for role in dm.DISCOVERY_ROLES:
+            mgr.is_on_cooldown(role, "scope_0", "sha_latest", 3600, now=now + 600)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.001, f"10 lookups took {elapsed:.4f}s, expected <1ms"
+
+    def test_is_on_cooldown_has_no_linear_scan(self):
+        """is_on_cooldown source must use _cooldown_index.get, not loop over _cooldowns."""
+        import ast as ast_mod
+        import inspect as inspect_mod
+        import textwrap
+
+        source = inspect_mod.getsource(dm.DiscoveryManager.is_on_cooldown)
+        # Must use O(1) index
+        assert "_cooldown_index.get" in source
+        # Dedent for AST parsing
+        dedented = textwrap.dedent(source)
+        # Parse AST and verify no for-loop over _cooldowns in the body
+        tree = ast_mod.parse(dedented)
+        for node in ast_mod.walk(tree):
+            if isinstance(node, ast_mod.For):
+                if hasattr(node, 'iter') and hasattr(node.iter, 'attr'):
+                    assert node.iter.attr != '_cooldowns', (
+                        "is_on_cooldown contains a for-loop over _cooldowns — O(N) scan detected"
+                    )
+
+    def test_in_memory_cap_500_and_index_consistency(self, tmp_path):
+        """After 600 records, _cooldowns is <=500 and every index entry matches."""
+        mgr = dm.DiscoveryManager(state_dir=tmp_path)
+        base_now = 100000.0
+        for i in range(600):
+            role = dm.DISCOVERY_ROLES[i % len(dm.DISCOVERY_ROLES)]
+            scope = f"proj_{i % 50}"
+            mgr.record_completion(
+                role=role, scope=scope, commit_sha=f"sha_{i}",
+                findings=1, duplicates=0, rejected=0, cost_tokens=50,
+                now=base_now + i,
+            )
+
+        # Hard cap
+        assert len(mgr._cooldowns) <= 500
+
+        # Every index entry must point at a valid, matching cooldown
+        for (role, scope), idx in mgr._cooldown_index.items():
+            assert 0 <= idx < len(mgr._cooldowns), (
+                f"Index {idx} out of range for (role={role}, scope={scope}) "
+                f"with {len(mgr._cooldowns)} entries"
+            )
+            cd = mgr._cooldowns[idx]
+            assert cd.role == role, f"Index mismatch: expected role={role}, got {cd.role}"
+            assert cd.scope == scope, f"Index mismatch: expected scope={scope}, got {cd.scope}"
+
+        # Latest entry for each (role, scope) must be the one in index
+        # Build expected map from scanning the list
+        expected: dict[tuple[str, str], int] = {}
+        for idx, cd in enumerate(mgr._cooldowns):
+            expected[(cd.role, cd.scope)] = idx
+        assert mgr._cooldown_index == expected

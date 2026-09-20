@@ -168,6 +168,7 @@ class DiscoveryManager:
         self._cooldowns: list[DiscoveryCooldown] = []
         self._cooldown_index: dict[tuple[str, str], int] = {}  # (role, scope) -> index in _cooldowns
         self._yields: dict[str, RoleYieldStats] = {}
+        self._last_prune_at: float = 0.0
         self._load()
 
     def _state_path(self) -> Path | None:
@@ -182,10 +183,14 @@ class DiscoveryManager:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             for entry in data.get("cooldowns", []):
-                idx = len(self._cooldowns)
                 cd = DiscoveryCooldown(**entry)
                 self._cooldowns.append(cd)
-                # Rebuild index: latest entry for each (role, scope)
+            # Cap to last 500 entries (handles legacy state with >500)
+            if len(self._cooldowns) > 500:
+                self._cooldowns = self._cooldowns[-500:]
+            # Rebuild index: latest entry for each (role, scope)
+            self._cooldown_index.clear()
+            for idx, cd in enumerate(self._cooldowns):
                 self._cooldown_index[(cd.role, cd.scope)] = idx
             for role, stats in data.get("yields", {}).items():
                 ys = RoleYieldStats(role=role)
@@ -196,6 +201,8 @@ class DiscoveryManager:
                 ys.total_cost_tokens = stats.get("total_cost_tokens", 0)
                 ys.last_scan_at = stats.get("last_scan_at", 0.0)
                 self._yields[role] = ys
+            # Set _last_prune_at to now so we don't immediately re-prune
+            self._last_prune_at = time.time()
         except Exception:
             pass
 
@@ -239,6 +246,8 @@ class DiscoveryManager:
         
         Updates the O(1) cooldown index immediately after appending to ensure
         new cooldowns are visible to is_on_cooldown without delay.
+        Pruning is amortized: only runs when the list exceeds 500 entries
+        or more than 24 hours since the last prune.
         """
         now = now or time.time()
         idx = len(self._cooldowns)
@@ -256,7 +265,11 @@ class DiscoveryManager:
         if role not in self._yields:
             self._yields[role] = RoleYieldStats(role=role)
         self._yields[role].record_scan(findings, duplicates, rejected, cost_tokens, now)
-        # Prune old cooldowns (keep last 30 days) - must rebuild index after pruning
+        # Amortized pruning: skip if list is small and recently pruned
+        needs_prune = len(self._cooldowns) > 500 or (now - self._last_prune_at) > 86400
+        if not needs_prune:
+            return
+        # Prune old cooldowns (keep last 30 days) and enforce 500-entry cap
         cutoff = now - 30 * 86400
         old_cooldowns = self._cooldowns
         self._cooldowns = []
@@ -265,6 +278,13 @@ class DiscoveryManager:
             if c.completed_at > cutoff:
                 self._cooldowns.append(c)
                 self._cooldown_index[(c.role, c.scope)] = len(self._cooldowns) - 1
+        # Enforce hard cap: keep only the 500 most recent
+        if len(self._cooldowns) > 500:
+            self._cooldowns = self._cooldowns[-500:]
+            self._cooldown_index.clear()
+            for idx, c in enumerate(self._cooldowns):
+                self._cooldown_index[(c.role, c.scope)] = idx
+        self._last_prune_at = now
 
     def is_on_cooldown(
         self,
