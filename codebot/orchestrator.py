@@ -463,6 +463,64 @@ def _get_code_mtimes() -> dict[str, float]:
 
 _GLOBAL_CODE_MTIMES: dict[str, float] = {}
 
+# ---------------------------------------------------------------------------
+# Performance Cache: Heartbeat & Log Mtime
+# ---------------------------------------------------------------------------
+# Caches heartbeat timestamps and log file mtimes in memory to avoid
+# individual file syscalls for every bot on every health check tick.
+# Updated once per tick via _refresh_status_cache().
+_STATUS_CACHE_HB: dict[str, float] = {}
+_STATUS_CACHE_LOG: dict[str, float] = {}
+_STATUS_CACHE_TIMESTAMP: float = 0.0
+
+
+def _refresh_status_cache(bots: dict[str, BotState]) -> None:
+    """Bulk-update heartbeat and log mtime cache for all known bots.
+
+    Performs a single pass over the bot list to stat files, reducing
+    syscalls from O(2*N) to O(N) with better locality, and ensures
+    subsequent checks in the same tick hit memory only.
+    """
+    global _STATUS_CACHE_HB, _STATUS_CACHE_LOG, _STATUS_CACHE_TIMESTAMP
+    now = time.time()
+    new_hb: dict[str, float] = {}
+    new_log: dict[str, float] = {}
+
+    for name, bot in bots.items():
+        # Heartbeat
+        hb_path = STATE_DIR / f"{name}.heartbeat"
+        try:
+            txt = hb_path.read_text().strip()
+            ts = float(txt)
+            # Sanity check: ignore wildly stale or future dates
+            if abs(now - ts) < 86400 * 7:
+                new_hb[name] = ts
+            else:
+                new_hb[name] = 0.0
+        except (ValueError, OSError, FileNotFoundError):
+            new_hb[name] = 0.0
+
+        # Log mtime
+        log_path = LOGS_DIR / f"{name}.log"
+        try:
+            new_log[name] = log_path.stat().st_mtime
+        except OSError:
+            new_log[name] = 0.0
+
+    _STATUS_CACHE_HB = new_hb
+    _STATUS_CACHE_LOG = new_log
+    _STATUS_CACHE_TIMESTAMP = now
+
+
+def _get_cached_heartbeat(bot_name: str) -> float:
+    """Return cached heartbeat timestamp. Returns 0 if missing/stale."""
+    return _STATUS_CACHE_HB.get(bot_name, 0.0)
+
+
+def _get_cached_log_mtime(bot_name: str) -> float:
+    """Return cached log mtime. Returns 0 if missing."""
+    return _STATUS_CACHE_LOG.get(bot_name, 0.0)
+
 
 def _check_code_changes(bots: dict[str, BotState]) -> None:
     """Check for code changes in O(M+B) time.

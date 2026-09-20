@@ -279,10 +279,8 @@ class TestTicketStore:
         for state in [TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
                        TicketState.IMPLEMENTING, TicketState.REVIEWING, TicketState.VERIFYING, TicketState.COMPLETE]:
             if state == TicketState.COMPLETE:
-                # need gate approval for COMPLETE
-                import json as _json, time as _time
-                gate_path = tmp_path / "gate_results.jsonl"
-                gate_path.write_text(_json.dumps({"ticket_id": t1.id, "passed": True, "timestamp": _time.time(), "gates": []}) + "\n", encoding="utf-8")
+                # need gate approval for COMPLETE - use record_gate_result to update cache
+                store.record_gate_result(t1.id, True, gates=[])
             store.transition(t1.id, state)
         t2 = create_ticket("t2", TicketClass.BUG, Severity.LOW, "s", "same evidence", "same problem", "d", ["a"])
         store.add(t2)
@@ -505,7 +503,7 @@ class TestGatekeeperEnforcement:
         store = self._make_store(tmp_path)
         t = self._add_ticket(store)
         self._move_to_verifying(store, t.id)
-        self._write_gate_pass(tmp_path, t.id)
+        self._write_gate_pass(tmp_path, t.id, store=store)
 
         updated = store.transition(t.id, TicketState.COMPLETE)
         assert updated.state == TicketState.COMPLETE
@@ -515,7 +513,7 @@ class TestGatekeeperEnforcement:
         store = self._make_store(tmp_path)
         t = self._add_ticket(store)
         self._move_to_verifying(store, t.id)
-        self._write_gate_fail(tmp_path, t.id)
+        self._write_gate_fail(tmp_path, t.id, store=store)
 
         with pytest.raises(ValueError, match="gatekeeper"):
             store.transition(t.id, TicketState.COMPLETE)
