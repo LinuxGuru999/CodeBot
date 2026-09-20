@@ -3200,6 +3200,11 @@ DECOMPOSER_ROLE_NAMES: frozenset[str] = frozenset({
 })
 
 
+def _is_decomposer_role(name: str) -> bool:
+    base = name.split("-")[0] if "-" in name else name
+    return base in DECOMPOSER_ROLE_NAMES
+
+
 def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -> int:
     """Dispatch DECOMPOSE tickets to decomposer agents, advance to PLANNING when done.
 
