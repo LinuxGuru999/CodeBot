@@ -2914,9 +2914,8 @@ def checkpoint_path(bot_name: str) -> Path:
 
 def read_checkpoint(bot_name: str) -> dict | None:
     p = checkpoint_path(bot_name)
-    # .with_suffix replaces the last suffix; since checkpoint_path already
-    # includes .json, we need to append .bak rather than replace.
-    bak = Path(str(p) + ".bak")
+    # Replace .json suffix with .bak (not append, not double-replace)
+    bak = p.with_suffix(".bak") if p.suffix == ".json" else Path(str(p) + ".bak")
     if not p.exists():
         if bak.exists():
             try:

@@ -408,24 +408,8 @@ class TestCheckpoint:
         bak.write_text(json.dumps(bak_data))
         with patch.object(orch, "STATE_DIR", tmp_path):
             result = read_checkpoint("test-bot")
-            assert result is None  # primary doesn't exist, bak exists but read_checkpoint returns None when primary missing
-            # Actually: when primary is missing, it checks bak
-            # Let me re-read the code...
-            # Line 1799: if not p.exists():
-            #     if bak.exists(): ... return data
-            #     return None
-            # So it DOES read from bak when primary is missing!
-            # But wait, the test shows bak exists and result is None...
-            # Let me re-check: the code says "if bak.exists(): try: raw = bak.read_text... return data"
-            # So it should return bak_data. The test was wrong in expecting None.
-            # Let me just test the correct behavior.
-        # Re-test properly:
-        bak2 = tmp_path / "test-bot2.checkpoint.bak"
-        bak_data2 = {"bot": "test-bot2", "reason": "backup"}
-        bak2.write_text(json.dumps(bak_data2))
-        with patch.object(orch, "STATE_DIR", tmp_path):
-            result = read_checkpoint("test-bot2")
-            assert result == bak_data2
+            # When primary doesn't exist but .bak does, read_checkpoint restores from .bak
+            assert result == bak_data
 
     def test_read_checkpoint_not_a_dict(self, tmp_path):
         """read_checkpoint returns None for non-dict JSON (e.g., list)."""
