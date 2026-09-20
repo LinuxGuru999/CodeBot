@@ -790,7 +790,28 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         base = name.split("-")[0] if "-" in name else name
         return base in ("decomposer", "implementation_planner")
 
-    non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES and not _is_planning_role(c.name)]
+    depths = _get_pipeline_state()
+    always_on_names = {"scheduler", "conflict_resolver", "budget_controller"}
+
+    def _role_has_demand(name: str) -> bool:
+        base = name.split("-")[0] if "-" in name else name
+        if base in always_on_names:
+            return True
+        if base in ("decomposer", "implementation_planner"):
+            return False
+        if base in IMPLEMENTER_ROLE_NAMES:
+            return False
+        if base in REVIEWER_ROLE_NAMES or base == "ux_reviewer":
+            return depths.get("REVIEWING", 0) > 0
+        if base == "quality_gate":
+            return depths.get("VERIFYING", 0) > 0
+        if base == "ticket_triager":
+            return (depths.get("DISCOVERED", 0) + depths.get("VALIDATING", 0) + depths.get("TRIAGED", 0)) > 0
+        if base in DISCOVERY_ROLE_NAMES:
+            return depths.get("DISCOVERED", 0) > 0
+        return True
+
+    non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES and not _is_planning_role(c.name) and _role_has_demand(c.name)]
     base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
     base_planning = [c for c in registry if _is_planning_role(c.name)]
     if not base_impl and not base_planning:
@@ -804,8 +825,17 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
             seen_planning_bases.add(base)
             unique_planning.append(cfg)
 
-    planning_slots = len(unique_planning)
-    impl_budget = max_concurrent - len(non_impl) - planning_slots
+    decomp_queue = depths.get("DECOMPOSE", 0)
+    plan_queue = depths.get("PLANNING", 0)
+    impl_queue = depths.get("IMPLEMENTING", 0) + depths.get("REWORK", 0)
+    planning_instances = 0
+    if decomp_queue > 0:
+        planning_instances += min(max(1, decomp_queue // 3), 6)
+    if plan_queue > 0:
+        planning_instances += min(max(1, plan_queue // 2), 4)
+    planning_instances = min(planning_instances, max(0, max_concurrent - len(non_impl) - 1))
+
+    impl_budget = max_concurrent - len(non_impl) - planning_instances
     target = min(demand, max(impl_budget, 0))
     target = max(target, min(len(base_impl), max(impl_budget, 0)))
     role_map = {c.name: c for c in base_impl}
@@ -833,14 +863,29 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         ))
         TIER_PRIORITY[name] = tier
 
+    depths = _get_pipeline_state()
+    decomp_queue = depths.get("DECOMPOSE", 0)
+    plan_queue = depths.get("PLANNING", 0)
+    planning_name_counts: dict[str, int] = {}
+
     for role_cfg in unique_planning:
-        out.append(BotConfig(
-            role_cfg.name, role_cfg.prompt_file, 30, 90,
-            role_cfg.model, fallback_model=role_cfg.fallback_model,
-            clean_exit_wait=False, runner_mode="api", tier=11,
-            max_restarts=role_cfg.max_restarts,
-        ))
-        TIER_PRIORITY[role_cfg.name] = 11
+        if role_cfg.name == "decomposer":
+            needed = min(max(1, decomp_queue // 3), 6) if decomp_queue > 0 else 1
+        else:
+            needed = min(max(1, plan_queue // 2), 4) if plan_queue > 0 else 1
+        budget_remaining = max_concurrent - len(out)
+        needed = min(needed, budget_remaining)
+        for i in range(max(0, needed)):
+            count = planning_name_counts.get(role_cfg.name, 0)
+            planning_name_counts[role_cfg.name] = count + 1
+            name = role_cfg.name if count == 0 else f"{role_cfg.name}-{count+1}"
+            out.append(BotConfig(
+                name, role_cfg.prompt_file, 30, 90,
+                role_cfg.model, fallback_model=role_cfg.fallback_model,
+                clean_exit_wait=False, runner_mode="api", tier=11,
+                max_restarts=role_cfg.max_restarts,
+            ))
+            TIER_PRIORITY[name] = 11
 
     return out
 
