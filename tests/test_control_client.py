@@ -58,11 +58,11 @@ class TestReqFunction(unittest.TestCase):
 
         call_args = mock_urlopen.call_args
         request_obj = call_args[0][0]
-        # Headers are case-insensitive; check via get_item or direct access
+        # Headers are case-insensitive; urllib uses 'Content-type' (lowercase 't')
         self.assertEqual(request_obj.headers.get("Authorization"), "Bearer secret-token-123")
-        # Content-Type is set in the headers dict
-        self.assertIn("Content-Type", request_obj.headers)
-        self.assertEqual(request_obj.headers["Content-Type"], "application/json")
+        # Check Content-Type with correct casing used by urllib.request
+        self.assertIn("Content-type", request_obj.headers)
+        self.assertEqual(request_obj.headers["Content-type"], "application/json")
 
     @patch('codebot.control_client.urllib.request.urlopen')
     @patch('codebot.control_client.URL', 'http://test-server:8081')
