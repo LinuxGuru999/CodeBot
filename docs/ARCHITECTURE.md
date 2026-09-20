@@ -59,7 +59,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `work_scorer.py` | ~392 | Utility scoring engine: priority + bottleneck relief + dependency unlock + aging - penalties |
 | `orchestrator.py` | ~2900 | Process lifecycle: start, stop, health monitoring, heartbeat checking, drain management |
 | `config_reloader.py` | ~160 | Hot-reloading for prompts, source code, and bot registry config; triggers graceful respawns |
-| `api_runner.py` | ~1450 | LLM execution loop: prompt assembly, tool dispatch, claim protocol, auto-commit |
+| `api_runner.py` | ~1450 | LLM execution loop: prompt assembly, tool dispatch, claim protocol (no commit — commit happens at COMPLETE) |
 | `ticket_engine.py` | ~390 | Normalized ticket schema v2, 14-state machine, SHA-256 dedup, persistent CRUD |
 | `dependency_graph.py` | ~160 | DAG construction, cycle detection, topological sort, ready-ticket resolution |
 | `risk_classifier.py` | ~100 | Deterministic risk scoring (0-100), constitution-aware autonomy decisions |
@@ -159,9 +159,8 @@ api_runner executes via LLM with tools
     ├── Writes failing test (TDD red)
     ├── Implements change (TDD green)
     ├── Runs pytest (verify)
-    ├── Auto-commits with ticket ID
     ├── Releases claim
-    └── Transitions → REVIEWING state
+    └── Transitions → REVIEWING state (no commit here)
     │
     ▼
 Reviewers (correctness, security, architecture, etc.)
@@ -175,7 +174,8 @@ gatekeeper runs quality gates
     └── rework_count >= 3 → REWORK state
     │
     ▼
-git_sync commits + pushes verified changes
+completion_commit commits the ticket's own files with [CB-xxx] message,
+records SHA on the ticket (fail-open; no push — push stays batched)
     │
     ▼
 alignment_scorer processes exit event → reward signal

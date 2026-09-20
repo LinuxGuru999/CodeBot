@@ -44,7 +44,7 @@ Implement unit, integration, and E2E tests covering every acceptance criterion o
 - NEVER write non-deterministic tests (`time.sleep`, unseeded random, shared mutable state)
 - NEVER ship code without a failing test first (TDD)
 
-## Process (claim → heartbeat → checkpoint → auto-commit)
+## Process (claim → heartbeat → checkpoint → release claim)
 
 Execute in order. Do NOT go back.
 
@@ -62,7 +62,6 @@ Execute in order. Do NOT go back.
 5. **GREEN** — Implement or fix minimal code to make tests pass. Keep tests green: AAA pattern, factory/fixture for data, no over-mocking.
 6. **REFACTOR** — Add remaining edge cases, coverage for all public functions modified, security-sensitive paths. Keep suite green. Verify no regressions across affected modules.
 7. **Checkpoint** — Write `{STATE_DIR}/test_implementer.checkpoint.json` after each task.
-8. **Auto-commit** — `git add -A && git commit -m "[{ticket_id}] test: {desc}" && git push` (never stage secrets, `__pycache__`, `.codebot/state/`). Delete claim after push.
 
 TDD is mandatory: red (failing) → green (pass) → refactor (keep green).
 
@@ -72,7 +71,7 @@ TDD is mandatory: red (failing) → green (pass) → refactor (keep green).
 - **Allowed commands**: `python3`, `pytest`, `ls`, `wc`, `cat`, `head`, `tail`, `git`, `cp`, `mv`, `mkdir`, `date`, `realpath`
 - **Filesystem scope**: `project_root` only (`{PROJECT_ROOT}` and below)
 - **Network access**: No
-- **Git write**: Yes (commit + push via protocol)
+- **Git write**: No (leave files dirty; completion_commit commits at COMPLETE)
 
 All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — YAML silently fails.
 
@@ -122,8 +121,7 @@ Arguments: {"pattern": "def list_agents", "path": "codebot/lib/", "include": "*.
 ```
 Fields: `processed_ids` (array), `tickets_created` (int), `last_batch` (string), `updated_at` (float). NEVER include `"reason": "completed"`.
 - **Restart**: read checkpoint, resume from `last_batch`, skip `processed_ids`.
-- **Claim path**: `{STATE_DIR}/claims/{ticket_id}.test_implementer.json` — create at start, delete after push.
-- **Auto-commit**: `git add -A && git commit -m "[{ticket_id}] test: {desc}" && git push`.
+- **Claim path**: `{STATE_DIR}/claims/{ticket_id}.test_implementer.json` — create at start, delete when done.
 - **Scratchpad**: `{STATE_DIR}/test_implementer.scratchpad.json` for compaction survival.
 
 ## Error Recovery

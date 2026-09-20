@@ -49,7 +49,7 @@ These have `.md` prompt files but are not yet registered as `AgentRole` entries:
 
 ## Implementation Roles (6)
 
-Implementation agents write code, tests, and documentation. They follow TDD (red-green-refactor) and the operational protocols (claim, heartbeat, checkpoint, auto-commit, noop cap).
+Implementation agents write code, tests, and documentation. They follow TDD (red-green-refactor) and the operational protocols (claim, heartbeat, checkpoint, noop cap). Commits happen at COMPLETE stage via completion_commit, not by agents.
 
 | Role | Legacy Worker | Tool Access | Git Write |
 |------|--------------|-------------|-----------|

@@ -43,7 +43,7 @@ Update module docs, API contracts, READMEs, ADRs, changelogs, and inline documen
 - NEVER suppress type errors (`as any`, `@ts-ignore`, `# type: ignore` without justification)
 - NEVER write text analysis instead of code/docs — you WRITE files
 
-## Process (claim → heartbeat → checkpoint → auto-commit)
+## Process (claim → heartbeat → checkpoint → release claim)
 
 Execute in order. Do NOT go back.
 
@@ -54,7 +54,6 @@ Execute in order. Do NOT go back.
 5. **GREEN (write docs)** — Update minimal required docs per Same-PR rule (see below). Keep style consistent. Include working examples; validate examples via `bash` if runnable. TDD where code-adjacent: write failing test or example, confirm, then document the passing reality.
 6. **Verify accuracy** — Re-read docs vs code; ensure no outdated claims. Run `pytest` if you added examples/tests.
 7. **Checkpoint** — Write `{STATE_DIR}/documentation_implementer.checkpoint.json` after each task.
-8. **Auto-commit** — `git add -A && git commit -m "[{ticket_id}] docs: {desc}" && git push` (never stage secrets, `__pycache__`, `.codebot/state/`). Delete claim after push.
 
 Same-PR rule:
 
@@ -74,7 +73,7 @@ Same-PR rule:
 - **Allowed commands**: `python3`, `ls`, `wc`, `cat`, `head`, `tail`, `git`, `cp`, `mv`, `mkdir`, `date`, `realpath`
 - **Filesystem scope**: `project_root` only (`{PROJECT_ROOT}` and below)
 - **Network access**: No
-- **Git write**: Yes (commit + push via protocol)
+- **Git write**: No (leave files dirty; completion_commit commits at COMPLETE)
 
 All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — YAML silently fails.
 
@@ -124,8 +123,7 @@ Arguments: {"pattern": "def register_agent", "path": "codebot/lib/", "include": 
 ```
 Fields: `processed_ids` (array), `tickets_created` (int), `last_batch` (string), `updated_at` (float). NEVER include `"reason": "completed"`.
 - **Restart**: read checkpoint, resume from `last_batch`, skip `processed_ids`.
-- **Claim path**: `{STATE_DIR}/claims/{ticket_id}.documentation_implementer.json` — create at start, delete after push.
-- **Auto-commit**: `git add -A && git commit -m "[{ticket_id}] docs: {desc}" && git push`.
+- **Claim path**: `{STATE_DIR}/claims/{ticket_id}.documentation_implementer.json` — create at start, delete when done.
 - **Scratchpad**: `{STATE_DIR}/documentation_implementer.scratchpad.json` for compaction survival.
 
 ## Error Recovery

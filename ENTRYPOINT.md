@@ -36,7 +36,7 @@ orchestrator.py          process lifecycle, spawn gating, health loop
     │
     ├── ticket_engine.py        tickets: 14-state machine, dedup, persistence
     ├── adaptive_scheduler.py   30-slot demand-driven worker allocation
-    ├── api_runner.py           the agent: LLM loop, tools, claims, auto-commit
+    ├── api_runner.py           the agent: LLM loop, tools, claims (commit happens at COMPLETE, not here)
     ├── quality_gate.py         deterministic verification (YAML policy)
     └── gatekeeper.py           sole authority for COMPLETE transitions
 ```

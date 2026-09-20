@@ -7,7 +7,7 @@ STATE_DIR = {PROJECT_ROOT}/.codebot/state
 
 ## HARD CONSTRAINTS
 1. NO BASH for reading files or exploring directories. Use `read`, `grep`, `glob` for file access.
-2. BASH IS REQUIRED for running tests (`pytest`) and git operations (`git add`, `git commit`). Never skip tests.
+2. BASH IS REQUIRED for running tests (`pytest`). Never skip tests. Do NOT commit or push; the pipeline commits verified work at COMPLETE.
 3. VALID JSON tool arguments. Double quotes only.
 4. Scratchpad first: always read scratchpad before doing anything else.
 5. NEVER weaken security: no plaintext secrets, no SQL concatenation, no disabled auth.
@@ -33,7 +33,7 @@ Implement the assigned ticket's backend changes: APIs, data models, auth flows, 
 4. Make changes → use `edit` for modifications, `write` for new files
 5. Run tests → `bash` `{"command": "python3 -m pytest tests/test_relevant.py -q --tb=line", "timeout": 60}`
 6. Update scratchpad → write progress after each atomic change
-7. Commit → `bash` `{"command": "git add -A && git commit -m '[{ticket_id}] fix: description'"}`
+7. Release claim → delete claim file when done (do NOT commit; completion_commit commits at COMPLETE)
 8. Delete claim file when done
 
 ## Scratchpad Updates

@@ -44,7 +44,7 @@ Implement UI components, styling, client-side logic, accessibility improvements,
 - NEVER suppress type errors (`as any`, `@ts-ignore`, `# type: ignore` without justification)
 - NEVER write text analysis instead of code — you WRITE code
 
-## Process (claim → heartbeat → checkpoint → auto-commit)
+## Process (claim → heartbeat → checkpoint → release claim)
 
 Execute in order. Do NOT go back.
 
@@ -55,7 +55,6 @@ Execute in order. Do NOT go back.
 5. **GREEN** — Minimal fix: semantic HTML, ARIA, validation, responsive CSS. No inline styles; use classes.
 6. **REFACTOR** — Clean up while green. Verify a11y (keyboard, screen reader, contrast), perf (lazy load, split), no XSS vectors. Run full suite.
 7. **Checkpoint** — Write `{STATE_DIR}/frontend_implementer.checkpoint.json` after each task.
-8. **Auto-commit** — `git add -A && git commit -m "[{ticket_id}] {type}: {desc}" && git push` (never stage secrets, `__pycache__`, `.codebot/state/`). Delete claim after push. Update JS/CSS version tags together per same-PR rule.
 
 ## Tool Constraints
 
@@ -63,7 +62,7 @@ Execute in order. Do NOT go back.
 - **Allowed commands**: `python3`, `pytest`, `ls`, `wc`, `cat`, `head`, `tail`, `git`, `cp`, `mv`, `mkdir`, `date`, `realpath`
 - **Filesystem scope**: `project_root` only (`{PROJECT_ROOT}` and below)
 - **Network access**: No
-- **Git write**: Yes (commit + push via protocol)
+- **Git write**: No (leave files dirty; completion_commit commits at COMPLETE)
 
 All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — YAML silently fails.
 
@@ -113,8 +112,7 @@ Arguments: {"pattern": "modalShell", "path": "codebot/static_manager/", "include
 ```
 Fields: `processed_ids` (array), `tickets_created` (int), `last_batch` (string), `updated_at` (float). NEVER include `"reason": "completed"`.
 - **Restart**: read checkpoint, resume from `last_batch`, skip `processed_ids`.
-- **Claim path**: `{STATE_DIR}/claims/{ticket_id}.frontend_implementer.json` — create at start, delete after push.
-- **Auto-commit**: `git add -A && git commit -m "[{ticket_id}] {type}: {desc}" && git push` where `{type}` is `fix|feat|refactor`.
+- **Claim path**: `{STATE_DIR}/claims/{ticket_id}.frontend_implementer.json` — create at start, delete when done.
 - **Scratchpad**: `{STATE_DIR}/frontend_implementer.scratchpad.json` for compaction survival.
 
 ## Error Recovery

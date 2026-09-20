@@ -618,7 +618,7 @@ Before shipping any new or modified role prompt, verify:
 
 ### Category-Specific
 - [ ] Discovery: Detection Patterns table present, create_ticket format shown
-- [ ] Implementation: Claim protocol stated, TDD process explicit, auto-commit command shown
+- [ ] Implementation: Claim protocol stated, TDD process explicit (agents do NOT commit; completion_commit handles COMPLETE-stage commits)
 - [ ] Review: Verdict format shown, words "APPROVE"/"REWORK"/"verdict" present
 - [ ] Control: No Python import examples, state files table present
 - [ ] Planning: ALLOWED FILES table present, decomposition rules stated
