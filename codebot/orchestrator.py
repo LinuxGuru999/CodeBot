@@ -1478,6 +1478,8 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         if bot.process is not None and bot.process.poll() is None:
             stop_bot(bot, f"restarting with ticket {tid}")
             start_bot(bot, bots=bots)
+        else:
+            start_bot(bot, bots=bots)
     return dispatched
 
 
@@ -5976,6 +5978,8 @@ def main() -> None:
         for bot in order:
             base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
             if base in demand_driven_roles:
+                continue
+            if base in IMPLEMENTER_ROLE_NAMES:
                 continue
             if _is_needed_bot(bot.config.name, pipeline):
                 needed.append(bot)
