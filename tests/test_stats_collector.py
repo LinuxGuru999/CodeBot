@@ -21,9 +21,9 @@ class TestStatsCollectorInstantiation:
             # Act
             collector = StatsCollector()
             
-            # Assert
-            assert collector.state_dir == tmp_path / ".codebot" / "state"
-            assert collector.stats_file == tmp_path / ".codebot" / "state" / "model_stats.json"
+            # Assert - state_dir is relative path by default
+            assert collector.state_dir == Path(".codebot/state")
+            assert collector.stats_file == Path(".codebot/state/model_stats.json")
             assert collector._cache == {}
         finally:
             os.chdir(original_cwd)

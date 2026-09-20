@@ -1199,7 +1199,12 @@ class TestBatchTransition:
         store.close()
 
     def test_batch_transition_partial_failure_is_atomic(self, tmp_path):
-        """If one transition fails, none should be applied (atomicity)."""
+        """If one transition fails, none should be applied (atomicity).
+
+        batch_transition applies changes in-memory under a single lock hold.
+        If a ValueError is raised mid-batch, the already-mutated tickets must
+        be rolled back so that either all transitions succeed or none do.
+        """
         store = self._make_store(tmp_path)
         tickets = self._add_tickets_in_state(store, 3, TicketState.IMPLEMENTING)
 
@@ -1216,7 +1221,10 @@ class TestBatchTransition:
         # All tickets should remain in IMPLEMENTING since the batch failed
         for t in tickets:
             stored = store.get(t.id)
-            assert stored.state == TicketState.IMPLEMENTING
+            assert stored.state == TicketState.IMPLEMENTING, (
+                f"Ticket {t.id} was mutated to {stored.state} despite batch failure; "
+                f"batch_transition must be atomic"
+            )
         store.close()
 
     def test_save_called_once_per_batch(self, tmp_path):
