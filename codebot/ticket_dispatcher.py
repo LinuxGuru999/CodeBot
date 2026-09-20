@@ -1123,37 +1123,16 @@ def process_rework_tickets(bots: dict[str, Any]) -> int:
         return 0
 
     advanced = 0
-    try:
-        results = ts.batch_transition(transitions)
-        advanced = len(results)
-        for i, (tid, target_state, _) in enumerate(transitions):
+    results = ts.batch_transition(transitions)
+    advanced = len(results)
+    result_ids = {r.id for r in results}
+    for i, (tid, target_state, _) in enumerate(transitions):
+        if tid in result_ids:
             rc = getattr(rework[i], 'rework_count', 0) if i < len(rework) else 0
             if target_state == TicketState.DECOMPOSE and rc >= 3:
                 logger.warning(f"Rework ticket {tid} -> DECOMPOSE (failed {rc} implementations, needs fresh decomposition)")
             else:
                 logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rc})")
-    except (ValueError, KeyError) as e:
-        # Fallback: apply individually if batch fails
-        logger.warning(f"Batch rework failed ({e}), falling back to individual transitions")
-        for i, (tid, target_state, _) in enumerate(transitions):
-            rc = getattr(rework[i], 'rework_count', 0) if i < len(rework) else 0
-            try:
-                ts.transition(tid, target_state)
-                if target_state == TicketState.DECOMPOSE and rc >= 3:
-                    logger.warning(f"Rework ticket {tid} -> DECOMPOSE (failed {rc} implementations, needs fresh decomposition)")
-                else:
-                    logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rc})")
-                advanced += 1
-            except ValueError as ve:
-                if tid in reject_fallbacks:
-                    try:
-                        ts.transition(tid, TicketState.REJECTED)
-                        logger.warning(f"Rework ticket {tid} -> REJECTED (decompose transition failed: {ve})")
-                        advanced += 1
-                    except ValueError:
-                        pass
-                else:
-                    logger.warning(f"Rework ticket {tid} transition failed: {ve}")
 
     return advanced
 

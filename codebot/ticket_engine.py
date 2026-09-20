@@ -486,6 +486,16 @@ class TicketStore:
                     try:
                         entry = json.loads(line)
                         t = Ticket.from_dict(entry)
+                        # Remove from old state index before updating to avoid
+                        # duplicates when the same ticket appears multiple times
+                        # in the WAL with different states (CB-4418574-630E).
+                        old_ticket = self._tickets.get(t.id)
+                        if old_ticket is not None and old_ticket.state != t.state:
+                            old_set = self._state_index.get(old_ticket.state)
+                            if old_set is not None:
+                                old_set.discard(t.id)
+                                if not old_set:
+                                    del self._state_index[old_ticket.state]
                         self._tickets[t.id] = t
                         self._evidence_index[t.evidence_hash()] = t.id
                         self._index_title(t)
