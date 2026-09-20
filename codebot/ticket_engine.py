@@ -685,8 +685,13 @@ class TicketStore:
             return len(self._tickets)
 
     def summary(self) -> dict[str, int]:
+        """Return count of tickets per state using state index for O(S) lookup.
+
+        S is the number of distinct states (constant ~14), making this
+        significantly faster than O(N) iteration for large stores.
+        """
         with self._lock:
             counts: dict[str, int] = {}
-            for t in self._tickets.values():
-                counts[t.state.value] = counts.get(t.state.value, 0) + 1
+            for state, ticket_ids in self._state_index.items():
+                counts[state.value] = len(ticket_ids)
             return counts
