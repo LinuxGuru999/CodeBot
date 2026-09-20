@@ -403,6 +403,8 @@ def _auto_commit(bot_name: str, files_touched: list[str], ticket_id: str = "") -
         else:
             _log(f"{bot_name}: auto-commit push failed for {repo}: {push_result.get('error', '')}")
 
+    return True
+
 
 BOTS_DIR = Path(__file__).parent
 DRAIN_FILE = BOTS_DIR / "state" / ".drain"
