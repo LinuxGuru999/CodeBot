@@ -129,6 +129,7 @@ ORCH = BOTS_DIR / "orchestrator.py"
 SAFE_UPDATE = BOTS_DIR / "safe_update.sh"
 
 CONTROL_TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
+CONTROL_ALLOW_UNAUTHENTICATED = os.environ.get("CONTROL_ALLOW_UNAUTHENTICATED", "").strip() == "1"
 PORT = int(os.environ.get("PORT", os.environ.get("CONTROL_PORT", "8081")))
 MAX_LOG_LINES = 2_000
 MAX_REQUEST_BYTES = 65_536
@@ -448,9 +449,17 @@ class ControlHandler(BaseHTTPRequestHandler):
             return None
 
         if not CONTROL_TOKEN:
+            if CONTROL_ALLOW_UNAUTHENTICATED:
+                logger.warning(
+                    "CONTROL_TOKEN is not set but CONTROL_ALLOW_UNAUTHENTICATED=1 — "
+                    "allowing unauthenticated access (local testing only)."
+                )
+                return True
             logger.critical(
                 "SECURITY: CONTROL_TOKEN is not set — rejecting all authenticated requests. "
-                "Set CONTROL_TOKEN env var to enable API access. This is a fail-closed security measure."
+                "Set CONTROL_TOKEN env var to enable API access, or set "
+                "CONTROL_ALLOW_UNAUTHENTICATED=1 for local testing. "
+                "This is a fail-closed security measure."
             )
             return False
         auth = self.headers.get("Authorization", "")

@@ -780,14 +780,11 @@ WORKER_FALLBACK_CYCLE = (
 
 
 def _count_actionable_queue_items() -> int:
-    """Count actionable items via TicketStore only. Returns 0 when unavailable."""
+    """Count actionable items via cached TicketStore. Returns 0 when unavailable."""
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if store_path.exists():
-            ts = TicketStore(store_path)
+        from codebot.ticket_engine import TicketState
+        ts = _get_ticket_store()
+        if ts is not None:
             return (
                 len(ts.list_ready())
                 + len(ts.list_by_state(TicketState.DECOMPOSE))
@@ -800,12 +797,8 @@ def _count_actionable_queue_items() -> int:
 
 def _peek_ticket_classes() -> list[str]:
     try:
-        from codebot.ticket_engine import TicketStore
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if store_path.exists():
-            ts = TicketStore(store_path)
+        ts = _get_ticket_store()
+        if ts is not None:
             ready = ts.list_ready()
             classes = []
             for t in ready:
@@ -825,12 +818,8 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
 
     def _read_depths() -> dict[str, int]:
         try:
-            from codebot.ticket_engine import TicketStore, TicketState
-            store_path = STATE_DIR / "tickets.json"
-            if not store_path.exists():
-                store_path = Path(".codebot/state/tickets.json")
-            if store_path.exists():
-                ts = TicketStore(store_path)
+            ts = _get_ticket_store()
+            if ts is not None:
                 return ts.summary()
         except Exception:
             pass
@@ -2353,20 +2342,26 @@ def _count_running_by_model(bots: dict[str, BotState]) -> dict[str, int]:
 
 
 def _count_api_runner_processes() -> int:
-    count = 0
+    """Count running api_runner.py processes using pgrep (O(1) from app perspective).
+
+    Uses the OS-optimized pgrep command instead of iterating /proc manually.
+    This eliminates the O(N) filesystem scan where N is total system processes.
+    Returns 0 if pgrep fails or is unavailable.
+    """
     try:
-        for process_dir in Path("/proc").iterdir():
-            if not process_dir.name.isdigit():
-                continue
-            try:
-                command = (process_dir / "cmdline").read_bytes()
-            except OSError:
-                continue
-            if b"api_runner.py" in command:
-                count += 1
-    except OSError:
+        result = subprocess.run(
+            ["pgrep", "-f", "api_runner.py"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # pgrep returns one PID per line; count non-empty lines
+            return len([line for line in result.stdout.strip().split("\n") if line.strip()])
         return 0
-    return count
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        # Fallback: pgrep unavailable or timed out, return 0 conservatively
+        return 0
 
 
 def _count_running_workers(bots: dict[str, BotState] | None = None) -> int:

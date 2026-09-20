@@ -34,9 +34,11 @@ from codebot.api_runner import (
     _extract_provider_usage,
     _write_bot_status,
     _auto_commit,
+    _create_ticket_tool,
     _log,
     HIGH_RISK_TOKEN_MANIFESTS,
 )
+from codebot.ticket_engine import TicketStore, TicketClass, Severity, RiskLevel
 
 
 class TestParseToolArgs:
@@ -477,3 +479,210 @@ class TestApiKeyLoggingSecurity:
             assert fragment not in captured.out, (
                 f"API key fragment '{fragment}' leaked in log output — CWE-532 violation"
             )
+
+
+class TestCreateTicketTool:
+    """Tests for _create_ticket_tool — ticket creation and store persistence.
+
+    CB-9506618-8175: Verify that _create_ticket_tool creates a ticket that
+    exists in the store and has the correct fields.
+    """
+
+    def _make_adapter(self, tmp_path):
+        """Create a mock adapter with paths() returning tmp_path-based dirs."""
+        adapter = MagicMock()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        adapter.paths.return_value = MagicMock(
+            state_dir=state_dir,
+            repository_root=tmp_path,
+        )
+        return adapter
+
+    def test_ticket_exists_in_store(self, tmp_path):
+        """Ticket appears in store after creation."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _create_ticket_tool(
+                title="Test bug from investigation",
+                ticket_class="bug",
+                severity="low",
+                source="general_implementer",
+                evidence="Testing if create_ticket works",
+                problem_statement="Testing if create_ticket works",
+                desired_state="Ticket appears in store",
+                acceptance_criteria="Ticket exists; Ticket has correct fields",
+            )
+        assert result["success"] is True
+        # Verify ticket exists in the store
+        store_path = adapter.paths().state_dir / "tickets.json"
+        assert store_path.exists(), "tickets.json store file must exist"
+        store = TicketStore(store_path)
+        tickets = store.list_all()
+        assert len(tickets) >= 1, "At least one ticket must be in the store"
+        # Find our ticket
+        matching = [t for t in tickets if t.title == "Test bug from investigation"]
+        assert len(matching) == 1, "Our ticket must be found in the store"
+
+    def test_ticket_has_correct_fields(self, tmp_path):
+        """Ticket has correct title, class, severity, problem_statement,
+        desired_state, and acceptance_criteria."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _create_ticket_tool(
+                title="Test bug from investigation",
+                ticket_class="bug",
+                severity="low",
+                source="general_implementer",
+                evidence="Testing if create_ticket works",
+                problem_statement="Testing if create_ticket works",
+                desired_state="Ticket appears in store",
+                acceptance_criteria="Ticket exists; Ticket has correct fields",
+            )
+        assert result["success"] is True
+        store_path = adapter.paths().state_dir / "tickets.json"
+        store = TicketStore(store_path)
+        tickets = store.list_all()
+        ticket = [t for t in tickets if t.title == "Test bug from investigation"][0]
+        # Verify fields
+        assert ticket.title == "Test bug from investigation"
+        assert ticket.ticket_class == TicketClass.BUG
+        assert ticket.severity == Severity.LOW
+        assert ticket.problem_statement == "Testing if create_ticket works"
+        assert ticket.desired_state == "Ticket appears in store"
+        assert "Ticket exists" in ticket.acceptance_criteria
+        assert "Ticket has correct fields" in ticket.acceptance_criteria
+
+    def test_ticket_id_format(self, tmp_path):
+        """Ticket ID follows CB-XXXXXXXX-XXXX format."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _create_ticket_tool(
+                title="ID format test",
+                ticket_class="bug",
+                severity="medium",
+                source="test",
+                evidence="ID format test",
+                problem_statement="ID format test",
+                desired_state="Correct ID format",
+                acceptance_criteria="ID matches CB- pattern",
+            )
+        assert result["success"] is True
+        store_path = adapter.paths().state_dir / "tickets.json"
+        store = TicketStore(store_path)
+        tickets = store.list_all()
+        ticket = [t for t in tickets if t.title == "ID format test"][0]
+        assert ticket.id.startswith("CB-"), f"Ticket ID must start with CB-, got {ticket.id}"
+
+    def test_ticket_state_is_discovered(self, tmp_path):
+        """Newly created ticket has DISCOVERED state."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _create_ticket_tool(
+                title="State test",
+                ticket_class="feature",
+                severity="medium",
+                source="test",
+                evidence="state test",
+                problem_statement="state test",
+                desired_state="correct state",
+                acceptance_criteria="state is DISCOVERED",
+            )
+        assert result["success"] is True
+        store_path = adapter.paths().state_dir / "tickets.json"
+        store = TicketStore(store_path)
+        tickets = store.list_all()
+        ticket = [t for t in tickets if t.title == "State test"][0]
+        from codebot.ticket_engine import TicketState
+        assert ticket.state == TicketState.DISCOVERED
+
+    def test_ticket_with_all_fields(self, tmp_path):
+        """Ticket with all optional fields populated."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _create_ticket_tool(
+                title="Full field test",
+                ticket_class="security",
+                severity="critical",
+                source="security_auditor",
+                evidence="CWE-123: vulnerability found",
+                problem_statement="Security vulnerability in auth module",
+                desired_state="Vulnerability patched and tested",
+                acceptance_criteria="Tests pass; No regressions",
+                affected_modules="codebot/auth.py,codebot/session.py",
+                risk="high",
+            )
+        assert result["success"] is True
+        store_path = adapter.paths().state_dir / "tickets.json"
+        store = TicketStore(store_path)
+        tickets = store.list_all()
+        ticket = [t for t in tickets if t.title == "Full field test"][0]
+        assert ticket.ticket_class == TicketClass.SECURITY
+        assert ticket.severity == Severity.CRITICAL
+        assert ticket.source == "security_auditor"
+        assert "codebot/auth.py" in ticket.affected_modules
+        assert "codebot/session.py" in ticket.affected_modules
+
+    def test_empty_title_falls_back_to_problem_statement(self, tmp_path):
+        """When title is empty, problem_statement is used as title."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _create_ticket_tool(
+                title="",
+                ticket_class="bug",
+                severity="medium",
+                source="test",
+                evidence="evidence",
+                problem_statement="Fallback title from problem_statement",
+                desired_state="correct",
+                acceptance_criteria="title matches problem_statement",
+            )
+        assert result["success"] is True
+        store_path = adapter.paths().state_dir / "tickets.json"
+        store = TicketStore(store_path)
+        tickets = store.list_all()
+        ticket = [t for t in tickets if t.ticket_class == TicketClass.BUG]
+        assert len(ticket) >= 1
+        # The title should have fallen back to problem_statement
+        assert ticket[-1].title == "Fallback title from problem_statement"
+
+    def test_acceptance_criteria_semicolon_parsing(self, tmp_path):
+        """Semicolon-separated acceptance criteria are parsed into a list."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _create_ticket_tool(
+                title="AC parsing test",
+                ticket_class="bug",
+                severity="medium",
+                source="test",
+                evidence="test",
+                problem_statement="test",
+                desired_state="test",
+                acceptance_criteria="First criterion; Second criterion; Third criterion",
+            )
+        assert result["success"] is True
+        store_path = adapter.paths().state_dir / "tickets.json"
+        store = TicketStore(store_path)
+        tickets = store.list_all()
+        ticket = [t for t in tickets if t.title == "AC parsing test"][0]
+        assert len(ticket.acceptance_criteria) == 3
+        assert "First criterion" in ticket.acceptance_criteria
+        assert "Second criterion" in ticket.acceptance_criteria
+        assert "Third criterion" in ticket.acceptance_criteria
+
+    def test_execute_tool_create_ticket_dispatch(self, tmp_path):
+        """_execute_tool correctly dispatches to create_ticket."""
+        adapter = self._make_adapter(tmp_path)
+        with patch("codebot.api_runner._adapter_instance", adapter):
+            result = _execute_tool("create_ticket", {
+                "title": "Dispatch test",
+                "ticket_class": "bug",
+                "severity": "low",
+                "source": "test",
+                "evidence": "dispatch test",
+                "problem_statement": "dispatch test",
+                "desired_state": "dispatch works",
+                "acceptance_criteria": "ticket created",
+            })
+        assert result["success"] is True
+        assert "Created ticket" in result["output"]
