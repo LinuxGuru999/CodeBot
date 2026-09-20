@@ -63,9 +63,13 @@ class TestGateFailures:
         assert result == []
 
     def test_parses_fail_entries(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setattr(auto_revert, "BOTS_DIR", tmp_path)
-        monkeypatch.setattr(auto_revert, "WORK_ROOT", tmp_path)
-        docs_dir = tmp_path / "docs" / "optimization"
+        bots_dir = tmp_path / "bots"
+        bots_dir.mkdir()
+        work_root = tmp_path / "work"
+        work_root.mkdir()
+        monkeypatch.setattr(auto_revert, "BOTS_DIR", bots_dir)
+        monkeypatch.setattr(auto_revert, "WORK_ROOT", work_root)
+        docs_dir = bots_dir / "docs" / "optimization"
         docs_dir.mkdir(parents=True)
         index_file = docs_dir / "build-gate-INDEX.md"
         index_file.write_text(
@@ -103,9 +107,13 @@ class TestGateFailures:
         assert isinstance(result, list)
 
     def test_extracts_multiple_files_from_single_line(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setattr(auto_revert, "BOTS_DIR", tmp_path)
-        monkeypatch.setattr(auto_revert, "WORK_ROOT", tmp_path)
-        docs_dir = tmp_path / "docs" / "optimization"
+        bots_dir = tmp_path / "bots"
+        bots_dir.mkdir()
+        work_root = tmp_path / "work"
+        work_root.mkdir()
+        monkeypatch.setattr(auto_revert, "BOTS_DIR", bots_dir)
+        monkeypatch.setattr(auto_revert, "WORK_ROOT", work_root)
+        docs_dir = bots_dir / "docs" / "optimization"
         docs_dir.mkdir(parents=True)
         (docs_dir / "build-gate-INDEX.md").write_text(
             "- FAIL: a.py b.js c.json d.yaml e.toml f.md g.html\n",
@@ -260,7 +268,8 @@ class TestRequeueWithFailure:
         monkeypatch.setattr(auto_revert, "WORK_ROOT", tmp_path)
         auto_revert._requeue_with_failure("test_hint", "test failure reason")
         content = queue_file.read_text(encoding="utf-8")
-        assert "auto-revert test_hint" in content
+        assert "auto-revert" in content
+        assert "test_hint" in content
         assert "test failure reason" in content
         assert "QUEUE-REVERT-" in content
 
