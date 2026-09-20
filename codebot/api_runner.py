@@ -447,10 +447,17 @@ def _resolve_api_key_for_provider(provider_name: str = "dialagram") -> str | Non
 
 API_URL = _DEFAULT_API_URL
 API_TIMEOUT = 30
+PLANNING_ROLE_TIMEOUT = 90
+_PLANNING_BASES = frozenset({"decomposer", "implementation_planner"})
 
 
-API_URL = _DEFAULT_API_URL
-API_TIMEOUT = 30
+def _timeout_for_bot(bot_name: str) -> int:
+    base = bot_name.split("-")[0] if "-" in bot_name else bot_name
+    if base in _PLANNING_BASES:
+        return PLANNING_ROLE_TIMEOUT
+    return API_TIMEOUT
+
+
 MAX_TOOL_ITERATIONS = 200
 MAX_RETRIES = 5
 MAX_TIMEOUT_RETRIES = 3
@@ -925,8 +932,10 @@ def _contract(heartbeat_file, ckpt_file):
     )
 
 
-def _call_api(messages, model, api_key):
+def _call_api(messages, model, api_key, timeout=None):
     """Chunked POST read to dialagram; raises on HTTP/timeout for caller retry."""
+    if timeout is None:
+        timeout = API_TIMEOUT
     body = {
         "model": model,
         "messages": messages,
@@ -943,11 +952,7 @@ def _call_api(messages, model, api_key):
         },
         method="POST",
     )
-    # 120 s stall detection — matches opencode-auto-resume semantics.
-    # Chunked read returns as soon as the first bytes arrive instead of
-    # waiting for the full body, cutting time-to-first-tool-call on
-    # large responses. Still bounded by the 2MB cap.
-    with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         chunks: list[bytes] = []
         remaining = 2_000_000
         while remaining > 0:
@@ -1897,7 +1902,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                 try:
                     _wait_for_rate_limit(active_model)
                     _record_request(active_model)
-                    result = _call_api(msgs, active_model, api_key)
+                    result = _call_api(msgs, active_model, api_key, timeout=_timeout_for_bot(bot_name))
                     _record_success(active_model)
                     return result
                 except urllib.error.HTTPError as exc:
