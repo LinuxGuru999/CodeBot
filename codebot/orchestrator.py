@@ -45,6 +45,7 @@ from codebot.ticket_dispatcher import (
     gatekeeper_verify_tickets, route_ready_tickets,
     process_rework_tickets, recover_deferred_tickets,
     _sweep_orphan_claims, clear_ticket_store_cache,
+    TICKET_CLASS_TO_IMPLEMENTER,
 )
 from codebot.dispatch_service import (
     get_pipeline_state, is_needed_bot, apply_agent_availability,
