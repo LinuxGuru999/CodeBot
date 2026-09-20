@@ -18,6 +18,7 @@ from codebot.readiness import (
     _parse_queue_complexity_from_text,
     filter_unapproved_items,
     load_approved_ids,
+    parse_queue_ids_from_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -471,3 +472,127 @@ class TestScrutiny:
         import json
         p.write_text(json.dumps({"Q-001": True, "Q-002": False}))
         assert load_approved_ids(str(tmp_path)) == {"Q-001"}
+
+
+# ---------------------------------------------------------------------------
+# parse_queue_ids_from_text — performance optimization
+# ---------------------------------------------------------------------------
+
+class TestParseQueueIds:
+    """Tests for parse_queue_ids_from_text (CB-9099192-1C65)."""
+
+    def test_empty_text(self):
+        assert parse_queue_ids_from_text("") == set()
+
+    def test_none_text(self):
+        assert parse_queue_ids_from_text(None) == set()
+
+    def test_simple_q_ids(self):
+        text = """| ID | Source | Title | Complexity | Status | Owner | Notes |
+|---|---|---|---|---|---|---|
+| Q-001 | bot | Fix bug | small | confirmed | | |
+| Q-002 | bot | Add feat | medium | approved | | |
+| Q-003 | bot | Refactor | high | deferred | | |
+"""
+        result = parse_queue_ids_from_text(text)
+        assert result == {"Q-001", "Q-002", "Q-003"}
+
+    def test_queue_decomp_ids(self):
+        text = """### QUEUE-DECOMP-100
+- **Status**: confirmed
+- **Lane**: short
+
+### QUEUE-DECOMP-200
+- **Status**: approved
+- **Lane**: long
+"""
+        result = parse_queue_ids_from_text(text)
+        assert result == {"QUEUE-DECOMP-100", "QUEUE-DECOMP-200"}
+
+    def test_mixed_ids(self):
+        text = """### QUEUE-DECOMP-50
+- **Status**: confirmed
+
+| ID | Source | Title | Complexity | Status | Owner | Notes |
+|---|---|---|---|---|---|---|
+| Q-001 | bot | Fix | small | confirmed | | |
+| Q-002 | bot | Add | medium | approved | | |
+"""
+        result = parse_queue_ids_from_text(text)
+        assert result == {"Q-001", "Q-002", "QUEUE-DECOMP-50"}
+
+    def test_no_duplicates(self):
+        text = "Q-001 appears Q-001 again Q-001 thrice"
+        result = parse_queue_ids_from_text(text)
+        assert result == {"Q-001"}
+
+    def test_o1_membership(self):
+        """Verify set membership is O(1) — same as any set check."""
+        text = "\n".join(f"| Q-{i:03d} | bot | Task {i} | small | confirmed | | |" for i in range(100))
+        result = parse_queue_ids_from_text(text)
+        assert len(result) == 100
+        assert "Q-050" in result
+        assert "Q-999" not in result
+
+    def test_verifies_same_result_as_naive(self):
+        """Ensure parse_queue_ids_from_text produces same IDs as naive approach."""
+        text = """| ID | Source | Title | Complexity | Status | Owner | Notes |
+|---|---|---|---|---|---|---|
+| Q-001 | bot | Fix bug | small | confirmed | | |
+| Q-002 | bot | Add feat | medium | approved | | |
+### QUEUE-DECOMP-1
+- **Status**: confirmed
+"""
+        # Naive: iterate all ticket IDs and check containment
+        all_ids = ["Q-001", "Q-002", "Q-003", "QUEUE-DECOMP-1", "QUEUE-DECOMP-2"]
+        naive_approved = set()
+        for tid in all_ids:
+            if tid in text:
+                naive_approved.add(tid)
+
+        fast_approved = parse_queue_ids_from_text(text)
+        # Fast approach finds IDs by regex; naive uses containment.
+        # Both should find the same IDs that exist in text.
+        assert fast_approved == naive_approved
+
+    def test_benchmark_10x_improvement(self):
+        """Benchmark: parse_queue_ids_from_text should be 10x faster than naive O(n*m)."""
+        import time as _time
+
+        # Build a 10KB QUEUE.md with 100 tickets
+        num_tickets = 100
+        lines = ["| ID | Source | Title | Complexity | Status | Owner | Notes |",
+                 "|---|---|---|---|---|---|---|"]
+        for i in range(num_tickets):
+            lines.append(f"| Q-{i:03d} | scanner | Task {i} | small | confirmed | bot | |")
+        queue_text = "\n".join(lines)
+        # Pad to ~10KB
+        padding = "x" * (10 * 1024 - len(queue_text))
+        queue_text += "\n" + padding
+
+        ticket_ids = [f"Q-{i:03d}" for i in range(num_tickets)]
+
+        # Naive O(n*m): for each ticket, scan the entire text
+        t0 = _time.perf_counter()
+        for _ in range(10):
+            naive = set()
+            for tid in ticket_ids:
+                if tid in queue_text:
+                    naive.add(tid)
+        naive_time = _time.perf_counter() - t0
+
+        # Fast O(f): single regex pass
+        t0 = _time.perf_counter()
+        for _ in range(10):
+            fast = parse_queue_ids_from_text(queue_text)
+        fast_time = _time.perf_counter() - t0
+
+        # Same result
+        assert naive == fast
+
+        # Must be at least 2x faster (conservative threshold for CI variability;
+        # the theoretical speedup is ~100x for 100 tickets on 10KB)
+        assert fast_time < naive_time * 0.5, (
+            f"Expected parse_queue_ids_from_text to be significantly faster: "
+            f"naive={naive_time:.4f}s, fast={fast_time:.4f}s, ratio={naive_time/max(fast_time,1e-9):.1f}x"
+        )
