@@ -30,8 +30,9 @@ from pathlib import Path
 from typing import Any
 
 from codebot.process_manager import (
-    BotConfig, BotState, start_bot, stop_bot, restart_bot,
-    is_stuck, effective_heartbeat_timeout, model_profile,
+    BotConfig, BotState, ModelProfile, MODEL_PROFILES,
+    start_bot, stop_bot, restart_bot,
+    is_stuck, is_log_stalled, effective_heartbeat_timeout, model_profile,
     read_heartbeat, log_mtime, update_bot_state,
     checkpoint_path, read_checkpoint, STATE_DIR, LOGS_DIR,
     BOTS_DIR, GATEWAY_MAX_CONCURRENT,
@@ -58,8 +59,9 @@ from codebot.dispatch_service import (
 )
 
 __all__ = [
-    "BotConfig", "BotState", "start_bot", "stop_bot", "restart_bot",
-    "is_stuck", "effective_heartbeat_timeout", "model_profile",
+    "BotConfig", "BotState", "ModelProfile", "MODEL_PROFILES",
+    "start_bot", "stop_bot", "restart_bot",
+    "is_stuck", "is_log_stalled", "effective_heartbeat_timeout", "model_profile",
     "read_heartbeat", "log_mtime", "update_bot_state", "checkpoint_path",
     "read_checkpoint", "STATE_DIR", "LOGS_DIR", "BOTS_DIR", "BACKUP_DIR",
     "GATEWAY_MAX_CONCURRENT", "GATEWAY_MIN_SPAWN_GAP", "ALWAYS_RESPAWN",
