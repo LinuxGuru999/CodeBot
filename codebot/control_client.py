@@ -41,6 +41,11 @@ import urllib.error
 URL = os.environ.get("CONTROL_URL", "http://127.0.0.1:8081").rstrip("/")
 TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
 
+# Bounded I/O: Constitutional invariant — all reads must have a size cap.
+# 1 MiB is generous for control-server JSON payloads while preventing memory
+# exhaustion from a malicious or misbehaving server.
+MAX_RESPONSE_BYTES = 1 * 1024 * 1024  # 1 MiB
+
 def req(method: str, path: str, body: dict | None = None) -> tuple[int, dict | str]:
     url = f"{URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
