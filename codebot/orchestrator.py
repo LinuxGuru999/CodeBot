@@ -2908,12 +2908,15 @@ def update_bot_state(bot: BotState, status: str) -> None:
         logger.error(f"Failed to update state for '{bot.config.name}': {e}")
 
 def checkpoint_path(bot_name: str) -> Path:
-    return STATE_DIR / f"{bot_name}.checkpoint.json"
+    state_dir = globals().get("STATE_DIR", _paths.state_dir)
+    return state_dir / f"{bot_name}.checkpoint.json"
 
 
 def read_checkpoint(bot_name: str) -> dict | None:
     p = checkpoint_path(bot_name)
-    bak = p.with_suffix(".checkpoint.bak")
+    # .with_suffix replaces the last suffix; since checkpoint_path already
+    # includes .json, we need to append .bak rather than replace.
+    bak = Path(str(p) + ".bak")
     if not p.exists():
         if bak.exists():
             try:
@@ -2995,7 +2998,8 @@ def _state_write_lock(bot_name: str) -> Iterator[None]:
 
 
 def _read_state_file(bot_name: str) -> dict:
-    state_file = STATE_DIR / f"{bot_name}.state.json"
+    state_dir = globals().get("STATE_DIR", _paths.state_dir)
+    state_file = state_dir / f"{bot_name}.state.json"
     try:
         if state_file.exists():
             return json.loads(state_file.read_text(encoding="utf-8"))
@@ -3005,7 +3009,8 @@ def _read_state_file(bot_name: str) -> dict:
 
 
 def _write_state_file(bot_name: str, data: dict) -> None:
-    state_file = STATE_DIR / f"{bot_name}.state.json"
+    state_dir = globals().get("STATE_DIR", _paths.state_dir)
+    state_file = state_dir / f"{bot_name}.state.json"
     _write_json_atomic(state_file, data)
 
 
