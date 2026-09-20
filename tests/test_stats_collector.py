@@ -303,8 +303,18 @@ class TestSaveLoadPersistence:
         state_dir.mkdir()
         stats_file = state_dir / "model_stats.json"
 
-        # Pre-populate with known data
-        initial_data = {"model:task": {"total_calls": 1}}
+        # Pre-populate with complete entry data
+        initial_data = {
+            "model:task": {
+                "total_calls": 1,
+                "successful_calls": 1,
+                "failed_calls": 0,
+                "total_cost": 0.05,
+                "total_tokens_in": 100,
+                "total_tokens_out": 200,
+                "last_updated": 1700000000.0,
+            }
+        }
         stats_file.write_text(json.dumps(initial_data))
 
         collector = StatsCollector(state_dir=str(state_dir))
@@ -358,6 +368,26 @@ class TestLoadEdgeCases:
 
         collector = StatsCollector(state_dir=str(state_dir))
         assert collector._cache == {}
+
+    def test_load_partial_entry_record_call_graceful(self, tmp_path):
+        """If loaded entries have missing fields, record_call should not crash."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        stats_file = state_dir / "model_stats.json"
+
+        # Pre-populate with incomplete entry (missing 'successful_calls' field)
+        partial_data = {"model:task": {"total_calls": 1}}
+        stats_file.write_text(json.dumps(partial_data))
+
+        collector = StatsCollector(state_dir=str(state_dir))
+        assert "model:task" in collector._cache
+
+        # record_call should handle missing fields gracefully
+        collector.record_call("model", "task", True, 0.01, 10, 20)
+
+        entry = collector._cache["model:task"]
+        # Should have incremented total_calls from 1 to 2
+        assert entry["total_calls"] == 2
 
     def test_load_whitespace_only_json(self, tmp_path):
         """File with only whitespace is invalid JSON — should degrade gracefully."""

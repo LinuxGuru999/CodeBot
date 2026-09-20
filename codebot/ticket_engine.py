@@ -368,6 +368,19 @@ class TicketStore:
         self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
         self._save_worker.start()
 
+    def _save_worker_loop(self) -> None:
+        while not self._shutdown:
+            with self._save_condition:
+                while not self._save_queue and not self._shutdown:
+                    self._save_condition.wait(timeout=5.0)
+                if self._shutdown:
+                    break
+                self._save_queue.clear()
+            try:
+                self._save()
+            except Exception:
+                pass
+
     def _load(self) -> None:
         if not self._path.exists():
             self._build_approval_cache()

@@ -293,7 +293,8 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         """Resume endpoint must reject bot names containing dollar signs."""
         from codebot.control_server import ControlHandler
 
-        handler = self._make_handler("POST", "/bots/test$(cat /etc/passwd)/resume")
+        # Use injection attempt without / which would break URL routing
+        handler = self._make_handler("POST", "/bots/test$(whoami)/resume")
         responses = []
         handler._json = lambda code, data, r=responses: r.append((code, data))
         handler._auth = lambda: True
@@ -389,25 +390,28 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertIn("invalid bot name", body.get("error", "").lower())
 
-    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
     def test_start_accepts_valid_bot_names(self):
         """Start endpoint must accept valid bot names."""
         from codebot.control_server import ControlHandler
 
-        handler = self._make_handler("POST", "/bots/start", body={"bots": ["valid-bot"]})
-        responses = []
-        handler._json = lambda code, data, r=responses: r.append((code, data))
-        handler._auth = lambda: True
-        handler._read_json_body = lambda: ({"bots": ["valid-bot"]}, None, None)
+        mock_bot = MagicMock()
+        mock_bot.name = "valid-bot"
 
-        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
-            ControlHandler.do_POST(handler)
-            mock_popen.assert_called_once()
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            handler = self._make_handler("POST", "/bots/start", body={"bots": ["valid-bot"]})
+            responses = []
+            handler._json = lambda code, data, r=responses: r.append((code, data))
+            handler._auth = lambda: True
+            handler._read_json_body = lambda: ({"bots": ["valid-bot"]}, None, None)
 
-        self.assertTrue(len(responses) > 0)
-        status_code, body = responses[0]
-        self.assertEqual(status_code, 200)
-        self.assertTrue(body["ok"])
+            with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+                ControlHandler.do_POST(handler)
+                mock_popen.assert_called_once()
+
+            self.assertTrue(len(responses) > 0)
+            status_code, body = responses[0]
+            self.assertEqual(status_code, 200)
+            self.assertTrue(body["ok"])
 
     def test_validate_bot_name_function(self):
         """Test the validate_bot_name function directly."""
