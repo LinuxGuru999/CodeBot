@@ -63,3 +63,41 @@ class TestBuildSummary:
         ct = CostTracker(tmp_path)
         summary = ct.build_summary()
         assert summary["tickets"] == {}
+
+    def test_build_summary_caching_performance(self, tmp_path):
+        """Test that subsequent build_summary calls return cached result in <1ms."""
+        import time
+        ct = CostTracker(tmp_path)
+        # Add some data
+        for i in range(100):
+            ct.record_phase_cost(f"CB-{i}", "w1", "m1", 100, 50, "planning")
+        
+        # First call (cache miss)
+        start = time.perf_counter()
+        summary1 = ct.build_summary()
+        duration1 = time.perf_counter() - start
+        
+        # Second call (cache hit)
+        start = time.perf_counter()
+        summary2 = ct.build_summary()
+        duration2 = time.perf_counter() - start
+        
+        assert duration2 < 0.001, f"Cached call took {duration2:.4f}s, expected <0.001s"
+        assert summary1 == summary2
+
+    def test_build_summary_cache_invalidation(self, tmp_path):
+        """Test that build_summary detects file change and updates cache."""
+        ct = CostTracker(tmp_path)
+        ct.record_phase_cost("CB-1", "w1", "m1", 100, 50, "planning")
+        
+        # Build initial summary
+        summary1 = ct.build_summary()
+        assert summary1["fleet_totals"]["ticket_count"] == 1
+        
+        # Add new entry
+        ct.record_phase_cost("CB-2", "w2", "m2", 200, 100, "implementation")
+        
+        # Build summary again - should detect change
+        summary2 = ct.build_summary()
+        assert summary2["fleet_totals"]["ticket_count"] == 2
+        assert summary2["fleet_totals"]["total_tokens"] == 450

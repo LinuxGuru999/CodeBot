@@ -190,7 +190,22 @@ def heartbeat_age(name: str) -> float | None:
 
 
 def log_tail(name: str, lines: int = 200) -> str:
-    p = LOGS_DIR / f"{name}.log"
+    # Defense-in-depth: validate name parameter before path construction
+    # Reject names containing '/' or '..' and validate against safe pattern
+    if not isinstance(name, str):
+        return ""
+    if '/' in name or '..' in name:
+        logger.warning("log_tail: rejected path traversal attempt: %s", repr(name))
+        return ""
+    if not BOT_NAME_PATTERN.match(name):
+        logger.warning("log_tail: rejected invalid bot name: %s", repr(name))
+        return ""
+    # Additional safeguard: use os.path.basename() to strip any directory components
+    safe_name = os.path.basename(name)
+    if not safe_name or safe_name != name:
+        logger.warning("log_tail: rejected name with path components: %s", repr(name))
+        return ""
+    p = LOGS_DIR / f"{safe_name}.log"
     if not p.exists():
         return ""
     try:

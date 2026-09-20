@@ -369,10 +369,24 @@ class TicketStore:
         self._save_worker.start()
 
     def _save_worker_loop(self) -> None:
+        """Background worker that debounces saves.
+
+        Waits for SAVE_DEBOUNCE_SECONDS after the last mutation before
+        flushing to disk, coalescing rapid-fire add()/transition() calls
+        into a single I/O operation.
+        """
         while not self._shutdown:
             with self._save_condition:
                 while not self._save_queue and not self._shutdown:
-                    self._save_condition.wait(timeout=5.0)
+                    self._save_condition.wait(timeout=1.0)
+                if self._shutdown:
+                    break
+                # Record when the first mutation in this batch arrived
+                first_ts = self._save_queue[0]["ts"]
+                elapsed = time.time() - first_ts
+                remaining = self.SAVE_DEBOUNCE_SECONDS - elapsed
+                if remaining > 0:
+                    self._save_condition.wait(timeout=remaining)
                 if self._shutdown:
                     break
                 self._save_queue.clear()
@@ -380,6 +394,19 @@ class TicketStore:
                 self._save()
             except Exception:
                 pass
+
+    def flush(self) -> None:
+        """Force an immediate save of all dirty tickets.
+
+        Blocks until the background worker has persisted pending changes.
+        Use this when durability is required (e.g., before shutdown or
+        in tests that verify persistence).
+        """
+        with self._save_condition:
+            if self._save_queue:
+                self._save_queue.clear()
+                self._save_condition.notify()
+        self._save()
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -478,15 +505,16 @@ class TicketStore:
             return False
 
     def _queue_save(self) -> None:
-        """Persist ticket store synchronously under lock.
+        """Debounce saves so rapid mutations trigger only one I/O operation.
 
-        Replaces the previous async save-worker approach which introduced a
-        race condition: a second TicketStore instance could load stale data
-        before the background worker flushed writes to disk.  Synchronous
-        saves guarantee that add()/transition() mutations are durable
-        immediately, fixing test_persistence and test_summary_performance_scales.
+        Appends a signal to the save queue and notifies the background worker.
+        The actual serialization happens asynchronously, ensuring that
+        add()/transition() return in O(1) time without blocking on disk I/O.
+        For immediate durability needs, call flush() explicitly.
         """
-        self._save()
+        with self._save_condition:
+            self._save_queue.append({"ts": time.time()})
+            self._save_condition.notify()
 
     def _save(self) -> None:
         """Atomically save ticket store, preferring incremental saves.
