@@ -255,3 +255,49 @@ class TestFailClosedSecurity:
              patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
             result = handler._auth()
         assert result is False
+
+    def test_state_endpoint_returns_404(self):
+        """GET /state must return 404 - endpoint removed for security (CB-8659441-F271)."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/state"
+        handler.client_address = ("192.168.1.100", 54321)
+        handler.headers = {"Authorization": "Bearer valid-token"}
+        handler._json = MagicMock()
+        handler.rfile = io.BytesIO(b"")
+        handler.wfile = io.BytesIO()
+        handler.requestline = "GET /state HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.command = "GET"
+
+        with patch("codebot.control_server.CONTROL_TOKEN", "valid-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            ControlHandler.do_GET(handler)
+
+        handler._json.assert_called_once()
+        call_args = handler._json.call_args
+        assert call_args[0][0] == 404, f"Expected 404 for /state, got {call_args[0][0]}"
+
+    def test_api_state_endpoint_returns_404(self):
+        """GET /api/state must return 404 - endpoint removed for security (CB-8659441-F271)."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/api/state"
+        handler.client_address = ("192.168.1.100", 54321)
+        handler.headers = {"Authorization": "Bearer valid-token"}
+        handler._json = MagicMock()
+        handler.rfile = io.BytesIO(b"")
+        handler.wfile = io.BytesIO()
+        handler.requestline = "GET /api/state HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.command = "GET"
+
+        with patch("codebot.control_server.CONTROL_TOKEN", "valid-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            ControlHandler.do_GET(handler)
+
+        handler._json.assert_called_once()
+        call_args = handler._json.call_args
+        assert call_args[0][0] == 404, f"Expected 404 for /api/state, got {call_args[0][0]}"
