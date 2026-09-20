@@ -443,21 +443,13 @@ class TestApiKeyLoggingSecurity:
 
     def test_run_bot_logs_key_presence_without_content(self, tmp_path, capsys, monkeypatch):
         """Integration-level test: run_bot's key resolution log must not leak key material."""
-        fake_key = "dgr-test-key-xyzzy-99887766"
+        # Use a key with no substrings that collide with other log content
+        fake_key = "dgr-QxZz9WpLmKqRvYjNfHcBtUeAoIgDsF"
         monkeypatch.setenv("DIALAGRAM_API_KEY", fake_key)
 
-        # We only need to verify the log line emitted before the bot starts its loop.
-        # Mock sys.exit to prevent actual exit, and mock downstream calls.
         import codebot.api_runner as ar
 
-        original_exit = ar.sys.exit
-        exit_code = []
-
-        def mock_exit(code=0):
-            exit_code.append(code)
-            raise SystemExit(code)
-
-        with patch.object(ar.sys, "exit", side_effect=mock_exit), \
+        with patch.object(ar.sys, "exit", side_effect=SystemExit), \
              patch.object(ar, "_is_draining", return_value=False), \
              patch.object(ar, "_write_heartbeat"), \
              patch.object(ar, "_start_heartbeat_thread", return_value=MagicMock()), \
@@ -467,9 +459,9 @@ class TestApiKeyLoggingSecurity:
              patch.object(ar, "_write_bot_status"):
             try:
                 ar.run_bot(
-                    bot_name="test-bot",
-                    model="test-model",
-                    mission_prompt="test mission",
+                    bot_name="sec-check-bot",
+                    model="dummy-model",
+                    mission_prompt="verify security",
                     heartbeat_file=str(tmp_path / "hb"),
                     ckpt_file=str(tmp_path / "ckpt.json"),
                 )
