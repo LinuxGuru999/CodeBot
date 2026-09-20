@@ -5380,6 +5380,7 @@ def main() -> None:
         _clean_stale_heartbeats()
         for bot in bots.values():
             bot._assigned_ticket_id = ''
+        _apply_agent_availability(bots)
         pipeline = _get_pipeline_state()
         dynamic = _compute_dynamic_priority(pipeline)
         ready = pipeline.get("READY", 0)
