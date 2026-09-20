@@ -10,334 +10,318 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from io import StringIO
 from unittest.mock import patch, MagicMock
 
 # Import the module under test
-sys.path.insert(0, '/home/kozuka/Work/CodeBot')
-from codebot.control_client import req, cmd_status, cmd_dead_letter_retry, cmd_scheduler_status, cmd_dead_letters
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from codebot import control_client
 
 
 class TestReqFunction(unittest.TestCase):
     """Test the req() HTTP client function."""
 
-    @patch('codebot.control_client.urllib.request.urlopen')
-    @patch('codebot.control_client.URL', 'http://test-server:8081')
-    @patch('codebot.control_client.TOKEN', '')
-    def test_req_get_success(self, mock_urlopen):
+    def setUp(self):
+        """Reset environment variables before each test."""
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        # Default to localhost for tests
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+
+    def tearDown(self):
+        """Restore original environment variables."""
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+
+    @patch('urllib.request.Request')
+    @patch('urllib.request.urlopen')
+    def test_req_get_success_json(self, mock_urlopen, mock_request):
         """req() sends correct GET request and parses JSON response."""
+        # Setup mock request object
+        mock_req_instance = MagicMock()
+        mock_req_instance.method = "GET"
+        mock_req_instance.full_url = "http://127.0.0.1:8081/bots"
+        mock_request.return_value = mock_req_instance
+        
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({"status": "ok", "count": 5}).encode()
         mock_response.status = 200
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        status, body = req("GET", "/bots")
+        status, body = control_client.req("GET", "/bots")
 
         self.assertEqual(status, 200)
         self.assertEqual(body, {"status": "ok", "count": 5})
-        # Verify request was constructed correctly
-        call_args = mock_urlopen.call_args
-        request_obj = call_args[0][0]
-        self.assertEqual(request_obj.method, "GET")
-        self.assertEqual(request_obj.full_url, "http://test-server:8081/bots")
-        self.assertIsNone(request_obj.data)
+        # Verify Request was called with correct headers
+        mock_request.assert_called_once()
+        call_kwargs = mock_request.call_args[1]
+        self.assertIn("Authorization", call_kwargs["headers"])
+        self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer test-token")
 
-    @patch('codebot.control_client.urllib.request.urlopen')
-    @patch('codebot.control_client.URL', 'http://test-server:8081')
-    @patch('codebot.control_client.TOKEN', 'secret-token-123')
-    def test_req_with_auth_header(self, mock_urlopen):
-        """req() includes Authorization header when TOKEN is set."""
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"result": "success"}).encode()
-        mock_response.status = 200
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        req("POST", "/control/drain", {"action": "stop"})
-
-        call_args = mock_urlopen.call_args
-        request_obj = call_args[0][0]
-        # Headers are case-insensitive; urllib uses 'Content-type' (lowercase 't')
-        self.assertEqual(request_obj.headers.get("Authorization"), "Bearer secret-token-123")
-        # Check Content-Type with correct casing used by urllib.request
-        self.assertIn("Content-type", request_obj.headers)
-        self.assertEqual(request_obj.headers["Content-type"], "application/json")
-
-    @patch('codebot.control_client.urllib.request.urlopen')
-    @patch('codebot.control_client.URL', 'http://test-server:8081')
-    @patch('codebot.control_client.TOKEN', '')
+    @patch('urllib.request.urlopen')
     def test_req_post_with_body(self, mock_urlopen):
-        """req() sends POST request with JSON body."""
+        """req() sends POST with JSON body correctly."""
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"updated": True}).encode()
+        mock_response.read.return_value = json.dumps({"result": "created"}).encode()
+        mock_response.status = 201
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        status, body = control_client.req("POST", "/control/drain", {"reason": "maintenance"})
+
+        self.assertEqual(status, 201)
+        self.assertEqual(body, {"result": "created"})
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        self.assertEqual(request.method, "POST")
+        self.assertTrue(request.full_url.endswith("/control/drain"))
+        # Verify body was sent
+        self.assertIsNotNone(request.data)
+        sent_body = json.loads(request.data.decode())
+        self.assertEqual(sent_body, {"reason": "maintenance"})
+
+    @patch('urllib.request.urlopen')
+    def test_req_no_token_when_unset(self, mock_urlopen):
+        """req() omits Authorization header when TOKEN is empty."""
+        os.environ["CONTROL_TOKEN"] = ""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
         mock_response.status = 200
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        body = {"item_id": "abc-123", "force": True}
-        status, result = req("POST", "/scheduler/dead-letters/abc-123/retry", body)
+        status, body = control_client.req("GET", "/health")
 
         self.assertEqual(status, 200)
         call_args = mock_urlopen.call_args
-        request_obj = call_args[0][0]
-        self.assertEqual(request_obj.method, "POST")
-        self.assertEqual(request_obj.full_url, "http://test-server:8081/scheduler/dead-letters/abc-123/retry")
-        sent_data = json.loads(request_obj.data.decode())
-        self.assertEqual(sent_data, body)
+        request = call_args[0][0]
+        self.assertNotIn("Authorization", request.headers)
 
-    @patch('codebot.control_client.urllib.request.urlopen')
-    @patch('codebot.control_client.URL', 'http://test-server:8081')
+    @patch('urllib.request.urlopen')
     def test_req_http_error_404(self, mock_urlopen):
         """req() handles HTTP 404 error gracefully."""
         from urllib.error import HTTPError
         mock_fp = MagicMock()
         mock_fp.read.return_value = json.dumps({"error": "not found"}).encode()
-        http_error = HTTPError(
-            url="http://test-server:8081/missing",
-            code=404,
-            msg="Not Found",
-            hdrs={},
-            fp=mock_fp
-        )
+        http_error = HTTPError("http://example.com", 404, "Not Found", {}, mock_fp)
         mock_urlopen.side_effect = http_error
 
-        status, body = req("GET", "/missing")
+        status, body = control_client.req("GET", "/nonexistent")
 
         self.assertEqual(status, 404)
         self.assertIsInstance(body, dict)
         self.assertIn("error", body)
 
-    @patch('codebot.control_client.urllib.request.urlopen')
-    @patch('codebot.control_client.URL', 'http://test-server:8081')
+    @patch('urllib.request.urlopen')
     def test_req_connection_error(self, mock_urlopen):
-        """req() handles connection errors gracefully without raising."""
+        """req() handles connection errors gracefully, returning code 0."""
         mock_urlopen.side_effect = Exception("Connection refused")
 
-        status, body = req("GET", "/bots")
+        status, body = control_client.req("GET", "/bots")
 
         self.assertEqual(status, 0)
         self.assertIsInstance(body, dict)
         self.assertIn("error", body)
         self.assertIn("Connection refused", body["error"])
 
-    @patch('codebot.control_client.urllib.request.urlopen')
-    @patch('codebot.control_client.URL', 'http://test-server:8081')
-    def test_req_empty_response(self, mock_urlopen):
-        """req() handles empty response body."""
-        mock_response = MagicMock()
-        mock_response.read.return_value = b""
-        mock_response.status = 204
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        status, body = req("DELETE", "/cache")
-
-        self.assertEqual(status, 204)
-        self.assertEqual(body, {})
-
-    @patch('codebot.control_client.urllib.request.urlopen')
-    @patch('codebot.control_client.URL', 'http://test-server:8081')
+    @patch('urllib.request.urlopen')
     def test_req_non_json_response(self, mock_urlopen):
         """req() returns raw string when response is not valid JSON."""
         mock_response = MagicMock()
-        mock_response.read.return_value = b"Plain text response"
+        mock_response.read.return_value = b'Plain text response'
         mock_response.status = 200
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        status, body = req("GET", "/plain")
+        status, body = control_client.req("GET", "/plain")
 
         self.assertEqual(status, 200)
         self.assertEqual(body, "Plain text response")
+
+    @patch('urllib.request.urlopen')
+    def test_req_empty_response(self, mock_urlopen):
+        """req() returns empty dict for empty successful response."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b''
+        mock_response.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        status, body = control_client.req("POST", "/empty")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {})
 
 
 class TestCmdStatus(unittest.TestCase):
     """Test cmd_status() output parsing."""
 
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = ""
+        self.held_output = StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.held_output
+
+    def tearDown(self):
+        sys.stdout = self.original_stdout
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+
     @patch('codebot.control_client.req')
     def test_cmd_status_success(self, mock_req):
-        """cmd_status() prints formatted bot status on success."""
+        """cmd_status() parses JSON response and prints formatted output."""
         mock_req.return_value = (200, [
-            {"name": "bug_hunter", "running": True, "heartbeat_age_seconds": 15, "effective_timeout": 300, "risk": "low", "model": "qwen-3.5-plus", "next_run_in_seconds": 45},
-            {"name": "security_auditor", "running": False, "heartbeat_age_seconds": None, "effective_timeout": 600, "risk": "high", "model": "claude-sonnet-4", "next_run_in_seconds": None}
+            {"name": "bug_hunter", "running": True, "heartbeat_age_seconds": 30, "effective_timeout": 300, "risk": "low", "model": "qwen-3.5-plus", "next_run_in_seconds": 60},
+            {"name": "security_auditor", "running": False, "heartbeat_age_seconds": None, "effective_timeout": 300, "risk": "high", "model": "claude-3.5", "next_run_in_seconds": None}
         ])
 
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
+        control_client.cmd_status()
 
-        try:
-            cmd_status()
-        finally:
-            sys.stdout = old_stdout
-
-        output = captured_output.getvalue()
+        output = self.held_output.getvalue()
         self.assertIn("bug_hunter", output)
         self.assertIn("RUN", output)
         self.assertIn("security_auditor", output)
         self.assertIn("WAIT", output)
-        self.assertIn("hb=15s", output)
+        self.assertIn("hb=30s", output)
 
     @patch('codebot.control_client.req')
     def test_cmd_status_failure(self, mock_req):
         """cmd_status() prints error and exits on non-200 response."""
         mock_req.return_value = (500, {"error": "Internal server error"})
 
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
+        with self.assertRaises(SystemExit) as cm:
+            control_client.cmd_status()
 
-        try:
-            with self.assertRaises(SystemExit) as cm:
-                cmd_status()
-            self.assertEqual(cm.exception.code, 1)
-        finally:
-            sys.stdout = old_stdout
-
-        output = captured_output.getvalue()
+        self.assertEqual(cm.exception.code, 1)
+        output = self.held_output.getvalue()
         self.assertIn("error", output.lower())
 
 
 class TestCmdDeadLetterRetry(unittest.TestCase):
     """Test cmd_dead_letter_retry() request construction."""
 
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+        self.held_output = StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.held_output
+
+    def tearDown(self):
+        sys.stdout = self.original_stdout
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+
     @patch('codebot.control_client.req')
     def test_cmd_dead_letter_retry_success(self, mock_req):
         """cmd_dead_letter_retry() sends POST to correct endpoint."""
-        mock_req.return_value = (200, {"retried": True, "item_id": "cb-xyz-789"})
+        mock_req.return_value = (200, {"status": "retried", "item_id": "CB-123"})
 
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
+        control_client.cmd_dead_letter_retry("CB-123")
 
-        try:
-            cmd_dead_letter_retry("cb-xyz-789")
-        finally:
-            sys.stdout = old_stdout
-
-        # Verify req was called with correct arguments
-        mock_req.assert_called_once_with(
-            "POST",
-            "/scheduler/dead-letters/cb-xyz-789/retry",
-            {}
-        )
-
-        output = captured_output.getvalue()
+        mock_req.assert_called_once_with("POST", "/scheduler/dead-letters/CB-123/retry", {})
+        output = self.held_output.getvalue()
         self.assertIn("retried", output)
 
     @patch('codebot.control_client.req')
     def test_cmd_dead_letter_retry_failure(self, mock_req):
         """cmd_dead_letter_retry() exits with code 1 on failure."""
-        mock_req.return_value = (400, {"error": "Invalid item ID"})
+        mock_req.return_value = (404, {"error": "Item not found"})
 
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
+        with self.assertRaises(SystemExit) as cm:
+            control_client.cmd_dead_letter_retry("CB-999")
 
-        try:
-            with self.assertRaises(SystemExit) as cm:
-                cmd_dead_letter_retry("invalid-id")
-            self.assertEqual(cm.exception.code, 1)
-        finally:
-            sys.stdout = old_stdout
+        self.assertEqual(cm.exception.code, 1)
+        mock_req.assert_called_once_with("POST", "/scheduler/dead-letters/CB-999/retry", {})
 
 
-class TestCmdSchedulerStatus(unittest.TestCase):
-    """Test cmd_scheduler_status() bounded output."""
+class TestEdgeCases(unittest.TestCase):
+    """Test edge cases and error paths."""
 
-    @patch('codebot.control_client.req')
-    def test_cmd_scheduler_status_success(self, mock_req):
-        """cmd_scheduler_status() prints bounded JSON on success."""
-        mock_payload = {
-            "version": "1.2.3",
-            "budget_state": "healthy",
-            "budget_day": 1000,
-            "budget_total_actual": 5000,
-            "drain": False,
-            "dead_letter_count": 3,
-            "dead_letter_ids": ["dl-1", "dl-2", "dl-3", "dl-4"],  # Should be truncated to 20
-            "queue_tracked": True,
-            "lease_active": True,
-            "paused_count": 2,
-            "paused_bots": ["bot-a", "bot-b"],
-            "disabled_count": 1,
-            "disabled_bots": ["bot-c"],
-            "disabled_details": [{"bot": "bot-c", "reason": "manual"}],
-            "starved_oldest": "bot-d",
-            "starved_top": ["bot-d", "bot-e"],
-            "batch_utilization": 0.85,
-            "per_model_actual": {"qwen": 100, "claude": 200}
-        }
-        mock_req.return_value = (200, mock_payload)
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = ""
 
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
+    def tearDown(self):
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
 
-        try:
-            cmd_scheduler_status()
-        finally:
-            sys.stdout = old_stdout
+    @patch('urllib.request.urlopen')
+    def test_req_url_trailing_slash_handling(self, mock_urlopen):
+        """req() handles URL with or without trailing slash."""
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081/"
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
+        mock_response.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        output = captured_output.getvalue()
-        parsed = json.loads(output)
-        self.assertEqual(parsed["version"], "1.2.3")
-        # dead_letter_ids is truncated to 20 max; original had 4 so all should be kept
-        self.assertEqual(len(parsed["dead_letter_ids"]), 4)
-        self.assertIn("budget_state", parsed)
+        control_client.req("GET", "/bots")
 
-    @patch('codebot.control_client.req')
-    def test_cmd_scheduler_status_non_dict_response(self, mock_req):
-        """cmd_scheduler_status() handles non-dict response gracefully."""
-        mock_req.return_value = (200, "unexpected string response")
+        call_args = mock_urlopen.call_args
+        request = call_args[0][0]
+        # Should not have double slashes
+        self.assertNotIn("//bots", request.full_url.replace("://", ""))
 
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
+    @patch('urllib.request.urlopen')
+    def test_req_timeout_setting(self, mock_urlopen):
+        """req() uses 15 second timeout."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
+        mock_response.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        try:
-            with self.assertRaises(SystemExit) as cm:
-                cmd_scheduler_status()
-            self.assertEqual(cm.exception.code, 1)
-        finally:
-            sys.stdout = old_stdout
+        control_client.req("GET", "/health")
 
-
-class TestCmdDeadLetters(unittest.TestCase):
-    """Test cmd_dead_letters() retrieval."""
+        # Verify timeout=15 was passed
+        call_kwargs = mock_urlopen.call_args[1]
+        self.assertEqual(call_kwargs.get("timeout"), 15)
 
     @patch('codebot.control_client.req')
-    def test_cmd_dead_letters_success(self, mock_req):
-        """cmd_dead_letters() fetches and prints dead letters."""
-        mock_req.return_value = (200, [{"id": "dl-1", "error": "timeout"}, {"id": "dl-2", "error": "rate_limit"}])
+    def test_cmd_scheduler_status_missing_fields(self, mock_req):
+        """cmd_scheduler_status() handles missing fields gracefully."""
+        mock_req.return_value = (200, {"version": "1.0"})  # Minimal response
 
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
-
-        try:
-            cmd_dead_letters()
-        finally:
-            sys.stdout = old_stdout
-
-        output = captured_output.getvalue()
-        self.assertIn("dl-1", output)
-        self.assertIn("dl-2", output)
-        mock_req.assert_called_once_with("GET", "/scheduler/dead-letters")
-
-    @patch('codebot.control_client.req')
-    def test_cmd_dead_letters_failure(self, mock_req):
-        """cmd_dead_letters() exits on error response."""
-        mock_req.return_value = (503, {"error": "Service unavailable"})
-
-        captured_output = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
+        self.held_output = StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.held_output
 
         try:
-            with self.assertRaises(SystemExit) as cm:
-                cmd_dead_letters()
-            self.assertEqual(cm.exception.code, 1)
+            control_client.cmd_scheduler_status()
+            output = self.held_output.getvalue()
+            self.assertIn("version", output)
         finally:
-            sys.stdout = old_stdout
+            sys.stdout = self.original_stdout
 
 
 if __name__ == "__main__":

@@ -1846,7 +1846,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     if not api_key:
         _log(f"{bot_name}: FATAL — no API key found (env DIALAGRAM_API_KEY or opencode.jsonc)")
         sys.exit(1)
-    _log(f"{bot_name}: API key resolved (status=present, no key material logged)")
+    _log(f'{bot_name}: API key resolved (present={bool(api_key)})')
 
     active_model = model
     used_fallback = False

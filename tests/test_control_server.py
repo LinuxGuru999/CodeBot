@@ -1,8 +1,11 @@
 """Tests for control_server rate limiting and authentication.
 
 Covers RateLimiter class behavior and integration with _auth() and _handle_telemetry().
+Also covers fail-closed security behavior when CONTROL_TOKEN is unset (CB-6048497-D3F1).
 """
+import io
 import json
+import logging
 import time
 import threading
 from http.server import BaseHTTPRequestHandler
