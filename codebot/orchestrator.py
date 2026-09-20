@@ -3767,12 +3767,24 @@ def _process_rework_tickets(bots: dict[str, BotState]) -> int:
         return 0
     if not rework:
         return 0
+    plans_dir = STATE_DIR / "plans"
     advanced = 0
     for ticket in rework:
         tid = ticket.id
+        rework_count = getattr(ticket, 'rework_count', 0)
+        if rework_count >= 3:
+            try:
+                ts.transition(tid, TicketState.REJECTED)
+                logger.warning(f"Rework ticket {tid} -> REJECTED (exceeded {rework_count} reworks without progress)")
+                advanced += 1
+            except ValueError as e:
+                logger.warning(f"Rework ticket {tid} rejection failed: {e}")
+            continue
+        plan_file = plans_dir / f"{tid}.plan.json"
+        target_state = TicketState.IMPLEMENTING if plan_file.exists() else TicketState.PLANNING
         try:
-            ts.transition(tid, TicketState.IMPLEMENTING)
-            logger.info(f"Rework ticket {tid} -> IMPLEMENTING (re-entering pipeline)")
+            ts.transition(tid, target_state)
+            logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rework_count})")
             advanced += 1
         except ValueError as e:
             logger.warning(f"Rework ticket {tid} transition failed: {e}")
