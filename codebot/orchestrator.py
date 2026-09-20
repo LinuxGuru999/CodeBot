@@ -57,6 +57,7 @@ from codebot.dispatch_service import (
     transition_ticket_on_error, compute_rate_limit_backoff,
     retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
 )
+from codebot.scratchpad import load_scratchpad, save_scratchpad
 
 __all__ = [
     "BotConfig", "BotState", "ModelProfile", "MODEL_PROFILES",
