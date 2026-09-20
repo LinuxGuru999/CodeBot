@@ -475,31 +475,50 @@ class TicketStore:
             return False
 
     def _queue_save(self) -> None:
-        """Queue an asynchronous save request.
-        
-        Adds a marker to the save queue and notifies the save worker thread.
-        The worker will batch multiple save requests and persist them together.
+        """Persist ticket store synchronously under lock.
+
+        Replaces the previous async save-worker approach which introduced a
+        race condition: a second TicketStore instance could load stale data
+        before the background worker flushed writes to disk.  Synchronous
+        saves guarantee that add()/transition() mutations are durable
+        immediately, fixing test_persistence and test_summary_performance_scales.
         """
-        with self._save_condition:
-            self._save_queue.append(True)
-            self._save_condition.notify()
+        self._save()
 
     def _save(self) -> None:
-        """Atomically save ticket store with lock retry on contention.
-        
-        Retries lock acquisition up to 3 times with exponential backoff (0.1s, 0.2s, 0.4s).
-        If lock remains unavailable after retries, raises RuntimeError rather than
-        risking data corruption via unlocked write.
+        """Atomically save ticket store, preferring incremental saves.
+
+        When a small subset of tickets has changed (dirty tracking), loads the
+        existing file and patches only those entries — avoiding O(N) full-store
+        serialization. Falls back to full serialization periodically or when
+        the dirty set is large relative to the total store size.
+
+        Retries lock acquisition up to 3 times with exponential backoff.
         """
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "updated_at": time.time(),
-            "tickets": [t.to_dict() for t in self._tickets.values()],
-        }
+        # Snapshot dirty IDs and clear them atomically
+        with self._lock:
+            dirty_ids = self._dirty_ids.copy()
+            self._dirty_ids.clear()
+
+        # Decide: incremental vs full save
+        total = len(self._tickets)
+        self._save_count += 1
+        use_incremental = (
+            dirty_ids
+            and self._path.exists()
+            and len(dirty_ids) < max(total * 0.3, 50)
+            and self._save_count % self._FULL_SAVE_INTERVAL != 0
+        )
+
+        if use_incremental:
+            payload = self._build_incremental_payload(dirty_ids)
+        else:
+            payload = self._build_full_payload()
+
         lock_path = self._path.with_suffix(".lock")
         max_retries = 3
         base_delay = 0.1  # seconds
-        
+
         for attempt in range(max_retries):
             try:
                 with open(lock_path, "a+") as lock_fd:
@@ -507,7 +526,10 @@ class TicketStore:
                     try:
                         self._backup()
                         tmp = self._path.with_suffix(".tmp")
-                        tmp.write_text(json.dumps(payload, indent=2 if self._pretty else None), encoding="utf-8")
+                        tmp.write_text(
+                            json.dumps(payload, indent=2 if self._pretty else None),
+                            encoding="utf-8",
+                        )
                         tmp.replace(self._path)
                     finally:
                         flock(lock_fd, LOCK_UN)
@@ -521,6 +543,44 @@ class TicketStore:
                         f"TicketStore._save failed after {max_retries} lock retries: {e}. "
                         f"Data may be at risk if concurrent writes occurred."
                     ) from e
+
+    def _build_full_payload(self) -> dict:
+        """Build save payload by serializing all tickets — O(N)."""
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "updated_at": time.time(),
+            "tickets": [t.to_dict() for t in self._tickets.values()],
+        }
+
+    def _build_incremental_payload(self, dirty_ids: set[str]) -> dict:
+        """Build save payload by patching only dirty tickets in existing file.
+
+        Loads the existing JSON, updates only the entries for dirty ticket IDs,
+        and rebuilds the payload. This avoids calling to_dict() on unchanged
+        tickets, reducing CPU cost from O(N) to O(K) for serialization where
+        K = len(dirty_ids). The JSON parse/write is still O(N) but avoids the
+        expensive dataclass->dict conversion for most tickets.
+        """
+        try:
+            existing_data = json.loads(self._path.read_text(encoding="utf-8"))
+            existing_map: dict[str, dict] = {
+                t["id"]: t for t in existing_data.get("tickets", [])
+            }
+        except (json.JSONDecodeError, KeyError, OSError):
+            # Corrupted or missing file — fall back to full save
+            return self._build_full_payload()
+
+        # Patch only dirty entries
+        for tid in dirty_ids:
+            ticket = self._tickets.get(tid)
+            if ticket is not None:
+                existing_map[tid] = ticket.to_dict()
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "updated_at": time.time(),
+            "tickets": list(existing_map.values()),
+        }
 
     def add(self, ticket: Ticket) -> Ticket:
         eh = ticket.evidence_hash()
@@ -539,6 +599,8 @@ class TicketStore:
             self._evidence_index[eh] = ticket.id
             # Maintain per-state index
             self._state_index.setdefault(ticket.state, set()).add(ticket.id)
+            # Track dirty for incremental save
+            self._dirty_ids.add(ticket.id)
             self._queue_save()
         return ticket
 
@@ -658,6 +720,8 @@ class TicketStore:
                 if not self._state_index[old_state]:
                     del self._state_index[old_state]
             self._state_index.setdefault(new_state, set()).add(ticket_id)
+            # Track dirty for incremental save
+            self._dirty_ids.add(ticket_id)
             self._queue_save()
             return updated
 
