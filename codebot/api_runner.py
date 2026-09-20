@@ -1910,7 +1910,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                 try:
                     _wait_for_rate_limit(active_model)
                     _record_request(active_model)
-                    result = _call_api(msgs, active_model, api_key, timeout=_timeout_for_bot(bot_name))
+                    result = _call_api(msgs, active_model, api_key, timeout=_timeout_for_bot(bot_name), bot_name=bot_name)
                     _record_success(active_model)
                     return result
                 except urllib.error.HTTPError as exc:
