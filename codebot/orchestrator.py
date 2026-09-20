@@ -1419,12 +1419,17 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         base_name = name.split("-")[0] if "-" in name else name
         if base_name not in IMPLEMENTER_ROLE_NAMES:
             continue
+        if not bot.config.enabled:
+            continue
         if bot.process is not None and bot.process.poll() is None:
             if not getattr(bot, '_assigned_ticket_id', ''):
                 unassigned_running.append((name, bot))
         else:
             idle_impl.append((name, bot))
+
     available = idle_impl + unassigned_running
+    if not available:
+        return 0
     dispatched = 0
     for ticket in ready:
         if not available:
