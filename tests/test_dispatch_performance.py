@@ -85,9 +85,13 @@ class TestDispatchPerformanceCB8002139:
     def test_dispatch_100_tickets_50_workers_under_10ms(self, tmp_path):
         """100 tickets dispatched against 50 workers must complete in <10ms.
 
-        The core dict build + lookup loop is O(n+m). We patch time.sleep
-        and use start_bot_fn returning False (to avoid claim file I/O overhead)
-        to isolate the algorithmic complexity from I/O overhead.
+        The core dict build + lookup loop is O(n+m). We patch time.sleep,
+        register_claim, release_claim, and all claim file I/O to isolate the
+        algorithmic complexity from disk overhead.
+
+        start_bot_fn returns True so bots are assigned from the deque (O(1)
+        popleft), avoiding the _get_or_create_bot fallback path which does
+        prompt-file disk I/O.
         """
         tickets = []
         classes = list(TICKET_CLASS_TO_IMPLEMENTER.keys())
@@ -103,20 +107,35 @@ class TestDispatchPerformanceCB8002139:
             bots[name] = MockBotState(config=MockBotConfig(name=name, enabled=True), process=None)
 
         fake_store = FakeTicketStore(implementing=tickets)
-        # Return False so we don't actually write claim files or sleep
-        start_bot_fn = MagicMock(return_value=False)
+        # Return True so bots get assigned from the deque (no _get_or_create_bot fallback)
+        start_bot_fn = MagicMock(return_value=True)
 
-        # Patch register_claim and release_claim to eliminate disk I/O overhead
-        # that is not part of the algorithmic complexity we're measuring.
+        # Create the claims dir and patch all claim file I/O to no-ops
+        _claims_dir = tmp_path / "claims"
+        _claims_dir.mkdir(parents=True, exist_ok=True)
+
+        from pathlib import Path as _Path
+
+        def _noop_write(self_path, *a, **kw):
+            return None
+
+        def _noop_replace(self_path, *a, **kw):
+            return None
+
+        def _noop_unlink(self_path, **kw):
+            return None
+
         with patch("codebot.ticket_dispatcher.get_ticket_store", return_value=fake_store):
             with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
                 with patch("codebot.ticket_dispatcher.time.sleep", return_value=None):
                     with patch("codebot.ticket_dispatcher.register_claim"):
                         with patch("codebot.ticket_dispatcher.release_claim"):
-                            (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                            start = time.perf_counter()
-                            result = spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=start_bot_fn)
-                            elapsed = time.perf_counter() - start
+                            with patch.object(_Path, "write_text", _noop_write):
+                                with patch.object(_Path, "replace", _noop_replace):
+                                    with patch.object(_Path, "unlink", _noop_unlink):
+                                        start = time.perf_counter()
+                                        result = spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=start_bot_fn)
+                                        elapsed = time.perf_counter() - start
 
         elapsed_ms = elapsed * 1000
         print(f"Dispatch 100 tickets / 50 workers in {elapsed_ms:.3f}ms (spawned={result})")
@@ -155,3 +174,46 @@ class TestDispatchPerformanceCB8002139:
                 assert spawned_roles[0] == expected_role, (
                     f"ticket_class={tc_str}: expected {expected_role}, got {spawned_roles[0]}"
                 )
+
+    def test_o1_bot_lookup_by_role_name(self, tmp_path):
+        """Verify role-indexed dict lookup is O(1) — scaling bots does NOT increase lookup time.
+
+        Creates 10, 100, and 1000 bots and measures the time to build the
+        role index + do lookups for 10 tickets. The lookup time must remain
+        constant (within noise) as bot count scales.
+        """
+        tickets = [_make_ticket(f"T-{i:04d}", TicketClass.BUG) for i in range(10)]
+
+        def _build_bots(n: int) -> dict[str, MockBotState]:
+            bots: dict[str, MockBotState] = {}
+            roles = list(IMPLEMENTER_ROLE_NAMES)
+            for i in range(n):
+                role = roles[i % len(roles)]
+                name = f"{role}-{i+1}"
+                bots[name] = MockBotState(config=MockBotConfig(name=name, enabled=True), process=None)
+            return bots
+
+        times = []
+        for n_bots in [10, 100, 1000]:
+            bots = _build_bots(n_bots)
+            fake_store = FakeTicketStore(implementing=tickets)
+            start_bot_fn = MagicMock(return_value=True)
+
+            with patch("codebot.ticket_dispatcher.get_ticket_store", return_value=fake_store):
+                with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
+                    with patch("codebot.ticket_dispatcher.time.sleep", return_value=None):
+                        with patch("codebot.ticket_dispatcher.register_claim"):
+                            with patch("codebot.ticket_dispatcher.release_claim"):
+                                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
+                                from pathlib import Path as _Path
+                                start = time.perf_counter()
+                                spawn_demand_agents(bots, max_concurrent=20, start_bot_fn=start_bot_fn)
+                                elapsed = time.perf_counter() - start
+                                times.append(elapsed * 1000)
+
+        print(f"Role lookup times: 10 bots={times[0]:.3f}ms, 100 bots={times[1]:.3f}ms, 1000 bots={times[2]:.3f}ms")
+        # O(1) lookup means 1000x bots should not cause 1000x slowdown.
+        # Allow up to 5x noise due to I/O and Python overhead.
+        assert times[2] < times[0] * 5 + 1.0, (
+            f"Lookup not O(1): 10 bots={times[0]:.3f}ms, 1000 bots={times[2]:.3f}ms"
+        )

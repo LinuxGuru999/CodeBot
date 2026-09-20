@@ -41,7 +41,7 @@ def check_prompt_changes(
         if bot.last_prompt_mtime > 0 and current_mtime > bot.last_prompt_mtime:
             alive = bot.process is not None and bot.process.poll() is None
             if alive:
-                logger.info(f"Prompt changed for '{name}' — triggering live reload (graceful respawn)")
+                logger.info(f"Prompt changed for '{name}' \u2014 triggering live reload (graceful respawn)")
                 stop_bot_fn(bot, "prompt-hot-reload")
                 bot.next_run_at = time.time()
         bot.last_prompt_mtime = current_mtime
@@ -68,6 +68,10 @@ def get_code_mtimes(pkg_dir: Path) -> Dict[str, float]:
     return mtimes
 
 
+# Module-level baseline -- persists across ticks for O(M+B) change detection.
+_last_code_mtimes: Dict[str, float] = {}
+
+
 def check_code_changes(
     bots: Dict[str, "BotState"],
     pkg_dir: Path,
@@ -76,44 +80,40 @@ def check_code_changes(
     """Check for code changes in orchestrator package and respawn affected bots.
 
     Uses O(M+B) complexity:
-    - O(M) to compute the set of changed modules via set intersection
-    - O(B) to iterate bots once and stop active ones
+    - O(M) set comprehension to detect changed modules against a module-level
+      baseline (no per-bot O(M) merge needed)
+    - O(B) single iteration over bots to stop active ones
+
+    ``_last_code_mtimes`` persists across ticks.  Empty on first call --
+    all modules are treated as changed (safe, no missed updates).
 
     Args:
         bots: Dictionary of bot states
         pkg_dir: Package directory to monitor
         stop_bot_fn: Callback to stop a bot
     """
+    global _last_code_mtimes
+
     current_mtimes = get_code_mtimes(pkg_dir)
     if not current_mtimes:
         return
 
-    # Merge all bot baselines into one dict for O(1) lookups per module
-    merged_baseline: Dict[str, float] = {}
-    for bot in bots.values():
-        for mod, mt in bot.last_code_mtimes.items():
-            if mod not in merged_baseline or mt > merged_baseline[mod]:
-                merged_baseline[mod] = mt
+    prev, _last_code_mtimes = _last_code_mtimes, dict(current_mtimes)
 
-    # O(M) — compute changed modules set via set comprehension
+    # O(M) -- set comprehension over modules only (no per-bot iteration)
     changed_modules: set[str] = {
         mod_name
         for mod_name, mtime in current_mtimes.items()
-        if merged_baseline.get(mod_name, 0.0) > 0 and mtime > merged_baseline[mod_name]
+        if prev.get(mod_name, 0.0) > 0 and mtime > prev[mod_name]
     }
 
     if not changed_modules:
-        for bot in bots.values():
-            if not bot.last_code_mtimes:
-                bot.last_code_mtimes = dict(current_mtimes)
-            else:
-                bot.last_code_mtimes.update(current_mtimes)
         return
 
     unique_changed = sorted(changed_modules)
-    logger.info(f"Code change detected in {unique_changed} — respawning active bots")
+    logger.info(f"Code change detected in {unique_changed} \u2014 respawning active bots")
 
-    # O(B) — iterate bots once to stop active ones
+    # O(B) -- iterate bots once to stop active ones
     for name, bot in bots.items():
         if not bot.config.enabled:
             continue

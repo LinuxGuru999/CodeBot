@@ -17,6 +17,22 @@ from codebot.process_manager import (
     batch_read_heartbeats,
     read_heartbeat,
 )
+from codebot.state_manager import PathConfig
+
+
+def _make_paths_for(tmp_path: Path) -> PathConfig:
+    """Build a PathConfig rooted at tmp_path for tests."""
+    return PathConfig(
+        bots_dir=tmp_path,
+        state_dir=tmp_path,
+        logs_dir=tmp_path,
+        backup_dir=tmp_path / "backup",
+        alignment_events_dir=tmp_path / "alignment_events",
+        drain_file=tmp_path / ".drain",
+        update_lock=tmp_path / ".update_lock",
+        restart_file=tmp_path / ".restart",
+    )
+from codebot.state_manager import PathConfig
 
 
 def test_count_api_runner_processes_matches_module_invocation():
@@ -99,8 +115,14 @@ def test_concurrent_prompt_read(tmp_path):
         )
         bot_state = BotState(config=bot_config)
 
-        # Patch BOTS_DIR to use tmp_path
-        with patch("codebot.process_manager.BOTS_DIR", tmp_path):
+        # Patch get_paths to use tmp_path as bots_dir
+        _mock_paths = PathConfig(
+            bots_dir=tmp_path, state_dir=tmp_path, logs_dir=tmp_path,
+            backup_dir=tmp_path, alignment_events_dir=tmp_path,
+            drain_file=tmp_path / ".drain", update_lock=tmp_path / ".update_lock",
+            restart_file=tmp_path / ".restart",
+        )
+        with patch("codebot.process_manager.get_paths", return_value=_mock_paths):
             iterations = 0
             while not stop_event.is_set() and iterations < 100:
                 try:
@@ -160,7 +182,13 @@ def test_prepare_prompt_with_context_locks_file(tmp_path):
     )
     bot_state = BotState(config=bot_config)
 
-    with patch("codebot.process_manager.BOTS_DIR", tmp_path):
+    _mock_paths = PathConfig(
+        bots_dir=tmp_path, state_dir=tmp_path, logs_dir=tmp_path,
+        backup_dir=tmp_path, alignment_events_dir=tmp_path,
+        drain_file=tmp_path / ".drain", update_lock=tmp_path / ".update_lock",
+        restart_file=tmp_path / ".restart",
+    )
+    with patch("codebot.process_manager.get_paths", return_value=_mock_paths):
         content = _prepare_prompt_with_context(bot_state)
 
     # Should get the content (may have git context appended)
@@ -178,34 +206,34 @@ class TestBatchReadHeartbeats:
         now = time.time()
         for name, ts in [("bot-a", now - 5), ("bot-b", now - 10)]:
             (tmp_path / f"{name}.heartbeat").write_text(str(ts))
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             result = batch_read_heartbeats(["bot-a", "bot-b"])
         assert result["bot-a"] == pytest.approx(now - 5, abs=0.01)
         assert result["bot-b"] == pytest.approx(now - 10, abs=0.01)
 
     def test_missing_file_returns_zero(self, tmp_path):
         """Missing heartbeat files produce 0.0 entries."""
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             result = batch_read_heartbeats(["no-such-bot"])
         assert result["no-such-bot"] == 0.0
 
     def test_corrupt_file_returns_zero(self, tmp_path):
         """Corrupt heartbeat files produce 0.0 entries."""
         (tmp_path / "bad-bot.heartbeat").write_text("not-a-timestamp")
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             result = batch_read_heartbeats(["bad-bot"])
         assert result["bad-bot"] == 0.0
 
     def test_empty_list_returns_empty_dict(self, tmp_path):
         """Empty input returns empty dict."""
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             result = batch_read_heartbeats([])
         assert result == {}
 
     def test_empty_file_returns_zero(self, tmp_path):
         """Empty heartbeat file produces 0.0."""
         (tmp_path / "empty-bot.heartbeat").write_text("")
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             result = batch_read_heartbeats(["empty-bot"])
         assert result["empty-bot"] == 0.0
 
@@ -215,7 +243,7 @@ class TestBatchReadHeartbeats:
         bots = ["match-a", "match-b", "match-c"]
         for name in bots:
             (tmp_path / f"{name}.heartbeat").write_text(str(now - 20))
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             batch_result = batch_read_heartbeats(bots)
             individual_results = {name: read_heartbeat(name) for name in bots}
         for name in bots:
@@ -225,7 +253,7 @@ class TestBatchReadHeartbeats:
         """Mix of existing and missing heartbeat files handled correctly."""
         now = time.time()
         (tmp_path / "exists.heartbeat").write_text(str(now))
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             result = batch_read_heartbeats(["exists", "missing"])
         assert result["exists"] == pytest.approx(now, abs=0.01)
         assert result["missing"] == 0.0
@@ -234,7 +262,7 @@ class TestBatchReadHeartbeats:
         """Each entry in batch result matches read_heartbeat for same bot."""
         now = time.time()
         (tmp_path / "consistency.heartbeat").write_text(str(now))
-        with patch("codebot.process_manager.STATE_DIR", tmp_path):
+        with patch("codebot.health_monitor.STATE_DIR", tmp_path):
             batch_result = batch_read_heartbeats(["consistency"])
             individual = read_heartbeat("consistency")
         assert batch_result["consistency"] == pytest.approx(individual, abs=0.01)

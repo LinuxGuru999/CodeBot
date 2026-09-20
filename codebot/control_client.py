@@ -22,9 +22,23 @@ Invariants
 Usage:
   CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py status
   CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py logs issues --lines 200
-  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py restart bug_fix
-  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py drain
+  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py restart bug_fix [--force|--dry-run]
+  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py pause bug_fix [--force|--dry-run]
+  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py resume bug_fix
+  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py drain [--force|--dry-run]
   CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py clear-drain
+  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py stop [bot1 bot2...] [--force|--dry-run]
+  CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py update [--force|--dry-run]
+
+Destructive commands (restart, pause, drain, stop, update) require either:
+  - Interactive confirmation (default, prompts for 'yes')
+  - --force flag to skip confirmation
+  - --dry-run flag to preview without executing
+
+Undo/Recovery:
+  - After drain: run 'clear-drain' to resume operations
+  - After stop: run 'start' or 'restart <bot>' to resume bots
+  - After update: git revert can restore previous version if needed
 
 If CONTROL_URL/TOKEN unset, defaults to http://127.0.0.1:8081 with no auth (local test).
 
@@ -45,6 +59,35 @@ TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
 # 1 MiB is generous for control-server JSON payloads while preventing memory
 # exhaustion from a malicious or misbehaving server.
 MAX_RESPONSE_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+# Bot name validation pattern: same as server-side validation
+import re as _re
+_BOT_NAME_RE = _re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def validate_bot_name_simple(name: str) -> bool:
+    """Validate bot name against safe pattern to prevent command injection."""
+    return isinstance(name, str) and bool(_BOT_NAME_RE.match(name))
+
+
+def _print_result(j: dict | str) -> None:
+    """Print a server response, displaying undo info when available."""
+    if isinstance(j, dict):
+        print(json.dumps(j, indent=2)[:8000])
+        if j.get("undo"):
+            print(f"\n💡 Recovery: {j['undo']}")
+        if j.get("dry_run") and j.get("preview"):
+            preview = j["preview"]
+            if isinstance(preview, dict):
+                desc = preview.get("description", "")
+                if desc:
+                    print(f"🔍 Preview: {desc}")
+                undo = preview.get("undo")
+                if undo:
+                    print(f"💡 Recovery: {undo}")
+    else:
+        print(j)
+
 
 def req(method: str, path: str, body: dict | None = None) -> tuple[int, dict | str]:
     url = f"{URL}{path}"
@@ -190,17 +233,109 @@ def main():
         code, j = req("GET", f"/bots/{name}/logs?lines={lines}")
         print(j.get("tail", json.dumps(j, indent=2)) if isinstance(j, dict) else j)
     elif cmd == "restart" and len(sys.argv) >= 3:
-        code, j = req("POST", f"/bots/{sys.argv[2]}/restart", {}); print(j)
+        name = sys.argv[2]
+        extra_args = sys.argv[3:]
+        force = "--force" in extra_args
+        dry_run = "--dry-run" in extra_args
+        if not validate_bot_name_simple(name):
+            print(f"Invalid bot name: {name}"); sys.exit(1)
+        if not force and not dry_run:
+            print(f"WARNING: This will restart bot '{name}' by killing its current process.")
+            resp = input("Are you sure? Type 'yes' to confirm: ")
+            if resp.strip().lower() != "yes":
+                print("Aborted."); sys.exit(0)
+            force = True
+        payload = {}
+        if force:
+            payload["force"] = True
+        if dry_run:
+            payload["dry_run"] = True
+        code, j = req("POST", f"/bots/{name}/restart", payload)
+        _print_result(j)
     elif cmd == "pause" and len(sys.argv) >= 3:
-        code, j = req("POST", f"/bots/{sys.argv[2]}/pause", {}); print(j)
+        name = sys.argv[2]
+        extra_args = sys.argv[3:]
+        force = "--force" in extra_args
+        dry_run = "--dry-run" in extra_args
+        if not validate_bot_name_simple(name):
+            print(f"Invalid bot name: {name}"); sys.exit(1)
+        if not force and not dry_run:
+            print(f"WARNING: This will pause bot '{name}' and kill its current process.")
+            resp = input("Are you sure? Type 'yes' to confirm: ")
+            if resp.strip().lower() != "yes":
+                print("Aborted."); sys.exit(0)
+            force = True
+        payload = {}
+        if force:
+            payload["force"] = True
+        if dry_run:
+            payload["dry_run"] = True
+        code, j = req("POST", f"/bots/{name}/pause", payload)
+        _print_result(j)
     elif cmd == "resume" and len(sys.argv) >= 3:
         code, j = req("POST", f"/bots/{sys.argv[2]}/resume", {}); print(j)
+    elif cmd == "stop":
+        args = sys.argv[2:]
+        force = "--force" in args
+        dry_run = "--dry-run" in args
+        # Parse bot names (everything that's not a flag)
+        bot_names = [a for a in args if not a.startswith("--")]
+        if not force and not dry_run:
+            if bot_names:
+                print(f"WARNING: This will stop the following bots: {', '.join(bot_names)}")
+            else:
+                print("WARNING: No bots specified. This will stop ALL bots and the orchestrator.")
+                print("This will halt the entire fleet!")
+            resp = input("Are you sure? Type 'yes' to confirm: ")
+            if resp.strip().lower() != "yes":
+                print("Aborted."); sys.exit(0)
+            force = True
+        payload = {}
+        if bot_names:
+            payload["bots"] = bot_names
+        if force:
+            payload["force"] = True
+        if dry_run:
+            payload["dry_run"] = True
+        code, j = req("POST", "/bots/stop", payload)
+        _print_result(j)
     elif cmd in ("drain", "safe-stop"):
-        code, j = req("POST", "/control/drain", {"force": True}); print(j)
+        args = sys.argv[2:]
+        force = "--force" in args
+        dry_run = "--dry-run" in args
+        if not force and not dry_run:
+            print("WARNING: This will create a .drain file, causing all bots to gracefully shut down.")
+            resp = input("Are you sure? Type 'yes' to confirm: ")
+            if resp.strip().lower() != "yes":
+                print("Aborted."); sys.exit(0)
+            force = True
+        payload = {}
+        if force:
+            payload["force"] = True
+        if dry_run:
+            payload["dry_run"] = True
+        code, j = req("POST", "/control/drain", payload)
+        _print_result(j)
     elif cmd in ("clear-drain", "undrain"):
         code, j = req("POST", "/control/clear-drain", {}); print(j)
     elif cmd == "update":
-        code, j = req("POST", "/control/update", {"force": True}); print(json.dumps(j, indent=2)[:8000])
+        args = sys.argv[2:]
+        force = "--force" in args
+        dry_run = "--dry-run" in args
+        if not force and not dry_run:
+            print("WARNING: This will run safe_update.sh --force to update the codebase.")
+            print("This may restart services and interrupt running tasks.")
+            resp = input("Are you sure? Type 'yes' to confirm: ")
+            if resp.strip().lower() != "yes":
+                print("Aborted."); sys.exit(0)
+            force = True
+        payload = {}
+        if force:
+            payload["force"] = True
+        if dry_run:
+            payload["dry_run"] = True
+        code, j = req("POST", "/control/update", payload)
+        _print_result(j)
     elif cmd == "state":
         code, j = req("GET", "/state"); print(json.dumps(j, indent=2))
     else:

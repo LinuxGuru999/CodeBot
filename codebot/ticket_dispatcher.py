@@ -193,7 +193,16 @@ def get_ticket_store():
     except ImportError:
         return None
 
-    store_path = STATE_DIR / "tickets.json"
+    # Resolve STATE_DIR dynamically to honor test patches on dispatch_service
+    _state_dir = STATE_DIR
+    try:
+        import codebot.dispatch_service as _ds
+        if hasattr(_ds, 'STATE_DIR'):
+            _state_dir = _ds.STATE_DIR
+    except Exception:
+        pass
+
+    store_path = _state_dir / "tickets.json"
     if not store_path.exists():
         store_path = Path(".codebot/state/tickets.json")
     if not store_path.exists():
@@ -346,6 +355,73 @@ def _sweep_orphan_claims(bots: dict[str, Any]) -> int:
         del _claim_index[key]
 
     return swept
+
+
+def _sweep_and_build_active_claims(live_bots: dict[str, str], grace_seconds: float = 60) -> set[str]:
+    """Sweep stale claims and build the active_claims set using in-memory indexes.
+
+    Replaces the O(C) disk glob pattern that was duplicated in
+    ``dispatch_decompose_agents`` and ``dispatch_planning_agents``.
+    Uses ``_claim_index`` (forward) and ``_claims_by_ticket_id`` (reverse)
+    for O(C) in-memory iteration with no disk I/O per tick.
+
+    Falls back to seeding the index from disk on first call (cold start)
+    when the in-memory index is empty.
+
+    Args:
+        live_bots: dict mapping alive bot names to their assigned ticket_id.
+        grace_seconds: minimum claim age before sweeping (default 60s).
+
+    Returns:
+        Set of ticket_ids that have at least one active claim.
+    """
+    now = time.time()
+
+    # Seed index from disk on cold start (first call after process restart)
+    if not _claim_index:
+        claims_dir = STATE_DIR / "claims"
+        if claims_dir.exists():
+            for p in claims_dir.glob("*.json"):
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    worker = data.get("worker", data.get("bot", ""))
+                    at = float(data.get("at", 0))
+                    _claim_index[p.name] = {"worker": worker, "at": at, "path": p}
+                    parts = p.name.rsplit(".", 2)
+                    if len(parts) >= 3:
+                        ticket_id = parts[0]
+                        _claims_by_ticket_id.setdefault(ticket_id, set()).add(p.name)
+                except (json.JSONDecodeError, ValueError, OSError):
+                    try:
+                        _claim_index[p.name] = {"worker": "", "at": p.stat().st_mtime, "path": p}
+                    except OSError:
+                        pass
+
+    # O(C) sweep over in-memory index — no disk I/O
+    stale_keys: list[str] = []
+    for claim_name, info in _claim_index.items():
+        worker = info["worker"]
+        parts = claim_name.rsplit(".", 2)
+        if len(parts) < 3:
+            continue
+        claimed_tid = parts[0]
+        if worker not in live_bots or live_bots.get(worker) != claimed_tid:
+            age = now - info["at"]
+            if age < grace_seconds:
+                continue
+            path = info["path"]
+            try:
+                if path.exists():
+                    path.unlink()
+                stale_keys.append(claim_name)
+            except OSError:
+                pass
+
+    for key in stale_keys:
+        release_claim(key)
+
+    # O(K) active claims via reverse index (K = unique ticket_ids with claims)
+    return set(_claims_by_ticket_id.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -634,26 +710,8 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
             if assigned:
                 live_bots[name] = assigned
 
-    now = time.time()
-    claim_grace_seconds = 60
-    for p in claims_dir.glob("*.json"):
-        parts = p.stem.rsplit(".", 1)
-        if len(parts) != 2:
-            continue
-        claimed_tid, claimed_bot = parts
-        if claimed_bot not in live_bots or live_bots[claimed_bot] != claimed_tid:
-            try:
-                age = now - p.stat().st_mtime
-                if age < claim_grace_seconds:
-                    continue
-                p.unlink()
-                release_claim(p.name)
-            except OSError:
-                pass
-
-    active_claims: set[str] = set()
-    for p in claims_dir.glob("*.json"):
-        active_claims.add(p.stem.rsplit(".", 1)[0])
+    # O(C) in-memory sweep via _claim_index — replaces O(C) disk glob
+    active_claims = _sweep_and_build_active_claims(live_bots)
 
     idle_decomposers = []
     unassigned_running = []
@@ -842,26 +900,8 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
             if assigned:
                 live_bots[name] = assigned
 
-    now = time.time()
-    claim_grace_seconds = 60
-    for p in claims_dir.glob("*.json"):
-        parts = p.stem.rsplit(".", 1)
-        if len(parts) != 2:
-            continue
-        claimed_tid, claimed_bot = parts
-        if claimed_bot not in live_bots or live_bots[claimed_bot] != claimed_tid:
-            try:
-                age = now - p.stat().st_mtime
-                if age < claim_grace_seconds:
-                    continue
-                p.unlink()
-                release_claim(p.name)
-            except OSError:
-                pass
-
-    active_claims: set[str] = set()
-    for p in claims_dir.glob("*.json"):
-        active_claims.add(p.stem.rsplit(".", 1)[0])
+    # O(C) in-memory sweep via _claim_index — replaces O(C) disk glob
+    active_claims = _sweep_and_build_active_claims(live_bots)
 
     idle_planners = []
     unassigned_running = []

@@ -108,13 +108,43 @@ class TestProviderHealth:
 
     def test_unhealthy_after_low_success_rate(self):
         h = ProviderHealth(provider="dialagram")
+        for _ in range(6):
+            h.record_failure()
+        for _ in range(4):
+            h.record_success()
+        # 6 failures + 4 successes = 10 total, 4/10 = 40% < 50%
+        # consecutive_failures reset to 0 by successes, so only low rate triggers
+        assert h.total_calls == 10
+        assert h.is_healthy is False
+
+    def test_unhealthy_boundary_exactly_9_calls_not_enough(self):
+        """Less than 10 total calls should NOT trigger the low-success-rate check."""
+        h = ProviderHealth(provider="dialagram")
         for _ in range(5):
             h.record_failure()
         for _ in range(4):
             h.record_success()
-        # 4/9 = 44% < 50% with 10+ total calls
+        # 5+4=9 total calls, success_rate=44% but <10 calls so still healthy
         assert h.total_calls == 9
-        assert h.is_healthy is False
+        assert h.is_healthy is True
+
+    def test_healthy_exactly_50_percent(self):
+        """Exactly 50% success rate with 10+ calls should still be healthy."""
+        h = ProviderHealth(provider="dialagram")
+        for _ in range(10):
+            if _ % 2 == 0:
+                h.record_failure()
+            else:
+                h.record_success()
+        # 5 failures + 5 successes = 10 total, 50% == 50% (not <)
+        assert h.total_calls == 10
+        assert h.is_healthy is True
+
+    def test_success_rate_zero_when_no_calls(self):
+        """Success rate returns 1.0 (healthy) when no calls recorded."""
+        h = ProviderHealth(provider="dialagram")
+        assert h.total_calls == 0
+        assert h.success_rate == 1.0
 
     def test_healthy_with_mixed_results_above_threshold(self):
         h = ProviderHealth(provider="dialagram")

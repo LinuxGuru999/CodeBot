@@ -1,11 +1,14 @@
 """Tests for destructive endpoint validation requiring force/confirm field.
 
 Ticket: CB-4748843-2678 — Add server-side validation for destructive endpoints
+Ticket: CB-4437763-EB8F — Destructive control actions lack confirmation and undo affordance
 
 Acceptance Criteria:
 - control_server.py rejects destructive POSTs without force/confirm field
 - returns helpful error message
 - tests verify rejection
+- dry-run returns preview without executing
+- preview includes recovery/undo hints
 """
 from __future__ import annotations
 
@@ -240,6 +243,222 @@ class TestDestructiveEndpointValidation(unittest.TestCase):
         error_msg = body.get("error", "").lower()
         self.assertNotIn("force", error_msg)
         self.assertNotIn("confirm", error_msg)
+
+    def test_force_string_rejected(self):
+        """force:'yes' (string, not bool) must be rejected."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/stop", body={"force": "yes"})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": "yes"}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("force", body.get("error", "").lower())
+
+    def test_force_int_rejected(self):
+        """force:1 (int, not bool) must be rejected to prevent bypass via JSON number."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/stop", body={"force": 1})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": 1}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("force", body.get("error", "").lower())
+
+    def test_force_none_rejected(self):
+        """force:null must be rejected."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/stop", body={"force": None})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": None}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+
+
+class TestDryRunPreview(unittest.TestCase):
+    """Verify that dry_run mode returns a preview without executing the action."""
+
+    def _make_handler(self, method: str, path: str, body: dict | None = None):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = path
+        handler.command = method
+        handler.headers = {"Authorization": "Bearer test-token"}
+        if body is not None:
+            handler.rfile = BytesIO(json.dumps(body).encode())
+            handler.headers["Content-Length"] = str(len(json.dumps(body)))
+        else:
+            handler.rfile = BytesIO(b"")
+            handler.headers["Content-Length"] = "0"
+        return handler
+
+    def test_stop_dry_run_returns_preview(self):
+        """POST /bots/stop with dry_run:true returns preview without executing."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/stop", body={
+            "bots": ["issues", "features"],
+            "force": True,
+            "dry_run": True,
+        })
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["issues", "features"], "force": True, "dry_run": True}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 200)
+        self.assertTrue(body.get("ok"))
+        self.assertTrue(body.get("dry_run"))
+        preview = body.get("preview", {})
+        self.assertIn("description", preview)
+        self.assertIn("affected_bots", preview)
+
+    def test_drain_dry_run_returns_preview_with_recovery(self):
+        """POST /control/drain with dry_run:true includes recovery info."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/control/drain", body={
+            "force": True,
+            "dry_run": True,
+        })
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": True, "dry_run": True}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 200)
+        self.assertTrue(body.get("dry_run"))
+        preview = body.get("preview", {})
+        self.assertIn("recovery", preview)
+        self.assertIn("undo_command", preview)
+
+    def test_update_dry_run_returns_preview_with_warning(self):
+        """POST /control/update with dry_run:true includes warning."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/control/update", body={
+            "force": True,
+            "dry_run": True,
+        })
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": True, "dry_run": True}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 200)
+        self.assertTrue(body.get("dry_run"))
+        preview = body.get("preview", {})
+        self.assertIn("warning", preview)
+        self.assertIn("recovery", preview)
+
+    def test_stop_all_dry_run_warning(self):
+        """POST /bots/stop with no bots and dry_run warns about fleet halt."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/stop", body={
+            "force": True,
+            "dry_run": True,
+        })
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": True, "dry_run": True}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 200)
+        preview = body.get("preview", {})
+        self.assertEqual(preview.get("affected_bots"), "all")
+        self.assertIn("warning", preview)
+
+    def test_dry_run_without_force_still_rejected(self):
+        """dry_run:true without force/confirm should still be rejected (must confirm intent first)."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/stop", body={
+            "dry_run": True,
+        })
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"dry_run": True}, None, None)
+
+        ControlHandler.do_POST(handler)
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+
+    def test_get_destructive_preview_stop_with_bots(self):
+        """_get_destructive_preview returns correct preview for stop with specific bots."""
+        from codebot.control_server import ControlHandler
+
+        preview = ControlHandler._get_destructive_preview(
+            None, "/bots/stop", {"bots": ["bug_fix", "issues"]}
+        )
+        self.assertIn("description", preview)
+        self.assertIn("affected_bots", preview)
+        self.assertEqual(preview["affected_bots"], ["bug_fix", "issues"])
+        self.assertTrue(preview["would_execute"])
+
+    def test_get_destructive_preview_drain(self):
+        """_get_destructive_preview returns recovery info for drain."""
+        from codebot.control_server import ControlHandler
+
+        preview = ControlHandler._get_destructive_preview(
+            None, "/control/drain", {}
+        )
+        self.assertIn("recovery", preview)
+        self.assertIn("undo_command", preview)
+        self.assertIn("clear-drain", preview["undo_command"])
+
+    def test_get_destructive_preview_update(self):
+        """_get_destructive_preview returns warning for update."""
+        from codebot.control_server import ControlHandler
+
+        preview = ControlHandler._get_destructive_preview(
+            None, "/control/update", {}
+        )
+        self.assertIn("warning", preview)
+        self.assertIn("recovery", preview)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 if __name__ == "__main__":

@@ -542,6 +542,40 @@ class ControlHandler(BaseHTTPRequestHandler):
             return None, 400, "request body must be a JSON object"
         return body, None, None
 
+    def _get_destructive_preview(self, path: str, body: dict) -> dict:
+        """Return a preview of what a destructive action would do without executing it.
+
+        Args:
+            path: The endpoint path being called
+            body: The request body containing parameters like 'bots'
+
+        Returns:
+            A dict describing what would happen
+        """
+        preview = {"action": path, "would_execute": True}
+
+        if path in ("/bots/stop", "/api/bots/stop", "/control/stop"):
+            bots = body.get("bots")
+            if bots:
+                preview["description"] = f"Would stop specified bots: {bots}"
+                preview["affected_bots"] = bots
+            else:
+                preview["description"] = "Would stop ALL bots and orchestrator"
+                preview["affected_bots"] = "all"
+                preview["warning"] = "This will halt the entire fleet"
+
+        elif path in ("/control/drain", "/api/control/drain"):
+            preview["description"] = "Would create .drain file, causing all bots to gracefully shut down after current task"
+            preview["recovery"] = "Run clear-drain endpoint or delete state/.drain file to resume operations"
+            preview["undo_command"] = "python3 control_client.py clear-drain"
+
+        elif path in ("/control/update", "/api/control/update"):
+            preview["description"] = "Would run safe_update.sh --force to update the codebase"
+            preview["warning"] = "This may restart services and interrupt running tasks"
+            preview["recovery"] = "Git revert can restore previous version if needed"
+
+        return preview
+
     def do_GET(self):  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
@@ -715,8 +749,14 @@ class ControlHandler(BaseHTTPRequestHandler):
         if path in DESTRUCTIVE_PATHS:
             force = body.get("force")
             confirm = body.get("confirm")
+            dry_run = body.get("dry_run")
             if not (force is True or confirm is True):
                 self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
+                return
+            # If dry-run mode, return what would happen without executing
+            if dry_run is True:
+                preview = self._get_destructive_preview(path, body)
+                self._json(200, {"ok": True, "dry_run": True, "preview": preview})
                 return
 
         # POST /bots/{name}/restart
@@ -730,6 +770,20 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not any(c.name == name for c in BOT_REGISTRY):
                 self._json(404, {"error": "unknown bot"})
                 return
+            # Per-bot destructive action: require force/confirm or dry-run
+            is_dry_run = body.get("dry_run") is True
+            if is_dry_run:
+                self._json(200, {"ok": True, "dry_run": True, "preview": {
+                    "action": "restart", "bot": name,
+                    "description": f"Would restart bot '{name}' by killing current process and starting via orchestrator",
+                    "undo": "Bot will auto-respawn on next orchestrator health check if paused accidentally",
+                }})
+                return
+            force = body.get("force")
+            confirm = body.get("confirm")
+            if not (force is True or confirm is True):
+                self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
+                return
             # ask orchestrator via pkill + let interval-aware respawn handle, or direct start
             try:
                 # kill existing if running; apply defense-in-depth: regex validation + shlex.quote
@@ -738,7 +792,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 time.sleep(1)
                 # orchestrator will respawn on next health check if waiting; force start via orchestrator CLI
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
-                self._json(200, {"ok": True, "action": "restart", "bot": name})
+                self._json(200, {"ok": True, "action": "restart", "bot": name,
+                                 "undo": "Bot will auto-respawn on next orchestrator health check"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -753,12 +808,27 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not any(c.name == name for c in BOT_REGISTRY):
                 self._json(404, {"error": "unknown bot"})
                 return
+            # Per-bot destructive action: require force/confirm or dry-run
+            is_dry_run = body.get("dry_run") is True
+            if is_dry_run:
+                self._json(200, {"ok": True, "dry_run": True, "preview": {
+                    "action": "pause", "bot": name,
+                    "description": f"Would pause bot '{name}' by creating state/{name}.paused and killing process",
+                    "undo": f"POST /bots/{name}/resume to unpause",
+                }})
+                return
+            force = body.get("force")
+            confirm = body.get("confirm")
+            if not (force is True or confirm is True):
+                self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
+                return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
                 # Apply defense-in-depth: regex validation + shlex.quote
                 quoted_name = shlex.quote(name)
                 subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
-                self._json(200, {"ok": True, "paused": name})
+                self._json(200, {"ok": True, "paused": name,
+                                 "undo": f"POST /bots/{name}/resume to unpause"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -846,7 +916,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)
-                self._json(200, {"ok": True, "stopped": bots or "all"})
+                self._json(200, {"ok": True, "stopped": bots or "all",
+                                 "undo": "Run 'start' or 'restart <bot>' to resume bots; orchestrator will auto-respawn if still running"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -854,7 +925,8 @@ class ControlHandler(BaseHTTPRequestHandler):
         if path in ("/control/drain", "/api/control/drain"):
             try:
                 (STATE_DIR / ".drain").write_text(str(time.time()))
-                self._json(200, {"ok": True, "drain": True})
+                self._json(200, {"ok": True, "drain": True,
+                                 "undo": "POST /control/clear-drain to resume operations"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -872,7 +944,8 @@ class ControlHandler(BaseHTTPRequestHandler):
         if path in ("/control/update", "/api/control/update"):
             try:
                 proc = subprocess.run([str(SAFE_UPDATE), "--force"], cwd=str(BOTS_DIR), capture_output=True, text=True, timeout=120)
-                self._json(200, {"ok": proc.returncode == 0, "returncode": proc.returncode, "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]})
+                self._json(200, {"ok": proc.returncode == 0, "returncode": proc.returncode, "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:],
+                                 "undo": "Git revert can restore previous version if needed"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return

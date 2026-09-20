@@ -309,3 +309,56 @@ class TestReadEvents:
         append_event(tmp_path, "readiness", {"x": 1})
         events = read_events(tmp_path, limit=-5)
         assert len(events) == 1
+
+
+def test_append_and_read_events_io(tmp_path: Path) -> None:
+    """Integration test verifying append_event writes valid JSONL and read_events enforces limits.
+
+    Acceptance criteria for CB-8852001-D8EC:
+    - verifies written line is valid JSON
+    - verifies read_events returns at most 100 events
+    - verifies older events are dropped when limit exceeded
+    """
+    # Step 1: Append MAX_EVENTS + 10 events to exceed the cap
+    total_events = MAX_EVENTS + 10
+    for i in range(total_events):
+        append_event(tmp_path, "execution", {"index": i, "payload": f"event-{i}"})
+
+    # Step 2: Read back with default limit (MAX_EVENTS=100)
+    events = read_events(tmp_path)
+
+    # Verify read_events returns at most MAX_EVENTS (100)
+    assert len(events) == MAX_EVENTS, (
+        f"Expected {MAX_EVENTS} events, got {len(events)}"
+    )
+
+    # Verify older events are dropped: first returned event should be index=10
+    # (events 0-9 were dropped, events 10-109 remain, last 100 are 10-109)
+    assert events[0]["data"]["index"] == 10, (
+        f"Expected first event index=10 (oldest kept), got {events[0]['data']['index']}"
+    )
+    assert events[-1]["data"]["index"] == total_events - 1, (
+        f"Expected last event index={total_events - 1}, got {events[-1]['data']['index']}"
+    )
+
+    # Step 3: Verify every returned event has valid structure (valid JSON was written)
+    for event in events:
+        assert isinstance(event, dict)
+        assert event["version"] == 1
+        assert isinstance(event["type"], str)
+        assert isinstance(event["ts"], float)
+        assert isinstance(event["data"], dict)
+
+    # Step 4: Verify the raw file contains valid JSON lines by reading and parsing each line
+    events_file = tmp_path / "events.jsonl"
+    lines = events_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == total_events, (
+        f"Expected {total_events} lines in file, got {len(lines)}"
+    )
+    for line in lines:
+        record = json.loads(line)  # Will raise if invalid JSON
+        assert isinstance(record, dict)
+        assert "version" in record
+        assert "type" in record
+        assert "ts" in record
+        assert "data" in record

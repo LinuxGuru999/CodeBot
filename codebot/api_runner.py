@@ -194,6 +194,87 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _log_context_assembly(
+    bot_name: str,
+    event_type: str,
+    input_size: int = 0,
+    output_size: int = 0,
+    truncation_ratio: float = 0.0,
+    final_token_count: int = 0,
+    tool_name: str = "",
+    extra: dict | None = None,
+) -> None:
+    """Log structured JSON event for context assembly data flow tracing.
+
+    Writes to bot-specific log file for debugging context overflow issues.
+    All fields are sanitized to prevent PII leakage.
+
+    Args:
+        bot_name: Bot identifier for log routing.
+        event_type: Type of assembly event (e.g., 'tool_result_appended', 'truncation', 'summarization').
+        input_size: Size of input data in bytes before processing.
+        output_size: Size of output data in bytes after processing.
+        truncation_ratio: Ratio of output/input (1.0 = no truncation, <1.0 = truncated).
+        final_token_count: Token count after assembly step.
+        tool_name: Name of tool that produced the result (if applicable).
+        extra: Additional metadata (must not contain PII).
+    """
+    try:
+        log_dir = BOTS_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{bot_name}.context_trace.jsonl"
+
+        trace_event = {
+            "timestamp": time.time(),
+            "timestamp_human": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "event_type": event_type,
+            "input_size_bytes": max(0, int(input_size)),
+            "output_size_bytes": max(0, int(output_size)),
+            "truncation_ratio": round(max(0.0, min(1.0, float(truncation_ratio))), 4),
+            "final_token_count": max(0, int(final_token_count)),
+            "tool_name": tool_name[:64] if tool_name else "",
+        }
+        if extra and isinstance(extra, dict):
+            # Sanitize extra dict: only allow specific safe keys, redact sensitive values
+            SAFE_KEYS = frozenset({
+                "success", "tool_call_id", "response_length",
+                "truncated", "stream_truncated", "tool_results_truncated",
+                "iteration", "step", "phase",
+            })
+            SENSITIVE_PATTERNS = [
+                "sk-", "key", "secret", "password", "token", "api_key",
+                "apikey", "auth", "credential", "private",
+            ]
+            safe_extra = {}
+            for k, v in extra.items():
+                k_str = str(k).lower()
+                # Skip keys that look sensitive
+                if any(pat in k_str for pat in SENSITIVE_PATTERNS):
+                    continue
+                # Only allow whitelisted keys or simple numeric/bool values
+                if k not in SAFE_KEYS and not isinstance(v, (int, float, bool)):
+                    continue
+                if isinstance(v, bool):
+                    safe_extra[str(k)[:64]] = v
+                elif isinstance(v, (int, float)):
+                    safe_extra[str(k)[:64]] = v
+                elif isinstance(v, str):
+                    # Truncate and verify no sensitive patterns in value
+                    truncated_val = v[:200]
+                    val_lower = truncated_val.lower()
+                    if any(pat in val_lower for pat in SENSITIVE_PATTERNS):
+                        continue  # Skip values containing sensitive patterns
+                    safe_extra[str(k)[:64]] = truncated_val
+            if safe_extra:
+                trace_event["metadata"] = safe_extra
+
+        line = json.dumps(trace_event, ensure_ascii=True) + "\n"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass  # Fail-open: tracing must never break execution
+
+
 def _write_bot_status(
     bot_name: str,
     state_dir: Path,
@@ -231,6 +312,221 @@ def _write_bot_status(
     except Exception:
         pass  # Fail-open: status reporting is best-effort
 
+
+# ---------------------------------------------------------------------------
+# Context-assembly tracing — structured JSON logs for debugging context overflow
+# ---------------------------------------------------------------------------
+# CB-3548779-D85C: Logs how tool outputs are processed and integrated into
+# context, including truncation events, summarization triggers, and
+# context-assembly metrics.  Traces are bot-specific JSONL for easy debugging.
+
+
+class ContextAssemblyTracer:
+    """Structured JSON tracing for context-assembly in api_runner.
+
+    Emits one JSONL event per significant data-flow step.  All events
+    include size metrics and timestamps.  PII is stripped before writing.
+
+    Event types emitted:
+      - tool_output         : tool result received & serialized for context
+      - tool_output_trunc   : tool result > max_tool_bytes before append
+      - context_compaction  : compact_messages / needs_compaction triggered
+      - api_call_prepared   : messages assembled and sent to the model
+      - stream_truncation   : _persist_stream truncated the stream for disk
+      - trace_summary       : final summary at flush()
+
+    Output file: {logs_dir}/{bot_name}.context_trace.jsonl
+    """
+
+    # Regex patterns for PII detection
+    _RE_EMAIL = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    _RE_IP4 = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+    _RE_PHONE = re.compile(r'\+?\d[\d\s().-]{7,}\d')
+    _RE_API_KEY = re.compile(
+        r'(?:sk|dgr|ak|pk|token|api[_-]?key|secret|password|bearer)[_-]?[A-Za-z0-9]{4,}',
+        re.IGNORECASE,
+    )
+
+    def __init__(self, bot_name: str, logs_dir: Path) -> None:
+        self._bot_name = bot_name
+        self._log_path = logs_dir / f"{bot_name}.context_trace.jsonl"
+        self._events: list[dict] = []
+        self._total_input_chars = 0
+        self._total_output_bytes = 0
+        self._truncation_events = 0
+        self._compaction_events = 0
+
+    # -- PII sanitization ---------------------------------------------------
+
+    @classmethod
+    def sanitize_for_log(cls, text: str) -> str:
+        """Strip PII patterns from *text* before writing to trace logs.
+
+        Replaces matches with ``[REDACTED]`` so the log is useful for
+        debugging sizes and flow without leaking secrets or PII.
+        """
+        if not text:
+            return text
+        text = cls._RE_EMAIL.sub('[REDACTED_EMAIL]', text)
+        text = cls._RE_IP4.sub('[REDACTED_IP]', text)
+        text = cls._RE_PHONE.sub('[REDACTED_PHONE]', text)
+        text = cls._RE_API_KEY.sub('[REDACTED_KEY]', text)
+        return text
+
+    # -- internal emit ------------------------------------------------------
+
+    def _emit(self, event_type: str, **kwargs: Any) -> dict:
+        """Emit a structured JSON trace event."""
+        event: dict = {
+            'ts': time.time(),
+            'bot': self._bot_name,
+            'event': event_type,
+        }
+        event.update(kwargs)
+        self._events.append(event)
+
+        # Append to JSONL file (fail-open)
+        try:
+            line = json.dumps(event, ensure_ascii=False, default=str) + '\n'
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._log_path, 'a', encoding='utf-8') as fh:
+                fh.write(self.sanitize_for_log(line))
+        except Exception:
+            pass
+        return event
+
+    # -- public trace points ------------------------------------------------
+
+    def log_tool_output(
+        self,
+        tool_name: str,
+        tool_result: dict,
+        iteration: int,
+        max_tool_bytes: int = 2000,
+    ) -> dict:
+        """Log a tool output being processed for context assembly.
+
+        Called after ``_execute_tool`` returns and before the result is
+        appended to the message list.
+        """
+        output_raw = json.dumps(tool_result, ensure_ascii=False, default=str)
+        output_bytes = len(output_raw.encode('utf-8'))
+        self._total_output_bytes += output_bytes
+
+        truncated = output_bytes > max_tool_bytes
+        truncation_ratio = 0.0
+        if truncated:
+            truncation_ratio = 1.0 - (max_tool_bytes / output_bytes)
+            self._truncation_events += 1
+
+        # Token estimate for the (possibly truncated) content that goes into context
+        content_str = output_raw[:max_tool_bytes] if truncated else output_raw
+        token_estimate = max(1, len(content_str) // 4)
+
+        return self._emit(
+            'tool_output',
+            tool=tool_name,
+            iteration=iteration,
+            output_bytes=output_bytes,
+            truncated=truncated,
+            truncation_ratio=round(truncation_ratio, 4),
+            token_estimate=token_estimate,
+        )
+
+    def log_tool_output_truncation(
+        self,
+        tool_name: str,
+        original_bytes: int,
+        max_bytes: int,
+        iteration: int,
+    ) -> dict:
+        """Log when a tool output is truncated before adding to messages."""
+        self._truncation_events += 1
+        return self._emit(
+            'tool_output_trunc',
+            tool=tool_name,
+            iteration=iteration,
+            original_bytes=original_bytes,
+            max_bytes=max_bytes,
+            truncation_ratio=round(1.0 - (max_bytes / max(original_bytes, 1)), 4),
+        )
+
+    def log_context_compaction(
+        self,
+        messages_before: list,
+        messages_after: list,
+        tokens_before: int,
+        tokens_after: int,
+        method: str,
+    ) -> dict:
+        """Log a context-compaction event (summarize or truncate)."""
+        self._compaction_events += 1
+        return self._emit(
+            'context_compaction',
+            method=method,
+            messages_before=len(messages_before),
+            messages_after=len(messages_after),
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            reduction_ratio=round(1.0 - (tokens_after / max(tokens_before, 1)), 4),
+        )
+
+    def log_api_call_prepared(
+        self,
+        message_count: int,
+        total_chars: int,
+        iteration: int,
+    ) -> dict:
+        """Log data prepared for an API call."""
+        token_estimate = max(1, total_chars // 4)
+        self._total_input_chars += total_chars
+        return self._emit(
+            'api_call_prepared',
+            iteration=iteration,
+            message_count=message_count,
+            total_chars=total_chars,
+            token_estimate=token_estimate,
+        )
+
+    def log_stream_truncation(
+        self,
+        original_size: int,
+        final_size: int,
+        messages_kept: int,
+    ) -> dict:
+        """Log stream-persistence truncation in ``_persist_stream``."""
+        self._truncation_events += 1
+        return self._emit(
+            'stream_truncation',
+            original_bytes=original_size,
+            final_bytes=final_size,
+            truncation_ratio=round(
+                1.0 - (final_size / max(original_size, 1)), 4
+            ),
+            messages_kept=messages_kept,
+        )
+
+    # -- summary ------------------------------------------------------------
+
+    def summary(self) -> dict:
+        """Return aggregate metrics for this trace session."""
+        return {
+            'bot': self._bot_name,
+            'total_events': len(self._events),
+            'total_input_chars': self._total_input_chars,
+            'total_output_bytes': self._total_output_bytes,
+            'truncation_events': self._truncation_events,
+            'compaction_events': self._compaction_events,
+        }
+
+    def flush(self) -> None:
+        """Write a summary event and close out the trace."""
+        self._emit('trace_summary', **self.summary())
+
+
+# ---------------------------------------------------------------------------
+# GitHub helpers
+# ---------------------------------------------------------------------------
 
 def _github_issue_target(bot_name: str, mission_prompt: str) -> tuple[str, int] | None:
     """Return the GitHub target embedded in an implementer mission, if present."""
@@ -940,11 +1236,15 @@ def _write_checkpoint(ckpt_file, bot_name, reason):
 def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reason, usage=None):
     try:
         bounded = []
+        truncated_count = 0
+        original_total_size = sum(len(json.dumps(m)) for m in messages)
         for m in messages:
             entry = dict(m)
             if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
-                if len(entry["content"]) > 2000:
+                orig_len = len(entry["content"])
+                if orig_len > 2000:
                     entry["content"] = entry["content"][:2000] + "...[truncated]"
+                    truncated_count += 1
             bounded.append(entry)
         payload = {
             "bot": bot_name,
@@ -956,10 +1256,26 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
             "messages": bounded,
         }
         body = json.dumps(payload, ensure_ascii=False)
+        stream_truncated = False
         if len(body) > 500_000:
             payload["messages"] = [bounded[0]] + bounded[-20:] if len(bounded) > 21 else bounded
             payload["truncated"] = True
+            stream_truncated = True
             body = json.dumps(payload, ensure_ascii=False)
+        # Log truncation events
+        final_size = len(body)
+        truncation_ratio = final_size / max(1, original_total_size) if original_total_size > 0 else 1.0
+        if truncated_count > 0 or stream_truncated:
+            _log_context_assembly(
+                bot_name=bot_name,
+                event_type="stream_persist_truncation",
+                input_size=original_total_size,
+                output_size=final_size,
+                truncation_ratio=min(1.0, truncation_ratio),
+                final_token_count=final_size // 4,
+                tool_name="",
+                extra={"tool_results_truncated": truncated_count, "stream_truncated": stream_truncated},
+            )
         p = BOTS_DIR / "logs" / f"{bot_name}.stream.json"
         tmp = Path(str(p) + ".tmp")
         tmp.write_text(body, encoding="utf-8")
@@ -1299,10 +1615,43 @@ def _execute_provider_session(
                     r = {"success": False, "output": "", "error": str(e)}
                 if not isinstance(r, dict):
                     r = {"success": False, "output": "", "error": "invalid tool result"}
-                msgs.append({"role": "tool", "tool_call_id": tc_id, "content": json.dumps(r)})
+                # Context assembly tracing: log tool result integration
+                tool_result_json = json.dumps(r)
+                input_size = len(json.dumps(args)) if args else 0
+                output_size = len(tool_result_json)
+                truncation_ratio = 1.0 if input_size == 0 else min(1.0, output_size / max(1, input_size))
+                # Estimate token count (rough: 4 chars per token)
+                total_msg_size = sum(len(json.dumps(m)) for m in msgs) + output_size
+                estimated_tokens = total_msg_size // 4
+                _log_context_assembly(
+                    bot_name=bot_name,
+                    event_type="tool_result_appended",
+                    input_size=input_size,
+                    output_size=output_size,
+                    truncation_ratio=truncation_ratio,
+                    final_token_count=estimated_tokens,
+                    tool_name=name,
+                    extra={"tool_call_id": tc_id[:32] if tc_id else "", "success": r.get("success", False)},
+                )
+                msgs.append({"role": "tool", "tool_call_id": tc_id, "content": tool_result_json})
             tool_iterations += 1
             continue
         if has_content:
+            # Context assembly tracing: log assistant response integration
+            content_str = str(content) if content else ""
+            content_size = len(content_str)
+            total_msg_size = sum(len(json.dumps(m)) for m in msgs) + content_size
+            estimated_tokens = total_msg_size // 4
+            _log_context_assembly(
+                bot_name=bot_name,
+                event_type="assistant_response_received",
+                input_size=0,
+                output_size=content_size,
+                truncation_ratio=1.0,
+                final_token_count=estimated_tokens,
+                tool_name="",
+                extra={"response_length": content_size},
+            )
             msgs.append(msg)
             try:
                 _write_heartbeat(hb_path)
@@ -1732,7 +2081,7 @@ def run_batch(manifests: list[dict], batch_ctx: dict) -> dict:
     }
 
 
-def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_iterations=50):
+def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_iterations=50, tracer=None):
     state_dir = Path(state_dir)
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -1755,6 +2104,13 @@ def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_ite
         if iterations >= max_iterations:
             exit_reason = "iteration_limit"
             break
+        # Trace: log API-call preparation (message count & total size)
+        if tracer is not None:
+            try:
+                _total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+                tracer.log_api_call_prepared(len(messages), _total_chars, iterations)
+            except Exception:
+                pass
         try:
             resp_json = responder(messages)
         except Exception as exc:
@@ -1801,6 +2157,12 @@ def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_ite
                     result = _execute_tool(name, args)
                 except Exception as exc:
                     result = {"success": False, "output": "", "error": str(exc)}
+                # Trace: log tool output processing
+                if tracer is not None:
+                    try:
+                        tracer.log_tool_output(name, result, iterations)
+                    except Exception:
+                        pass
                 if not result.get("success", True):
                     _log(f"{bot_name}: tool '{name}' failed: {result.get('error', 'unknown')}")
                 touched = args.get("path") or args.get("filePath") or args.get("file")
@@ -1927,6 +2289,14 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     except ImportError:
         _compaction_available = False
     _compaction_budget = max_tokens_per_run if max_tokens_per_run > 0 else 120_000
+
+    # CB-3548779-D85C: Context-assembly tracer for structured data-flow logging
+    _logs_dir = Path(heartbeat_file).parent.parent / "logs"
+    try:
+        _logs_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    _tracer = ContextAssemblyTracer(bot_name, _logs_dir)
 
     # CAP-09/CAP-11: Ticket-scoped scratchpad for cross-agent handoff
     _scratch_ticket_id = bot_name
@@ -2086,7 +2456,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     exit_reason = "unexpected_error"
                     sys.exit(1)
 
-        result = run_agent_loop(bot_name, full_message, _model_responder, state_dir, max_iterations=MAX_TOOL_ITERATIONS)
+        result = run_agent_loop(bot_name, full_message, _model_responder, state_dir, max_iterations=MAX_TOOL_ITERATIONS, tracer=_tracer)
         tool_iterations = result.iterations
         tickets_created = result.tickets_created
         files_touched = result.files_touched

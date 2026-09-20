@@ -370,7 +370,7 @@ from codebot.ticket_dispatcher import (
     dispatch_planning_agents, advance_reviewed_tickets,
     gatekeeper_verify_tickets, route_ready_tickets,
     process_rework_tickets, recover_deferred_tickets,
-    _sweep_orphan_claims, clear_ticket_store_cache, get_ticket_store,
+    _sweep_orphan_claims, clear_ticket_store_cache,
     TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER,
 )
 from codebot.dispatch_service import (
@@ -450,6 +450,10 @@ def _build_worker_pool() -> frozenset:
         return frozenset({"worker-1", "worker-2"})
 
 WORKER_POOL = _build_worker_pool()
+
+# Adapter instance for queue depth and ticket class queries.
+# Set during bootstrap via _bootstrap_adapter(); None until then.
+_adapter: Any = None
 
 
 __all__ = [
@@ -581,21 +585,21 @@ def print_status(bots: dict[str, BotState]) -> None:
 # Helper functions for check_all_bots — each < 100 LOC
 # ---------------------------------------------------------------------------
 
-def _init_tick_cache() -> Any:
-    """Initialize TicketStore cache for this tick and log overhead."""
+def _init_tick() -> None:
+    """Initialize per-tick cache state.
+
+    Clears the TicketStore cache so each dispatcher call within this tick
+    shares a single fresh read.  Queue depth logging is delegated to the
+    injected project adapter — the orchestrator never directly touches
+    TicketStore instances.
+    """
     clear_ticket_store_cache()
-    _tick_t0 = time.time()
-    _ts = get_ticket_store()
-    _tick_elapsed_ms = (time.time() - _tick_t0) * 1000
-    if _ts is not None:
-        _tick_ticket_count = len(getattr(_ts, '_tickets', {}))
-        logger.debug(
-            "TicketStore cache initialized: %d tickets in %.1fms (single read per tick)",
-            _tick_ticket_count, _tick_elapsed_ms,
-        )
-    else:
-        logger.debug("TicketStore cache: tickets.json unavailable")
-    return _ts
+    if _adapter is not None:
+        try:
+            qd = _adapter.queue_depth()
+            logger.debug("Adapter queue depth: %d", qd)
+        except Exception:
+            logger.debug("Adapter queue depth unavailable")
 
 
 def _retry_disabled_and_stuck(bots: dict[str, BotState], hb_cache: dict) -> None:
@@ -609,9 +613,14 @@ def _retry_disabled_and_stuck(bots: dict[str, BotState], hb_cache: dict) -> None
                 logger.info(f"Retrying '{name}' stuck in starting")
 
 
-def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any) -> None:
-    """Handle bots that have exited, running alignment and transitioning tickets."""
+def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any) -> set[str]:
+    """Handle bots that have exited, running alignment and transitioning tickets.
+
+    Returns a set of ticket IDs that were returned to READY due to error exits,
+    so dispatchers can skip re-routing them in the same tick.
+    """
     current_paths = get_paths()
+    error_recovered_tids: set[str] = set()
     for name, bot in list(bots.items()):
         if not bot.config.enabled or bot.process is None or bot.process.poll() is None:
             continue
@@ -657,9 +666,11 @@ def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any) -> None:
                     save_scratchpad(current_paths.state_dir, scratch)
                 except Exception as e:
                     logger.warning(f"Failed to finish scratchpad for ticket {assigned_tid}: {e}")
+                error_recovered_tids.add(assigned_tid)
             transition_ticket_on_error(bot, bots, exit_code, store=ts)
             bot.next_run_at = now + 5
             update_bot_state(bot, "waiting")
+    return error_recovered_tids
 
 
 def _handle_stuck_bots(bots: dict[str, BotState], now: float, hb_cache: dict) -> None:

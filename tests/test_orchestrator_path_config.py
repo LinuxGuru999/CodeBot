@@ -151,3 +151,107 @@ class TestBackwardCompatibility:
         val = orch.LOGS_DIR
         assert isinstance(val, Path)
         assert val == orch._paths.logs_dir
+
+    def test_module_getattr_provides_all_path_names(self):
+        """All legacy path names resolve via __getattr__."""
+        path_names = [
+            "BOTS_DIR", "STATE_DIR", "LOGS_DIR", "BACKUP_DIR",
+            "ALIGNMENT_EVENTS_DIR", "DRAIN_FILE", "UPDATE_LOCK", "RESTART_FILE",
+        ]
+        for name in path_names:
+            val = getattr(orch, name)
+            assert val is not None, f"orch.{name} resolved to None"
+
+
+class TestDefaultImportTimeBehavior:
+    """AC: Default import-time behavior preserved when set_project_adapter never called."""
+
+    def test_default_paths_derived_from_project_root(self):
+        """Without calling set_project_adapter, paths default to project-root."""
+        from codebot.state_manager import _project_root
+        assert orch._paths.bots_dir == _project_root
+        assert orch._paths.state_dir == _project_root / ".codebot" / "state"
+        assert orch._paths.logs_dir == _project_root / ".codebot" / "logs"
+        assert orch._paths.backup_dir == _project_root / ".codebot" / "state" / "backup"
+
+    def test_default_drain_file_in_state_dir(self):
+        """Default drain_file lives under state_dir."""
+        assert orch._paths.drain_file == orch._paths.state_dir / ".drain"
+
+    def test_default_update_lock_in_state_dir(self):
+        """Default update_lock lives under state_dir."""
+        assert orch._paths.update_lock == orch._paths.state_dir / ".update_lock"
+
+    def test_default_restart_file_in_state_dir(self):
+        """Default restart_file lives under state_dir."""
+        assert orch._paths.restart_file == orch._paths.state_dir / ".restart"
+
+
+class TestGlobalsNotMutatedByAdapter:
+    """set_project_adapter must not mutate module-level globals."""
+
+    def test_set_adapter_preserves_module_path_attrs(self, tmp_path):
+        """Calling set_project_adapter does not create new module-level attributes."""
+        attrs_before = set(dir(orch))
+
+        mock_paths = MagicMock()
+        mock_paths.repository_root = tmp_path / "repo"
+        mock_paths.state_dir = tmp_path / "state"
+        mock_paths.logs_dir = tmp_path / "logs"
+        mock_paths.state_dir.mkdir(parents=True, exist_ok=True)
+        mock_paths.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        mock_adapter = MagicMock()
+        mock_adapter.paths.return_value = mock_paths
+
+        # Save originals to restore after test
+        orig_paths = orch._paths
+        try:
+            orch.set_project_adapter(mock_adapter)
+            # No new public attributes should have been added to the module
+            attrs_after = set(dir(orch))
+            new_attrs = attrs_after - attrs_before
+            assert not new_attrs, (
+                f"set_project_adapter created new module attrs: {new_attrs}"
+            )
+        finally:
+            import codebot.orchestrator as _mod
+            _mod._paths = orig_paths
+            orch._adapter_instance = None
+
+    def test_set_adapter_does_not_touch_process_manager_globals(self, tmp_path):
+        """set_project_adapter must not change any global in process_manager."""
+        import codebot.process_manager as pm
+        pm_attrs_before = {
+            name: getattr(pm, name)
+            for name in dir(pm)
+            if name.endswith("_DIR") or name.endswith("_FILE") or name == "BOTS_DIR"
+        }
+
+        mock_paths = MagicMock()
+        mock_paths.repository_root = tmp_path / "repo"
+        mock_paths.state_dir = tmp_path / "state"
+        mock_paths.logs_dir = tmp_path / "logs"
+        mock_paths.state_dir.mkdir(parents=True, exist_ok=True)
+        mock_paths.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        mock_adapter = MagicMock()
+        mock_adapter.paths.return_value = mock_paths
+
+        orig_paths = orch._paths
+        try:
+            orch.set_project_adapter(mock_adapter)
+            pm_attrs_after = {
+                name: getattr(pm, name)
+                for name in dir(pm)
+                if name.endswith("_DIR") or name.endswith("_FILE") or name == "BOTS_DIR"
+            }
+            # Nothing in process_manager should have changed
+            for name in pm_attrs_before:
+                assert pm_attrs_before[name] == pm_attrs_after[name], (
+                    f"set_project_adapter mutated process_manager.{name}"
+                )
+        finally:
+            import codebot.orchestrator as _mod
+            _mod._paths = orig_paths
+            orch._adapter_instance = None

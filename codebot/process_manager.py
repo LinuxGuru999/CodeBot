@@ -33,13 +33,128 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+import codebot.health_monitor as _hm
 from codebot.health_monitor import (
-    heartbeat_path, write_heartbeat, read_heartbeat, batch_read_heartbeats,
-    log_path, log_mtime, is_log_stalled, is_stuck, effective_heartbeat_timeout,
+    heartbeat_path as _hm_heartbeat_path,
+    write_heartbeat as _hm_write_heartbeat,
+    read_heartbeat as _hm_read_heartbeat,
+    batch_read_heartbeats as _hm_batch_read_heartbeats,
+    log_path as _hm_log_path,
+    log_mtime, is_log_stalled, is_stuck, effective_heartbeat_timeout,
 )
 from codebot.model_manager import model_profile, ModelProfile, MODEL_PROFILES
+from codebot.state_manager import get_paths
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_state_dir() -> Path:
+    """Resolve state dir, honoring module-level STATE_DIR test patches."""
+    try:
+        mod = sys.modules.get(__name__)
+        sd = getattr(mod, "STATE_DIR", None) if mod is not None else None
+        current = get_paths().state_dir
+        # patch("codebot.process_manager.STATE_DIR", tmp) replaces the global
+        # with tmp_path; honor it so existing tests keep working, otherwise
+        # use the adapter-provided dynamic path.
+        if sd is not None and Path(sd) != Path(current):
+            return Path(sd)
+    except Exception:
+        pass
+    return get_paths().state_dir
+
+
+def _resolve_logs_dir() -> Path:
+    """Resolve logs dir, honoring module-level LOGS_DIR test patches."""
+    try:
+        mod = sys.modules.get(__name__)
+        ld = getattr(mod, "LOGS_DIR", None) if mod is not None else None
+        current = get_paths().logs_dir
+        if ld is not None and Path(ld) != Path(current):
+            return Path(ld)
+    except Exception:
+        pass
+    return get_paths().logs_dir
+
+
+def _resolve_bots_dir() -> Path:
+    """Resolve bots dir, honoring module-level BOTS_DIR test patches."""
+    try:
+        mod = sys.modules.get(__name__)
+        bd = getattr(mod, "BOTS_DIR", None) if mod is not None else None
+        current = get_paths().bots_dir
+        if bd is not None and Path(bd) != Path(current):
+            return Path(bd)
+    except Exception:
+        pass
+    return get_paths().bots_dir
+
+
+def read_heartbeat(bot_name: str) -> float:
+    """Read heartbeat, honoring health_monitor.STATE_DIR test patches."""
+    try:
+        hm_state = getattr(_hm, "STATE_DIR", None)
+        hm_default = _hm._project_root / ".codebot" / "state"
+        if hm_state is not None and Path(hm_state) != Path(hm_default):
+            hb = Path(hm_state) / f"{bot_name}.heartbeat"
+            if not hb.exists():
+                return 0.0
+            txt = hb.read_text().strip()
+            try:
+                return float(txt)
+            except (ValueError, OSError):
+                return 0.0
+    except Exception:
+        pass
+    return _hm_read_heartbeat(bot_name)
+
+
+def batch_read_heartbeats(bot_names: list) -> dict:
+    """Batch-read heartbeats, honoring health_monitor.STATE_DIR test patches."""
+    try:
+        hm_state = getattr(_hm, "STATE_DIR", None)
+        hm_default = _hm._project_root / ".codebot" / "state"
+        if hm_state is not None and Path(hm_state) != Path(hm_default):
+            results: dict = {}
+            for n in bot_names:
+                hb = Path(hm_state) / f"{n}.heartbeat"
+                if not hb.exists():
+                    results[n] = 0.0
+                    continue
+                try:
+                    results[n] = float(hb.read_text().strip())
+                except (ValueError, OSError):
+                    results[n] = 0.0
+            return results
+    except Exception:
+        pass
+    return _hm_batch_read_heartbeats(list(bot_names))
+
+
+def write_heartbeat(bot_name: str) -> None:
+    """Write heartbeat via dynamic path resolution."""
+    _resolve_state_dir().mkdir(parents=True, exist_ok=True)
+    (_resolve_state_dir() / f"{bot_name}.heartbeat").write_text(str(time.time()))
+
+
+# ---------------------------------------------------------------------------
+# Dynamic path helpers — resolve via get_paths() instead of globals
+# ---------------------------------------------------------------------------
+
+def heartbeat_path(bot_name: str) -> Path:
+    """Path to bot's heartbeat file, resolved dynamically.
+
+    Uses heartbeat_path()/log_path() helpers backed by get_paths() so bot
+    spawning writes to adapter-provided locations. Module-level STATE_DIR
+    patches from existing tests take precedence for backward compatibility.
+    """
+    return _resolve_state_dir() / f"{bot_name}.heartbeat"
+
+
+def log_path(bot_name: str) -> Path:
+    """Path to bot's log file, resolved dynamically."""
+    return _resolve_logs_dir() / f"{bot_name}.log"
+
 
 # ---------------------------------------------------------------------------
 # Cross-platform file locking
@@ -145,7 +260,15 @@ _SPAWN_STAGGER_SECONDS: float = 5.0
 
 
 def _count_api_runner_processes() -> int:
-    """Count running module-invoked api runner processes using pgrep."""
+    """Count running module-invoked api runner processes using pgrep.
+
+    FAIL-CLOSED: On any error (timeout, missing pgrep, OS error) we return
+    a large number instead of 0.  Returning 0 would make the spawn gate
+    think no processes are running, allowing unlimited spawning which can
+    exhaust system resources.  Returning a large number blocks new spawns
+    until the next successful check — the safe direction.
+    """
+    _FAIL_CLOSED = 9999
     try:
         result = subprocess.run(
             ["pgrep", "-f", "codebot.api_runner"],
@@ -153,9 +276,11 @@ def _count_api_runner_processes() -> int:
         )
         if result.returncode == 0 and result.stdout.strip():
             return len([line for line in result.stdout.strip().split("\n") if line.strip()])
+        # pgrep returns 1 when no processes match — that's a real 0, not an error
         return 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning("_count_api_runner_processes failed (%s) — returning fail-closed count", type(exc).__name__)
+        return _FAIL_CLOSED
 
 
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False,
@@ -174,7 +299,7 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
         for b in (bots.values() if bots else [])
     )
     if not has_assignment and bot_name:
-        claims_dir = STATE_DIR / "claims"
+        claims_dir = _resolve_state_dir() / "claims"
         if claims_dir.exists():
             for cf in claims_dir.glob(f"*.{bot_name}.json"):
                 try:
@@ -213,8 +338,9 @@ def _write_json_atomic(path: Path, data: dict | list | str) -> None:
 
 @contextmanager
 def _state_write_lock(bot_name: str) -> Iterator[None]:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = STATE_DIR / f"{bot_name}.state.lock"
+    sd = _resolve_state_dir()
+    sd.mkdir(parents=True, exist_ok=True)
+    lock_path = sd / f"{bot_name}.state.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
         _flock(lock.fileno(), LOCK_EX)
         try:
@@ -250,7 +376,7 @@ def _prompt_read_lock(path: Path) -> Iterator[None]:
 
 
 def update_bot_state(bot: BotState, status: str) -> None:
-    state_file = STATE_DIR / f"{bot.config.name}.state.json"
+    state_file = _resolve_state_dir() / f"{bot.config.name}.state.json"
     try:
         with _state_write_lock(bot.config.name):
             try:
@@ -278,7 +404,7 @@ def update_bot_state(bot: BotState, status: str) -> None:
 
 
 def checkpoint_path(bot_name: str) -> Path:
-    return STATE_DIR / f"{bot_name}.checkpoint.json"
+    return _resolve_state_dir() / f"{bot_name}.checkpoint.json"
 
 
 # ---------------------------------------------------------------------------
@@ -360,20 +486,21 @@ def _check_inputs_changed(bot: BotState, last_run_mtime: float) -> bool:
     if last_run_mtime <= 0:
         return True
     # Check manifest inputs
+    bots_dir = _resolve_bots_dir()
     try:
-        manifest_path = BOTS_DIR / "manifests" / f"{bot.config.name.replace('-', '_')}.json"
+        manifest_path = bots_dir / "manifests" / f"{bot.config.name.replace('-', '_')}.json"
         if manifest_path.exists():
             mdata = json.loads(manifest_path.read_text(encoding="utf-8"))
             for inp in mdata.get("input", []):
                 ipath = Path(inp.get("path", ""))
                 if not ipath.is_absolute():
-                    ipath = BOTS_DIR / ipath
+                    ipath = bots_dir / ipath
                 if ipath.exists() and ipath.stat().st_mtime > last_run_mtime:
                     return True
     except Exception:
         return True
     # Check prompt file
-    prompt_path = BOTS_DIR / bot.config.prompt_file
+    prompt_path = bots_dir / bot.config.prompt_file
     if prompt_path.exists() and prompt_path.stat().st_mtime > last_run_mtime:
         return True
     return False
@@ -403,7 +530,7 @@ def _prepare_prompt_with_context(bot: BotState) -> str:
     through read() to prevent race conditions with concurrent writes that
     could cause stale/inconsistent reads or mismatched mtime/content.
     """
-    prompt_path = BOTS_DIR / bot.config.prompt_file
+    prompt_path = _resolve_bots_dir() / bot.config.prompt_file
 
     # Acquire lock, then stat() and read() atomically
     try:
@@ -437,7 +564,7 @@ def _prepare_prompt_with_context(bot: BotState) -> str:
     try:
         from codebot.scratchpad import load_scratchpad, create_handoff_note
         if assigned_tid:
-            scratch_state = load_scratchpad(STATE_DIR, assigned_tid)
+            scratch_state = load_scratchpad(_resolve_state_dir(), assigned_tid)
             if scratch_state.agent_history or scratch_state.completed_steps:
                 handoff = create_handoff_note(scratch_state)
                 prompt_text = f"{prompt_text}\n\n{handoff}\nResume from where the previous agent left off. Do NOT redo completed work."
@@ -467,7 +594,10 @@ def _build_checkpoint_block(bot_name: str, ckpt: dict | None, ckpt_file: Path) -
 def _build_mission_message(bot: BotState, prompt_text: str, heartbeat_file: Path,
                            ckpt_file: Path, ckpt_block: str) -> str:
     """Build the full mission message for the bot subprocess."""
-    prompt_path = BOTS_DIR / bot.config.prompt_file
+    state_dir = _resolve_state_dir()
+    logs_dir = _resolve_logs_dir()
+    bots_dir = _resolve_bots_dir()
+    prompt_path = bots_dir / bot.config.prompt_file
     try:
         from codebot.prompt_gateway import build_message as _gateway_build_message
         _GATEWAY = True
@@ -478,15 +608,15 @@ def _build_mission_message(bot: BotState, prompt_text: str, heartbeat_file: Path
         return _gateway_build_message(
             bot.config.name, bot.config.model, prompt_text,
             str(heartbeat_file), str(ckpt_file), ckpt_block,
-            str(STATE_DIR), str(LOGS_DIR), prompt_path.name)
+            str(state_dir), str(logs_dir), prompt_path.name)
 
     return (
         f"Sisyphus \u2014 delegated task: '{bot.config.name}' workflow (model {bot.config.model}).\n"
         f"Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
         f"- At startup and after every atomic task, write Unix timestamp to {heartbeat_file} using the `write` tool.\n"
         f"- After every atomic task, write <4KB checkpoint to {ckpt_file} using the `write` tool (atomic tmp->replace).\n"
-        f"- Before each atomic task, run `bash` with `test -f {STATE_DIR}/.drain || test -f {STATE_DIR}/.update_lock && echo DRAIN` to check for drain. If output contains DRAIN, exit 0. Do NOT use the `read` tool for drain checks.\n"
-        f"- State dir: {STATE_DIR}  Log dir: {LOGS_DIR}  Prompt: {prompt_path.name}\n"
+        f"- Before each atomic task, run `bash` with `test -f {state_dir}/.drain || test -f {state_dir}/.update_lock && echo DRAIN` to check for drain. If output contains DRAIN, exit 0. Do NOT use the `read` tool for drain checks.\n"
+        f"- State dir: {state_dir}  Log dir: {logs_dir}  Prompt: {prompt_path.name}\n"
         f"{ckpt_block}\n"
         f"--- Task Specification ({prompt_path.name}) ---\n"
         f"{prompt_text}"
@@ -515,7 +645,7 @@ def _update_bot_after_launch(bot: BotState, state_data: dict) -> None:
     global _last_spawn_time
     _last_spawn_time = time.time()
     try:
-        (STATE_DIR / ".last_spawn").write_text(str(time.time()))
+        (_resolve_state_dir() / ".last_spawn").write_text(str(time.time()))
     except OSError:
         pass
 
@@ -523,17 +653,18 @@ def _update_bot_after_launch(bot: BotState, state_data: dict) -> None:
 def _launch_bot_subprocess(bot: BotState, message: str, heartbeat_file: Path,
                            ckpt_file: Path, state_data: dict) -> bool:
     """Launch bot subprocess with mission message. Returns True on success."""
-    mission_file = LOGS_DIR / f"{bot.config.name}.mission"
+    paths = get_paths()
+    mission_file = paths.logs_dir / f"{bot.config.name}.mission"
     mission_file.write_text(message, encoding="utf-8")
     child_env = os.environ.copy()
-    child_env["PYTHONPATH"] = str(BOTS_DIR)
-    log_file = LOGS_DIR / f"{bot.config.name}.log"
+    child_env["PYTHONPATH"] = str(paths.bots_dir)
+    log_file = paths.logs_dir / f"{bot.config.name}.log"
     try:
         log_fh = open(log_file, "a")
         args = _build_popen_args(bot, heartbeat_file, ckpt_file, mission_file)
         process = subprocess.Popen(
             args, stdout=log_fh, stderr=subprocess.STDOUT,
-            cwd=str(BOTS_DIR), env=child_env, start_new_session=True,
+            cwd=str(paths.bots_dir), env=child_env, start_new_session=True,
         )
         bot.process = process
         _update_bot_after_launch(bot, state_data)
@@ -556,12 +687,13 @@ def _launch_bot_subprocess(bot: BotState, message: str, heartbeat_file: Path,
 
 def _init_and_prepare_bot(bot: BotState, resume_checkpoint: bool) -> tuple[Path, Path, str]:
     """Initialize state, prepare prompt, and build mission message. Returns (heartbeat_file, ckpt_file, message)."""
-    prompt_file = BOTS_DIR / bot.config.prompt_file
+    paths = get_paths()
+    prompt_file = paths.bots_dir / bot.config.prompt_file
     if not prompt_file.exists():
         raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
 
     state_data = {"bot": bot.config.name, "started": time.time(), "session": 0, "status": "starting"}
-    _write_json_atomic(STATE_DIR / f"{bot.config.name}.state.json", state_data)
+    _write_json_atomic(paths.state_dir / f"{bot.config.name}.state.json", state_data)
     write_heartbeat(bot.config.name)
     bot.last_heartbeat = time.time()
 
@@ -585,7 +717,8 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
               bots: dict[str, BotState] | None = None,
               is_overture: bool = False, is_demand: bool = False) -> bool:
     """Spawn a bot as a subprocess. Returns True on success."""
-    if (STATE_DIR / f"{bot.config.name}.paused").exists():
+    paths = get_paths()
+    if (paths.state_dir / f"{bot.config.name}.paused").exists():
         update_bot_state(bot, "paused")
         return False
 
@@ -648,7 +781,7 @@ def stop_bot(bot: BotState, reason: str = "manual") -> bool:
 def restart_bot(bot: BotState, reason: str = "stuck",
                 bots: dict[str, BotState] | None = None) -> bool:
     """Stop and restart a bot. Respects rate limits."""
-    per_bot_drain = STATE_DIR / f".drain_{bot.config.name}"
+    per_bot_drain = get_paths().state_dir / f".drain_{bot.config.name}"
     if per_bot_drain.exists():
         try:
             per_bot_drain.unlink()
@@ -685,7 +818,7 @@ def restart_bot(bot: BotState, reason: str = "stuck",
 
 
 def _is_queued(bot: BotState) -> bool:
-    state_file = STATE_DIR / f"{bot.config.name}.state.json"
+    state_file = get_paths().state_dir / f"{bot.config.name}.state.json"
     try:
         if state_file.exists():
             return json.loads(state_file.read_text()).get("status") == "queued"
@@ -754,7 +887,7 @@ def _load_ticket_context(ticket_id: str) -> str:
 
 def _manifest_restart_record(name: str, now: float) -> None:
     with _state_write_lock(name):
-        state_file = STATE_DIR / f"{name}.state.json"
+        state_file = get_paths().state_dir / f"{name}.state.json"
         try:
             if state_file.exists():
                 state = json.loads(state_file.read_text())
