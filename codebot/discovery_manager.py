@@ -260,10 +260,10 @@ class DiscoveryManager:
         old_cooldowns = self._cooldowns
         self._cooldowns = []
         self._cooldown_index.clear()
-        for i, c in enumerate(old_cooldowns):
+        for c in old_cooldowns:
             if c.completed_at > cutoff:
                 self._cooldowns.append(c)
-                self._cooldown_index[(c.role, c.scope)] = i
+                self._cooldown_index[(c.role, c.scope)] = len(self._cooldowns) - 1
 
     def is_on_cooldown(
         self,

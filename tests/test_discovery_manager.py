@@ -242,6 +242,77 @@ class TestDiscoveryManagerCooldown:
         mgr = dm.DiscoveryManager(state_dir=tmp_path)
         assert mgr.is_on_cooldown("bug_hunter", "full_project", "abc", 3600) is False
 
+    def test_cooldown_index_updated_immediately_on_record_completion(self, tmp_path):
+        """Verify that record_completion updates the O(1) index immediately.
+        
+        This ensures new cooldowns are visible to is_on_cooldown without delay.
+        """
+        mgr = dm.DiscoveryManager(state_dir=tmp_path)
+        
+        # Initially, no entry in index
+        assert ("bug_hunter", "full_project") not in mgr._cooldown_index
+        
+        # Record a completion
+        mgr.record_completion(
+            role="bug_hunter", scope="full_project",
+            commit_sha="abc", findings=2, duplicates=0,
+            rejected=0, cost_tokens=100, now=1000.0,
+        )
+        
+        # Index should now contain the entry pointing to the last element
+        assert ("bug_hunter", "full_project") in mgr._cooldown_index
+        idx = mgr._cooldown_index[("bug_hunter", "full_project")]
+        assert idx == len(mgr._cooldowns) - 1  # Points to last element
+        assert mgr._cooldowns[idx].commit_sha == "abc"
+        
+        # is_on_cooldown should immediately see the new cooldown
+        assert mgr.is_on_cooldown("bug_hunter", "full_project", "abc", 3600, now=1500.0) is True
+        
+        # Record another completion for same (role, scope) - index should update
+        mgr.record_completion(
+            role="bug_hunter", scope="full_project",
+            commit_sha="def", findings=3, duplicates=0,
+            rejected=0, cost_tokens=150, now=2000.0,
+        )
+        
+        # Index should point to the new last element
+        idx = mgr._cooldown_index[("bug_hunter", "full_project")]
+        assert idx == len(mgr._cooldowns) - 1
+        assert mgr._cooldowns[idx].commit_sha == "def"
+        
+        # Should now see the new commit SHA
+        assert mgr.is_on_cooldown("bug_hunter", "full_project", "def", 3600, now=2500.0) is True
+        assert mgr.is_on_cooldown("bug_hunter", "full_project", "abc", 3600, now=2500.0) is False  # Stale commit
+
+    def test_cooldown_index_rebuilt_after_pruning(self, tmp_path):
+        """Verify that the index is correctly rebuilt after old cooldowns are pruned."""
+        import time as time_module
+        mgr = dm.DiscoveryManager(state_dir=tmp_path)
+        now = time_module.time()
+        old_time = now - 31 * 86400  # 31 days ago
+        
+        # Record an old cooldown
+        mgr.record_completion(
+            role="bug_hunter", scope="proj",
+            commit_sha="old", findings=1, duplicates=0,
+            rejected=0, cost_tokens=50, now=old_time,
+        )
+        old_idx = mgr._cooldown_index[("bug_hunter", "proj")]
+        assert old_idx == 0
+        
+        # Record a recent cooldown (triggers pruning)
+        mgr.record_completion(
+            role="security_auditor", scope="proj",
+            commit_sha="new", findings=1, duplicates=0,
+            rejected=0, cost_tokens=50, now=now,
+        )
+        
+        # Old cooldown should be pruned, index rebuilt
+        assert len(mgr._cooldowns) == 1
+        assert mgr._cooldowns[0].role == "security_auditor"
+        assert ("bug_hunter", "proj") not in mgr._cooldown_index  # Pruned from index
+        assert mgr._cooldown_index[("security_auditor", "proj")] == 0
+
 
 # ---------------------------------------------------------------------------
 # DiscoveryManager — yield stat decay over time
