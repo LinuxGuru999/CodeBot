@@ -157,11 +157,15 @@ class DiscoveryManager:
 
     Tracks cooldowns, yield statistics, and computes diverse allocations.
     State is persisted to disk as JSON for cross-restart continuity.
+    
+    Uses an O(1) index (_cooldown_index) mapping (role, scope) -> latest index
+    in _cooldowns for efficient cooldown lookups.
     """
 
     def __init__(self, state_dir: Path | None = None) -> None:
         self._state_dir = state_dir
         self._cooldowns: list[DiscoveryCooldown] = []
+        self._cooldown_index: dict[tuple[str, str], int] = {}  # (role, scope) -> index in _cooldowns
         self._yields: dict[str, RoleYieldStats] = {}
         self._load()
 
@@ -177,7 +181,11 @@ class DiscoveryManager:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             for entry in data.get("cooldowns", []):
-                self._cooldowns.append(DiscoveryCooldown(**entry))
+                idx = len(self._cooldowns)
+                cd = DiscoveryCooldown(**entry)
+                self._cooldowns.append(cd)
+                # Rebuild index: latest entry for each (role, scope)
+                self._cooldown_index[(cd.role, cd.scope)] = idx
             for role, stats in data.get("yields", {}).items():
                 ys = RoleYieldStats(role=role)
                 ys.total_scans = stats.get("total_scans", 0)
