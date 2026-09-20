@@ -507,7 +507,14 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         # /health is public — Fly's http_service.checks GETs /health without Bearer.
         # Keep it cheap: no auth, no bot scan, just ok + timestamp.
+        # But enforce rate limiting to prevent abuse (Constitution §2).
         if path in ("/health", "/api/health"):
+            client_ip = self.client_address[0] if self.client_address else "unknown"
+            allowed, reason = _rate_limiter.is_allowed(client_ip)
+            if not allowed:
+                logger.warning("Rate limit exceeded for /health from %s: %s", client_ip, reason)
+                self._json(429, {"error": "too many requests", "reason": reason})
+                return
             self._json(200, {"status": "ok", "time": time.time()})
             return
 
