@@ -2103,7 +2103,7 @@ def _count_running_by_category(bots: dict[str, BotState] | None) -> tuple[int, i
 
 
 _last_spawn_time: float = 0.0
-_SPAWN_STAGGER_SECONDS: float = 20.0
+_SPAWN_STAGGER_SECONDS: float = 5.0
 
 
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False, runner_mode: str = "api", bot_model: str = "", bot_name: str = "", is_overture: bool = False) -> tuple[bool, str]:
@@ -3233,7 +3233,7 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
         if not available:
             break
 
-        idx, bot_name, bot = available.pop(0)
+        bot_name, bot = available.pop(0)
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
             claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "decompose"}
@@ -3332,7 +3332,7 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
         if not available:
             break
 
-        idx, bot_name, bot = available.pop(0)
+        bot_name, bot = available.pop(0)
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
             claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "planning"}
