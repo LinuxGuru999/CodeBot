@@ -1405,9 +1405,10 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         ts = TicketStore(store_path)
     except Exception:
         return 0
-    ready = ts.list_by_state(TicketState.PLANNING)
+    ready = ts.list_by_state(TicketState.IMPLEMENTING)
     if not ready:
         return 0
+    plans_dir = STATE_DIR / "plans"
     claims_dir = STATE_DIR / "claims"
     claims_dir.mkdir(parents=True, exist_ok=True)
     active_claims: set[str] = set()
@@ -1555,6 +1556,10 @@ def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
 
         tid = getattr(ticket, 'id', '')
         if not tid or tid in active_claims or tid in busy_ticket_ids:
+            continue
+
+        plan_file = plans_dir / f"{tid}.plan.json"
+        if not plan_file.exists():
             continue
 
         tc = getattr(ticket, 'ticket_class', None)
