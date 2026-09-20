@@ -93,14 +93,14 @@ class StatsCollector:
             }
         
         entry = self._cache[key]
-        entry["total_calls"] += 1
+        entry["total_calls"] = entry.get("total_calls", 0) + 1
         if success:
-            entry["successful_calls"] += 1
+            entry["successful_calls"] = entry.get("successful_calls", 0) + 1
         else:
-            entry["failed_calls"] += 1
-        entry["total_cost"] += cost
-        entry["total_tokens_in"] += tokens_in
-        entry["total_tokens_out"] += tokens_out
+            entry["failed_calls"] = entry.get("failed_calls", 0) + 1
+        entry["total_cost"] = entry.get("total_cost", 0.0) + cost
+        entry["total_tokens_in"] = entry.get("total_tokens_in", 0) + tokens_in
+        entry["total_tokens_out"] = entry.get("total_tokens_out", 0) + tokens_out
         entry["last_updated"] = time.time()
         
         self._save()
