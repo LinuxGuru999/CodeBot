@@ -784,14 +784,28 @@ def _peek_ticket_classes() -> list[str]:
 
 def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> list[BotConfig]:
     demand = _count_actionable_queue_items()
-    planning_roles = frozenset({"decomposer", "implementation_planner"})
-    non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES and c.name not in planning_roles]
+    def _is_planning_role(name: str) -> bool:
+        base = name.split("-")[0] if "-" in name else name
+        return base in ("decomposer", "implementation_planner")
+
+    non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES and not _is_planning_role(c.name)]
     base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
-    base_planning = [c for c in registry if c.name in planning_roles]
+    base_planning = [c for c in registry if _is_planning_role(c.name)]
     if not base_impl and not base_planning:
         return registry
-    target = min(demand, max_concurrent - len(non_impl))
-    target = max(target, len(base_impl))
+
+    depths = _get_pipeline_state()
+    decomp_demand = min(depths.get("DECOMPOSE", 0), 3)
+    plan_demand = min(depths.get("PLANNING", 0), 3)
+    planning_slots = 0
+    if decomp_demand > 0:
+        planning_slots += min(decomp_demand, 3)
+    if plan_demand > 0:
+        planning_slots += min(plan_demand, 3)
+
+    impl_budget = max_concurrent - len(non_impl) - planning_slots
+    target = min(demand, max(impl_budget, 0))
+    target = max(target, min(len(base_impl), max(impl_budget, 0)))
     role_map = {c.name: c for c in base_impl}
     ticket_classes = _peek_ticket_classes()
     out = list(non_impl)
@@ -817,18 +831,15 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         ))
         TIER_PRIORITY[name] = tier
 
-    depths = _get_pipeline_state()
-    decomp_demand = min(depths.get("DECOMPOSE", 0), 3)
-    plan_demand = min(depths.get("PLANNING", 0), 3)
-    slots_used = len(out)
-
     for role_cfg in base_planning:
         extra = decomp_demand if role_cfg.name == "decomposer" else plan_demand
-        extra = min(extra, max_concurrent - slots_used)
-        for i in range(max(0, extra - 1)):
+        if extra <= 0:
+            continue
+        extra = min(extra, max_concurrent - len(out))
+        for i in range(max(0, extra)):
             count = name_counts.get(role_cfg.name, 0)
             name_counts[role_cfg.name] = count + 1
-            name = f"{role_cfg.name}-{count+2}"
+            name = role_cfg.name if count == 0 else f"{role_cfg.name}-{count+1}"
             out.append(BotConfig(
                 name, role_cfg.prompt_file, role_cfg.interval_seconds, role_cfg.heartbeat_timeout,
                 role_cfg.model, fallback_model=role_cfg.fallback_model,
@@ -836,7 +847,6 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
                 max_restarts=role_cfg.max_restarts,
             ))
             TIER_PRIORITY[name] = 11
-            slots_used += 1
 
     return out
 
