@@ -356,8 +356,21 @@ class TicketStore:
         # Start background save worker thread
         self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
         self._save_worker.start()
-        self._save_queue: list[dict] = []  # Queue of pending save payloads
+        self._save_queue: list[dict] = []
         self._save_condition = threading.Condition(self._save_lock)
+
+    def _save_worker_loop(self) -> None:
+        while not self._shutdown:
+            with self._save_condition:
+                while not self._save_queue and not self._shutdown:
+                    self._save_condition.wait(timeout=5.0)
+                if self._shutdown:
+                    break
+                self._save_queue.clear()
+            try:
+                self._save()
+            except Exception:
+                pass
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -480,11 +493,9 @@ class TicketStore:
                 return  # Success
             except OSError as e:
                 if attempt < max_retries - 1:
-                    # Exponential backoff before retry
                     delay = base_delay * (2 ** attempt)
                     time.sleep(delay)
                 else:
-                    # Final attempt failed - raise error rather than corrupt data
                     raise RuntimeError(
                         f"TicketStore._save failed after {max_retries} lock retries: {e}. "
                         f"Data may be at risk if concurrent writes occurred."

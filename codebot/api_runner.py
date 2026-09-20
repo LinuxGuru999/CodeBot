@@ -446,15 +446,12 @@ def _resolve_api_key_for_provider(provider_name: str = "dialagram") -> str | Non
 
 
 API_URL = _DEFAULT_API_URL
-API_TIMEOUT = 30
+API_TIMEOUT = 90
 PLANNING_ROLE_TIMEOUT = 90
 _PLANNING_BASES = frozenset({"decomposer", "implementation_planner"})
 
 
 def _timeout_for_bot(bot_name: str) -> int:
-    base = bot_name.split("-")[0] if "-" in bot_name else bot_name
-    if base in _PLANNING_BASES:
-        return PLANNING_ROLE_TIMEOUT
     return API_TIMEOUT
 
 
