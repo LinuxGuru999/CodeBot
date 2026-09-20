@@ -3339,13 +3339,13 @@ def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
             continue
 
         try:
-            ts.transition(tid, TicketState.REVIEWING)
-            logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> REVIEWING (worker exited)")
+            ts.transition(tid, TicketState.REWORK)
+            logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> REWORK (worker exited without completing)")
             recovered += 1
         except ValueError:
             try:
                 ts.transition(tid, TicketState.READY)
-                logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> READY (transition to REVIEWING failed)")
+                logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> READY (transition to REWORK failed)")
                 recovered += 1
             except ValueError as e:
                 logger.warning(f"Cannot recover ticket {tid}: {e}")
@@ -4946,8 +4946,13 @@ def _process_verifying_tickets() -> None:
                         ts_fresh = TicketStore(store_path)
                         t = ts_fresh.get(ticket.id)
                         if t and t.state == TicketState.VERIFYING:
-                            ts_fresh.transition(ticket.id, TicketState.COMPLETE)
-                            logger.info(f"Gatekeeper: {ticket.id} -> COMPLETE (no files to verify)")
+                            rework_count = getattr(t, 'rework_count', 0)
+                            if rework_count < 3:
+                                ts_fresh.transition(ticket.id, TicketState.REWORK)
+                                logger.info(f"Gatekeeper: {ticket.id} -> REWORK (no files changed by implementer)")
+                            else:
+                                ts_fresh.transition(ticket.id, TicketState.REJECTED)
+                                logger.warning(f"Gatekeeper: {ticket.id} -> REJECTED (no files after {rework_count} reworks)")
                     except ValueError:
                         pass
                     continue
