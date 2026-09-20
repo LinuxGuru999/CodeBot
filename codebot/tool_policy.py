@@ -33,6 +33,7 @@ BLOCKED_COMMANDS = frozenset({
     "chmod", "chown", "chgrp",
 })
 DANGEROUS_GIT_ARGS = frozenset({"--force", "-f", "--hard"})
+FILE_OPERATING_COMMANDS = frozenset({"cat", "ls", "find", "cp", "mv", "rm", "head", "tail", "wc", "touch", "mkdir"})
 
 
 def resolve_workspace_path(path: str, workspace_root: Path) -> Path | None:
@@ -58,6 +59,48 @@ def _has_path_escape(argv: list[str], workspace_root: Path) -> bool:
             if resolved is None:
                 return True
     return False
+
+
+def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
+    """Validate that all path arguments for file-operating bare commands stay within workspace.
+
+    Returns True if the command is safe, False if any path escapes the workspace boundary.
+    This prevents sandbox escape via absolute paths like 'cat /etc/passwd' or 'ls /'.
+    """
+    if not argv:
+        return True
+    base_cmd = Path(argv[0]).name  # Handle cases like /bin/cat
+    if base_cmd not in FILE_OPERATING_COMMANDS:
+        return True
+
+    skip_next = False
+    for i, token in enumerate(argv[1:], start=1):
+        if skip_next:
+            skip_next = False
+            continue
+        # Skip flags and their values that aren't paths
+        if token.startswith("-"):
+            # Some flags take a value argument (e.g., find -name '*.py', ls --color=auto)
+            # We only skip the next arg if it's a known flag-with-value pattern
+            if token in ("-name", "-type", "-exec", "-maxdepth", "-mindepth", "--color"):
+                skip_next = True
+            continue
+        # Skip shell operators that might appear in argv after splitting
+        if token in ("|", ">>", ">", "<", "&&", "||", ";"):
+            break  # Stop checking this segment; next segment is checked separately
+        # Check for path traversal
+        if ".." in token:
+            return False
+        # For absolute paths or relative paths, resolve and verify they stay in workspace
+        if token.startswith("/") or "/" in token or base_cmd in ("cat", "ls", "find", "cp", "mv", "rm", "head", "tail", "wc", "touch", "mkdir"):
+            # Only validate tokens that look like paths (not regex patterns, etc.)
+            # For find, skip pattern arguments that follow -name/-type
+            if base_cmd == "find" and i > 1 and argv[i-1] in ("-name", "-iname", "-path", "-regex"):
+                continue
+            resolved = resolve_workspace_path(token, workspace_root)
+            if resolved is None:
+                return False
+    return True
 
 
 def validate_command(command: str, workspace_root: Path | None = None) -> list[str] | None:
@@ -120,6 +163,10 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
                 resolved = resolve_workspace_path(token, workspace_root)
                 if resolved is None:
                     return None
+        # Validate bare command paths per pipeline segment
+        for seg in segments:
+            if seg and not _validate_bare_command_paths(seg, workspace_root):
+                return None
     else:
         for token in argv[1:]:
             if not token.startswith("-") and token not in ("|", ">>", ">", "<", "&&", "||", ";") and ".." in token:

@@ -17,14 +17,198 @@ from typing import Any
 from codebot.process_manager import (
     BotConfig, BotState,
     start_bot, stop_bot, restart_bot,
-    is_stuck, is_log_stalled, effective_heartbeat_timeout, read_heartbeat,
-    heartbeat_path, checkpoint_path, read_checkpoint, update_bot_state,
-    model_profile, ModelProfile, MODEL_PROFILES,
-    _write_json_atomic, log_mtime,
-    BOTS_DIR, STATE_DIR, LOGS_DIR, GATEWAY_MAX_CONCURRENT,
-    _get_code_mtimes,
-    batch_read_heartbeats,
+    is_stuck as _pm_is_stuck,
+    is_log_stalled as _pm_is_log_stalled,
+    effective_heartbeat_timeout as _pm_effective_heartbeat_timeout,
+    read_heartbeat as _pm_read_heartbeat,
+    heartbeat_path as _pm_heartbeat_path,
+    checkpoint_path as _pm_checkpoint_path,
+    read_checkpoint as _pm_read_checkpoint,
+    update_bot_state as _pm_update_bot_state,
+    model_profile as _pm_model_profile,
+    ModelProfile, MODEL_PROFILES,
+    _write_json_atomic as _pm_write_json_atomic,
+    log_mtime as _pm_log_mtime,
+    GATEWAY_MAX_CONCURRENT,
+    _get_code_mtimes as _pm_get_code_mtimes,
+    batch_read_heartbeats as _pm_batch_read_heartbeats,
 )
+
+# ---------------------------------------------------------------------------
+# Patchable wrappers — tests patch these at the orchestrator module level.
+# Each wrapper resolves STATE_DIR / DRAIN_FILE dynamically so that
+# ``patch.object(orch, "STATE_DIR", tmp)`` works correctly.
+# ---------------------------------------------------------------------------
+
+def heartbeat_path(bot_name: str):
+    """Patchable wrapper: uses orchestrator-level STATE_DIR when patched."""
+    try:
+        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+        if sd is not None:
+            from pathlib import Path as _P
+            return _P(sd) / f"{bot_name}.heartbeat"
+    except Exception:
+        pass
+    return _pm_heartbeat_path(bot_name)
+
+
+def read_heartbeat(bot_name: str) -> float:
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    try:
+        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+        if sd is not None:
+            import datetime as _dt
+            from pathlib import Path as _P
+            hb = _P(sd) / f"{bot_name}.heartbeat"
+            if not hb.exists():
+                return 0.0
+            txt = hb.read_text().strip()
+            try:
+                return float(txt)
+            except (ValueError, OSError):
+                pass
+            try:
+                token = txt.split()[0].replace("Z", "+00:00")
+                d = _dt.datetime.fromisoformat(token)
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=_dt.timezone.utc)
+                ts = d.timestamp()
+                now = time.time()
+                if ts > now + 60 or ts < now - 86400:
+                    return 0.0
+                return ts
+            except Exception:
+                return 0.0
+    except Exception:
+        pass
+    return _pm_read_heartbeat(bot_name)
+
+
+def checkpoint_path(bot_name: str):
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    try:
+        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+        if sd is not None:
+            from pathlib import Path as _P
+            return _P(sd) / f"{bot_name}.checkpoint.json"
+    except Exception:
+        pass
+    return _pm_checkpoint_path(bot_name)
+
+
+def read_checkpoint(bot_name: str):
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    try:
+        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+        if sd is not None:
+            from pathlib import Path as _P
+            import json as _json
+            p = _P(sd) / f"{bot_name}.checkpoint.json"
+            bak = p.with_suffix(".bak") if p.suffix == ".json" else _P(str(p) + ".bak")
+            if not p.exists():
+                if bak.exists():
+                    try:
+                        data = _json.loads(bak.read_text(encoding="utf-8"))
+                        if isinstance(data, dict):
+                            return data
+                    except Exception:
+                        pass
+                return None
+            try:
+                raw = p.read_text(encoding="utf-8")
+                data = _json.loads(raw)
+                if isinstance(data, dict):
+                    return data
+                return None
+            except Exception:
+                # Try backup
+                if bak.exists():
+                    try:
+                        data = _json.loads(bak.read_text(encoding="utf-8"))
+                        if isinstance(data, dict):
+                            return data
+                    except Exception:
+                        pass
+                return None
+    except Exception:
+        pass
+    return _pm_read_checkpoint(bot_name)
+
+
+def is_stuck(bot=None, heartbeat_cache=None):
+    """Patchable wrapper for stuck detection."""
+    return _pm_is_stuck(bot, heartbeat_cache=heartbeat_cache)
+
+
+def is_log_stalled(bot=None, model: str = ""):
+    """Patchable wrapper for log stall detection."""
+    return _pm_is_log_stalled(bot, model)
+
+
+def effective_heartbeat_timeout(bot=None, model: str = "", interval_seconds: int = 0, base_timeout: int = 0):
+    """Patchable wrapper for timeout calculation."""
+    return _pm_effective_heartbeat_timeout(bot, model, interval_seconds, base_timeout)
+
+
+def model_profile(model: str):
+    """Patchable wrapper for model profile lookup."""
+    return _pm_model_profile(model)
+
+
+def update_bot_state(bot, status: str):
+    """Patchable wrapper for state updates."""
+    return _pm_update_bot_state(bot, status)
+
+
+def log_mtime(bot_name: str) -> float:
+    """Patchable wrapper for log mtime."""
+    return _pm_log_mtime(bot_name)
+
+
+def _write_json_atomic(path, data):
+    """Patchable wrapper for atomic JSON writes."""
+    return _pm_write_json_atomic(path, data)
+
+
+def _get_code_mtimes():
+    """Patchable wrapper for code mtime detection."""
+    return _pm_get_code_mtimes()
+
+
+def batch_read_heartbeats(bot_names: list):
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    try:
+        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+        if sd is not None:
+            import datetime as _dt
+            from pathlib import Path as _P
+            results = {}
+            for name in bot_names:
+                hb = _P(sd) / f"{name}.heartbeat"
+                if not hb.exists():
+                    results[name] = 0.0
+                    continue
+                txt = hb.read_text().strip()
+                ts = 0.0
+                try:
+                    ts = float(txt)
+                except (ValueError, OSError):
+                    try:
+                        token = txt.split()[0].replace("Z", "+00:00")
+                        d = _dt.datetime.fromisoformat(token)
+                        if d.tzinfo is None:
+                            d = d.replace(tzinfo=_dt.timezone.utc)
+                        ts = d.timestamp()
+                        now = time.time()
+                        if ts > now + 60 or ts < now - 86400:
+                            ts = 0.0
+                    except Exception:
+                        ts = 0.0
+                results[name] = ts
+            return results
+    except Exception:
+        pass
+    return _pm_batch_read_heartbeats(bot_names)
 from codebot.alignment_coordinator import write_alignment_event
 from codebot.alignment_service import (
     run_alignment_pipeline, run_alignment_pipeline_for_all,
