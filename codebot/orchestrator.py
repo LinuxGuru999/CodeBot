@@ -1677,6 +1677,31 @@ def _advance_reviewed_tickets(bots: dict[str, BotState]) -> int:
 
         try:
             if has_rework_flag:
+                try:
+                    from codebot.scratchpad import load_scratchpad, save_scratchpad
+                    scratch = load_scratchpad(STATE_DIR, tid)
+                    for claim_file in review_claims:
+                        bn = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
+                        tl = LOGS_DIR / f"{bn}.tasklog"
+                        if tl.exists():
+                            try:
+                                content = tl.read_text(encoding="utf-8", errors="ignore")
+                                if content.strip():
+                                    scratch.agent_history.append({
+                                        "agent": bn,
+                                        "stage": "REVIEWING",
+                                        "started_at": time.time(),
+                                        "finished_at": time.time(),
+                                        "completed_steps": [],
+                                        "files_changed": [],
+                                        "summary": "reviewer verdict: REWORK",
+                                        "error": content.strip()[-2000:],
+                                    })
+                            except OSError:
+                                pass
+                    save_scratchpad(STATE_DIR, scratch)
+                except Exception as se:
+                    logger.warning(f"Failed to write reviewer feedback to scratchpad for {tid}: {se}")
                 ts.transition(tid, TicketState.REWORK)
                 logger.info(f"Review verdict: {tid} -> REWORK")
             else:
