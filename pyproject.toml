@@ -1,6 +1,8 @@
 [build-system]
-# Pinned to <70.0 to prevent breaking changes in build backend API while allowing patch updates
-requires = ["setuptools>=68.0,<70.0"]
+# Pinned to <69.0 per CB-9481010-8A0A for supply chain safety under stdlib-only policy.
+# Unpinned major versions risk breaking changes or malicious updates affecting build reproducibility.
+# Range chosen after testing compatibility with setuptools 68.x series.
+requires = ["setuptools>=68.0,<69.0"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
