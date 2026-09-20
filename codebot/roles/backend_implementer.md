@@ -13,10 +13,12 @@ STATE_DIR = {PROJECT_ROOT}/.codebot/state
 
 ## Startup (IN ORDER)
 1. Extract `ticket_id` from your ASSIGNED TICKET block (injected by orchestrator).
-2. `read` `{STATE_DIR}/{ticket_id}.scratchpad.json` — if it exists, RESUME from where previous agent left off. Do NOT redo completed work.
-3. `read` `{STATE_DIR}/plans/{ticket_id}.plan.json` — your implementation guide.
+2. `read` `{STATE_DIR}/{ticket_id}.scratchpad.json` — if it does NOT exist, that is NORMAL (first run). Continue. If it exists, RESUME from where previous agent left off.
+3. `read` `{STATE_DIR}/plans/{ticket_id}.plan.json` — your implementation guide. If it does NOT exist, extract requirements from the ASSIGNED TICKET block instead.
 4. `read` the affected source files listed in the plan/ticket using `read` and `grep`.
 5. Write claim: `{STATE_DIR}/claims/{ticket_id}.{your_name}.json`
+
+CRITICAL: Missing scratchpad or plan files are NORMAL. Do NOT retry, do NOT treat as errors. Move to the next step immediately.
 
 Do NOT read: .drain, .update_lock, alignment files, ROADMAP.md, tickets.json.
 
