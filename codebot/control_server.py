@@ -144,6 +144,23 @@ BOT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 # Telemetry token from environment; empty means reject all telemetry requests
 TELEMETRY_TOKEN = os.environ.get("CODEBOT_TELEMETRY_TOKEN", "").strip()
 
+# Remediation hints for 401 responses — tells operators how to recover
+CONTROL_UNAUTHORIZED_HINT = (
+    "Set the CONTROL_TOKEN environment variable on the server and pass it as "
+    "an 'Authorization: Bearer <token>' header. Example: "
+    "export CONTROL_TOKEN=your-secret-token && fly secrets set CONTROL_TOKEN=$CONTROL_TOKEN"
+)
+TELEMETRY_UNAUTHORIZED_HINT = (
+    "Set the CODEBOT_TELEMETRY_TOKEN (or CONTROL_TOKEN) environment variable "
+    "on the server and pass it as an 'Authorization: Bearer <token>' header. "
+    "Example: export CODEBOT_TELEMETRY_TOKEN=your-telemetry-token"
+)
+TELEMETRY_NOT_CONFIGURED_HINT = (
+    "Neither CODEBOT_TELEMETRY_TOKEN nor CONTROL_TOKEN is configured on the server. "
+    "Set at least one via environment variables, e.g. "
+    "export CODEBOT_TELEMETRY_TOKEN=your-telemetry-token"
+)
+
 # Import orchestrator model profiles without starting it
 try:
     import importlib.util
@@ -490,7 +507,8 @@ class ControlHandler(BaseHTTPRequestHandler):
         allowed, reason = _rate_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning("Rate limit exceeded for %s: %s", client_ip, reason)
-            self._json(429, {"error": "too many requests", "reason": reason})
+            retry_after = str(RATE_LIMIT_COOLDOWN_SECONDS)
+            self._json(429, {"error": "too many requests", "reason": reason}, extra_headers={"Retry-After": retry_after})
             return None
 
         if not CONTROL_TOKEN:
@@ -525,7 +543,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
 
-    def _json(self, code: int, obj: dict | list) -> None:
+    def _json(self, code: int, obj: dict | list, extra_headers: dict | None = None) -> None:
         """Send JSON response with security headers (Constitution §2)."""
         body = json.dumps(obj).encode()
         self.send_response(code)
@@ -535,6 +553,9 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -626,7 +647,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             allowed, reason = _rate_limiter.is_allowed(client_ip)
             if not allowed:
                 logger.warning("Rate limit exceeded for /health from %s: %s", client_ip, reason)
-                self._json(429, {"error": "too many requests", "reason": reason})
+                retry_after = str(RATE_LIMIT_COOLDOWN_SECONDS)
+                self._json(429, {"error": "too many requests", "reason": reason}, extra_headers={"Retry-After": retry_after})
                 return
             self._json(200, {"status": "ok", "time": time.time()})
             return
@@ -635,7 +657,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         if auth_result is None:
             return  # Rate limited, response already sent
         if not auth_result:
-            self._json(401, {"error": "unauthorized"})
+            self._json(401, {"error": "unauthorized", "hint": CONTROL_UNAUTHORIZED_HINT})
             return
 
         if path in ("/bots", "/api/bots"):
@@ -796,7 +818,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         if auth_result is None:
             return  # Rate limited, response already sent
         if not auth_result:
-            self._json(401, {"error": "unauthorized"})
+            self._json(401, {"error": "unauthorized", "hint": CONTROL_UNAUTHORIZED_HINT})
             return
         parsed = urlparse(self.path)
         path = parsed.path
@@ -1043,7 +1065,8 @@ class ControlHandler(BaseHTTPRequestHandler):
         allowed, reason = _rate_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning("Rate limit exceeded for telemetry from %s: %s", client_ip, reason)
-            self._json(429, {"error": "too many requests", "reason": reason})
+            retry_after = str(RATE_LIMIT_COOLDOWN_SECONDS)
+            self._json(429, {"error": "too many requests", "reason": reason}, extra_headers={"Retry-After": retry_after})
             return
 
         # Check telemetry-specific auth using constant-time comparison (Constitution §2)
@@ -1053,11 +1076,11 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not hmac.compare_digest(auth.strip(), expected):
                 _rate_limiter.record_failure(client_ip)
                 logger.warning("Telemetry authentication failed for %s", client_ip)
-                self._json(401, {"error": "unauthorized"})
+                self._json(401, {"error": "unauthorized", "hint": TELEMETRY_UNAUTHORIZED_HINT})
                 return
         elif not CONTROL_TOKEN:
             # If neither token is set, reject telemetry (safer default)
-            self._json(401, {"error": "telemetry token not configured"})
+            self._json(401, {"error": "telemetry token not configured", "hint": TELEMETRY_NOT_CONFIGURED_HINT})
             return
 
         # Import telemetry validation and ticket creation
