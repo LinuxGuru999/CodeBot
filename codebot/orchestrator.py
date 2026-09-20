@@ -417,6 +417,8 @@ def _check_config_changes(bots: dict[str, BotState]) -> None:
         entry = new_map.get(base)
         if not entry:
             continue
+        if name != base and name not in new_map:
+            continue
         if base in DECOMPOSER_ROLE_NAMES or base in PLANNING_ROLE_NAMES:
             new_interval = 30
         else:
@@ -736,6 +738,7 @@ WORKER_FALLBACK_CYCLE = (
 
 
 def _count_actionable_queue_items() -> int:
+    """Count actionable items via TicketStore only. No QUEUE.md fallback."""
     try:
         from codebot.ticket_engine import TicketStore, TicketState
         store_path = STATE_DIR / "tickets.json"
@@ -750,19 +753,7 @@ def _count_actionable_queue_items() -> int:
             )
     except Exception:
         pass
-    queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
-    try:
-        content = queue_path.read_text(encoding="utf-8")
-    except OSError:
-        return 0
-    count = 0
-    for line in content.splitlines():
-        if not line.startswith("|") or line.startswith("|---") or line.startswith("| ID "):
-            continue
-        parts = [p.strip().lower() for p in line.split("|")[1:-1]]
-        if any(s in parts for s in ("confirmed", "approved")):
-            count += 1
-    return count
+    return 0
 
 
 def _peek_ticket_classes() -> list[str]:
