@@ -125,15 +125,57 @@ class TestGetGitSshCommand:
         monkeypatch.setenv("SSH_PRIVATE_KEY_PATH", str(key))
         cmd = credentials.get_git_ssh_command()
         assert f"-i {key}" in cmd
-        assert "StrictHostKeyChecking=accept-new" in cmd
+        assert "StrictHostKeyChecking=yes" in cmd
         assert "IdentitiesOnly=yes" in cmd
+        assert "UserKnownHostsFile=" in cmd
 
     def test_without_key_path(self, monkeypatch, tmp_path):
         monkeypatch.delenv("SSH_PRIVATE_KEY_PATH", raising=False)
         with patch.object(Path, "home", return_value=tmp_path):
             cmd = credentials.get_git_ssh_command()
             assert "-i " not in cmd
-            assert "StrictHostKeyChecking=accept-new" in cmd
+            assert "StrictHostKeyChecking=yes" in cmd
+            assert "UserKnownHostsFile=" in cmd
+
+    def test_strict_host_key_rejects_accept_new(self, monkeypatch, tmp_path):
+        """CB-1061483-B8B3: accept-new must NOT be used — it allows MITM on first connect."""
+        monkeypatch.delenv("SSH_PRIVATE_KEY_PATH", raising=False)
+        with patch.object(Path, "home", return_value=tmp_path):
+            cmd = credentials.get_git_ssh_command()
+        assert "accept-new" not in cmd, (
+            "StrictHostKeyChecking=accept-new allows MITM on first connection. "
+            "Use 'yes' with a pre-populated known_hosts instead."
+        )
+        assert "StrictHostKeyChecking=no" not in cmd, (
+            "StrictHostKeyChecking=no disables host key verification entirely."
+        )
+
+    def test_uses_bundled_known_hosts_not_system(self, monkeypatch, tmp_path):
+        """CB-1061483-B8B3: SSH must use bundled known_hosts to prevent MITM."""
+        monkeypatch.delenv("SSH_PRIVATE_KEY_PATH", raising=False)
+        with patch.object(Path, "home", return_value=tmp_path):
+            cmd = credentials.get_git_ssh_command()
+        bundled_path = credentials._get_known_hosts_path()
+        assert bundled_path in cmd, (
+            f"SSH command must reference bundled known_hosts at {bundled_path}"
+        )
+
+    def test_bundled_known_hosts_contains_only_github(self):
+        """CB-1061483-B8B3: bundled known_hosts must only contain github.com entries."""
+        import re
+        hosts_path = credentials._get_known_hosts_path()
+        with open(hosts_path, "r") as f:
+            lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        hosts = set()
+        for line in lines:
+            # known_hosts format: <host> <keytype> <key> [comment]
+            parts = line.split()
+            if parts:
+                hosts.add(parts[0])
+        assert hosts == {"github.com"}, (
+            f"Expected only github.com in bundled known_hosts, got: {hosts}. "
+            "Only pre-pinned hosts should be trusted to prevent MITM."
+        )
 
 
 class TestGetDryRun:
@@ -199,13 +241,16 @@ class TestSetupGitEnvironment:
     def test_excludes_gh_token_when_dry_run(self, monkeypatch, tmp_path):
         monkeypatch.delenv("SSH_PRIVATE_KEY_PATH", raising=False)
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-        monkeypatch.setenv("GH_TOKEN", "secret-token")
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         monkeypatch.setenv("GITHUB_DRY_RUN", "1")
 
         with patch.object(Path, "home", return_value=tmp_path):
-            env = credentials.setup_git_environment()
-        # GH_TOKEN should not be in env if dry run is active
-        assert "GH_TOKEN" not in env or env["GH_TOKEN"] != "secret-token"
+            with patch.object(credentials, "_read_secret_file", return_value="secret-token"):
+                env = credentials.setup_git_environment()
+        # GH_TOKEN should not be added by setup_git_environment when dry run is active
+        # Note: dict(os.environ) won't contain GH_TOKEN since we deleted it above
+        assert env.get("GH_TOKEN") != "secret-token"
 
 
 class TestReadSecretFile:
