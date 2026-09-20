@@ -741,7 +741,11 @@ def _count_actionable_queue_items() -> int:
             store_path = Path(".codebot/state/tickets.json")
         if store_path.exists():
             ts = TicketStore(store_path)
-            return max(len(ts.list_ready()), 0)
+            return (
+                len(ts.list_ready())
+                + len(ts.list_by_state(TicketState.DECOMPOSE))
+                + len(ts.list_by_state(TicketState.REWORK))
+            )
     except Exception:
         pass
     queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
@@ -780,9 +784,11 @@ def _peek_ticket_classes() -> list[str]:
 
 def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> list[BotConfig]:
     demand = _count_actionable_queue_items()
-    non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES]
+    planning_roles = frozenset({"decomposer", "implementation_planner"})
+    non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES and c.name not in planning_roles]
     base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
-    if not base_impl:
+    base_planning = [c for c in registry if c.name in planning_roles]
+    if not base_impl and not base_planning:
         return registry
     target = min(demand, max_concurrent - len(non_impl))
     target = max(target, len(base_impl))
@@ -793,7 +799,9 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     for i in range(target):
         tc_val = ticket_classes[i] if i < len(ticket_classes) else "feature"
         base_name = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
-        role = role_map.get(base_name, base_impl[0])
+        role = role_map.get(base_name, base_impl[0] if base_impl else None)
+        if role is None:
+            continue
         count = name_counts.get(role.name, 0)
         name_counts[role.name] = count + 1
         name = role.name if count == 0 else f"{role.name}-{count+1}"
@@ -808,6 +816,28 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
             max_restarts=role.max_restarts,
         ))
         TIER_PRIORITY[name] = tier
+
+    depths = _get_pipeline_state()
+    decomp_demand = min(depths.get("DECOMPOSE", 0), 3)
+    plan_demand = min(depths.get("PLANNING", 0), 3)
+    slots_used = len(out)
+
+    for role_cfg in base_planning:
+        extra = decomp_demand if role_cfg.name == "decomposer" else plan_demand
+        extra = min(extra, max_concurrent - slots_used)
+        for i in range(max(0, extra - 1)):
+            count = name_counts.get(role_cfg.name, 0)
+            name_counts[role_cfg.name] = count + 1
+            name = f"{role_cfg.name}-{count+2}"
+            out.append(BotConfig(
+                name, role_cfg.prompt_file, role_cfg.interval_seconds, role_cfg.heartbeat_timeout,
+                role_cfg.model, fallback_model=role_cfg.fallback_model,
+                clean_exit_wait=False, runner_mode="api", tier=11,
+                max_restarts=role_cfg.max_restarts,
+            ))
+            TIER_PRIORITY[name] = 11
+            slots_used += 1
+
     return out
 
 
@@ -2170,10 +2200,16 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
     if prompt_path.exists() and prompt_path.stat().st_mtime > last_run_mtime:
         inputs_changed = True
     if not inputs_changed and last_run_mtime > 0 and bot.config.name not in WORKER_POOL and bot.config.name not in ALWAYS_RESPAWN:
-        logger.info(f"Bot '{bot.config.name}' skipped — no input changes since last run")
-        bot.next_run_at = time.time() + bot.config.interval_seconds
-        update_bot_state(bot, "noop")
-        return False
+        depths = _get_pipeline_state()
+        has_demand = (
+            bot.config.name in DECOMPOSER_ROLE_NAMES and depths.get("DECOMPOSE", 0) > 0
+            or bot.config.name in PLANNING_ROLE_NAMES and depths.get("PLANNING", 0) > 0
+        )
+        if not has_demand:
+            logger.info(f"Bot '{bot.config.name}' skipped — no input changes since last run")
+            bot.next_run_at = time.time() + bot.config.interval_seconds
+            update_bot_state(bot, "noop")
+            return False
     due = bot.next_run_at
     is_queued = _is_queued(bot)
     ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api", bot_model=bot.config.model, bot_name=bot.config.name, is_overture=is_overture)
