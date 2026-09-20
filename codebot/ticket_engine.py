@@ -122,6 +122,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     TicketState.READY: frozenset({
         TicketState.DECOMPOSE,
         TicketState.PLANNING,
+        TicketState.IMPLEMENTING,
         TicketState.DEFERRED,
     }),
     TicketState.DECOMPOSE: frozenset({
@@ -467,6 +468,16 @@ class TicketStore:
         except Exception:
             return False
 
+    def _queue_save(self) -> None:
+        """Queue an asynchronous save request.
+        
+        Adds a marker to the save queue and notifies the save worker thread.
+        The worker will batch multiple save requests and persist them together.
+        """
+        with self._save_condition:
+            self._save_queue.append(True)
+            self._save_condition.notify()
+
     def _save(self) -> None:
         """Atomically save ticket store with lock retry on contention.
         
@@ -522,7 +533,7 @@ class TicketStore:
             self._evidence_index[eh] = ticket.id
             # Maintain per-state index
             self._state_index.setdefault(ticket.state, set()).add(ticket.id)
-            self._save()
+            self._queue_save()
         return ticket
 
     def get(self, ticket_id: str) -> Ticket | None:
@@ -641,7 +652,7 @@ class TicketStore:
                 if not self._state_index[old_state]:
                     del self._state_index[old_state]
             self._state_index.setdefault(new_state, set()).add(ticket_id)
-            self._save()
+            self._queue_save()
             return updated
 
     def list_by_state(self, state: TicketState) -> list[Ticket]:

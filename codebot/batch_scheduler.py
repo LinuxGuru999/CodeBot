@@ -216,6 +216,10 @@ def pack_batches(
     elif budget_state == "ok":
         reason = None
         warning = None
+    elif budget_state is None:
+        # No budget constraint, proceed with packing
+        reason = None
+        warning = None
     else:
         for m in ready:
             nm = m.get("name", "?") if isinstance(m, dict) else str(m)
@@ -256,12 +260,16 @@ def pack_batches(
         grouped_by_model.setdefault(str(manifest.get("model", "")), []).append(manifest)
 
     batches: list[list[dict[str, Any]]] = []
+    limit_reached = False
     for model_manifests in grouped_by_model.values():
         for index in range(0, len(model_manifests), batch_size):
             candidate = model_manifests[index:index + batch_size]
-            if len(batches) < batch_limit:
+            if not limit_reached and len(batches) < batch_limit:
                 batches.append(candidate)
                 continue
+            # Once batch limit is reached, all remaining manifests are dropped.
+            # Track via flag to avoid re-checking len() each iteration.
+            limit_reached = True
             for manifest in candidate:
                 dropped.append({"name": manifest.get("name", "?"), "manifest": manifest, "reason": "batch-capacity"})
 

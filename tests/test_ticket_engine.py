@@ -692,3 +692,182 @@ class TestPlanningPrerequisite:
         # REWORK -> IMPLEMENTING should work without plan
         updated = store.transition(t.id, TicketState.IMPLEMENTING)
         assert updated.state == TicketState.IMPLEMENTING
+
+
+class TestPerformance:
+    """Performance tests for TicketStore operations."""
+
+    def test_list_ready_performance_at_10k_tickets(self, tmp_path):
+        """list_ready() must complete in <10ms with 10,000 tickets.
+
+        Regression test for CB-8851929-4713: previously list_ready() performed
+        O(N) linear scans over all tickets. With indexed lookups, it should be
+        O(K) where K is the number of READY tickets.
+        """
+        store = TicketStore(tmp_path / "tickets.json")
+        num_tickets = 10000
+        num_ready = 1000  # 10% in READY state
+
+        # Add tickets efficiently by bypassing individual transitions
+        # We'll create them directly in DISCOVERED state, then move some to READY
+        tickets = []
+        for i in range(num_tickets):
+            t = create_ticket(
+                f"ticket-{i}",
+                TicketClass.BUG,
+                Severity.LOW,
+                "test",
+                f"evidence-{i}",
+                "problem",
+                "desired",
+                ["crit"],
+                risk=RiskLevel.LOW,  # Low risk to skip planning prerequisite
+            )
+            store.add(t)
+            tickets.append(t)
+
+        # Move first num_ready tickets to READY state
+        for t in tickets[:num_ready]:
+            store.transition(t.id, TicketState.VALIDATING)
+            store.transition(t.id, TicketState.TRIAGED)
+            store.transition(t.id, TicketState.READY)
+
+        # Wait for async save to complete
+        time.sleep(0.6)
+
+        # Measure list_ready() performance
+        start = time.perf_counter()
+        ready_tickets = store.list_ready()
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        # Verify correctness
+        assert len(ready_tickets) == num_ready
+
+        # Verify performance: must be <10ms
+        assert elapsed_ms < 10, f"list_ready() took {elapsed_ms:.2f}ms, expected <10ms"
+
+    def test_list_by_state_performance_at_10k_tickets(self, tmp_path):
+        """list_by_state() must be O(K) not O(N) with 10,000 tickets."""
+        store = TicketStore(tmp_path / "tickets.json")
+        num_tickets = 10000
+
+        # Add tickets
+        for i in range(num_tickets):
+            t = create_ticket(
+                f"ticket-{i}",
+                TicketClass.BUG,
+                Severity.LOW,
+                "test",
+                f"evidence-{i}",
+                "problem",
+                "desired",
+                ["crit"],
+                risk=RiskLevel.LOW,
+            )
+            store.add(t)
+
+        # Wait for async save
+        time.sleep(0.6)
+
+        # Measure list_by_state performance for DISCOVERED state (all tickets)
+        start = time.perf_counter()
+        discovered = store.list_by_state(TicketState.DISCOVERED)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        assert len(discovered) == num_tickets
+        # Should be fast even with all tickets in one state
+        assert elapsed_ms < 50, f"list_by_state() took {elapsed_ms:.2f}ms, expected <50ms"
+
+
+class TestApprovalCache:
+    """Tests for O(1) gate approval cache (CB-209456-CF06)."""
+
+    def test_has_gate_approval_returns_cached_value(self, tmp_path):
+        """_has_gate_approval should return True from cache after record_gate_result."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e", "p", "d", ["a"])
+        store.add(t)
+
+        # Before recording, should be False
+        assert store._has_gate_approval(t.id) is False
+
+        # Record a passing gate result
+        store.record_gate_result(t.id, True, gates=[])
+
+        # Should now return True from cache (O(1))
+        assert store._has_gate_approval(t.id) is True
+
+    def test_cache_updates_on_gate_results_write(self, tmp_path):
+        """Cache should reflect the latest gate result when overwritten."""
+        store = TicketStore(tmp_path / "tickets.json")
+        t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e", "p", "d", ["a"])
+        store.add(t)
+
+        # Pass first
+        store.record_gate_result(t.id, True, gates=[])
+        assert store._has_gate_approval(t.id) is True
+
+        # Fail second — cache should update to False
+        store.record_gate_result(t.id, False, gates=[{"gate_name": "test", "result": "fail"}])
+        assert store._has_gate_approval(t.id) is False
+
+        # Pass third — cache should update back to True
+        store.record_gate_result(t.id, True, gates=[])
+        assert store._has_gate_approval(t.id) is True
+
+    def test_cache_handles_missing_ticket_id_gracefully(self, tmp_path):
+        """_has_gate_approval should return False for unknown ticket IDs."""
+        store = TicketStore(tmp_path / "tickets.json")
+        assert store._has_gate_approval("CB-NONEXISTENT") is False
+
+    def test_cache_rebuilt_on_reload(self, tmp_path):
+        """Cache should be rebuilt from gate_results.jsonl on store reload."""
+        path = tmp_path / "tickets.json"
+        store1 = TicketStore(path)
+        t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e", "p", "d", ["a"])
+        store1.add(t)
+        store1.record_gate_result(t.id, True, gates=[])
+
+        # Create a new store instance pointing to the same path (simulates restart)
+        store2 = TicketStore(path)
+        # Cache should have been rebuilt from gate_results.jsonl
+        assert store2._has_gate_approval(t.id) is True
+
+    def test_concurrent_access_does_not_corrupt_cache(self, tmp_path):
+        """Multiple threads recording gate results should not corrupt the cache."""
+        import threading
+
+        store = TicketStore(tmp_path / "tickets.json")
+        tickets = []
+        for i in range(20):
+            t = create_ticket(f"t-{i}", TicketClass.BUG, Severity.LOW, "s", f"e-{i}", "p", "d", ["a"])
+            store.add(t)
+            tickets.append(t)
+
+        errors = []
+
+        def worker(ticket_id: str, passed: bool):
+            try:
+                for _ in range(10):
+                    store.record_gate_result(ticket_id, passed, gates=[])
+                    store._has_gate_approval(ticket_id)
+            except Exception as e:
+                errors.append(e)
+
+        threads = []
+        for t in tickets:
+            threads.append(threading.Thread(target=worker, args=(t.id, True)))
+            threads.append(threading.Thread(target=worker, args=(t.id, False)))
+
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        assert not errors, f"Concurrent access raised errors: {errors}"
+
+        # Each ticket's final state should be consistent (either True or False,
+        # but no corruption or KeyError)
+        for t in tickets:
+            result = store._has_gate_approval(t.id)
+            assert isinstance(result, bool)
