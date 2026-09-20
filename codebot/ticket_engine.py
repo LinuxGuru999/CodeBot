@@ -148,6 +148,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     TicketState.VERIFYING: frozenset({
         TicketState.COMPLETE,
         TicketState.REWORK,
+        TicketState.REJECTED,
     }),
     TicketState.REWORK: frozenset({
         TicketState.IMPLEMENTING,
@@ -601,7 +602,7 @@ class TicketStore:
                             payload = self._build_full_payload()
                             tmp = self._path.with_suffix(".tmp")
                             tmp.write_text(
-                                json.dumps(payload, indent=2 if self._pretty else None),
+                                json.dumps(payload, separators=(",", ":")) if not self._pretty else json.dumps(payload, indent=2),
                                 encoding="utf-8",
                             )
                             tmp.replace(self._path)

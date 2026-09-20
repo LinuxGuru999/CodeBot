@@ -92,6 +92,41 @@ REVIEWER_TYPES = (
     "documentation_reviewer",
 )
 
+WORKER_MODEL_CYCLE = (
+    "xiaomi-mimo-2.5", "xiaomi-mimo-2.5", "qwen-3.7-plus", "qwen-3.7-plus",
+    "qwen-3.8-max", "qwen-3.8-max", "qwen-3.6-plus", "qwen-3.5-plus",
+    "qwen-3.8-max-thinking", "qwen-3.7-max-thinking",
+    "meta-muse-spark-1.3", "meta-muse-spark-1.2",
+    "qwen-3.7-max", "qwen-3.6-plus-thinking", "qwen-3.5-plus-thinking",
+)
+
+WORKER_FALLBACK_CYCLE = (
+    "qwen-3.5-plus", "qwen-3.5-plus", "xiaomi-mimo-2.5", "xiaomi-mimo-2.5",
+    "qwen-3.7-plus", "qwen-3.7-plus", "xiaomi-mimo-2.5", "xiaomi-mimo-2.5",
+    "qwen-3.7-max-thinking", "qwen-3.7-plus",
+    "qwen-3.6-plus", "qwen-3.5-plus",
+    "qwen-3.6-plus", "qwen-3.7-max-thinking", "qwen-3.7-max-thinking",
+)
+
+_MODEL_FALLBACKS = {
+    "qwen-3.8-max": "qwen-3.7-plus",
+    "qwen-3.8-max-thinking": "qwen-3.7-max-thinking",
+    "qwen-3.7-max": "qwen-3.6-plus",
+    "qwen-3.7-max-thinking": "qwen-3.7-plus",
+    "qwen-3.7-plus": "xiaomi-mimo-2.5",
+    "qwen-3.6-plus": "xiaomi-mimo-2.5",
+    "qwen-3.6-plus-thinking": "qwen-3.7-max-thinking",
+    "qwen-3.5-plus": "xiaomi-mimo-2.5",
+    "qwen-3.5-plus-thinking": "qwen-3.7-max-thinking",
+    "meta-muse-spark-1.3": "qwen-3.6-plus",
+    "meta-muse-spark-1.2": "qwen-3.5-plus",
+    "xiaomi-mimo-2.5": "qwen-3.5-plus",
+}
+
+MODEL_TIER_EXPENSIVE = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
+
+_model_rotation_index = 0
+
 
 def _get_ticket_store():
     """Get TicketStore instance with caching."""
@@ -238,6 +273,45 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
             pass
 
     spawned = 0
+    global _model_rotation_index
+
+    def _get_or_create_bot(base_name: str, suffix: str = "") -> Any:
+        from codebot.process_manager import BotConfig, BotState
+        bot_name = f"{base_name}-{suffix}" if suffix else base_name
+        if bot_name in bots:
+            bot = bots[bot_name]
+            if not bot.config.enabled:
+                bot.config.enabled = True
+            return bot
+        prompt_file = f"codebot/roles/{base_name}.md"
+        prompt_path = BOTS_DIR / prompt_file
+        if not prompt_path.exists():
+            prompt_file = f"{base_name}.md"
+            prompt_path = BOTS_DIR / prompt_file
+            if not prompt_path.exists():
+                return None
+        global _model_rotation_index
+        idx = _model_rotation_index % len(WORKER_MODEL_CYCLE)
+        model = WORKER_MODEL_CYCLE[idx]
+        fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+        _model_rotation_index += 1
+        tier = 13 if model in MODEL_TIER_EXPENSIVE or "thinking" in model else 12
+        cfg = BotConfig(
+            name=bot_name,
+            prompt_file=prompt_file,
+            interval_seconds=30,
+            heartbeat_timeout=90,
+            model=model,
+            fallback_model=fb,
+            enabled=True,
+            clean_exit_wait=False,
+            runner_mode="api",
+            tier=tier,
+            max_restarts=5,
+        )
+        state = BotState(config=cfg)
+        bots[bot_name] = state
+        return state
 
     def _is_idle(bot: Any) -> bool:
         return bot.process is None or bot.process.poll() is not None
@@ -270,16 +344,26 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
             bot._assigned_ticket_id = ""
             return False
 
-    # Dispatch implementers
+    # Dispatch implementers — O(n+m) via role-indexed lookup
     impl_all = list(implementing) + list(rework_tickets)
     max_concurrent_impl = 8
-    running_impl = sum(
-        1 for name, b in bots.items()
-        if b.process is not None and b.process.poll() is None
-        and (name.split("-")[0] if "-" in name else name) in IMPLEMENTER_ROLE_NAMES
-    )
+
+    # Build role-indexed dictionary: O(m) where m = number of bots
+    idle_bots_by_role: dict[str, list[Any]] = {}
+    all_bots_by_role: dict[str, list[str]] = {}
+    running_impl = 0
+    for name, b in bots.items():
+        base = name.split("-")[0] if "-" in name else name
+        all_bots_by_role.setdefault(base, []).append(name)
+        if b.process is not None and b.process.poll() is None:
+            if base in IMPLEMENTER_ROLE_NAMES:
+                running_impl += 1
+        else:
+            if b.config.enabled and not getattr(b, "_assigned_ticket_id", ""):
+                idle_bots_by_role.setdefault(base, []).append(b)
+
     impl_budget = min(len(impl_all), budget, max(0, max_concurrent_impl - running_impl))
-    
+
     for ticket in impl_all[:impl_budget]:
         if spawned >= impl_budget:
             break
@@ -291,15 +375,11 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
         target_base = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
 
         assigned = False
-        for name, bot in bots.items():
-            base = name.split("-")[0] if "-" in name else name
-            if base != target_base:
-                continue
-            if not bot.config.enabled:
-                continue
-            if not _is_idle(bot):
-                continue
-            if getattr(bot, "_assigned_ticket_id", ""):
+        # O(1) average-case lookup by role instead of O(m) scan
+        candidates = idle_bots_by_role.get(target_base, [])
+        while candidates:
+            bot = candidates.pop(0)
+            if not bot.config.enabled or getattr(bot, "_assigned_ticket_id", ""):
                 continue
             if _assign_and_spawn(bot, tid):
                 assigned = True
@@ -308,20 +388,36 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
         if assigned:
             continue
 
+        existing = all_bots_by_role.get(target_base, [])
+        suffix = str(len(existing) + 1) if existing else ""
+        bot = _get_or_create_bot(target_base, suffix)
+        if bot and _is_idle(bot):
+            if _assign_and_spawn(bot, tid):
+                active_claims.add(tid)
+
     budget -= spawned
     if budget <= 0:
         return spawned
 
-    # Dispatch reviewers
+    # Dispatch reviewers — O(n+m) via role-indexed lookup
     max_concurrent_reviewers = 8
-    running_reviewers = sum(
-        1 for name, b in bots.items()
-        if b.process is not None and b.process.poll() is None
-        and ((name.split("-")[0] if "-" in name else name) in REVIEWER_ROLE_NAMES or name == "ux_reviewer")
-    )
+
+    # Reuse idle_bots_by_role built above; also build reviewer-specific indexes: O(m)
+    idle_reviewers_by_role: dict[str, list[Any]] = {}
+    all_reviewers_by_role: dict[str, list[str]] = {}
+    running_reviewers = 0
+    for name, b in bots.items():
+        base = name.split("-")[0] if "-" in name else name
+        if base in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
+            all_reviewers_by_role.setdefault(base, []).append(name)
+            if b.process is not None and b.process.poll() is None:
+                running_reviewers += 1
+            elif b.config.enabled and not getattr(b, "_assigned_ticket_id", ""):
+                idle_reviewers_by_role.setdefault(base, []).append(b)
+
     review_budget = min(len(reviewing) * len(REVIEWER_TYPES), budget, max(0, max_concurrent_reviewers - running_reviewers))
     reviewer_spawned = 0
-    
+
     for ticket in reviewing:
         if reviewer_spawned >= review_budget:
             break
@@ -332,15 +428,11 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
             if reviewer_spawned >= review_budget:
                 break
             assigned = False
-            for name, bot in bots.items():
-                base = name.split("-")[0] if "-" in name else name
-                if base != rtype:
-                    continue
-                if not bot.config.enabled:
-                    continue
-                if not _is_idle(bot):
-                    continue
-                if getattr(bot, "_assigned_ticket_id", ""):
+            # O(1) average-case lookup by role instead of O(m) scan
+            candidates = idle_reviewers_by_role.get(rtype, [])
+            while candidates:
+                bot = candidates.pop(0)
+                if not bot.config.enabled or getattr(bot, "_assigned_ticket_id", ""):
                     continue
                 if _assign_and_spawn(bot, tid):
                     assigned = True
@@ -348,6 +440,13 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
                     break
             if assigned:
                 continue
+
+            existing = all_reviewers_by_role.get(rtype, [])
+            suffix = str(len(existing) + 1) if existing else ""
+            bot = _get_or_create_bot(rtype, suffix)
+            if bot and _is_idle(bot):
+                if _assign_and_spawn(bot, tid):
+                    reviewer_spawned += 1
 
     return spawned + reviewer_spawned
 

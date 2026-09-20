@@ -397,7 +397,8 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if bot.next_run_at and now < bot.next_run_at:
             continue
         if is_needed_bot(name, pipeline):
-            start_bot(bot, bots=bots)
+            has_ticket = bool(getattr(bot, '_assigned_ticket_id', ''))
+            start_bot(bot, bots=bots, is_demand=has_ticket)
         else:
             bot.next_run_at = now + bot.config.interval_seconds
             update_bot_state(bot, "waiting")
