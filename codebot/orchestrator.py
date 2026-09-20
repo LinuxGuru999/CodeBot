@@ -882,20 +882,25 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     plan_queue = depths.get("PLANNING", 0)
     planning_name_counts: dict[str, int] = {}
 
+    planning_model_idx = 0
     for role_cfg in unique_planning:
         if role_cfg.name == "decomposer":
             needed = min(max(1, decomp_queue // 3), 6) if decomp_queue > 0 else 1
         else:
             needed = min(max(1, plan_queue // 2), 4) if plan_queue > 0 else 1
         budget_remaining = max_concurrent - len(out)
-        needed = min(needed, budget_remaining)
+        needed = min(needed, max(budget_remaining, 0))
         for i in range(max(0, needed)):
             count = planning_name_counts.get(role_cfg.name, 0)
             planning_name_counts[role_cfg.name] = count + 1
             name = role_cfg.name if count == 0 else f"{role_cfg.name}-{count+1}"
+            idx = planning_model_idx % len(WORKER_MODEL_CYCLE)
+            model = WORKER_MODEL_CYCLE[idx]
+            fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+            planning_model_idx += 1
             out.append(BotConfig(
                 name, role_cfg.prompt_file, 30, 90,
-                role_cfg.model, fallback_model=role_cfg.fallback_model,
+                model, fallback_model=fb,
                 clean_exit_wait=False, runner_mode="api", tier=11,
                 max_restarts=role_cfg.max_restarts,
             ))
@@ -908,13 +913,18 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
                     "documentation_reviewer", "ux_reviewer"]
     impl_queue = depths.get("IMPLEMENTING", 0) + depths.get("REWORK", 0)
     needs_reviewers = review_queue > 0 or impl_queue > 0
+    review_model_idx = 0
     for rname in review_names:
         if needs_reviewers and len(out) < max_concurrent:
             role_cfg = next((c for c in registry if c.name == rname), None)
             if role_cfg:
+                idx = review_model_idx % len(WORKER_MODEL_CYCLE)
+                model = WORKER_MODEL_CYCLE[idx]
+                fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+                review_model_idx += 1
                 out.append(BotConfig(
                     rname, role_cfg.prompt_file, 30, 90,
-                    role_cfg.model, fallback_model=role_cfg.fallback_model,
+                    model, fallback_model=fb,
                     clean_exit_wait=False, runner_mode="api", tier=12,
                     max_restarts=role_cfg.max_restarts,
                 ))
@@ -924,9 +934,12 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     if needs_verifier and len(out) < max_concurrent:
         qg_cfg = next((c for c in registry if c.name == "quality_gate"), None)
         if qg_cfg:
+            idx = review_model_idx % len(WORKER_MODEL_CYCLE)
+            model = WORKER_MODEL_CYCLE[idx]
+            fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
             out.append(BotConfig(
                 "quality_gate", qg_cfg.prompt_file, 30, 90,
-                qg_cfg.model, fallback_model=qg_cfg.fallback_model,
+                model, fallback_model=fb,
                 clean_exit_wait=False, runner_mode="api", tier=12,
                 max_restarts=qg_cfg.max_restarts,
             ))
