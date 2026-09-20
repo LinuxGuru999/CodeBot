@@ -6,6 +6,7 @@ rotating_slots, checkpoint_path/read_checkpoint, is_restart_budget_exceeded,
 is_error_disabled, _model_tier_for_complexity, _spawn_gate, _get_available_memory_mb.
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -652,62 +653,274 @@ class TestTicketClassRouting:
 # Alignment Service Refactoring (CB-4469363-7FE7)
 # ---------------------------------------------------------------------------
 
-class TestAlignmentServiceRefactoring:
-    """Tests for the simplified alignment service implementation.
+class TestAlignmentServiceMocking:
+    """Tests that mock alignment_service to verify orchestrator delegation.
 
-    Verifies that DefaultAlignmentService boilerplate is removed or simplified,
-    and that the alignment pipeline can still be invoked correctly.
+    The orchestrator imports run_alignment_pipeline and run_alignment_pipeline_for_all
+    directly from codebot.alignment_service.  These tests mock those functions
+    in the orchestrator namespace and verify the orchestrator calls them at
+    the correct times (clean exit, error exit, stuck bot, periodic sweep).
     """
 
-    def test_get_alignment_service_returns_callable(self):
-        """get_alignment_service returns a valid service instance with required methods."""
-        service = orch.get_alignment_service()
-        assert service is not None
-        assert hasattr(service, 'run_alignment_pipeline')
-        assert hasattr(service, 'run_alignment_pipeline_for_all')
-        assert callable(service.run_alignment_pipeline)
-        assert callable(service.run_alignment_pipeline_for_all)
+    # -- helpers ----------------------------------------------------------
 
-    def test_set_alignment_service_injection(self):
-        """set_alignment_service allows injecting a custom implementation."""
-        mock_service = MagicMock()
-        mock_service.run_alignment_pipeline.return_value = True
-        mock_service.run_alignment_pipeline_for_all.return_value = None
+    def _make_running_bot(self, name="test-bot", model="xiaomi-mimo-2.5",
+                          interval=300, enabled=True):
+        """Return a BotState whose process is still running (poll → None)."""
+        cfg = _make_config(name=name, model=model, interval=interval,
+                           enabled=enabled)
+        bot = _make_bot(config=cfg)
+        bot.process = MagicMock()
+        bot.process.poll.return_value = None  # still running
+        return bot
 
-        orch.set_alignment_service(mock_service)
-        retrieved = orch.get_alignment_service()
+    def _make_exited_bot(self, name="test-bot", exit_code=0,
+                         model="xiaomi-mimo-2.5"):
+        """Return a BotState whose process has already exited."""
+        cfg = _make_config(name=name, model=model)
+        bot = _make_bot(config=cfg)
+        bot.process = MagicMock()
+        bot.process.poll.return_value = exit_code  # already exited
+        bot.process.returncode = exit_code
+        bot.started_at = time.time() - 60
+        return bot
 
-        assert retrieved is mock_service
-        # Reset to default for other tests
-        orch.set_alignment_service(None)
+    # -- helpers ----------------------------------------------------------
 
-    def test_default_service_uses_lazy_import(self):
-        """Default service attempts lazy import of alignment_service module."""
-        # Reset to ensure we get the default
-        orch.set_alignment_service(None)
-        service = orch.get_alignment_service()
+    _FAKE_PATHS = MagicMock(
+        state_dir=Path("/tmp/fake/state"),
+        logs_dir=Path("/tmp/fake/logs"),
+        drain_file=Path("/tmp/fake/state/.drain"),
+        backup_dir=Path("/tmp/fake/state/backup"),
+        alignment_events_dir=Path("/tmp/fake/state/alignment_events"),
+    )
 
-        # Verify it's not the old DefaultAlignmentService class with duplicated logic
-        # The new implementation should be simpler (function-based or minimal class)
-        from codebot.orchestrator import DefaultAlignmentService
-        # If DefaultAlignmentService still exists as a complex class, this test will fail
-        # after refactoring. For now, we verify the service works.
-        
-        with patch('codebot.alignment_service.run_alignment_pipeline', return_value=True) as mock_run:
-            result = service.run_alignment_pipeline("test-bot")
-            assert result is True
-            mock_run.assert_called_once_with("test-bot", 120)
+    def _enter_exit_patches(self, stack):
+        """Patches needed for _handle_exited_bots."""
+        stack.enter_context(patch('codebot.orchestrator.get_paths',
+                                  return_value=self._FAKE_PATHS))
+        stack.enter_context(patch('codebot.orchestrator.write_alignment_event'))
+        stack.enter_context(patch('codebot.orchestrator.update_bot_state'))
+        stack.enter_context(patch('codebot.orchestrator.transition_ticket_on_success'))
+        stack.enter_context(patch('codebot.orchestrator.transition_ticket_on_error'))
+        stack.enter_context(patch('codebot.orchestrator.rotate_model_on_error'))
+        stack.enter_context(patch('codebot.orchestrator.compute_rate_limit_backoff',
+                                  return_value=(5, False)))
+        stack.enter_context(patch('codebot.orchestrator.load_scratchpad'))
+        stack.enter_context(patch('codebot.orchestrator.save_scratchpad'))
 
-    def test_default_service_handles_import_error_gracefully(self):
-        """Default service handles missing alignment_service module gracefully."""
-        orch.set_alignment_service(None)
-        service = orch.get_alignment_service()
+    # -- pipeline trigger on clean exit -----------------------------------
 
-        with patch.dict('sys.modules', {'codebot.alignment_service': None}, clear=False):
-            with patch('builtins.__import__', side_effect=ImportError):
-                # Should not raise, should return False
-                result = service.run_alignment_pipeline("test-bot")
-                assert result is False
+    def test_pipeline_called_on_clean_exit(self):
+        """run_alignment_pipeline is called when a bot exits with code 0."""
+        bot = self._make_exited_bot(exit_code=0)
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            self._enter_exit_patches(stack)
+            mock_pipe = stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline'))
+            orch._handle_exited_bots(bots, time.time(), ts=None)
+
+        mock_pipe.assert_called_once_with(bot.config.name)
+
+    # -- pipeline trigger on error exit -----------------------------------
+
+    def test_pipeline_called_on_error_exit(self):
+        """run_alignment_pipeline is called when a bot exits with non-zero code."""
+        bot = self._make_exited_bot(exit_code=1)
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            self._enter_exit_patches(stack)
+            mock_pipe = stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline'))
+            orch._handle_exited_bots(bots, time.time(), ts=None)
+
+        mock_pipe.assert_called_once_with(bot.config.name)
+
+    # -- pipeline trigger on exit code 3 ----------------------------------
+
+    def test_pipeline_called_on_rate_limit_exit(self):
+        """run_alignment_pipeline is called when a bot exits with code 3."""
+        bot = self._make_exited_bot(exit_code=3)
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            self._enter_exit_patches(stack)
+            mock_pipe = stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline'))
+            orch._handle_exited_bots(bots, time.time(), ts=None)
+
+        mock_pipe.assert_called_once_with(bot.config.name)
+
+    # -- pipeline trigger on stuck bot ------------------------------------
+
+    def test_pipeline_called_on_stuck_bot(self):
+        """run_alignment_pipeline is called when a running bot is detected as stuck."""
+        bot = self._make_running_bot()
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch('codebot.orchestrator.is_stuck',
+                                      return_value=True))
+            stack.enter_context(patch('codebot.orchestrator.write_alignment_event'))
+            stack.enter_context(patch('codebot.orchestrator.restart_bot'))
+            mock_pipe = stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline'))
+            hb_cache = {bot.config.name: time.time() - 200}
+            orch._handle_stuck_bots(bots, time.time(), hb_cache)
+
+        mock_pipe.assert_called_once_with(bot.config.name)
+
+    # -- pipeline failure is handled gracefully on exit -------------------
+
+    def test_pipeline_failure_on_exit_does_not_crash(self):
+        """If alignment pipeline raises on exit, orchestrator continues without crashing."""
+        bot = self._make_exited_bot(exit_code=0)
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            self._enter_exit_patches(stack)
+            stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline',
+                      side_effect=RuntimeError("pipeline boom")))
+            # Should NOT raise
+            orch._handle_exited_bots(bots, time.time(), ts=None)
+
+    # -- pipeline failure is handled gracefully on stuck ------------------
+
+    def test_pipeline_failure_on_stuck_does_not_crash(self):
+        """If alignment pipeline raises on stuck, orchestrator continues."""
+        bot = self._make_running_bot()
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch('codebot.orchestrator.is_stuck',
+                                      return_value=True))
+            stack.enter_context(patch('codebot.orchestrator.write_alignment_event'))
+            stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline',
+                      side_effect=RuntimeError("boom")))
+            stack.enter_context(patch('codebot.orchestrator.restart_bot'))
+            hb_cache = {bot.config.name: time.time() - 200}
+            # Should NOT raise
+            orch._handle_stuck_bots(bots, time.time(), hb_cache)
+
+    # -- alignment_event written before pipeline on exit ------------------
+
+    def test_alignment_event_written_before_pipeline_on_exit(self):
+        """write_alignment_event is called before run_alignment_pipeline on exit."""
+        bot = self._make_exited_bot(exit_code=0)
+        bots = {bot.config.name: bot}
+        call_order = []
+
+        def _track_event(name, **kw):
+            call_order.append('event')
+
+        def _track_pipeline(name):
+            call_order.append('pipeline')
+
+        with contextlib.ExitStack() as stack:
+            self._enter_exit_patches(stack)
+            stack.enter_context(
+                patch('codebot.orchestrator.write_alignment_event',
+                      side_effect=_track_event))
+            stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline',
+                      side_effect=_track_pipeline))
+            orch._handle_exited_bots(bots, time.time(), ts=None)
+
+        assert call_order == ['event', 'pipeline'], \
+            f"Expected event before pipeline, got {call_order}"
+
+    # -- alignment_event written before pipeline on stuck -----------------
+
+    def test_alignment_event_written_before_pipeline_on_stuck(self):
+        """write_alignment_event is called before run_alignment_pipeline on stuck."""
+        bot = self._make_running_bot()
+        bots = {bot.config.name: bot}
+        call_order = []
+
+        def _track_event(name, **kw):
+            call_order.append('event')
+
+        def _track_pipeline(name):
+            call_order.append('pipeline')
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch('codebot.orchestrator.is_stuck',
+                                      return_value=True))
+            stack.enter_context(
+                patch('codebot.orchestrator.write_alignment_event',
+                      side_effect=_track_event))
+            stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline',
+                      side_effect=_track_pipeline))
+            stack.enter_context(patch('codebot.orchestrator.restart_bot'))
+            hb_cache = {bot.config.name: time.time() - 200}
+            orch._handle_stuck_bots(bots, time.time(), hb_cache)
+
+        assert call_order == ['event', 'pipeline'], \
+            f"Expected event before pipeline, got {call_order}"
+
+    # -- pipeline not called for disabled bots on exit --------------------
+
+    def test_pipeline_not_called_for_disabled_bot_on_exit(self):
+        """run_alignment_pipeline is not called for a disabled bot on exit."""
+        bot = self._make_exited_bot(exit_code=0)
+        bot.config.enabled = False
+        bot.process = None
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            self._enter_exit_patches(stack)
+            mock_pipe = stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline'))
+            orch._handle_exited_bots(bots, time.time(), ts=None)
+
+        mock_pipe.assert_not_called()
+
+    # -- pipeline not called when process still running -------------------
+
+    def test_pipeline_not_called_when_bot_still_running(self):
+        """run_alignment_pipeline is not called when bot.poll() is None (still running)."""
+        bot = self._make_running_bot()
+        bots = {bot.config.name: bot}
+
+        with contextlib.ExitStack() as stack:
+            self._enter_exit_patches(stack)
+            mock_pipe = stack.enter_context(
+                patch('codebot.orchestrator.run_alignment_pipeline'))
+            orch._handle_exited_bots(bots, time.time(), ts=None)
+
+        mock_pipe.assert_not_called()
+
+    # -- pipeline not called when not stuck --------------------------------
+
+    def test_pipeline_not_called_when_bot_not_stuck(self):
+        """run_alignment_pipeline is not called when bot is not stuck."""
+        bot = self._make_running_bot()
+        bots = {bot.config.name: bot}
+
+        with patch('codebot.orchestrator.is_stuck', return_value=False), \
+             patch('codebot.orchestrator.run_alignment_pipeline') as mock_pipe:
+            hb_cache = {bot.config.name: time.time()}
+            orch._handle_stuck_bots(bots, time.time(), hb_cache)
+
+        mock_pipe.assert_not_called()
+
+    # -- pipeline_for_all import -----------------------------------------
+
+    def test_run_alignment_pipeline_for_all_is_imported(self):
+        """orchestrator module has run_alignment_pipeline_for_all available."""
+        assert hasattr(orch, 'run_alignment_pipeline_for_all')
+        assert callable(orch.run_alignment_pipeline_for_all)
+
+    def test_run_alignment_pipeline_is_imported(self):
+        """orchestrator module has run_alignment_pipeline available."""
+        assert hasattr(orch, 'run_alignment_pipeline')
+        assert callable(orch.run_alignment_pipeline)
 
 
 # ---------------------------------------------------------------------------
