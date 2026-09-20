@@ -89,7 +89,7 @@ class RateLimiter:
             if client_ip in self._blocked_until:
                 if now < self._blocked_until[client_ip]:
                     remaining = int(self._blocked_until[client_ip] - now)
-                    return False, f"rate limit exceeded; try again in {remaining}s"
+                    return False, f"rate limit exceeded; blocked for {remaining}s (try again later)"
                 else:
                     # Cooldown expired, clear block and reset failures
                     del self._blocked_until[client_ip]
@@ -107,7 +107,7 @@ class RateLimiter:
                 self._blocked_until[client_ip] = now + RATE_LIMIT_COOLDOWN_SECONDS
                 return (
                     False,
-                    f"rate limit exceeded ({RATE_LIMIT_MAX_ATTEMPTS} attempts in {RATE_LIMIT_WINDOW_SECONDS}s); blocked for {RATE_LIMIT_COOLDOWN_SECONDS}s",
+                    f"rate limit exceeded ({RATE_LIMIT_MAX_ATTEMPTS} attempts in {RATE_LIMIT_WINDOW_SECONDS}s); blocked for {RATE_LIMIT_COOLDOWN_SECONDS}s (try again later)",
                 )
 
             return True, None
@@ -424,7 +424,7 @@ def retry_dead_letter(item_id: str) -> dict:
         return {"status": "unavailable", "id": item_id}
 
 
-class Handler(BaseHTTPRequestHandler):
+class ControlHandler(BaseHTTPRequestHandler):
     def _auth(self) -> bool | None:
         """Validate Bearer token via Authorization header with rate limiting.
 
@@ -879,7 +879,7 @@ def main() -> None:
     startup_msg = f"control_server listening on {addr[0]}:{addr[1]}  bots={len(BOT_REGISTRY)}  drain={(STATE_DIR / '.drain').exists()}"
     print(startup_msg, flush=True)
     logger.info(startup_msg)
-    httpd = ThreadingHTTPServer(addr, Handler)
+    httpd = ThreadingHTTPServer(addr, ControlHandler)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -1511,6 +1511,9 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
 
     impl_all = list(implementing) + list(rework_tickets)
     impl_needed = min(len(impl_all), budget)
+    enabled_impl = sum(1 for n, b in bots.items() if b.config.enabled and (n.split("-")[0] if "-" in n else n) in IMPLEMENTER_ROLE_NAMES)
+    idle_enabled = sum(1 for n, b in bots.items() if b.config.enabled and _is_idle(b) and not getattr(b, "_assigned_ticket_id", "") and (n.split("-")[0] if "-" in n else n) in IMPLEMENTER_ROLE_NAMES)
+    logger.info(f"Demand spawn check: implementing={len(implementing)} rework={len(rework_tickets)} budget={budget} demand_running={demand_running} active_claims={len(active_claims)} enabled_impl={enabled_impl} idle_enabled={idle_enabled}")
     for ticket in impl_all[:impl_needed]:
         if spawned >= budget:
             break
