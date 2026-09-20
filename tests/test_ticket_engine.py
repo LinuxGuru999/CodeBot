@@ -450,39 +450,45 @@ class TestGatekeeperEnforcement:
         store.transition(ticket_id, TicketState.REVIEWING)
         store.transition(ticket_id, TicketState.VERIFYING)
 
-    def _write_gate_pass(self, state_dir, ticket_id):
-        """Write a passing gate result for the given ticket."""
-        import os
-        gate_path = state_dir / "gate_results.jsonl"
-        record = {
-            "ticket_id": ticket_id,
-            "passed": True,
-            "timestamp": time.time(),
-            "gates": [],
-        }
-        line = json.dumps(record) + "\n"
-        fd = os.open(str(gate_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, line.encode("utf-8"))
-        finally:
-            os.close(fd)
+    def _write_gate_pass(self, state_dir, ticket_id, store=None):
+        """Write a passing gate result for the given ticket via record_gate_result."""
+        if store is not None:
+            store.record_gate_result(ticket_id, True, gates=[])
+        else:
+            import os
+            gate_path = state_dir / "gate_results.jsonl"
+            record = {
+                "ticket_id": ticket_id,
+                "passed": True,
+                "timestamp": time.time(),
+                "gates": [],
+            }
+            line = json.dumps(record) + "\n"
+            fd = os.open(str(gate_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, line.encode("utf-8"))
+            finally:
+                os.close(fd)
 
-    def _write_gate_fail(self, state_dir, ticket_id):
-        """Write a failing gate result for the given ticket."""
-        import os
-        gate_path = state_dir / "gate_results.jsonl"
-        record = {
-            "ticket_id": ticket_id,
-            "passed": False,
-            "timestamp": time.time(),
-            "gates": [{"gate_name": "test", "result": "fail"}],
-        }
-        line = json.dumps(record) + "\n"
-        fd = os.open(str(gate_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, line.encode("utf-8"))
-        finally:
-            os.close(fd)
+    def _write_gate_fail(self, state_dir, ticket_id, store=None):
+        """Write a failing gate result for the given ticket via record_gate_result."""
+        if store is not None:
+            store.record_gate_result(ticket_id, False, gates=[{"gate_name": "test", "result": "fail"}])
+        else:
+            import os
+            gate_path = state_dir / "gate_results.jsonl"
+            record = {
+                "ticket_id": ticket_id,
+                "passed": False,
+                "timestamp": time.time(),
+                "gates": [{"gate_name": "test", "result": "fail"}],
+            }
+            line = json.dumps(record) + "\n"
+            fd = os.open(str(gate_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, line.encode("utf-8"))
+            finally:
+                os.close(fd)
 
     def test_verifying_to_complete_blocked_without_gate(self, tmp_path):
         """VERIFYING -> COMPLETE is blocked without gatekeeper approval."""
