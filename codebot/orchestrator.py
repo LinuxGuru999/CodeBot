@@ -3344,11 +3344,16 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
         except OSError:
             continue
 
+        current_assignment = getattr(bot, '_assigned_ticket_id', '')
         bot._assigned_ticket_id = tid
         dispatched += 1
         logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
-        if bot.process is not None and bot.process.poll() is None:
+        if current_assignment == tid:
+            pass
+        elif bot.process is not None and bot.process.poll() is None:
             stop_bot(bot, f"restarting with decomposition {tid}")
+            start_bot(bot, bots=bots)
+        else:
             start_bot(bot, bots=bots)
 
     return dispatched
@@ -3474,11 +3479,16 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
         except OSError:
             continue
 
+        current_assignment = getattr(bot, '_assigned_ticket_id', '')
         bot._assigned_ticket_id = tid
         dispatched += 1
         logger.info(f"Dispatched planning for {tid} -> {bot_name}")
-        if bot.process is not None and bot.process.poll() is None:
+        if current_assignment == tid:
+            pass
+        elif bot.process is not None and bot.process.poll() is None:
             stop_bot(bot, f"restarting with planning {tid}")
+            start_bot(bot, bots=bots)
+        else:
             start_bot(bot, bots=bots)
 
     return dispatched
