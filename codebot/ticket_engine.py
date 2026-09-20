@@ -818,6 +818,77 @@ class TicketStore:
             self._queue_save()
             return updated
 
+    def batch_transition(
+        self,
+        transitions: list[tuple[str, TicketState, list[dict] | None]],
+    ) -> list[Ticket]:
+        """Apply multiple ticket transitions in memory, then save once.
+
+        This method avoids the O(K*N) cost of calling transition() K times
+        by collecting all state changes in memory under a single lock hold,
+        updating indices, and queuing a single save operation.
+
+        Args:
+            transitions: List of (ticket_id, new_state, reviewer_feedback) tuples.
+
+        Returns:
+            List of updated Ticket objects in the same order as input.
+
+        Raises:
+            KeyError: If any ticket_id is not found.
+            ValueError: If any transition is invalid or prerequisites not met.
+        """
+        if not transitions:
+            return []
+
+        results: list[Ticket] = []
+        with self._lock:
+            for ticket_id, new_state, reviewer_feedback in transitions:
+                ticket = self._tickets.get(ticket_id)
+                if ticket is None:
+                    raise KeyError(f"ticket not found: {ticket_id}")
+
+                # Enforce gatekeeper approval before VERIFYING -> COMPLETE (GAP-2)
+                if (ticket.state == TicketState.VERIFYING and
+                    new_state == TicketState.COMPLETE):
+                    if not self._has_gate_approval(ticket_id):
+                        raise ValueError(
+                            f"ticket {ticket_id} cannot transition to COMPLETE: "
+                            f"gatekeeper approval required but not found"
+                        )
+
+                # Enforce planning prerequisite before READY -> IMPLEMENTING
+                if (ticket.state == TicketState.READY and
+                    new_state == TicketState.IMPLEMENTING):
+                    ticket_risk_order = _RISK_ORDER.get(ticket.risk.value, 0)
+                    threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
+                    if ticket_risk_order >= threshold_order:
+                        if not self._has_plan(ticket_id):
+                            raise ValueError(
+                                f"ticket {ticket_id} risk={ticket.risk.value} "
+                                f"requires an implementation plan before IMPLEMENTING; "
+                                f"create plan in PLANNING state"
+                            )
+
+                updated = ticket.transition(new_state, reviewer_feedback)
+                self._tickets[ticket_id] = updated
+
+                # Maintain per-state index: remove from old state, add to new
+                old_state = ticket.state
+                if old_state in self._state_index:
+                    self._state_index[old_state].discard(ticket_id)
+                    if not self._state_index[old_state]:
+                        del self._state_index[old_state]
+                self._state_index.setdefault(new_state, set()).add(ticket_id)
+
+                # Track dirty for incremental save
+                self._dirty_ids.add(ticket_id)
+                results.append(updated)
+
+        # Queue a single save for all dirty tickets
+        self._queue_save()
+        return results
+
     def list_by_state(self, state: TicketState) -> list[Ticket]:
         with self._lock:
             ticket_ids = self._state_index.get(state, set())
