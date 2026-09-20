@@ -156,65 +156,109 @@ class CostTracker:
                 continue
         return results
 
-    def build_summary(self) -> dict[str, Any]:
-        summary: dict[str, dict[str, Any]] = {}
+    def _is_cache_valid(self) -> bool:
+        """Check if cached summary is still valid based on file mtime and size."""
+        if self._summary_cache is None:
+            return False
         if not self._costs_path.exists():
-            return {"tickets": {}, "fleet_totals": {}}
+            # If file doesn't exist now but we have a cache, check if cache was for empty state
+            if self._cache_file_mtime == 0 and self._cache_file_size == 0:
+                return True
+            return False
         try:
-            for raw in self._read_recent_lines():
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                tid = entry.get("ticket_id", "unknown")
-                if tid not in summary:
-                    summary[tid] = {
-                        "total_tokens": 0,
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "phases": {},
-                        "agents": set(),
-                        "models": set(),
-                        "attempts": 0,
-                        "wall_clock_total": 0.0,
-                    }
-                s = summary[tid]
-                s["total_tokens"] += entry.get("total_tokens", 0)
-                s["prompt_tokens"] += entry.get("prompt_tokens", 0)
-                s["completion_tokens"] += entry.get("completion_tokens", 0)
-                phase = entry.get("phase", "unknown")
-                s["phases"][phase] = s["phases"].get(phase, 0) + entry.get("total_tokens", 0)
-                s["agents"].add(entry.get("agent", "unknown"))
-                s["models"].add(entry.get("model", "unknown"))
-                s["attempts"] = max(s["attempts"], entry.get("attempts", 1))
-                s["wall_clock_total"] += entry.get("wall_clock_seconds", 0.0)
+            stat = self._costs_path.stat()
+            current_mtime = stat.st_mtime
+            current_size = stat.st_size
+            return (
+                self._cache_file_mtime == current_mtime
+                and self._cache_file_size == current_size
+            )
         except OSError:
-            pass
-        serializable = {}
-        fleet_prompt = 0
-        fleet_completion = 0
-        fleet_total = 0
-        for tid, s in summary.items():
-            s["agents"] = sorted(s["agents"])
-            s["models"] = sorted(s["models"])
-            serializable[tid] = s
-            fleet_prompt += s["prompt_tokens"]
-            fleet_completion += s["completion_tokens"]
-            fleet_total += s["total_tokens"]
-        result = {
-            "generated_at": time.time(),
-            "tickets": serializable,
-            "fleet_totals": {
-                "prompt_tokens": fleet_prompt,
-                "completion_tokens": fleet_completion,
-                "total_tokens": fleet_total,
-                "ticket_count": len(serializable),
-            },
-        }
-        tmp = self._summary_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        tmp.replace(self._summary_path)
-        return result
+            return False
+
+    def _update_cache_metadata(self) -> None:
+        """Update cache metadata after computing a new summary."""
+        if self._costs_path.exists():
+            try:
+                stat = self._costs_path.stat()
+                self._cache_file_mtime = stat.st_mtime
+                self._cache_file_size = stat.st_size
+            except OSError:
+                self._cache_file_mtime = None
+                self._cache_file_size = None
+        else:
+            self._cache_file_mtime = 0
+            self._cache_file_size = 0
+
+    def build_summary(self) -> dict[str, Any]:
+        with self._cache_lock:
+            # Check if cache is valid
+            if self._is_cache_valid():
+                return self._summary_cache  # type: ignore[return-value]
+
+            summary: dict[str, dict[str, Any]] = {}
+            if not self._costs_path.exists():
+                result: dict[str, Any] = {"tickets": {}, "fleet_totals": {}}
+                self._summary_cache = result
+                self._update_cache_metadata()
+                return result
+            try:
+                for raw in self._read_recent_lines():
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    tid = entry.get("ticket_id", "unknown")
+                    if tid not in summary:
+                        summary[tid] = {
+                            "total_tokens": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "phases": {},
+                            "agents": set(),
+                            "models": set(),
+                            "attempts": 0,
+                            "wall_clock_total": 0.0,
+                        }
+                    s = summary[tid]
+                    s["total_tokens"] += entry.get("total_tokens", 0)
+                    s["prompt_tokens"] += entry.get("prompt_tokens", 0)
+                    s["completion_tokens"] += entry.get("completion_tokens", 0)
+                    phase = entry.get("phase", "unknown")
+                    s["phases"][phase] = s["phases"].get(phase, 0) + entry.get("total_tokens", 0)
+                    s["agents"].add(entry.get("agent", "unknown"))
+                    s["models"].add(entry.get("model", "unknown"))
+                    s["attempts"] = max(s["attempts"], entry.get("attempts", 1))
+                    s["wall_clock_total"] += entry.get("wall_clock_seconds", 0.0)
+            except OSError:
+                pass
+            serializable = {}
+            fleet_prompt = 0
+            fleet_completion = 0
+            fleet_total = 0
+            for tid, s in summary.items():
+                s["agents"] = sorted(s["agents"])
+                s["models"] = sorted(s["models"])
+                serializable[tid] = s
+                fleet_prompt += s["prompt_tokens"]
+                fleet_completion += s["completion_tokens"]
+                fleet_total += s["total_tokens"]
+            result = {
+                "generated_at": time.time(),
+                "tickets": serializable,
+                "fleet_totals": {
+                    "prompt_tokens": fleet_prompt,
+                    "completion_tokens": fleet_completion,
+                    "total_tokens": fleet_total,
+                    "ticket_count": len(serializable),
+                },
+            }
+            tmp = self._summary_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
+            tmp.replace(self._summary_path)
+            self._summary_cache = result
+            self._update_cache_metadata()
+            return result

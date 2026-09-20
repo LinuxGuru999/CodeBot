@@ -11,9 +11,9 @@ class TestAutoCommitGatekeeperFailClosed(unittest.TestCase):
 
     def setUp(self):
         self.mock_adapter_patcher = patch('codebot.api_runner._adapter_instance')
-        self.mock_run_patcher = patch('codebot.api_runner.subprocess.run')
+        self.mock_bash_patcher = patch('codebot.api_runner.bash')
         self.mock_adapter = self.mock_adapter_patcher.start()
-        self.mock_run = self.mock_run_patcher.start()
+        self.mock_bash = self.mock_bash_patcher.start()
         
         self.mock_adapter.paths.return_value = MagicMock(
             state_dir='/tmp/state',
@@ -22,7 +22,7 @@ class TestAutoCommitGatekeeperFailClosed(unittest.TestCase):
         )
         
         self.addCleanup(self.mock_adapter_patcher.stop)
-        self.addCleanup(self.mock_run_patcher.stop)
+        self.addCleanup(self.mock_bash_patcher.stop)
 
     @patch('codebot.gatekeeper.Gatekeeper')
     def test_gatekeeper_exception_blocks_commit(self, mock_gk_cls):

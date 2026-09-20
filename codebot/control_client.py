@@ -55,13 +55,13 @@ def req(method: str, path: str, body: dict | None = None) -> tuple[int, dict | s
     r = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(r, timeout=15) as resp:
-            raw = resp.read().decode()
+            raw = resp.read(MAX_RESPONSE_BYTES).decode()
             try:
                 return resp.status, json.loads(raw) if raw else {}
             except Exception:
                 return resp.status, raw
     except urllib.error.HTTPError as e:
-        raw = e.read().decode() if e.fp else ""
+        raw = e.read(MAX_RESPONSE_BYTES).decode() if e.fp else ""
         try:
             return e.code, json.loads(raw) if raw else {"error": raw}
         except Exception:

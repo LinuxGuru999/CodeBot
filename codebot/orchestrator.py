@@ -1504,9 +1504,15 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
             return False
 
     impl_all = list(implementing) + list(rework_tickets)
-    impl_needed = min(len(impl_all), budget)
-    for ticket in impl_all[:impl_needed]:
-        if spawned >= budget:
+    max_concurrent_impl = 8
+    running_impl = sum(
+        1 for name, b in bots.items()
+        if b.process is not None and b.process.poll() is None
+        and (name.split("-")[0] if "-" in name else name) in IMPLEMENTER_ROLE_NAMES
+    )
+    impl_budget = min(len(impl_all), budget, max(0, max_concurrent_impl - running_impl))
+    for ticket in impl_all[:impl_budget]:
+        if spawned >= impl_budget:
             break
         tid = getattr(ticket, "id", "")
         if not tid or tid in active_claims:
