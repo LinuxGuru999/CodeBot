@@ -35,7 +35,7 @@ def _advance_to_verifying(store: TicketStore, ticket_id: str) -> None:
     store.transition(ticket_id, TicketState.VERIFYING)
 
 
-def _record_gate_pass(state_dir: Path, ticket_id: str) -> None:
+def _record_gate_pass(state_dir: Path, ticket_id: str, store: TicketStore | None = None) -> None:
     """Record a passing gate result for a ticket."""
     evaluations = [
         GateEvaluation(
@@ -43,7 +43,8 @@ def _record_gate_pass(state_dir: Path, ticket_id: str) -> None:
             result=GateResult.PASS,
             command="echo ok",
             output="ok",
-            duration_seconds=0.1,
+            duration_ms=0.1,
+            passed=True,
             required=True,
         ),
         GateEvaluation(
@@ -51,14 +52,17 @@ def _record_gate_pass(state_dir: Path, ticket_id: str) -> None:
             result=GateResult.PASS,
             command="pytest -q",
             output="ok",
-            duration_seconds=0.5,
+            duration_ms=0.5,
+            passed=True,
             required=True,
         ),
     ]
     record_gate_results(state_dir, ticket_id, True, evaluations)
+    if store is not None:
+        store.record_gate_result(ticket_id, True)
 
 
-def _record_gate_fail(state_dir: Path, ticket_id: str) -> None:
+def _record_gate_fail(state_dir: Path, ticket_id: str, store: TicketStore | None = None) -> None:
     """Record a failing gate result for a ticket."""
     evaluations = [
         GateEvaluation(
@@ -66,12 +70,15 @@ def _record_gate_fail(state_dir: Path, ticket_id: str) -> None:
             result=GateResult.FAIL,
             command="echo fail",
             output="build failed",
-            duration_seconds=0.1,
+            duration_ms=0.1,
+            passed=False,
             required=True,
             error_message="exit code 1",
         ),
     ]
     record_gate_results(state_dir, ticket_id, False, evaluations)
+    if store is not None:
+        store.record_gate_result(ticket_id, False)
 
 
 class TestGateEnforcement:
@@ -106,7 +113,7 @@ class TestGateEnforcement:
         store.add(t)
         _advance_to_verifying(store, t.id)
 
-        _record_gate_fail(state_dir, t.id)
+        _record_gate_fail(state_dir, t.id, store=store)
 
         with pytest.raises(ValueError, match="gatekeeper approval"):
             store.transition(t.id, TicketState.COMPLETE)
@@ -124,7 +131,7 @@ class TestGateEnforcement:
         store.add(t)
         _advance_to_verifying(store, t.id)
 
-        _record_gate_pass(state_dir, t.id)
+        _record_gate_pass(state_dir, t.id, store=store)
 
         updated = store.transition(t.id, TicketState.COMPLETE)
         assert updated.state == TicketState.COMPLETE

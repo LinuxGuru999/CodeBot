@@ -1,6 +1,7 @@
 """Tests for role_registry.py — model satisfaction, tool policy enforcement, adversarial lookup."""
 
 import pytest
+import logging
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -298,3 +299,60 @@ class TestAdversarialReviewExtended:
             assert role.required_model.cost_class in (CostClass.STANDARD, CostClass.PREMIUM), (
                 f"Discovery role {role.name} has {role.required_model.cost_class.value} cost — expected STANDARD or PREMIUM"
             )
+
+
+class TestStructuredErrorLogging:
+    """Tests for structured error logging in role_registry.py."""
+
+    def test_error_logging_on_missing_role(self, caplog):
+        """Failed role init logs full traceback with role name."""
+        with caplog.at_level(logging.WARNING):
+            result = get_role("nonexistent_role_xyz")
+        
+        assert result is None
+        # Check that a warning was logged with the role name
+        assert any("Role not found" in record.message for record in caplog.records)
+        assert any("nonexistent_role_xyz" in record.message for record in caplog.records)
+
+    def test_error_logging_includes_ticket_id(self, caplog):
+        """Logs include ticket ID when available."""
+        ticket_id = "CB-TEST-123"
+        with caplog.at_level(logging.WARNING):
+            result = get_role("nonexistent_role_xyz", ticket_id=ticket_id)
+        
+        assert result is None
+        # Check that ticket_id is in the log message
+        assert any(ticket_id in record.message for record in caplog.records)
+
+    def test_no_sensitive_data_in_logs(self, caplog):
+        """No credentials or secrets appear in error logs."""
+        # Use a role name that might look sensitive but isn't
+        sensitive_looking_name = "admin_secret_role"
+        with caplog.at_level(logging.WARNING):
+            get_role(sensitive_looking_name, ticket_id="CB-SENSITIVE-999")
+        
+        # Verify no actual sensitive data patterns in logs
+        for record in caplog.records:
+            message = record.message
+            # Ensure no common sensitive patterns appear
+            assert "password" not in message.lower()
+            assert "secret_key" not in message.lower()
+            assert "api_key" not in message.lower()
+            assert "token=" not in message.lower()
+
+    def test_adversarial_lookup_logs_missing_role(self, caplog):
+        """find_adversarial_reviewers logs warning when implementer role not found."""
+        with caplog.at_level(logging.WARNING):
+            result = find_adversarial_reviewers("nonexistent_implementer")
+        
+        assert result == []
+        assert any("Implementer role not found" in record.message for record in caplog.records)
+
+    def test_adversarial_lookup_includes_ticket_id(self, caplog):
+        """find_adversarial_reviewers includes ticket_id in logs."""
+        ticket_id = "CB-ADV-456"
+        with caplog.at_level(logging.WARNING):
+            result = find_adversarial_reviewers("nonexistent_implementer", ticket_id=ticket_id)
+        
+        assert result == []
+        assert any(ticket_id in record.message for record in caplog.records)

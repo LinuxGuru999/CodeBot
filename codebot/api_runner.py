@@ -389,7 +389,8 @@ def _auto_commit(bot_name: str, files_touched: list[str], ticket_id: str = "") -
             _log(f"{bot_name}: auto-commit git add failed for {repo}: {add_result.get('error', '')}")
             continue
 
-        commit_msg = f"bot: {bot_name} auto-commit after task completion"
+        safe_bot_name = shlex.quote(bot_name)
+        commit_msg = f"bot: {safe_bot_name} auto-commit after task completion"
         commit_result = bash(f'git -C {shlex.quote(repo_path)} commit -m {shlex.quote(commit_msg)}', timeout=15)
         if not commit_result["success"]:
             if "nothing to commit" in commit_result.get("error", "") or "nothing to commit" in commit_result.get("output", ""):
@@ -1007,10 +1008,13 @@ def _call_api(messages, model, api_key, timeout=None, bot_name=None):
         },
         method="POST",
     )
+    deadline = time.monotonic() + timeout
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         chunks: list[bytes] = []
         remaining = 2_000_000
         while remaining > 0:
+            if time.monotonic() > deadline:
+                raise urllib.error.URLError("API read deadline exceeded")
             piece = resp.read(min(65536, remaining))
             if not piece:
                 break

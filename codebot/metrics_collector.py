@@ -575,7 +575,11 @@ def _collect_scrutiny() -> dict[str, Any]:
 
 def _build_docs_findings_cache() -> dict[str, int]:
     """Perform ONE recursive glob of docs/ and count output files per bot.
-    
+
+    Uses case-sensitive ``bot in filename`` contains semantics, matching the
+    original ``*{bot}*.md`` rglob pattern exactly — preserving underscores,
+    no ``.lower()`` normalisation, no redundant ``startswith`` check.
+
     Returns:
         Dict mapping bot name to count of matching output files.
     """
@@ -584,13 +588,12 @@ def _build_docs_findings_cache() -> dict[str, int]:
     if not docs_dir.exists():
         return cache
     try:
-        # Single recursive traversal - O(Files) instead of O(Bots*Files)
+        # Single recursive traversal — O(Files) instead of O(Bots*Files)
         for f in docs_dir.rglob("*.md"):
             if f.is_file():
-                fname = f.name.lower()
+                name = f.name  # case-sensitive, preserves underscores
                 for bot in KNOWN_BOTS:
-                    bot_normalized = bot.replace("_", "")
-                    if fname.startswith(bot_normalized) or bot_normalized in fname:
+                    if bot in name:
                         cache[bot] += 1
     except Exception:
         pass

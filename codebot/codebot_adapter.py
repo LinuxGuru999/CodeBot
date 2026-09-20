@@ -257,3 +257,43 @@ class CodeBotAdapter(ProjectAdapter):
             if role_count < 20:
                 errors.append(f"only {role_count} role prompts found, expected >= 20")
         return errors
+
+    def queue_depth(self) -> int:
+        """Return count of actionable tickets via TicketStore."""
+        try:
+            from codebot.ticket_dispatcher import get_ticket_store
+            from codebot.ticket_engine import TicketState
+            store = get_ticket_store()
+            if store is None:
+                return 0
+            actionable_states = (
+                TicketState.READY,
+                TicketState.DECOMPOSE,
+                TicketState.PLANNING,
+                TicketState.IMPLEMENTING,
+            )
+            count = 0
+            for state in actionable_states:
+                tickets = store.list_by_state(state)
+                if tickets:
+                    count += len(tickets)
+            return count
+        except Exception:
+            return 0
+
+    def ticket_class_counts(self) -> dict[str, int]:
+        """Return counts of tickets grouped by TicketClass."""
+        try:
+            from codebot.ticket_dispatcher import get_ticket_store
+            store = get_ticket_store()
+            if store is None:
+                return {}
+            counts: dict[str, int] = {}
+            all_tickets = getattr(store, '_tickets', {})
+            for ticket in all_tickets.values():
+                tc = getattr(ticket, 'ticket_class', None)
+                class_name = tc.value if hasattr(tc, 'value') else str(tc) if tc else 'unknown'
+                counts[class_name] = counts.get(class_name, 0) + 1
+            return counts
+        except Exception:
+            return {}

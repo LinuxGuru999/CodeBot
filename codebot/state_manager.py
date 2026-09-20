@@ -158,3 +158,8 @@ def safe_stop_all(bots: dict, stop_fn) -> dict:
 def get_paths() -> PathConfig:
     import codebot.state_manager as _self
     return _self._paths
+
+def get_adapter_instance() -> Any:
+    """Return the currently registered ProjectAdapter instance, if any."""
+    import codebot.state_manager as _self
+    return _self._adapter_instance

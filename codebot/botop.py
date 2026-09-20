@@ -241,7 +241,7 @@ def _find_agent_pid(agent_name: str) -> int | None:
     # try pgrep first
     try:
         result = subprocess.run(
-            ["pgrep", "-f", f"api_runner.*{agent_name}"],
+            ["pgrep", "-f", f"api_runner[^/]*[[:space:]]{agent_name}([^A-Za-z0-9_-]|$)"],
             capture_output=True, text=True, timeout=3,
         )
         if result.stdout.strip():

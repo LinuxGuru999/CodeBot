@@ -81,23 +81,21 @@ ALL_MODELS = [
 
 def get_pipeline_state(store: Any | None = None) -> dict[str, int]:
     """Get current pipeline state counts from TicketStore.
-    
+
+    O(1) via TicketStore.summary() which uses cached per-state counts,
+    instead of O(N*S) scanning of list_by_state per state.
+
     Args:
         store: Optional shared TicketStore instance for this tick. If supplied,
                used directly to avoid an extra tickets.json read/parse.
     """
     try:
-        from codebot.ticket_engine import TicketState
         from codebot.ticket_dispatcher import get_ticket_store
         _store = store if store is not None else get_ticket_store()
         if _store is None:
             return {}
-        counts: dict[str, int] = {}
-        for state in TicketState:
-            tickets = _store.list_by_state(state)
-            if tickets:
-                counts[state.value] = len(tickets)
-        return counts
+        # summary() returns cached _state_counts dict in O(1)
+        return _store.summary()
     except Exception:
         return {}
 
@@ -292,7 +290,8 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                 else:
                     if t.state == TicketState.IMPLEMENTING:
                         ts.transition(assigned_tid, TicketState.REVIEWING)
-                        ts.flush()
+                        # No flush() here — _queue_save() inside transition()
+                        # batches dirty writes via the background worker.
                         logger.info(f"Ticket {assigned_tid} -> REVIEWING (agent {bot.config.name} completed)")
             claims_dir = STATE_DIR / "claims"
             if base_role not in REVIEWER_ROLE_NAMES:
@@ -344,7 +343,8 @@ def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int, s
         current_state = ticket.state
         if current_state == TicketState.IMPLEMENTING:
             ts.transition(assigned_tid, TicketState.READY)
-            ts.flush()  # Ensure changes are written to disk immediately
+            # No flush() here — _queue_save() inside transition()
+            # batches dirty writes via the background worker.
             logger.info(f"Bot '{bot.config.name}' errored (exit {exit_code}), returning ticket {assigned_tid} to READY for retry")
         else:
             logger.warning(

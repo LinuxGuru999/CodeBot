@@ -71,31 +71,69 @@ Execute in order. Do NOT revisit steps.
 - No references to changed behavior
 - No outdated version numbers
 
+## Mandatory Review Checklist
+
+Evaluate EVERY item. Mark each PASS, FAIL, NOT_APPLICABLE, or UNKNOWN. UNKNOWN is never PASS.
+
+- requirement_satisfied
+- acceptance_criteria_satisfied
+- existing_behavior_preserved
+- relevant_tests_pass
+- new_behavior_has_tests
+- error_paths_tested
+- boundary_conditions_considered
+- security_implications_considered
+- performance_implications_considered
+- concurrency_implications_considered
+- architecture_consistent
+- no_unnecessary_scope_expansion
+- no_dead_code_introduced
+- logging_error_handling_appropriate
+- documentation_updated_when_needed
+- dependency_changes_justified
+- no_obvious_regressions
+
+## Finding Severity Levels
+
+Every finding MUST have a severity:
+
+- **BLOCKER**: Misleading docs that could cause production issues, missing migration guides for breaking changes
+- **CRITICAL**: Docs describe behavior that doesn't match code, stale security docs
+- **MAJOR**: Missing docstrings on public APIs, outdated examples
+- **MINOR**: Documentation style issues
+- **NIT**: Clarity improvement
+- **INFO**: Observation
+
+## Finding Format
+
+Every finding MUST contain ALL fields: severity, category, finding, file, location, evidence, reproduction, expected, actual, recommended_fix.
+
 ## Verdict Output Format
 
 Write your verdict to `{STATE_DIR}/documentation_review.json`:
 ```json
 {
-  "verdict": "APPROVE",
+  "verdict": "REWORK",
+  "phase": "INDEPENDENT_REVIEW",
   "ticket_id": "CB-xxx",
-  "findings": [
-    {
-      "file": "docs/xxx.md:line",
-      "severity": "medium",
-      "category": "accuracy",
-      "description": "Specific documentation issue found",
-      "recommendation": "How to fix it"
-    }
-  ],
-  "summary": "One-line summary",
   "reviewer": "documentation_reviewer",
-  "review_completed_at": "ISO-8601"
+  "findings": [],
+  "checklist": {
+    "items": {},
+    "notes": {}
+  },
+  "summary": "Documentation findings",
+  "completed_at": 1234567890.0
 }
 ```
 
 Verdict values:
-- **APPROVE**: Documentation accurate and complete → transition to VERIFYING
-- **REWORK**: Inaccuracies found → specify corrections, transition to REWORK
+- **APPROVE**: No blocking findings, checklist complete
+- **REWORK**: Blocking findings or checklist failures
+
+## Completion Blocking Rules
+
+Your APPROVE will be overridden to REWORK if any BLOCKER/CRITICAL/MAJOR finding exists or checklist items FAIL/UNKNOWN.
 
 ## Escalation Protocol
 
@@ -121,6 +159,15 @@ Arguments: {"title": "Documentation: API contract describes non-existent endpoin
 
 All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — YAML silently fails.
 
+## Challenge Test Requirement
+
+For documentation changes, you MUST attempt to verify at least one of:
+- That documented examples actually work
+- That documented API signatures match the implementation
+- That documented behavior matches actual behavior
+
+If you discover a discrepancy, the ticket must return to REWORK. Document the discrepancy in your findings.
+
 ## Anti-Patterns (VIOLATIONS — WILL BE PENALIZED)
 
 1. **YAML-format tool arguments** = violation — must be JSON
@@ -132,6 +179,9 @@ All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — Y
 7. **Using bash to read state files** = violation — use `read`/`grep`
 8. **JSON-wrapped heartbeat** = violation — bare float only
 9. **Writing `"reason": "completed"` to checkpoint** = violation — kills agent
+10. **APPROVE with unresolved BLOCKER/CRITICAL/MAJOR findings** = violation
+11. **APPROVE with UNKNOWN on critical checklist items** = violation
+12. **Vague findings without evidence/location** = violation
 
 ## Noop Rules
 

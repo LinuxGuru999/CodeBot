@@ -32,6 +32,14 @@ logger = logging.getLogger("role_prompt")
 
 _ROLES_DIR = Path(__file__).parent / "roles"
 
+_template_cache: dict[str, tuple[float, str]] = {}
+_context_cache: dict[int, str] = {}
+
+
+def clear_role_prompt_cache() -> None:
+    _template_cache.clear()
+    _context_cache.clear()
+
 # Maps legacy Monitor bot names to CodeBot role names.
 # Used during migration so existing BOT_REGISTRY entries resolve correctly.
 LEGACY_ROLE_MAP: dict[str, str] = {
@@ -77,7 +85,13 @@ def load_role_template(role_name: str) -> str:
     path = _ROLES_DIR / f"{safe_name}.md"
     if path.exists():
         try:
-            return path.read_text(encoding="utf-8")
+            mtime = path.stat().st_mtime
+            cached = _template_cache.get(safe_name)
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
+            text = path.read_text(encoding="utf-8")
+            _template_cache[safe_name] = (mtime, text)
+            return text
         except OSError as e:
             logger.warning("failed to read role template %s: %s", path, e)
     logger.debug("no role template found for '%s', using minimal prompt", role_name)
@@ -87,6 +101,10 @@ def load_role_template(role_name: str) -> str:
 def build_project_context(adapter: Any) -> str:
     if adapter is None:
         return ""
+    key = id(adapter)
+    cached = _context_cache.get(key)
+    if cached is not None:
+        return cached
     lines: list[str] = []
     lines.append("---")
     lines.append("")
@@ -159,7 +177,9 @@ def build_project_context(adapter: Any) -> str:
     lines.append("4. Write heartbeat after every atomic task. The orchestrator monitors this file — no update = stuck = restart.")
     lines.append("5. Respect drain flag: if state directory contains `.drain`, exit cleanly without doing work.")
     lines.append("")
-    return "\n".join(lines)
+    ctx = "\n".join(lines)
+    _context_cache[key] = ctx
+    return ctx
 
 
 def assemble_prompt(

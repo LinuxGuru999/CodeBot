@@ -8,10 +8,12 @@ Covers:
 - Normal-sized error responses work correctly
 - Oversized error responses are truncated without memory exhaustion
 - No unbounded .read() calls exist in the source code
+- Per-read deadline enforcement (slow-trickle attack prevention)
 """
 import json
 import os
 import sys
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 import urllib.error
@@ -141,6 +143,58 @@ class TestApiRunnerBoundedIO(unittest.TestCase):
                 # Argument should not be empty
                 self.assertTrue(len(arg) > 0, 
                     f"Found potentially unbounded read call: {call}")
+
+
+    def test_slow_trickle_read_aborts(self):
+        """Slow-trickle attack: server sends 1 byte every few seconds.
+
+        The deadline check should abort the read before the full timeout expires,
+        raising URLError with 'API read deadline exceeded'.
+        """
+        import time as time_module
+        from codebot.api_runner import _call_api, API_TIMEOUT
+
+        call_count = [0]
+
+        class SlowTrickleResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, size=-1):
+                call_count[0] += 1
+                if call_count[0] <= 3:
+                    return b'x'
+                return b''
+
+        with patch('urllib.request.urlopen') as mock_urlopen:
+            mock_resp = SlowTrickleResponse()
+            mock_urlopen.return_value.__enter__ = lambda self: mock_resp
+            mock_urlopen.return_value.__exit__ = lambda self, *args: None
+
+            original_monotonic = time_module.monotonic
+            monotonic_calls = [0]
+            base_time = 1000.0
+
+            def fake_monotonic():
+                monotonic_calls[0] += 1
+                if monotonic_calls[0] <= 2:
+                    return base_time
+                else:
+                    return base_time + 2.0
+
+            with patch('time.monotonic', side_effect=fake_monotonic):
+                with self.assertRaises(urllib.error.URLError) as ctx:
+                    _call_api(
+                        messages=[{"role": "user", "content": "test"}],
+                        model="test-model",
+                        api_key="test-key",
+                        timeout=1
+                    )
+
+                self.assertIn('API read deadline exceeded', str(ctx.exception))
 
 
 if __name__ == "__main__":

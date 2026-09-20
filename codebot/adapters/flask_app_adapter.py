@@ -242,3 +242,11 @@ class FlaskAppAdapter(ProjectAdapter):
         if not req_file.exists():
             errors.append("requirements.txt missing")
         return errors
+
+    def queue_depth(self) -> int:
+        """FlaskApp adapter stub — no TicketStore access."""
+        return 0
+
+    def ticket_class_counts(self) -> dict[str, int]:
+        """FlaskApp adapter stub — no TicketStore access."""
+        return {}

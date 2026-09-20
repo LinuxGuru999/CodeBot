@@ -138,3 +138,13 @@ class ProjectAdapter(ABC):
     @abstractmethod
     def validate_project(self) -> list[str]:
         ...
+
+    @abstractmethod
+    def queue_depth(self) -> int:
+        """Return the number of actionable items in the project queue."""
+        ...
+
+    @abstractmethod
+    def ticket_class_counts(self) -> dict[str, int]:
+        """Return counts of tickets grouped by ticket class."""
+        ...

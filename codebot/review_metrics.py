@@ -206,6 +206,119 @@ def get_gatekeeper_stats() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Post-completion audit sampling
+# ---------------------------------------------------------------------------
+
+def select_tickets_for_audit(
+    completed_ticket_ids: list[str],
+    audit_percentage: int,
+    risk_scores: dict[str, int] | None = None,
+) -> list[str]:
+    """Select tickets for post-completion audit via risk-weighted sampling.
+
+    Higher-risk completions are more likely to be audited. Returns the
+    subset of ticket IDs that should be re-reviewed.
+    """
+    import random
+
+    if not completed_ticket_ids or audit_percentage <= 0:
+        return []
+
+    target_count = max(1, len(completed_ticket_ids) * audit_percentage // 100)
+    target_count = min(target_count, len(completed_ticket_ids))
+
+    if risk_scores is None:
+        return random.sample(completed_ticket_ids, target_count)
+
+    weights = [float(risk_scores.get(tid, 50)) + 1.0 for tid in completed_ticket_ids]
+    selected: list[str] = []
+    remaining = list(completed_ticket_ids)
+    remaining_weights = list(weights)
+
+    for _ in range(target_count):
+        if not remaining:
+            break
+        total_w = sum(remaining_weights)
+        r = random.uniform(0, total_w)
+        cumulative = 0.0
+        chosen_idx = len(remaining) - 1
+        for i, w in enumerate(remaining_weights):
+            cumulative += w
+            if r <= cumulative:
+                chosen_idx = i
+                break
+        selected.append(remaining[chosen_idx])
+        remaining.pop(chosen_idx)
+        remaining_weights.pop(chosen_idx)
+
+    return selected
+
+
+def record_audit_result(
+    ticket_id: str,
+    auditor: str,
+    verdict: str,
+    findings_count: int = 0,
+    blocking_count: int = 0,
+    reopened: bool = False,
+) -> None:
+    """Record the outcome of a post-completion audit."""
+    state_dir = _resolve_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "audit_results.jsonl"
+    record = {
+        "ts": time.time(),
+        "ticket_id": ticket_id,
+        "auditor": auditor,
+        "verdict": verdict,
+        "findings_count": findings_count,
+        "blocking_count": blocking_count,
+        "reopened": reopened,
+    }
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def get_audit_stats() -> dict[str, Any]:
+    """Aggregate post-completion audit statistics."""
+    state_dir = _resolve_state_dir()
+    path = state_dir / "audit_results.jsonl"
+    if not path.exists():
+        return {}
+    total = 0
+    reopened_count = 0
+    total_findings = 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    total += 1
+                    if rec.get("reopened"):
+                        reopened_count += 1
+                    total_findings += rec.get("findings_count", 0)
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return {}
+    if total == 0:
+        return {}
+    return {
+        "total_audits": total,
+        "reopened_count": reopened_count,
+        "reopen_rate": round(reopened_count / total, 3),
+        "findings_per_audit": round(total_findings / total, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Quality health alerts
+# ---------------------------------------------------------------------------
+
 def check_quality_health() -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
     gk = get_gatekeeper_stats()
@@ -236,5 +349,15 @@ def check_quality_health() -> list[dict[str, str]]:
                 "rule": "HIGH_ESCAPED_DEFECTS",
                 "severity": "critical",
                 "message": f"{count} escaped defects recorded — review system may be failing",
+            })
+    audit = get_audit_stats()
+    if audit:
+        reopen_rate = audit.get("reopen_rate", 0)
+        total_audits = audit.get("total_audits", 0)
+        if total_audits >= 20 and reopen_rate >= 0.15:
+            alerts.append({
+                "rule": "HIGH_AUDIT_REOPEN_RATE",
+                "severity": "critical",
+                "message": f"Post-completion audit reopen_rate={reopen_rate:.1%} over {total_audits} audits — false completions likely",
             })
     return alerts

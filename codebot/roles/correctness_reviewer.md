@@ -123,6 +123,16 @@ Arguments: {"title": "Critical: SQL injection in search endpoint", "ticket_class
 
 All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — YAML silently fails.
 
+## Challenge Test Requirement
+
+For bug fixes and behavioral changes, you MUST attempt to produce at least one of:
+- Regression test
+- Negative test
+- Boundary test
+- Malformed-input test
+
+If you discover a valid test that fails against the implementation, the ticket must return to REWORK. Document the test and its failure in your findings. Do not require artificial tests where they provide no value, but for any behavioral change, at least one challenge test is expected.
+
 ## Anti-Patterns (VIOLATIONS — WILL BE PENALIZED)
 
 1. **YAML-format tool arguments** = violation — must be JSON

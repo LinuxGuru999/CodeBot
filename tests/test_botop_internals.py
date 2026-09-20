@@ -158,22 +158,70 @@ def test_collect_agents_paused_bucket(tmp_path):
     state_dir.mkdir(parents=True)
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
-    
+
     now = time.time()
-    # Create heartbeat and paused file
     hb_path = state_dir / "paused_agent.heartbeat"
-    hb_path.write_text(str(now - 30))  # Recent heartbeat
+    hb_path.write_text(str(now - 30))
     paused_path = state_dir / "paused_agent.paused"
     paused_path.write_text(str(now))
-    
+
     with patch('codebot.botop._find_state_dir', return_value=state_dir):
         with patch('codebot.botop._find_logs_dir', return_value=logs_dir):
             with patch('codebot.botop._find_all_api_pids', return_value={}):
-                agents = _collect_agents(tmp_path)
-                assert len(agents) == 1
-                assert agents[0]["name"] == "paused_agent"
-                assert agents[0]["bucket"] == "PAUSED"
-                assert agents[0]["paused"] is True
+                with patch('codebot.botop._find_agent_pid', side_effect=AssertionError("no per-agent scan")):
+                    agents = _collect_agents(tmp_path)
+                    assert len(agents) == 1
+                    assert agents[0]["name"] == "paused_agent"
+                    assert agents[0]["bucket"] == "PAUSED"
+                    assert agents[0]["paused"] is True
+
+
+def test_collect_agents_uses_bulk_pid_scan_only(tmp_path):
+    from codebot import botop as botop_mod
+    now = time.time()
+    state_dir = tmp_path / ".codebot" / "state"
+    state_dir.mkdir(parents=True)
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    for i in range(5):
+        (state_dir / f"dead_agent_{i}.heartbeat").write_text(str(now - 3600))
+
+    with patch.object(botop_mod, '_find_state_dir', return_value=state_dir):
+        with patch.object(botop_mod, '_find_logs_dir', return_value=logs_dir):
+            with patch.object(botop_mod, '_find_all_api_pids', return_value={"dead_agent_0": 1234}) as bulk:
+                with patch.object(botop_mod, '_find_agent_pid', side_effect=AssertionError("per-agent fallback")) as single:
+                    agents = botop_mod._collect_agents(tmp_path)
+                    assert len(agents) == 5
+                    assert bulk.call_count == 1
+                    assert single.call_count == 0
+                    by_name = {a["name"]: a for a in agents}
+                    assert by_name["dead_agent_0"]["pid"] == 1234
+                    assert by_name["dead_agent_0"]["running"] is True
+                    for i in range(1, 5):
+                        assert by_name[f"dead_agent_{i}"]["pid"] is None
+                        assert by_name[f"dead_agent_{i}"]["running"] is False
+
+
+def test_find_all_api_pids_parses_all_spawn_forms():
+    from codebot import botop as botop_mod
+    ps_output = (
+        "  1001 /usr/bin/python3 -m codebot.api_runner decomposer-2 model /hb /ckpt /mission fb 0 \n"
+        "  1002 /usr/bin/python3 -m codebot.api_runner --bot decomposer-3 --prompt roles/decomposer.md\n"
+        "  1003 /usr/bin/python3 /repo/bots/api_runner.py reviewer-1 --bot reviewer-1\n"
+    )
+    with patch.object(botop_mod.subprocess, 'check_output', return_value=ps_output):
+        pid_map = botop_mod._find_all_api_pids()
+    assert pid_map == {"decomposer-2": 1001, "decomposer-3": 1002, "reviewer-1": 1003}
+
+
+def test_find_agent_pid_matches_exact_name_only():
+    from codebot import botop as botop_mod
+    ps_output = "  2001 /usr/bin/python3 -m codebot.api_runner decomposer-25 model\n"
+    with patch.object(botop_mod.subprocess, 'run') as run_mock:
+        run_mock.return_value.stdout = ""
+        run_mock.return_value.returncode = 1
+        with patch.object(botop_mod.subprocess, 'check_output', return_value=ps_output):
+            assert botop_mod._find_agent_pid("decomposer-2") is None
 
 
 # ---------------------------------------------------------------------------

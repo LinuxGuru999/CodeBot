@@ -457,15 +457,25 @@ def get_role(name: str, ticket_id: str | None = None) -> AgentRole | None:
         AgentRole if found, None otherwise
     """
     try:
-        return ROLE_REGISTRY.get(name)
+        role = ROLE_REGISTRY.get(name)
+        if role is None:
+            context = {"role_name": name}
+            if ticket_id:
+                context["ticket_id"] = ticket_id
+            logger.warning(
+                "Role not found: role_name=%s, ticket_id=%s",
+                name,
+                ticket_id
+            )
+        return role
     except Exception as e:
         context = {"role_name": name}
         if ticket_id:
             context["ticket_id"] = ticket_id
         logger.error(
-            "Role lookup failed: %s(%s) - %s: %s\nTraceback:\n%s",
-            type(e).__name__,
-            context,
+            "Role lookup failed: role_name=%s, ticket_id=%s, exception_type=%s, message=%s\nTraceback:\n%s",
+            name,
+            ticket_id,
             type(e).__name__,
             str(e),
             traceback.format_exc()
@@ -488,6 +498,18 @@ def find_adversarial_reviewers(implementer_role: str, ticket_id: str | None = No
         List of adversarial reviewer roles, empty list on error
     """
     try:
+        # Check if the implementer role exists first
+        if implementer_role not in ROLE_REGISTRY:
+            context = {"implementer_role": implementer_role}
+            if ticket_id:
+                context["ticket_id"] = ticket_id
+            logger.warning(
+                "Implementer role not found for adversarial lookup: implementer_role=%s, ticket_id=%s",
+                implementer_role,
+                ticket_id
+            )
+            return []
+        
         reviewers = []
         for role in REVIEW_ROLES:
             if implementer_role in role.adversarial_to:
@@ -498,9 +520,9 @@ def find_adversarial_reviewers(implementer_role: str, ticket_id: str | None = No
         if ticket_id:
             context["ticket_id"] = ticket_id
         logger.error(
-            "Finding adversarial reviewers failed: %s(%s) - %s: %s\nTraceback:\n%s",
-            type(e).__name__,
-            context,
+            "Finding adversarial reviewers failed: implementer_role=%s, ticket_id=%s, exception_type=%s, message=%s\nTraceback:\n%s",
+            implementer_role,
+            ticket_id,
             type(e).__name__,
             str(e),
             traceback.format_exc()

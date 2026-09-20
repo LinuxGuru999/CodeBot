@@ -74,7 +74,11 @@ def check_code_changes(
     stop_bot_fn: Any,
 ) -> None:
     """Check for code changes in orchestrator package and respawn affected bots.
-    
+
+    Uses O(M+B) complexity:
+    - O(M) to compute the set of changed modules via set intersection
+    - O(B) to iterate bots once and stop active ones
+
     Args:
         bots: Dictionary of bot states
         pkg_dir: Package directory to monitor
@@ -83,15 +87,21 @@ def check_code_changes(
     current_mtimes = get_code_mtimes(pkg_dir)
     if not current_mtimes:
         return
-    
-    changed_modules: list[str] = []
-    for mod_name, mtime in current_mtimes.items():
-        for bot in bots.values():
-            prev = bot.last_code_mtimes.get(mod_name, 0.0)
-            if prev > 0 and mtime > prev:
-                changed_modules.append(mod_name)
-                break
-    
+
+    # Merge all bot baselines into one dict for O(1) lookups per module
+    merged_baseline: Dict[str, float] = {}
+    for bot in bots.values():
+        for mod, mt in bot.last_code_mtimes.items():
+            if mod not in merged_baseline or mt > merged_baseline[mod]:
+                merged_baseline[mod] = mt
+
+    # O(M) — compute changed modules set via set comprehension
+    changed_modules: set[str] = {
+        mod_name
+        for mod_name, mtime in current_mtimes.items()
+        if merged_baseline.get(mod_name, 0.0) > 0 and mtime > merged_baseline[mod_name]
+    }
+
     if not changed_modules:
         for bot in bots.values():
             if not bot.last_code_mtimes:
@@ -99,10 +109,11 @@ def check_code_changes(
             else:
                 bot.last_code_mtimes.update(current_mtimes)
         return
-    
-    unique_changed = sorted(set(changed_modules))
+
+    unique_changed = sorted(changed_modules)
     logger.info(f"Code change detected in {unique_changed} — respawning active bots")
-    
+
+    # O(B) — iterate bots once to stop active ones
     for name, bot in bots.items():
         if not bot.config.enabled:
             continue

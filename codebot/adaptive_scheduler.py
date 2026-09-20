@@ -308,6 +308,30 @@ class AdaptiveScheduler:
         )
         assignments.extend(plan_assign)
 
+        # --- Economic throttling (budget health signals) ---
+        # Compute burn rates from pipeline state + cost config
+        _hs = getattr(pipeline, 'hourly_spend_usd', 0.0)
+        _ds = getattr(pipeline, 'daily_spend_usd', 0.0)
+        _hl = self.config.cost.hourly_limit_usd
+        _dl = self.config.cost.daily_limit_usd
+        _hourly_burn = (_hs / _hl) if _hl > 0 else 0.0
+        _daily_burn = (_ds / _dl) if _dl > 0 else 0.0
+
+        # Severe: budget exhausted or daily burn >= 0.9 — zero discovery, halve impl
+        if pipeline.budget_exhausted or _daily_burn >= 0.9:
+            reasons.append(
+                f"budget throttled: economics burn rate daily={_daily_burn:.2f} hourly={_hourly_burn:.2f} state=severe"
+            )
+            impl_budget = max(0, impl_budget // 2)
+            free_slots = 0  # No discovery slots
+        # Warning: budget_warning or hourly burn >= 0.8 — halve discovery
+        elif getattr(pipeline, 'budget_warning', False) or _hourly_burn >= 0.8:
+            reasons.append(
+                f"budget throttled: economics burn rate daily={_daily_burn:.2f} hourly={_hourly_burn:.2f} state=warning"
+            )
+            impl_budget = max(0, impl_budget - max(0, impl_budget // 4))  # Reduce impl by 25%
+            free_slots = max(0, free_slots // 2)  # Halve discovery slots
+
         # STEP 4 & 5: Discovery fill with diversity (§8, §9)
         if free_slots > 0:
             disc_alloc = self.discovery.compute_allocation(

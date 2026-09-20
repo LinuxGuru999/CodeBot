@@ -378,3 +378,276 @@ class TestMetricsSaveLoad:
         assert c.was_rework is True
         assert c.was_productive is False
         assert c.cost_tokens == 999
+
+
+class TestSchedulerMetricsEconomics:
+    """Tests for economics fields in SchedulerMetrics."""
+
+    def test_economics_fields_defaults(self):
+        """SchedulerMetrics defaults expose economics with zero burn rates and ok budget_state."""
+        m = SchedulerMetrics()
+        assert m.budget_state == "ok"
+        assert m.budget_exhausted is False
+        assert m.budget_warning is False
+        assert m.hourly_spend_usd == 0.0
+        assert m.daily_spend_usd == 0.0
+        assert m.hourly_limit_usd == 10.0
+        assert m.daily_limit_usd == 100.0
+        assert m.hourly_burn_rate == 0.0
+        assert m.daily_burn_rate == 0.0
+        assert m.remaining_hourly_usd == 10.0
+        assert m.remaining_daily_usd == 100.0
+
+    def test_frozen_economics(self):
+        """Economics fields are also frozen."""
+        m = SchedulerMetrics()
+        with pytest.raises((AttributeError, TypeError)):
+            m.budget_state = "warn"  # type: ignore[misc]
+
+    def test_summary_includes_economics(self):
+        """summary() contains economics section with burn rates and remaining budget."""
+        m = SchedulerMetrics(
+            budget_state="warn",
+            budget_warning=True,
+            hourly_spend_usd=8.5,
+            daily_spend_usd=85.0,
+            hourly_limit_usd=10.0,
+            daily_limit_usd=100.0,
+            hourly_burn_rate=0.85,
+            daily_burn_rate=0.85,
+            remaining_hourly_usd=1.5,
+            remaining_daily_usd=15.0,
+        )
+        s = m.summary()
+        assert "economics" in s
+        econ = s["economics"]
+        assert econ["budget_state"] == "warn"
+        assert econ["budget_warning"] is True
+        assert econ["hourly_burn_rate"] == 0.85
+        assert econ["daily_burn_rate"] == 0.85
+        assert econ["remaining_hourly_usd"] == 1.5
+        assert econ["remaining_daily_usd"] == 15.0
+
+
+class TestMetricsBuildEconomics:
+    """Tests for MetricsAccumulator.build() economics computation."""
+
+    def test_build_populates_economics_from_pipeline_state(self):
+        """build() copies hourly_spend_usd/daily_spend_usd/budget_* from PipelineState."""
+        acc = MetricsAccumulator()
+        ps = PipelineState(
+            hourly_spend_usd=8.0,
+            daily_spend_usd=80.0,
+            budget_warning=True,
+        )
+        m = acc.build(ps)
+        assert m.hourly_spend_usd == 8.0
+        assert m.daily_spend_usd == 80.0
+        assert m.budget_warning is True
+        assert m.hourly_burn_rate == pytest.approx(0.8)
+        assert m.daily_burn_rate == pytest.approx(0.8)
+        assert m.budget_state == "warn"
+
+    def test_build_with_cost_config(self):
+        """build() uses CostConfig limits for burn rate computation."""
+        from codebot.scheduler_config import CostConfig
+        acc = MetricsAccumulator()
+        cc = CostConfig(hourly_limit_usd=10.0, daily_limit_usd=100.0)
+        ps = PipelineState(hourly_spend_usd=9.5, daily_spend_usd=95.0, budget_warning=True)
+        m = acc.build(ps, cost_config=cc)
+        assert m.hourly_burn_rate == pytest.approx(0.95)
+        assert m.daily_burn_rate == pytest.approx(0.95)
+        assert m.remaining_hourly_usd == pytest.approx(0.5)
+        assert m.remaining_daily_usd == pytest.approx(5.0)
+
+    def test_build_with_scheduler_config(self):
+        """build() also accepts SchedulerConfig (with nested CostConfig)."""
+        from codebot.scheduler_config import SchedulerConfig
+        acc = MetricsAccumulator()
+        sc = SchedulerConfig.default()
+        ps = PipelineState(hourly_spend_usd=5.0, daily_spend_usd=50.0)
+        m = acc.build(ps, cost_config=sc)
+        assert m.hourly_burn_rate == pytest.approx(0.5)
+        assert m.daily_burn_rate == pytest.approx(0.5)
+        assert m.hourly_limit_usd == 10.0
+        assert m.daily_limit_usd == 100.0
+
+    def test_budget_exhausted_yields_stop(self):
+        """budget_exhausted => budget_state=stop."""
+        acc = MetricsAccumulator()
+        ps = PipelineState(budget_exhausted=True)
+        m = acc.build(ps)
+        assert m.budget_state == "stop"
+        assert m.budget_exhausted is True
+
+    def test_high_daily_burn_yields_shed_tier3(self):
+        """daily_burn_rate >= 0.9 => budget_state=shed_tier3."""
+        acc = MetricsAccumulator()
+        ps = PipelineState(daily_spend_usd=95.0)  # 95/100 = 0.95
+        m = acc.build(ps)
+        assert m.budget_state == "shed_tier3"
+
+    def test_zero_limits_no_divide_by_zero(self):
+        """Zero limits guard: burn rate = 0, remaining = 0, no crash."""
+        acc = MetricsAccumulator()
+        # Create a cost_config with effectively zero limits
+        from codebot.scheduler_config import CostConfig
+        cc = CostConfig(hourly_limit_usd=10.0, daily_limit_usd=100.0)
+        ps = PipelineState(hourly_spend_usd=0.0, daily_spend_usd=0.0)
+        m = acc.build(ps, cost_config=cc)
+        assert m.hourly_burn_rate == 0.0
+        assert m.daily_burn_rate == 0.0
+        assert m.remaining_hourly_usd == 10.0
+        assert m.remaining_daily_usd == 100.0
+
+    def test_spend_exceeds_limit(self):
+        """Spend exceeding limits: burn_rate > 1.0, remaining clamped to 0."""
+        acc = MetricsAccumulator()
+        from codebot.scheduler_config import CostConfig
+        cc = CostConfig(hourly_limit_usd=10.0, daily_limit_usd=100.0)
+        ps = PipelineState(hourly_spend_usd=15.0, daily_spend_usd=150.0)
+        m = acc.build(ps, cost_config=cc)
+        assert m.hourly_burn_rate == pytest.approx(1.5)
+        assert m.daily_burn_rate == pytest.approx(1.5)
+        assert m.remaining_hourly_usd == 0.0
+        assert m.remaining_daily_usd == 0.0
+
+    def test_missing_budget_fields_on_pipeline_state(self):
+        """Old PipelineState without budget fields => defaults (getattr fallback)."""
+        acc = MetricsAccumulator()
+
+        class OldPipelineState:
+            active_count = 0
+            total_slots = 30
+            active_workers = ()
+            reviewing_count = 0
+            def active_by_role(self):
+                return {}
+
+        ps = OldPipelineState()
+        m = acc.build(ps)
+        assert m.hourly_spend_usd == 0.0
+        assert m.daily_spend_usd == 0.0
+        assert m.budget_exhausted is False
+        assert m.budget_warning is False
+        assert m.budget_state == "ok"
+
+    def test_build_no_cost_config_defaults(self):
+        """When no cost_config is provided, default limits (10/100) are used."""
+        acc = MetricsAccumulator()
+        ps = PipelineState(hourly_spend_usd=5.0, daily_spend_usd=50.0)
+        m = acc.build(ps)
+        assert m.hourly_burn_rate == pytest.approx(0.5)
+        assert m.daily_burn_rate == pytest.approx(0.5)
+        assert m.hourly_limit_usd == 10.0
+        assert m.daily_limit_usd == 100.0
+
+    def test_existing_metrics_structure_unchanged(self):
+        """Existing summary keys still present alongside economics."""
+        m = SchedulerMetrics(slots_total=30, slots_active=5)
+        s = m.summary()
+        assert "slots" in s
+        assert "queues" in s
+        assert "throughput" in s
+        assert "quality" in s
+        assert "discovery" in s
+        assert "cost" in s
+        assert "economics" in s
+        assert "mode" in s
+        assert "timestamp" in s
+
+    def test_existing_build_signature_unchanged(self):
+        """Existing call to build(pipeline_state) without cost_config still works."""
+        acc = MetricsAccumulator()
+        ps = FakePipelineState(active_count=5, total_slots=30)
+        m = acc.build(ps)
+        assert m.slots_total == 30
+        assert m.slot_utilization == pytest.approx(round(5 / 30, 4))
+
+
+class TestSchedulerBudgetThrottling:
+    """Tests for adaptive scheduler economic throttling behavior."""
+
+    def _make_scheduler(self):
+        from codebot.adaptive_scheduler import AdaptiveScheduler
+        from codebot.scheduler_config import SchedulerConfig
+        return AdaptiveScheduler(config=SchedulerConfig.default())
+
+    def test_budget_exhausted_yields_budget_throttled(self):
+        """budget_exhausted => BUDGET_THROTTLED with zero assignments (existing behavior)."""
+        from codebot.adaptive_scheduler import AdaptiveScheduler
+        from codebot.scheduler_config import SchedulerConfig
+        s = AdaptiveScheduler(config=SchedulerConfig.default())
+        ps = PipelineState(
+            total_slots=30,
+            budget_exhausted=True,
+        )
+        d = s.tick(ps, [], [], [], [], [], [])
+        assert d.mode.value == "BUDGET_THROTTLED"
+        assert len(d.assignments) == 0
+
+    def test_budget_warning_halves_discovery(self):
+        """budget_warning => discovery allocation halved."""
+        from codebot.adaptive_scheduler import AdaptiveScheduler
+        from codebot.scheduler_config import SchedulerConfig
+        s = AdaptiveScheduler(config=SchedulerConfig.default())
+        # Create pipeline with budget warning and high hourly spend
+        ps = PipelineState(
+            total_slots=30,
+            budget_warning=True,
+            hourly_spend_usd=9.0,  # 0.9 burn rate
+            daily_spend_usd=50.0,
+        )
+        d = s.tick(ps, [], [], [], [], [], [])
+        # Check that reason mentions budget throttled
+        reasons_str = " ".join(d.reasons)
+        assert "budget throttled" in reasons_str
+
+    def test_high_burn_rate_throttles_discovery(self):
+        """hourly_burn_rate >= 0.8 => discovery throttled even without budget_warning flag."""
+        from codebot.adaptive_scheduler import AdaptiveScheduler
+        from codebot.scheduler_config import SchedulerConfig
+        s = AdaptiveScheduler(config=SchedulerConfig.default())
+        ps = PipelineState(
+            total_slots=30,
+            hourly_spend_usd=8.5,  # 0.85 burn rate
+            daily_spend_usd=50.0,
+            budget_warning=False,
+        )
+        d = s.tick(ps, [], [], [], [], [], [])
+        reasons_str = " ".join(d.reasons)
+        assert "budget throttled" in reasons_str
+
+    def test_daily_burn_90_severe_throttling(self):
+        """daily_burn_rate >= 0.9 => severe throttling (zero discovery)."""
+        from codebot.adaptive_scheduler import AdaptiveScheduler
+        from codebot.scheduler_config import SchedulerConfig
+        s = AdaptiveScheduler(config=SchedulerConfig.default())
+        ps = PipelineState(
+            total_slots=30,
+            hourly_spend_usd=5.0,
+            daily_spend_usd=95.0,  # 0.95 daily burn
+            budget_warning=False,
+        )
+        d = s.tick(ps, [], [], [], [], [], [])
+        reasons_str = " ".join(d.reasons)
+        assert "severe" in reasons_str
+        # No discovery assignments in severe mode
+        discovery_assigns = [a for a in d.assignments if "discovery" in a.role]
+        assert len(discovery_assigns) == 0
+
+    def test_no_throttling_when_budget_healthy(self):
+        """Low spend => no budget throttling reasons."""
+        from codebot.adaptive_scheduler import AdaptiveScheduler
+        from codebot.scheduler_config import SchedulerConfig
+        s = AdaptiveScheduler(config=SchedulerConfig.default())
+        ps = PipelineState(
+            total_slots=30,
+            hourly_spend_usd=2.0,  # 0.2 burn rate
+            daily_spend_usd=20.0,
+            budget_warning=False,
+            budget_exhausted=False,
+        )
+        d = s.tick(ps, [], [], [], [], [], [])
+        reasons_str = " ".join(d.reasons)
+        assert "budget throttled" not in reasons_str

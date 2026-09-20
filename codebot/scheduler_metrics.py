@@ -76,6 +76,19 @@ class SchedulerMetrics:
     slot_utilization: float = 0.0
     productive_slot_utilization: float = 0.0
 
+    # Economics (budget health)
+    budget_state: str = "ok"
+    budget_exhausted: bool = False
+    budget_warning: bool = False
+    hourly_spend_usd: float = 0.0
+    daily_spend_usd: float = 0.0
+    hourly_limit_usd: float = 10.0
+    daily_limit_usd: float = 100.0
+    hourly_burn_rate: float = 0.0
+    daily_burn_rate: float = 0.0
+    remaining_hourly_usd: float = 10.0
+    remaining_daily_usd: float = 100.0
+
     # Mode
     scheduler_mode: str = "BALANCED"
 
@@ -119,6 +132,19 @@ class SchedulerMetrics:
             "cost": {
                 "per_hour_usd": round(self.cost_per_hour_usd, 4),
                 "per_ticket_usd": round(self.cost_per_ticket_usd, 4),
+            },
+            "economics": {
+                "budget_state": self.budget_state,
+                "budget_exhausted": self.budget_exhausted,
+                "budget_warning": self.budget_warning,
+                "hourly_spend_usd": round(self.hourly_spend_usd, 4),
+                "daily_spend_usd": round(self.daily_spend_usd, 4),
+                "hourly_limit_usd": round(self.hourly_limit_usd, 4),
+                "daily_limit_usd": round(self.daily_limit_usd, 4),
+                "hourly_burn_rate": round(self.hourly_burn_rate, 4),
+                "daily_burn_rate": round(self.daily_burn_rate, 4),
+                "remaining_hourly_usd": round(self.remaining_hourly_usd, 4),
+                "remaining_daily_usd": round(self.remaining_daily_usd, 4),
             },
             "mode": self.scheduler_mode,
             "timestamp": self.timestamp,
@@ -201,8 +227,16 @@ class MetricsAccumulator:
         pipeline_state: Any,
         scheduler_mode: str = "BALANCED",
         now: float | None = None,
+        cost_config: Any | None = None,
     ) -> SchedulerMetrics:
-        """Compute a frozen metrics snapshot from accumulated data."""
+        """Compute a frozen metrics snapshot from accumulated data.
+
+        Args:
+            pipeline_state: PipelineState (or compatible) with budget fields.
+            scheduler_mode: Current scheduler mode string.
+            now: Optional timestamp override.
+            cost_config: Optional CostConfig (or SchedulerConfig) with hourly/daily USD limits.
+        """
         now = now or time.time()
         ps = pipeline_state
 
@@ -281,6 +315,44 @@ class MetricsAccumulator:
 
         slots_by_role = ps.active_by_role() if hasattr(ps, 'active_by_role') else {}
 
+        # --- Economics / budget health ---
+        # Extract spend from pipeline state
+        hourly_spend = getattr(ps, 'hourly_spend_usd', 0.0)
+        daily_spend = getattr(ps, 'daily_spend_usd', 0.0)
+        budget_exhausted = getattr(ps, 'budget_exhausted', False)
+        budget_warning = getattr(ps, 'budget_warning', False)
+
+        # Extract limits from cost_config (CostConfig or SchedulerConfig)
+        hourly_limit = 10.0
+        daily_limit = 100.0
+        if cost_config is not None:
+            if hasattr(cost_config, 'cost'):
+                # It's a SchedulerConfig — access nested CostConfig
+                hourly_limit = getattr(cost_config.cost, 'hourly_limit_usd', hourly_limit)
+                daily_limit = getattr(cost_config.cost, 'daily_limit_usd', daily_limit)
+            else:
+                hourly_limit = getattr(cost_config, 'hourly_limit_usd', hourly_limit)
+                daily_limit = getattr(cost_config, 'daily_limit_usd', daily_limit)
+
+        # Compute burn rates (guard divide-by-zero)
+        hourly_burn_rate = (hourly_spend / hourly_limit) if hourly_limit > 0 else 0.0
+        daily_burn_rate = (daily_spend / daily_limit) if daily_limit > 0 else 0.0
+
+        # Remaining budget (clamp to non-negative)
+        remaining_hourly = max(0.0, hourly_limit - hourly_spend)
+        remaining_daily = max(0.0, daily_limit - daily_spend)
+
+        # Budget state: derive from burn rate if not already set by token_budget
+        if budget_exhausted:
+            budget_state = "stop"
+        elif budget_warning or daily_burn_rate >= 0.8:
+            if daily_burn_rate >= 0.9:
+                budget_state = "shed_tier3"
+            else:
+                budget_state = "warn"
+        else:
+            budget_state = "ok"
+
         return SchedulerMetrics(
             slots_total=total,
             slots_active=active,
@@ -307,6 +379,17 @@ class MetricsAccumulator:
             cost_per_ticket_usd=cost_per_ticket,
             slot_utilization=round(raw_util, 4),
             productive_slot_utilization=round(productive_util, 4),
+            budget_state=budget_state,
+            budget_exhausted=budget_exhausted,
+            budget_warning=budget_warning,
+            hourly_spend_usd=hourly_spend,
+            daily_spend_usd=daily_spend,
+            hourly_limit_usd=hourly_limit,
+            daily_limit_usd=daily_limit,
+            hourly_burn_rate=round(hourly_burn_rate, 4),
+            daily_burn_rate=round(daily_burn_rate, 4),
+            remaining_hourly_usd=round(remaining_hourly, 4),
+            remaining_daily_usd=round(remaining_daily, 4),
             scheduler_mode=scheduler_mode,
             timestamp=now,
         )

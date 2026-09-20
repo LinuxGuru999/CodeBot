@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Process Manager — Bot lifecycle and health monitoring.
+"""Process Manager — Bot lifecycle management.
 
 Purpose
 -------
-Manages bot subprocesses: start, stop, restart, health monitoring.
-Detects stuck agents via heartbeat files and auto-restarts them.
+Manages bot subprocesses: start, stop, restart.
+Delegates health monitoring to health_monitor module.
 
 Why
 ---
@@ -32,6 +32,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+from codebot.health_monitor import (
+    heartbeat_path, write_heartbeat, read_heartbeat, batch_read_heartbeats,
+    log_path, log_mtime, is_log_stalled, is_stuck, effective_heartbeat_timeout,
+)
+from codebot.model_manager import model_profile, ModelProfile, MODEL_PROFILES
 
 logger = logging.getLogger(__name__)
 
@@ -96,18 +102,18 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 class BotConfig:
     """Configuration for a single bot."""
     name: str
-    prompt_file: str          # Name of .md file in BOTS_DIR
-    interval_seconds: int     # Seconds between runs
-    heartbeat_timeout: int    # Seconds before considered stuck (2x interval)
-    model: str = "xiaomi-mimo-2.5"  # Model from opencode.jsonc
-    fallback_model: str = ""      # Fallback when primary model fails; empty = no fallback
+    prompt_file: str
+    interval_seconds: int
+    heartbeat_timeout: int
+    model: str = "xiaomi-mimo-2.5"
+    fallback_model: str = ""
     enabled: bool = True
-    max_restarts: int = 5     # Max restarts per hour
-    clean_exit_wait: bool = False  # True: after exit 0, wait interval_seconds before respawn
-    tier: int = 2             # Symphony tier: 1=core loop, 2=quality gates, 3=infrequent
-    runner_mode: str = "api"  # "api" = api_runner.run_bot subprocess
-    max_tokens_per_run: int = 0  # 0 = unlimited; per-run token cap enforced by api_runner
-    fallback_models: tuple[str, ...] = ()  # Ordered fallback chain beyond single fallback_model
+    max_restarts: int = 5
+    clean_exit_wait: bool = False
+    tier: int = 2
+    runner_mode: str = "api"
+    max_tokens_per_run: int = 0
+    fallback_models: tuple[str, ...] = ()
 
 
 @dataclass
@@ -125,216 +131,6 @@ class BotState:
     prompt_mtime: float = 0.0
     last_prompt_mtime: float = 0.0
     last_code_mtimes: dict[str, float] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Model Profiles for Lockup Detection
-# ---------------------------------------------------------------------------
-
-MODEL_TIER_CHEAP = frozenset({"xiaomi-mimo-2.5"})
-MODEL_TIER_EXPENSIVE = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
-
-@dataclass
-class ModelProfile:
-    """Lockup behaviour profile for a model provider."""
-    lockup_risk: str          # high | medium | low
-    heartbeat_multiplier: float  # effective_timeout = interval * multiplier
-    log_stall_seconds: int    # seconds log must be silent before suspicious
-    restart_cooldown: int     # seconds to wait before respawn after stuck
-    description: str
-
-MODEL_PROFILES: dict[str, ModelProfile] = {
-    "qwen-3.8-max-thinking": ModelProfile(
-        lockup_risk="high", heartbeat_multiplier=2.8, log_stall_seconds=280,
-        restart_cooldown=12, description="Newest deep reasoning; longest silent thinking",
-    ),
-    "qwen-3.7-max-thinking": ModelProfile(
-        lockup_risk="high", heartbeat_multiplier=2.5, log_stall_seconds=240,
-        restart_cooldown=10, description="Deep reasoning; silent thinking ~90s normal",
-    ),
-    "qwen-3.6-plus-thinking": ModelProfile(
-        lockup_risk="medium-high", heartbeat_multiplier=2.3, log_stall_seconds=210,
-        restart_cooldown=9, description="Plus thinking; moderate-deep reasoning",
-    ),
-    "qwen-3.5-plus-thinking": ModelProfile(
-        lockup_risk="medium-high", heartbeat_multiplier=2.2, log_stall_seconds=200,
-        restart_cooldown=8, description="Older thinking; slower, can stall",
-    ),
-    "qwen-3.8-max": ModelProfile(
-        lockup_risk="medium-high", heartbeat_multiplier=2.0, log_stall_seconds=180,
-        restart_cooldown=7, description="Strong code gen; can hang on large edits",
-    ),
-    "qwen-3.7-max": ModelProfile(
-        lockup_risk="medium", heartbeat_multiplier=1.9, log_stall_seconds=175,
-        restart_cooldown=30, description="Strong code gen; balanced performance",
-    ),
-    "qwen-3.7-plus": ModelProfile(
-        lockup_risk="medium", heartbeat_multiplier=1.9, log_stall_seconds=170,
-        restart_cooldown=6, description="Balanced plus; steady",
-    ),
-    "qwen-3.6-plus": ModelProfile(
-        lockup_risk="medium", heartbeat_multiplier=1.9, log_stall_seconds=165,
-        restart_cooldown=6, description="Balanced plus; steady on integration checks",
-    ),
-    "qwen-3.5-plus": ModelProfile(
-        lockup_risk="low-medium", heartbeat_multiplier=1.7, log_stall_seconds=140,
-        restart_cooldown=4, description="Older plus; fast, lightweight",
-    ),
-    "qwen-3.5-omni-plus": ModelProfile(
-        lockup_risk="low-medium", heartbeat_multiplier=1.7, log_stall_seconds=145,
-        restart_cooldown=4, description="Omni; holistic cross-check",
-    ),
-    "meta-muse-spark-1.3": ModelProfile(
-        lockup_risk="medium", heartbeat_multiplier=1.8, log_stall_seconds=150,
-        restart_cooldown=5, description="Creative; steady but can stall on broad scans",
-    ),
-    "meta-muse-spark-1.2": ModelProfile(
-        lockup_risk="low-medium", heartbeat_multiplier=1.8, log_stall_seconds=150,
-        restart_cooldown=5, description="Writing-heavy; generally fast",
-    ),
-    "xiaomi-mimo-2.5": ModelProfile(
-        lockup_risk="low", heartbeat_multiplier=1.5, log_stall_seconds=120,
-        restart_cooldown=3, description="Balanced/fast; fails quickly if it fails",
-    ),
-}
-
-
-def model_profile(model: str) -> ModelProfile | None:
-    """Return profile for model, or None if unknown."""
-    return MODEL_PROFILES.get(model)
-
-
-def effective_heartbeat_timeout(bot: BotState) -> int:
-    """Effective heartbeat timeout after applying model profile."""
-    prof = model_profile(bot.config.model)
-    if prof:
-        derived = int(bot.config.interval_seconds * prof.heartbeat_multiplier)
-        return max(derived, bot.config.heartbeat_timeout)
-    return bot.config.heartbeat_timeout
-
-
-# ---------------------------------------------------------------------------
-# Heartbeat Protocol
-# ---------------------------------------------------------------------------
-
-def heartbeat_path(bot_name: str) -> Path:
-    """Path to bot's heartbeat file."""
-    return STATE_DIR / f"{bot_name}.heartbeat"
-
-
-def write_heartbeat(bot_name: str) -> None:
-    """Write current timestamp as heartbeat."""
-    hb = heartbeat_path(bot_name)
-    hb.write_text(str(time.time()))
-
-
-def read_heartbeat(bot_name: str) -> float:
-    """Read bot's last heartbeat timestamp. Returns 0 if missing/stale/corrupt."""
-    hb = heartbeat_path(bot_name)
-    if not hb.exists():
-        return 0.0
-    txt = hb.read_text().strip()
-    try:
-        ts = float(txt)
-    except (ValueError, OSError):
-        pass
-    else:
-        return ts
-    try:
-        import datetime
-        token = txt.split()[0]
-        token = token.replace("Z", "+00:00")
-        dt = datetime.datetime.fromisoformat(token)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        ts = dt.timestamp()
-        now = time.time()
-        if ts > now + 60 or ts < now - 86400:
-            return 0.0
-        return ts
-    except Exception:
-        return 0.0
-
-
-def batch_read_heartbeats(bot_names: list[str]) -> dict[str, float]:
-    """Read heartbeat files for all bots in a single pass.
-
-    Returns {name: timestamp} where timestamp is the last heartbeat time.
-    Bots with missing/corrupt heartbeat files get 0.0.
-    """
-    results: dict[str, float] = {}
-    for name in bot_names:
-        hb = heartbeat_path(name)
-        if not hb.exists():
-            results[name] = 0.0
-            continue
-        txt = hb.read_text().strip()
-        ts = 0.0
-        try:
-            ts = float(txt)
-        except (ValueError, OSError):
-            try:
-                import datetime
-                token = txt.split()[0]
-                token = token.replace("Z", "+00:00")
-                dt = datetime.datetime.fromisoformat(token)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=datetime.timezone.utc)
-                ts = dt.timestamp()
-                now = time.time()
-                if ts > now + 60 or ts < now - 86400:
-                    ts = 0.0
-            except Exception:
-                ts = 0.0
-        results[name] = ts
-    return results
-
-
-def log_path(bot_name: str) -> Path:
-    return LOGS_DIR / f"{bot_name}.log"
-
-
-def log_mtime(bot_name: str) -> float:
-    """Return log file mtime."""
-    lp = log_path(bot_name)
-    try:
-        return lp.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def is_log_stalled(bot: BotState) -> bool:
-    prof = model_profile(bot.config.model)
-    stall = prof.log_stall_seconds if prof else 180
-    mtime = log_mtime(bot.config.name)
-    if mtime == 0.0:
-        return False
-    return (time.time() - mtime) > stall
-
-
-def is_stuck(bot: BotState, heartbeat_cache: dict[str, float] | None = None) -> bool:
-    eff = effective_heartbeat_timeout(bot)
-    if heartbeat_cache is not None and bot.config.name in heartbeat_cache:
-        last = heartbeat_cache[bot.config.name]
-    else:
-        last = read_heartbeat(bot.config.name)
-    if last == 0.0:
-        if bot.process and bot.process.poll() is None:
-            elapsed = time.time() - bot.last_heartbeat
-            if elapsed <= eff:
-                return False
-            return is_log_stalled(bot) or elapsed > eff + 120
-        return False
-    bot.last_heartbeat = last
-    hb_age = time.time() - last
-    if hb_age < 0:
-        hb_age = 0.0
-    if hb_age <= eff:
-        return False
-    prof = model_profile(bot.config.model)
-    if prof and prof.lockup_risk in ("high", "medium-high"):
-        return is_log_stalled(bot)
-    return True
 
 
 # ---------------------------------------------------------------------------

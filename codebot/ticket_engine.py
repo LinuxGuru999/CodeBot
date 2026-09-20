@@ -97,6 +97,18 @@ class RiskLevel(str, Enum):
 # Configurable: raise to HIGH to exempt medium-risk tickets from planning.
 MIN_RISK_FOR_PLANNING = RiskLevel.MEDIUM
 
+
+def get_min_risk_for_planning() -> "RiskLevel":
+    """Return the current minimum risk level that requires a plan."""
+    return MIN_RISK_FOR_PLANNING
+
+
+def set_min_risk_for_planning(level: "RiskLevel") -> None:
+    """Update the minimum risk level that requires a plan before IMPLEMENTING."""
+    global MIN_RISK_FOR_PLANNING
+    MIN_RISK_FOR_PLANNING = level
+
+
 # Ordered risk levels for threshold comparison
 _RISK_ORDER: dict[str, int] = {
     RiskLevel.LOW.value: 0,
@@ -352,6 +364,11 @@ def _normalize_title_words(title: str) -> frozenset[str]:
 class TicketStore:
     SIMILARITY_THRESHOLD = 0.8  # Jaccard threshold for "similar" titles
     SAVE_DEBOUNCE_SECONDS = 0.5  # Debounce window for batching saves
+    # Backup frequency: perform a full backup every N compactions (not every one)
+    # to amortize O(n) I/O cost of backup + prune across more saves.
+    BACKUP_EVERY_N_COMPACT = 5
+    # Prune frequency: prune old backups every N backups created
+    PRUNE_EVERY_N_BACKUPS = 3
 
     def __init__(self, path: Path, *, pretty: bool = False) -> None:
         self._path = path
@@ -373,9 +390,7 @@ class TicketStore:
         self._save_count: int = 0
         self._FULL_SAVE_INTERVAL: int = 50
         # Debounced save mechanism
-        self._save_pending = False
         self._save_lock = threading.Lock()
-        self._save_timer: threading.Timer | None = None
         self._shutdown = False
         self._load()
         # Build initial state counts cache from loaded state index
@@ -386,8 +401,11 @@ class TicketStore:
         self._save_condition = threading.Condition(self._save_lock)
         self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
         self._save_worker.start()
-        # Backup worker: async file-copy consumer
-        self._backup_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        # Backup frequency tracking: avoid O(n) backup on every compaction
+        self._compact_count: int = 0  # compactions since last backup
+        self._backup_count: int = 0  # backups since last prune
+        # Backup worker: async file-copy and prune consumer
+        self._backup_queue: queue.Queue[tuple[str, str] | tuple[str, str] | None] = queue.Queue()
         self._backup_shutdown = False
         self._backup_worker = threading.Thread(target=self._backup_worker_loop, daemon=True)
         self._backup_worker.start()
@@ -398,6 +416,10 @@ class TicketStore:
         Waits for SAVE_DEBOUNCE_SECONDS after the last mutation before
         flushing to disk, coalescing rapid-fire add()/transition() calls
         into a single I/O operation.
+
+        On transient I/O errors the worker logs the failure and continues
+        waiting for the next signal rather than dying, which previously
+        caused silent data loss for all subsequent mutations.
         """
         while not self._shutdown:
             with self._save_condition:
@@ -405,7 +427,6 @@ class TicketStore:
                     self._save_condition.wait(timeout=1.0)
                 if self._shutdown:
                     break
-                # Record when the first mutation in this batch arrived
                 first_ts = self._save_queue[0]["ts"]
                 elapsed = time.time() - first_ts
                 remaining = self.SAVE_DEBOUNCE_SECONDS - elapsed
@@ -414,19 +435,26 @@ class TicketStore:
                 if self._shutdown:
                     break
                 self._save_queue.clear()
-            try:
-                self._save()
-            except Exception:
-                pass
+            # Perform save outside the condition lock to avoid holding it during I/O
+            if not self._shutdown:
+                try:
+                    self._save()
+                except Exception as exc:
+                    logger.warning("background save failed (will retry): %s", exc)
 
     # ---- Backup worker ----
 
     def _backup_worker_loop(self) -> None:
         """Background worker that performs queued file copies (shutil.copy2).
 
-        Consumes (src, dst) tuples from _backup_queue.  A ``None`` sentinel
-        signals the worker to exit.  Errors are logged but never propagate
-        so the worker keeps processing subsequent tasks.
+        Consumes tasks from _backup_queue.  Supported task types:
+
+        - ``(src, dst)`` tuples → ``shutil.copy2`` (file backup)
+        - ``("__PRUNE__", backup_dir_str)`` → prune old backups
+        - ``None`` sentinel → exit
+
+        Errors are logged but never propagate so the worker keeps
+        processing subsequent tasks.
         """
         while True:
             try:
@@ -437,11 +465,19 @@ class TicketStore:
                 continue
             if item is None:
                 break
-            src, dst = item
             try:
-                shutil.copy2(src, dst)
+                if (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                    and item[0] == "__PRUNE__"
+                ):
+                    backup_dir = Path(item[1])
+                    self._do_async_prune(backup_dir)
+                else:
+                    src, dst = item
+                    shutil.copy2(src, dst)
             except Exception as exc:
-                logger.warning("backup copy failed: %s -> %s: %s", src, dst, exc)
+                logger.warning("backup worker task failed: %r: %s", item, exc)
             finally:
                 self._backup_queue.task_done()
 
@@ -452,6 +488,35 @@ class TicketStore:
         so the caller is never blocked.
         """
         self._backup_queue.put((src, dst))
+
+    def queue_prune_task(self, backup_dir: Path) -> None:
+        """Enqueue an asynchronous backup-prune task.
+
+        The actual directory listing, sorting, and deletion runs in the
+        background worker thread so the caller is never blocked.
+        """
+        self._backup_queue.put(("__PRUNE__", str(backup_dir)))
+
+    def _do_async_prune(self, backup_dir: Path) -> None:
+        """Prune old backup files. Called by the backup worker thread.
+
+        Lists all backup files, sorts by mtime, and removes all but the
+        newest ``keep`` files.  This is the O(m log m) operation that
+        was previously on the critical save path.
+        """
+        try:
+            backups = sorted(
+                backup_dir.glob("tickets-*.json"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            keep = 20
+            for old in backups[:-keep]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     def flush(self) -> None:
         """Force an immediate save of all dirty tickets.
@@ -577,15 +642,62 @@ class TicketStore:
         return intersection / union if union else 0.0
 
     def _backup(self) -> None:
+        """Queue an async backup of the ticket store file.
+
+        Instead of synchronously reading the entire file and writing a copy
+        (O(n) I/O on the critical path), this method:
+
+        1. Ensures the backup directory exists (fast sync mkdir)
+        2. Queues the actual file copy to the background worker thread
+           (via ``shutil.copy2``) so the caller is never blocked
+        3. Periodically queues a backup-prune task to clean up old backups
+
+        The backup directory must exist before the copy task is queued,
+        hence the synchronous ``mkdir`` call (which is effectively O(1)).
+        """
         backup_dir = self._path.parent / "ticket_backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
         backup_path = backup_dir / f"tickets-{ts}.json"
         try:
-            backup_path.write_text(self._path.read_text(encoding="utf-8"), encoding="utf-8")
-            self._prune_backups(backup_dir)
+            # Async file copy via the background backup worker
+            self.queue_backup_task(str(self._path), str(backup_path))
+            # Periodically prune old backups (every N backups)
+            self._backup_count += 1
+            if self._backup_count >= self.PRUNE_EVERY_N_BACKUPS:
+                self._backup_count = 0
+                self.queue_prune_task(backup_dir)
+        except Exception:
+            pass
+
+    def prune_stale_sibling_backups(self, keep_pre_backups: int = 1) -> int:
+        """Delete one-off `tickets*.pre-*` / `tickets.backup.json` siblings.
+
+        Called opportunistically before compaction; returns files removed.
+        Keeps the newest `keep_pre_backups` pre-* files as a safety margin.
+        """
+        removed = 0
+        try:
+            candidates = sorted(
+                (p for p in self._path.parent.glob("tickets*.pre-*") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+            )
+            for old in candidates[: max(0, len(candidates) - keep_pre_backups)]:
+                try:
+                    old.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+            legacy = self._path.parent / "tickets.backup.json"
+            if legacy.exists():
+                try:
+                    legacy.unlink()
+                    removed += 1
+                except OSError:
+                    pass
         except OSError:
             pass
+        return removed
 
     def _prune_backups(self, backup_dir: Path, keep: int = 20) -> None:
         backups = sorted(backup_dir.glob("tickets-*.json"), key=lambda p: p.stat().st_mtime)
@@ -675,6 +787,7 @@ class TicketStore:
                     try:
                         if needs_compaction:
                             self._backup()
+                            self.prune_stale_sibling_backups()
                             payload = self._build_full_payload()
                             tmp = self._path.with_suffix(".tmp")
                             tmp.write_text(
@@ -721,36 +834,6 @@ class TicketStore:
             "schema_version": SCHEMA_VERSION,
             "updated_at": time.time(),
             "tickets": [t.to_dict() for t in self._tickets.values()],
-        }
-
-    def _build_incremental_payload(self, dirty_ids: set[str]) -> dict:
-        """Build save payload by patching only dirty tickets in existing file.
-
-        Loads the existing JSON, updates only the entries for dirty ticket IDs,
-        and rebuilds the payload. This avoids calling to_dict() on unchanged
-        tickets, reducing CPU cost from O(N) to O(K) for serialization where
-        K = len(dirty_ids). The JSON parse/write is still O(N) but avoids the
-        expensive dataclass->dict conversion for most tickets.
-        """
-        try:
-            existing_data = json.loads(self._path.read_text(encoding="utf-8"))
-            existing_map: dict[str, dict] = {
-                t["id"]: t for t in existing_data.get("tickets", [])
-            }
-        except (json.JSONDecodeError, KeyError, OSError):
-            # Corrupted or missing file — fall back to full save
-            return self._build_full_payload()
-
-        # Patch only dirty entries
-        for tid in dirty_ids:
-            ticket = self._tickets.get(tid)
-            if ticket is not None:
-                existing_map[tid] = ticket.to_dict()
-
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "updated_at": time.time(),
-            "tickets": list(existing_map.values()),
         }
 
     def add(self, ticket: Ticket) -> Ticket:

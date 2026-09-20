@@ -95,6 +95,49 @@ class TestLoadRoleTemplate:
         assert isinstance(result, str)
 
 
+class TestRolePromptCache:
+    def test_template_cache_returns_same_without_reread(self, tmp_path: Path) -> None:
+        from codebot import role_prompt as rp_mod
+        rp_mod.clear_role_prompt_cache()
+        first = load_role_template("general_implementer")
+        assert len(first) > 50
+        assert "general_implementer" in rp_mod._template_cache
+        second = load_role_template("general_implementer")
+        assert second == first
+
+    def test_template_cache_invalidates_on_mtime(self, tmp_path: Path) -> None:
+        from codebot import role_prompt as rp_mod
+        rp_mod.clear_role_prompt_cache()
+        rp_mod._template_cache["general_implementer"] = (0.0, "STALE")
+        result = load_role_template("general_implementer")
+        assert result != "STALE"
+        assert len(result) > 50
+
+    def test_context_cache_per_adapter(self) -> None:
+        from codebot import role_prompt as rp_mod
+        from unittest.mock import MagicMock as _MM
+        rp_mod.clear_role_prompt_cache()
+        adapter = _MM()
+        adapter.project_name.return_value = "P"
+        adapter.paths.return_value = _MM(
+            repository_root="/r", state_dir="/r/s",
+            logs_dir="/r/l", docs_dir="/r/d",
+            constitution_file="/r/c",
+        )
+        first = build_project_context(adapter)
+        calls_after_first = adapter.paths.call_count
+        second = build_project_context(adapter)
+        assert second == first
+        assert adapter.paths.call_count == calls_after_first
+
+    def test_clear_cache(self) -> None:
+        from codebot import role_prompt as rp_mod
+        rp_mod._template_cache["x"] = (1.0, "y")
+        rp_mod.clear_role_prompt_cache()
+        assert rp_mod._template_cache == {}
+        assert rp_mod._context_cache == {}
+
+
 # ---------------------------------------------------------------------------
 # build_project_context
 # ---------------------------------------------------------------------------

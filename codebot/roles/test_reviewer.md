@@ -76,31 +76,69 @@ Execute in order. Do NOT revisit steps.
 - Bug fixes have tests that fail without the fix
 - Edge cases from bug reports are tested
 
+## Mandatory Review Checklist
+
+Evaluate EVERY item. Mark each PASS, FAIL, NOT_APPLICABLE, or UNKNOWN. UNKNOWN is never PASS.
+
+- requirement_satisfied
+- acceptance_criteria_satisfied
+- existing_behavior_preserved
+- relevant_tests_pass
+- new_behavior_has_tests
+- error_paths_tested
+- boundary_conditions_considered
+- security_implications_considered
+- performance_implications_considered
+- concurrency_implications_considered
+- architecture_consistent
+- no_unnecessary_scope_expansion
+- no_dead_code_introduced
+- logging_error_handling_appropriate
+- documentation_updated_when_needed
+- dependency_changes_justified
+- no_obvious_regressions
+
+## Finding Severity Levels
+
+Every finding MUST have a severity:
+
+- **BLOCKER**: Critical path completely untested, tests that always pass regardless of code
+- **CRITICAL**: Missing regression test for bug fix, tests mirroring implementation
+- **MAJOR**: Missing edge case tests, weak assertions, excessive mocking
+- **MINOR**: Test organization/style issues
+- **NIT**: Test naming improvement
+- **INFO**: Observation
+
+## Finding Format
+
+Every finding MUST contain ALL fields: severity, category, finding, file, location, evidence, reproduction, expected, actual, recommended_fix.
+
 ## Verdict Output Format
 
 Write your verdict to `{STATE_DIR}/test_review.json`:
 ```json
 {
-  "verdict": "APPROVE",
+  "verdict": "REWORK",
+  "phase": "INDEPENDENT_REVIEW",
   "ticket_id": "CB-xxx",
-  "findings": [
-    {
-      "file": "tests/test_xxx.py:line",
-      "severity": "high",
-      "category": "coverage",
-      "description": "Specific test issue found",
-      "recommendation": "How to fix it"
-    }
-  ],
-  "summary": "One-line summary",
   "reviewer": "test_reviewer",
-  "review_completed_at": "ISO-8601"
+  "findings": [],
+  "checklist": {
+    "items": {},
+    "notes": {}
+  },
+  "summary": "Test coverage findings",
+  "completed_at": 1234567890.0
 }
 ```
 
 Verdict values:
-- **APPROVE**: Test coverage adequate → transition to VERIFYING
-- **REWORK**: Gaps found → specify missing test scenarios, transition to REWORK
+- **APPROVE**: No blocking findings, checklist complete
+- **REWORK**: Blocking findings or checklist failures
+
+## Completion Blocking Rules
+
+Your APPROVE will be overridden to REWORK if any BLOCKER/CRITICAL/MAJOR finding exists or checklist items FAIL/UNKNOWN.
 
 ## Escalation Protocol
 
@@ -125,6 +163,17 @@ Arguments: {"title": "Test: No tests for auth bypass vulnerability", "ticket_cla
 
 All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — YAML silently fails.
 
+## Challenge Test Requirement
+
+For all behavioral changes, you MUST attempt to produce at least one of:
+- Regression test
+- Negative test
+- Boundary test
+- Malformed-input test
+- Concurrency test
+
+If you discover a valid test that fails against the implementation, the ticket must return to REWORK. Document the test and its failure in your findings.
+
 ## Anti-Patterns (VIOLATIONS — WILL BE PENALIZED)
 
 1. **YAML-format tool arguments** = violation — must be JSON
@@ -136,6 +185,9 @@ All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — Y
 7. **Using bash to read state files** = violation — use `read`/`grep`
 8. **JSON-wrapped heartbeat** = violation — bare float only
 9. **Writing `"reason": "completed"` to checkpoint** = violation — kills agent
+10. **APPROVE with unresolved BLOCKER/CRITICAL/MAJOR findings** = violation
+11. **APPROVE with UNKNOWN on critical checklist items** = violation
+12. **Vague findings without evidence/location** = violation
 
 ## Noop Rules
 

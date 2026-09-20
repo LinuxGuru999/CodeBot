@@ -26,6 +26,7 @@ Invariants
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -309,6 +310,143 @@ def evaluate_gate(
     except Exception as e:
         duration = time.monotonic() - start
         return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, True, str(e)[:500])
+
+
+_GATE_PASS_CACHE = "gate_pass_cache.json"
+_GATE_PASS_TTL_SECONDS = 24 * 3600
+
+
+def _hash_files(workspace: Path, files: list[str]) -> str:
+    digest = hashlib.sha256()
+    for rel in sorted(files):
+        p = workspace / rel
+        digest.update(rel.encode("utf-8") + b"\x00")
+        try:
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    digest.update(chunk)
+        except OSError:
+            digest.update(b"<missing>\x00")
+            continue
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def _load_pass_cache(state_dir: Path) -> dict[str, Any]:
+    path = state_dir / _GATE_PASS_CACHE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return {}
+
+
+def _store_pass_cache(state_dir: Path, data: dict[str, Any]) -> None:
+    path = state_dir / _GATE_PASS_CACHE
+    tmp = state_dir / (_GATE_PASS_CACHE + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except OSError:
+        pass
+
+
+def clear_gate_pass_cache(state_dir: Path | None = None) -> None:
+    if state_dir is None:
+        return
+    try:
+        (state_dir / _GATE_PASS_CACHE).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def check_gate_pass_cache(
+    state_dir: Path,
+    ticket_id: str,
+    workspace: Path,
+    changed_files: list[str] | None,
+    gate_names: list[str] | None = None,
+    now: float | None = None,
+) -> GateEvaluation | None:
+    """Return a cached PASS evaluation when file hashes still match.
+
+    Cache entries are written by run_quality_gates after a full pass.
+    FAIL/ERROR results are never cached: only identical-content passes skip.
+    """
+    files = list(changed_files or [])
+    if not ticket_id or not files:
+        return None
+    now = time.time() if now is None else now
+    cache = _load_pass_cache(state_dir)
+    entry = cache.get(ticket_id)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        age = now - float(entry.get("timestamp", 0))
+    except (TypeError, ValueError):
+        return None
+    if age < 0 or age > _GATE_PASS_TTL_SECONDS:
+        return None
+    cached_files = entry.get("files")
+    if not isinstance(cached_files, list) or sorted(cached_files) != sorted(files):
+        return None
+    if not entry.get("passed", False):
+        return None
+    if _hash_files(workspace, files) != entry.get("files_hash", ""):
+        return None
+    if gate_names is not None:
+        cached_gates = entry.get("gates")
+        if not isinstance(cached_gates, list) or sorted(cached_gates) != sorted(gate_names):
+            return None
+    return GateEvaluation(
+        "cached-pass",
+        GateResult.PASS,
+        "cache-hit",
+        f"all gates previously passed for unchanged files (ticket {ticket_id})",
+        0.0,
+        True,
+    )
+
+
+def run_quality_gates_with_cache(
+    policy: QualityGatePolicy,
+    workspace: Path,
+    state_dir: Path,
+    ticket_id: str,
+    ticket_class: str = "",
+    changed_files: list[str] | None = None,
+    test_dirs: str = "tests/",
+    conditions: list[str] | None = None,
+) -> tuple[bool, list[GateEvaluation]]:
+    """Run gates, skipping subprocesses on a verified cache hit.
+
+    Only full passes are cached. Any miss runs every gate normally and
+    records a fresh cache entry when everything passes.
+    """
+    gate_names = [g.get("name", "") for g in policy.required]
+    for condition in (conditions or []):
+        gate_names.extend(g.get("name", "") for g in policy.conditional.get(condition, []))
+    if ticket_class == "security":
+        gate_names.extend(g.get("name", "") for g in policy.conditional.get("security_boundary", []))
+    hit = check_gate_pass_cache(state_dir, ticket_id, workspace, changed_files, gate_names)
+    if hit is not None:
+        return True, [hit]
+    passed, evaluations = run_quality_gates(
+        policy, workspace, ticket_class, changed_files, test_dirs, conditions,
+    )
+    if passed and changed_files:
+        cache = _load_pass_cache(state_dir)
+        cache[ticket_id] = {
+            "passed": True,
+            "timestamp": time.time(),
+            "files": sorted(changed_files),
+            "files_hash": _hash_files(workspace, list(changed_files)),
+            "gates": sorted(gate_names),
+        }
+        _store_pass_cache(state_dir, cache)
+    return passed, evaluations
 
 
 def run_quality_gates(

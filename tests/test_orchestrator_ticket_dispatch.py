@@ -11,9 +11,11 @@ Verifies:
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -282,3 +284,190 @@ class TestTicketStoreExclusiveDispatch:
             clear_ticket_store_cache()
             result = get_ticket_store()
             assert result is not None, "Should return a TicketStore when file exists"
+
+
+class TestClaimAtomicity:
+    """Tests for atomic claim acquisition and state transition.
+
+    CB-7435179-126E: Ensure claim file acquisition and ticket state transition
+    are atomic in dispatch functions, cleaning up orphaned claims on any
+    transition failure.
+    """
+
+    def test_claim_cleaned_up_on_planning_transition_failure(self, tmp_path):
+        """Test that claim files are cleaned up when planning transition fails.
+
+        When both batch_transition and individual transition raise ValueError,
+        the claim file must be deleted to prevent orphaned claims that lock tickets.
+        """
+        from codebot.ticket_engine import TicketStore, TicketState, TicketClass, Severity, RiskLevel, create_ticket
+        from codebot.ticket_dispatcher import dispatch_planning_agents, clear_ticket_store_cache
+        from codebot.process_manager import BotConfig, BotState
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        claims_dir = state_dir / "claims"
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        plans_dir = state_dir / "plans"
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        store_path = state_dir / "tickets.json"
+
+        ts = TicketStore(store_path)
+
+        # Create a PLANNING ticket
+        tid = "CB-ATOMIC-001"
+        t = create_ticket(
+            title="Test atomicity ticket",
+            ticket_class=TicketClass.FEATURE,
+            severity=Severity.MEDIUM,
+            source="test",
+            evidence="evidence",
+            problem_statement="Test",
+            desired_state="Test",
+            acceptance_criteria=["Test"],
+            affected_modules=["test.py"],
+            risk=RiskLevel.LOW,
+        )
+        ts.add(t)
+        ts.transition(tid, TicketState.VALIDATING)
+        ts.transition(tid, TicketState.TRIAGED)
+        ts.transition(tid, TicketState.READY)
+        ts.transition(tid, TicketState.DECOMPOSE)
+        ts.transition(tid, TicketState.PLANNING)
+        ts.flush()
+
+        # Create a fake plan file so the dispatcher tries to transition immediately
+        plan_file = plans_dir / f"{tid}.plan.json"
+        plan_file.write_text(json.dumps({"steps": []}), encoding="utf-8")
+
+        # Manually create a claim file to simulate the race condition scenario
+        claim_file = claims_dir / f"{tid}.implementation_planner.json"
+        claim_data = {"ticket_id": tid, "bot": "implementation_planner", "at": time.time(), "class": "planning"}
+        claim_file.write_text(json.dumps(claim_data), encoding="utf-8")
+
+        # Verify claim exists before transition attempt
+        assert claim_file.exists(), "Claim file should exist before transition"
+
+        # Create an idle planner bot
+        bots = {}
+        cfg = BotConfig(
+            name="implementation_planner",
+            prompt_file="codebot/roles/implementation_planner.md",
+            interval_seconds=30,
+            heartbeat_timeout=90,
+            model="qwen-3.7-plus",
+            fallback_model="xiaomi-mimo-2.5",
+            enabled=True,
+            clean_exit_wait=False,
+            runner_mode="api",
+            tier=12,
+            max_restarts=5,
+        )
+        bot = BotState(config=cfg)
+        bots["implementation_planner"] = bot
+
+        mock_start = MagicMock(return_value=True)
+
+        # Mock batch_transition and transition to both raise ValueError
+        mock_batch = MagicMock(side_effect=ValueError("Batch transition failed"))
+        mock_transition = MagicMock(side_effect=ValueError("Individual transition failed"))
+        ts.batch_transition = mock_batch
+        ts.transition = mock_transition
+
+        # Call dispatch - it should try to transition the completed plan and fail,
+        # cleaning up the claim file
+        with patch("codebot.ticket_dispatcher.get_ticket_store", return_value=ts):
+            dispatch_planning_agents(bots, start_bot_fn=mock_start, store=ts)
+
+        # Verify claim file was cleaned up after failure
+        claim_files_after = list(claims_dir.glob(f"{tid}.*.json"))
+        assert len(claim_files_after) == 0, f"Claim file should be deleted after transition failure, but found: {claim_files_after}"
+
+        # Verify both batch and individual transition were attempted
+        assert mock_batch.called, "batch_transition should have been called"
+        assert mock_transition.called, "transition should have been called as fallback"
+
+    def test_claim_cleaned_up_on_decompose_transition_failure(self, tmp_path):
+        """Test that claim files are cleaned up when decompose transition fails."""
+        from codebot.ticket_engine import TicketStore, TicketState, TicketClass, Severity, RiskLevel, create_ticket
+        from codebot.ticket_dispatcher import dispatch_decompose_agents, clear_ticket_store_cache
+        from codebot.process_manager import BotConfig, BotState
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        claims_dir = state_dir / "claims"
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        decomp_dir = state_dir / "decompositions"
+        decomp_dir.mkdir(parents=True, exist_ok=True)
+        store_path = state_dir / "tickets.json"
+
+        ts = TicketStore(store_path)
+
+        # Create a DECOMPOSE ticket
+        tid = "CB-ATOMIC-DECOMP-001"
+        t = create_ticket(
+            title="Test decompose atomicity ticket",
+            ticket_class=TicketClass.FEATURE,
+            severity=Severity.MEDIUM,
+            source="test",
+            evidence="evidence",
+            problem_statement="Test",
+            desired_state="Test",
+            acceptance_criteria=["Test"],
+            affected_modules=["test.py"],
+            risk=RiskLevel.LOW,
+        )
+        ts.add(t)
+        ts.transition(tid, TicketState.VALIDATING)
+        ts.transition(tid, TicketState.TRIAGED)
+        ts.transition(tid, TicketState.READY)
+        ts.transition(tid, TicketState.DECOMPOSE)
+        ts.flush()
+
+        # Create a fake decomposition file so the dispatcher tries to transition
+        decomp_file = decomp_dir / f"{tid}.decomp.json"
+        decomp_file.write_text(json.dumps({"sub_tickets": []}), encoding="utf-8")
+
+        # Manually create a claim file
+        claim_file = claims_dir / f"{tid}.decomposer.json"
+        claim_data = {"ticket_id": tid, "bot": "decomposer", "at": time.time(), "class": "decompose"}
+        claim_file.write_text(json.dumps(claim_data), encoding="utf-8")
+
+        assert claim_file.exists(), "Claim file should exist before transition"
+
+        # Create an idle decomposer bot
+        bots = {}
+        cfg = BotConfig(
+            name="decomposer",
+            prompt_file="codebot/roles/decomposer.md",
+            interval_seconds=30,
+            heartbeat_timeout=90,
+            model="qwen-3.7-plus",
+            fallback_model="xiaomi-mimo-2.5",
+            enabled=True,
+            clean_exit_wait=False,
+            runner_mode="api",
+            tier=12,
+            max_restarts=5,
+        )
+        bot = BotState(config=cfg)
+        bots["decomposer"] = bot
+
+        mock_start = MagicMock(return_value=True)
+
+        # Mock batch_transition and transition to both raise ValueError
+        mock_batch = MagicMock(side_effect=ValueError("Batch transition failed"))
+        mock_transition = MagicMock(side_effect=ValueError("Individual transition failed"))
+        ts.batch_transition = mock_batch
+        ts.transition = mock_transition
+
+        # Call dispatch
+        with patch("codebot.ticket_dispatcher.get_ticket_store", return_value=ts):
+            dispatch_decompose_agents(bots, start_bot_fn=mock_start, store=ts)
+
+        # Verify claim file was cleaned up after failure
+        claim_files_after = list(claims_dir.glob(f"{tid}.*.json"))
+        assert len(claim_files_after) == 0, f"Claim file should be deleted after transition failure, but found: {claim_files_after}"
+
+        assert mock_batch.called, "batch_transition should have been called"
+        assert mock_transition.called, "transition should have been called as fallback"

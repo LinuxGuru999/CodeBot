@@ -217,3 +217,11 @@ class MonitorAdapter(ProjectAdapter):
             if not comp_path.exists():
                 errors.append(f"component path missing: {comp.path}")
         return errors
+
+    def queue_depth(self) -> int:
+        """Monitor adapter stub — no TicketStore access."""
+        return 0
+
+    def ticket_class_counts(self) -> dict[str, int]:
+        """Monitor adapter stub — no TicketStore access."""
+        return {}

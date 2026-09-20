@@ -69,6 +69,77 @@ class TestRecordGateResults:
         assert json.loads(lines[0])["ticket_id"] == "CB-1"
 
 
+class TestGatePassCache:
+    def _policy(self):
+        from codebot.quality_gate import QualityGatePolicy
+        return QualityGatePolicy(
+            required=[{"name": "build", "command": "python3 -m py_compile {file}"}],
+            conditional={},
+        )
+
+    def test_second_run_skips_subprocess(self, tmp_path):
+        from codebot.quality_gate import run_quality_gates_with_cache
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "a.py").write_text("x = 1\n")
+        state = tmp_path / "state"
+        state.mkdir()
+        policy = self._policy()
+        files = ["a.py"]
+        passed1, evals1 = run_quality_gates_with_cache(policy, ws, state, "CB-C1", changed_files=files)
+        assert passed1 is True
+        assert evals1[0].gate_name == "build"
+        passed2, evals2 = run_quality_gates_with_cache(policy, ws, state, "CB-C1", changed_files=files)
+        assert passed2 is True
+        assert len(evals2) == 1
+        assert evals2[0].gate_name == "cached-pass"
+        assert evals2[0].command == "cache-hit"
+
+    def test_changed_file_invalidates_cache(self, tmp_path):
+        from codebot.quality_gate import run_quality_gates_with_cache
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = ws / "a.py"
+        target.write_text("x = 1\n")
+        state = tmp_path / "state"
+        state.mkdir()
+        policy = self._policy()
+        files = ["a.py"]
+        passed1, _ = run_quality_gates_with_cache(policy, ws, state, "CB-C2", changed_files=files)
+        assert passed1 is True
+        target.write_text("x = 2\n")
+        passed2, evals2 = run_quality_gates_with_cache(policy, ws, state, "CB-C2", changed_files=files)
+        assert passed2 is True
+        assert evals2[0].gate_name == "build"
+
+    def test_fail_results_never_cached(self, tmp_path):
+        import json as _json
+        from codebot.quality_gate import run_quality_gates_with_cache, QualityGatePolicy
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "a.py").write_text("x = 1\n")
+        state = tmp_path / "state"
+        state.mkdir()
+        policy = QualityGatePolicy(required=[{"name": "bad", "command": "false"}], conditional={})
+        passed1, _ = run_quality_gates_with_cache(policy, ws, state, "CB-C3", changed_files=["a.py"])
+        assert passed1 is False
+        cache_file = state / "gate_pass_cache.json"
+        if cache_file.exists():
+            assert "CB-C3" not in _json.loads(cache_file.read_text())
+        passed2, evals2 = run_quality_gates_with_cache(policy, ws, state, "CB-C3", changed_files=["a.py"])
+        assert passed2 is False
+        assert evals2[0].gate_name == "bad"
+
+    def test_no_files_no_cache(self, tmp_path):
+        from codebot.quality_gate import check_gate_pass_cache
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        state = tmp_path / "state"
+        state.mkdir()
+        assert check_gate_pass_cache(state, "CB-X", ws, []) is None
+        assert check_gate_pass_cache(state, "", ws, ["a.py"]) is None
+
+
 class TestGateMetrics:
     """Tests for gate metrics collection and alerting."""
 

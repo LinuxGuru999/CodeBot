@@ -216,6 +216,116 @@ class TestCollectProgress:
         assert result["checkpoint_age_s"] >= 0
 
 
+class TestDocsFindingsCache:
+    """Regression tests for _build_docs_findings_cache single-traversal semantics."""
+
+    def test_single_traversal_and_accurate_counts(self, isolated, monkeypatch):
+        """One rglob per collect_all run; per-bot output_files counts equal
+        case-sensitive substring-match truth including underscore bots."""
+        # Reconfigure KNOWN_BOTS to include underscore bots for this test
+        monkeypatch.setattr(mc, "KNOWN_BOTS", [
+            "worker-1", "worker-2", "issues", "bug_triage", "test_coverage",
+        ])
+        docs_dir = isolated["bots_dir"] / "docs"
+        docs_dir.mkdir()
+        # Create files that exercise various matching scenarios
+        (docs_dir / "worker-1_report.md").write_text("r1")
+        (docs_dir / "worker-1_notes.md").write_text("r2")
+        (docs_dir / "worker-2_analysis.md").write_text("r2a")
+        (docs_dir / "bug_triage_report.md").write_text("bt1")
+        (docs_dir / "bug_triage_summary.md").write_text("bt2")
+        (docs_dir / "my_bug_triage_notes.md").write_text("bt3")
+        (docs_dir / "issues_workflow.md").write_text("iw1")
+        (docs_dir / "unrelated_doc.md").write_text("un1")
+
+        # Count expected matches using case-sensitive substring logic:
+        # worker-1: "worker-1_report.md", "worker-1_notes.md" → 2
+        # worker-2: "worker-2_analysis.md" → 1
+        # issues: "issues_workflow.md" → 1
+        # bug_triage: "bug_triage_report.md", "bug_triage_summary.md",
+        #             "my_bug_triage_notes.md" → 3
+        cache = mc._build_docs_findings_cache()
+        assert cache["worker-1"] == 2
+        assert cache["worker-2"] == 1
+        assert cache["issues"] == 1
+        assert cache["bug_triage"] == 3
+
+    def test_single_rglob_call(self, isolated, monkeypatch):
+        """_build_docs_findings_cache performs exactly one rglob call."""
+        docs_dir = isolated["bots_dir"] / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "worker-1_report.md").write_text("r1")
+
+        rglob_calls = []
+        orig_rglob = Path.rglob
+
+        def counting_rglob(self, pattern):
+            rglob_calls.append(pattern)
+            return orig_rglob(self, pattern)
+
+        monkeypatch.setattr(Path, "rglob", counting_rglob)
+        mc._build_docs_findings_cache()
+        assert len(rglob_calls) == 1
+        assert rglob_calls[0] == "*.md"
+
+    def test_collect_all_uses_cache_no_extra_rglobs(self, isolated, monkeypatch):
+        """collect_all passes docs_findings_cache to _collect_progress;
+        _collect_progress does not perform its own rglob when cache is given."""
+        docs_dir = isolated["bots_dir"] / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "worker-1_report.md").write_text("r1")
+
+        progress_rglobs = []
+        orig_rglob = Path.rglob
+
+        def counting_rglob(self, pattern):
+            progress_rglobs.append(pattern)
+            return orig_rglob(self, pattern)
+
+        monkeypatch.setattr(Path, "rglob", counting_rglob)
+        snap = mc.collect_all()
+        # worker-1 has one doc file
+        assert snap["bots"]["worker-1"]["progress"]["output_files"] == 1
+        # No extra rglob calls from _collect_progress (cache was passed)
+        assert len(progress_rglobs) == 1  # only the one from _build_docs_findings_cache
+
+    def test_underscore_bot_matches_preserved(self, isolated, monkeypatch):
+        """Underscore bots (bug_triage, test_coverage) match literal underscore filenames."""
+        monkeypatch.setattr(mc, "KNOWN_BOTS", [
+            "worker-1", "worker-2", "issues", "bug_triage", "test_coverage",
+        ])
+        docs_dir = isolated["bots_dir"] / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "bug_triage_report.md").write_text("x")
+        (docs_dir / "test_coverage_metrics.md").write_text("y")
+        cache = mc._build_docs_findings_cache()
+        assert cache["bug_triage"] == 1
+        assert cache["test_coverage"] == 1
+
+    def test_missing_docs_dir(self, isolated):
+        """No docs/ directory returns zero-filled cache without exception."""
+        cache = mc._build_docs_findings_cache()
+        assert all(v == 0 for v in cache.values())
+
+    def test_empty_docs_dir(self, isolated):
+        """Empty docs/ returns all zeros."""
+        docs_dir = isolated["bots_dir"] / "docs"
+        docs_dir.mkdir()
+        cache = mc._build_docs_findings_cache()
+        assert all(v == 0 for v in cache.values())
+
+    def test_collect_all_completes_quickly(self, isolated):
+        """Metrics collection for 3 bots finishes in under 5 seconds."""
+        docs_dir = isolated["bots_dir"] / "docs"
+        docs_dir.mkdir()
+        for i in range(100):
+            (docs_dir / f"worker-1_file_{i}.md").write_text(f"f{i}")
+        start = time.time()
+        mc.collect_all()
+        elapsed = time.time() - start
+        assert elapsed < 5.0
+
+
 class TestCollectLiveness:
     def test_no_files(self, isolated):
         result = mc._collect_liveness("worker-1", time.time())
