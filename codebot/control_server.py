@@ -754,9 +754,32 @@ class ControlHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/bots/start", "/api/bots/start"):
-            bots = body.get("bots") or [c.name for c in BOT_REGISTRY]
+            bots = body.get("bots")
+            if bots is None:
+                # No bots specified, start all registered bots
+                bots = [c.name for c in BOT_REGISTRY]
+            else:
+                # Validate each bot name format before subprocess calls (Constitution §2)
+                if not isinstance(bots, list):
+                    self._json(400, {"error": "bots must be an array"})
+                    return
+                for n in bots:
+                    if not isinstance(n, str):
+                        self._json(400, {"error": "bot names must be strings"})
+                        return
+                    if not validate_bot_name(n):
+                        self._json(400, {"error": "invalid bot name format"})
+                        return
+                # Validate each bot name against BOT_REGISTRY (Constitution §2)
+                valid_bot_names = {c.name for c in BOT_REGISTRY}
+                for n in bots:
+                    if n not in valid_bot_names:
+                        self._json(404, {"error": f"unknown bot: {n}"})
+                        return
             try:
-                subprocess.Popen(["python3", str(ORCH), "--start", *bots], cwd=str(BOTS_DIR))
+                # Apply defense-in-depth: shlex.quote for each bot name
+                quoted_bots = [shlex.quote(n) for n in bots]
+                subprocess.Popen(["python3", str(ORCH), "--start", *quoted_bots], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "started": bots})
             except Exception as e:
                 self._json(500, {"error": str(e)})

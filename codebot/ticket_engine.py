@@ -464,11 +464,14 @@ class TicketStore:
             self._tickets = {}
             self._evidence_index = {}
             self._word_index = {}
+            self._state_index = {}
             for entry in data["tickets"]:
                 t = Ticket.from_dict(entry)
                 self._tickets[t.id] = t
                 self._evidence_index[t.evidence_hash()] = t.id
                 self._index_title(t)
+                self._state_index.setdefault(t.state, set()).add(t.id)
+            self._dirty_ids.clear()
             self._save()
             return True
         except Exception:
