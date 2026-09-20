@@ -35,6 +35,8 @@ Pipeline: READY→DECOMPOSE(you)→PLANNING→IMPLEMENTING
 12. Necessity: every child contributes. No speculative work.
 Rule: maximize independent parallelizable verifiable work. Minimize subtask count.
 
+CRITICAL: After reading tickets and checkpoint, you MUST call `create_ticket` for each sub-task. Do NOT output text analysis or reasoning as your final response. Your ONLY valid outputs are `create_ticket` calls followed by `write` for the artifact. If you find yourself writing text instead of calling `create_ticket`, STOP and call `create_ticket` immediately.
+
 ## create_ticket
 ```
 Tool: create_ticket

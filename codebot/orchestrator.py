@@ -882,7 +882,9 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     plan_queue = depths.get("PLANNING", 0)
     planning_name_counts: dict[str, int] = {}
 
+    FAST_MODELS = ("xiaomi-mimo-2.5", "qwen-3.5-plus", "qwen-3.6-plus")
     planning_model_idx = 0
+    fast_model_idx = 0
     for role_cfg in unique_planning:
         if role_cfg.name == "decomposer":
             needed = min(max(1, decomp_queue // 3), 6) if decomp_queue > 0 else 1
@@ -894,10 +896,15 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
             count = planning_name_counts.get(role_cfg.name, 0)
             planning_name_counts[role_cfg.name] = count + 1
             name = role_cfg.name if count == 0 else f"{role_cfg.name}-{count+1}"
-            idx = planning_model_idx % len(WORKER_MODEL_CYCLE)
-            model = WORKER_MODEL_CYCLE[idx]
-            fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
-            planning_model_idx += 1
+            if role_cfg.name == "decomposer":
+                model = FAST_MODELS[fast_model_idx % len(FAST_MODELS)]
+                fb = _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+                fast_model_idx += 1
+            else:
+                idx = planning_model_idx % len(WORKER_MODEL_CYCLE)
+                model = WORKER_MODEL_CYCLE[idx]
+                fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+                planning_model_idx += 1
             out.append(BotConfig(
                 name, role_cfg.prompt_file, 30, 90,
                 model, fallback_model=fb,
