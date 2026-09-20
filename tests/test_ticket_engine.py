@@ -1111,3 +1111,216 @@ class TestSavePerformance:
         store2 = TicketStore(path)
         assert store2.count() == 50
         store2.close()
+
+
+class TestBatchTransition:
+    """Tests for CB-9292354-0D38: O(K*N) ticket dispatch overhead fix.
+
+    Validates that batch_transition() applies K transitions with a single
+    save call, and that dispatch time is constant relative to total ticket count.
+    """
+
+    def _make_store(self, tmp_path):
+        return TicketStore(tmp_path / "tickets.json")
+
+    def _add_tickets_in_state(self, store, count, target_state, risk=RiskLevel.LOW):
+        """Helper to create tickets and advance them to a target state."""
+        tickets = []
+        for i in range(count):
+            t = create_ticket(
+                f"batch-{i}", TicketClass.BUG, Severity.LOW,
+                "test", f"evidence-batch-{i}", "problem", "desired", ["ac"],
+                risk=risk,
+            )
+            store.add(t)
+            # Advance through lifecycle to target state
+            current = TicketState.DISCOVERED
+            path_to_target = {
+                TicketState.VALIDATING: [TicketState.VALIDATING],
+                TicketState.TRIAGED: [TicketState.VALIDATING, TicketState.TRIAGED],
+                TicketState.READY: [TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY],
+                TicketState.IMPLEMENTING: [
+                    TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
+                    TicketState.IMPLEMENTING,
+                ],
+                TicketState.REVIEWING: [
+                    TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
+                    TicketState.IMPLEMENTING, TicketState.REVIEWING,
+                ],
+            }
+            for state in path_to_target.get(target_state, []):
+                t = store.transition(t.id, state)
+            tickets.append(t)
+        return tickets
+
+    def test_batch_transition_applies_all_changes(self, tmp_path):
+        """batch_transition should apply all K transitions atomically."""
+        store = self._make_store(tmp_path)
+        tickets = self._add_tickets_in_state(store, 5, TicketState.IMPLEMENTING)
+
+        transitions = [(t.id, TicketState.REVIEWING, None) for t in tickets]
+        results = store.batch_transition(transitions)
+
+        assert len(results) == 5
+        for r in results:
+            assert r.state == TicketState.REVIEWING
+
+        # Verify store state is consistent
+        reviewing = store.list_by_state(TicketState.REVIEWING)
+        assert len(reviewing) == 5
+        implementing = store.list_by_state(TicketState.IMPLEMENTING)
+        assert len(implementing) == 0
+        store.close()
+
+    def test_batch_transition_empty_list(self, tmp_path):
+        """batch_transition with empty list should return empty list."""
+        store = self._make_store(tmp_path)
+        results = store.batch_transition([])
+        assert results == []
+        store.close()
+
+    def test_batch_transition_invalid_raises_keyerror(self, tmp_path):
+        """batch_transition should raise KeyError for missing ticket IDs."""
+        store = self._make_store(tmp_path)
+        with pytest.raises(KeyError, match="ticket not found"):
+            store.batch_transition([("CB-NONEXISTENT", TicketState.VALIDATING, None)])
+        store.close()
+
+    def test_batch_transition_invalid_state_raises_valueerror(self, tmp_path):
+        """batch_transition should raise ValueError for invalid state transitions."""
+        store = self._make_store(tmp_path)
+        tickets = self._add_tickets_in_state(store, 2, TicketState.IMPLEMENTING)
+
+        # DISCOVERED -> COMPLETE is invalid
+        with pytest.raises(ValueError, match="invalid transition"):
+            store.batch_transition([
+                (tickets[0].id, TicketState.COMPLETE, None),
+            ])
+        store.close()
+
+    def test_batch_transition_partial_failure_is_atomic(self, tmp_path):
+        """If one transition fails, none should be applied (atomicity)."""
+        store = self._make_store(tmp_path)
+        tickets = self._add_tickets_in_state(store, 3, TicketState.IMPLEMENTING)
+
+        # Second transition is invalid (IMPLEMENTING -> COMPLETE not allowed directly)
+        transitions = [
+            (tickets[0].id, TicketState.REVIEWING, None),
+            (tickets[1].id, TicketState.COMPLETE, None),  # Invalid!
+            (tickets[2].id, TicketState.REVIEWING, None),
+        ]
+
+        with pytest.raises(ValueError, match="invalid transition"):
+            store.batch_transition(transitions)
+
+        # All tickets should remain in IMPLEMENTING since the batch failed
+        for t in tickets:
+            stored = store.get(t.id)
+            assert stored.state == TicketState.IMPLEMENTING
+        store.close()
+
+    def test_save_called_once_per_batch(self, tmp_path):
+        """_save() must be called at most once per batch_transition regardless of K.
+
+        Acceptance criterion: _save() is called at most once per dispatch cycle
+        regardless of K.
+        """
+        store = self._make_store(tmp_path)
+        tickets = self._add_tickets_in_state(store, 10, TicketState.IMPLEMENTING)
+
+        # Count _save calls via _queue_save (which triggers background save)
+        original_queue_save = store._queue_save
+        queue_save_count = [0]
+
+        def counting_queue_save():
+            queue_save_count[0] += 1
+            original_queue_save()
+
+        store._queue_save = counting_queue_save
+
+        transitions = [(t.id, TicketState.REVIEWING, None) for t in tickets]
+        store.batch_transition(transitions)
+
+        # _queue_save should be called exactly once for the entire batch
+        assert queue_save_count[0] == 1, (
+            f"Expected _queue_save called 1 time for batch of {len(tickets)}, "
+            f"got {queue_save_count[0]}"
+        )
+        store.close()
+
+    def test_dispatch_10_tickets_constant_time(self, tmp_path):
+        """Dispatching 10 tickets takes constant time relative to total ticket count.
+
+        Acceptance criterion: Dispatching 10 tickets takes constant time
+        relative to total ticket count. We measure batch_transition of 10
+        tickets with 100 vs 500 total tickets; ratio should be < 3x.
+        """
+        def measure_batch_dispatch(total_tickets, batch_size=10):
+            store = self._make_store(tmp_path / f"tickets_{total_tickets}.json")
+            tickets = self._add_tickets_in_state(store, total_tickets, TicketState.IMPLEMENTING)
+
+            # Take first batch_size tickets for transition
+            batch = [(t.id, TicketState.REVIEWING, None) for t in tickets[:batch_size]]
+
+            start = time.perf_counter()
+            store.batch_transition(batch)
+            elapsed = time.perf_counter() - start
+            store.close()
+            return elapsed
+
+        time_100 = measure_batch_dispatch(100)
+        time_500 = measure_batch_dispatch(500)
+
+        # With O(K) batch transition, 500 tickets should not take more than
+        # 3x longer than 100 tickets (allowing for some constant overhead).
+        # If it were O(K*N), 500 would take ~5x longer.
+        ratio = time_500 / max(time_100, 1e-9)
+        assert ratio < 3.0, (
+            f"batch_transition does not appear constant-time: "
+            f"100 tickets={time_100*1000:.2f}ms, 500 tickets={time_500*1000:.2f}ms, "
+            f"ratio={ratio:.2f}x (expected <3x)"
+        )
+
+    def test_batch_transition_preserves_gatekeeper_enforcement(self, tmp_path):
+        """batch_transition must enforce gate approval for VERIFYING->COMPLETE."""
+        store = self._make_store(tmp_path)
+        tickets = self._add_tickets_in_state(store, 2, TicketState.REVIEWING)
+
+        # Move to VERIFYING
+        for t in tickets:
+            store.transition(t.id, TicketState.VERIFYING)
+
+        # Attempt batch transition to COMPLETE without gate approval
+        transitions = [(t.id, TicketState.COMPLETE, None) for t in tickets]
+        with pytest.raises(ValueError, match="gatekeeper"):
+            store.batch_transition(transitions)
+
+        # Grant gate approval for first ticket only
+        store.record_gate_result(tickets[0].id, True, gates=[])
+
+        # Now batch with just the approved ticket should succeed
+        results = store.batch_transition([(tickets[0].id, TicketState.COMPLETE, None)])
+        assert len(results) == 1
+        assert results[0].state == TicketState.COMPLETE
+        store.close()
+
+    def test_batch_transition_preserves_planning_prerequisite(self, tmp_path):
+        """batch_transition must enforce planning prerequisite for READY->IMPLEMENTING."""
+        store = self._make_store(tmp_path)
+        tickets = self._add_tickets_in_state(store, 2, TicketState.READY, risk=RiskLevel.MEDIUM)
+
+        # Attempt batch transition to IMPLEMENTING without plan
+        transitions = [(t.id, TicketState.IMPLEMENTING, None) for t in tickets]
+        with pytest.raises(ValueError, match="requires.*implementation plan"):
+            store.batch_transition(transitions)
+
+        # Create plan for first ticket
+        from codebot.implementation_planner import PlanStore
+        plan_store = PlanStore(tmp_path)
+        plan_store.save(tickets[0].id, {"steps": ["step1"]})
+
+        # Batch with just planned ticket should succeed
+        results = store.batch_transition([(tickets[0].id, TicketState.IMPLEMENTING, None)])
+        assert len(results) == 1
+        assert results[0].state == TicketState.IMPLEMENTING
+        store.close()
