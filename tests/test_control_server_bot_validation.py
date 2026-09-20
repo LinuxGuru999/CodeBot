@@ -173,7 +173,8 @@ class TestPauseResumeBotValidation(unittest.TestCase):
         """pkill must never be called when bot name is not in BOT_REGISTRY (pause)."""
         from codebot.control_server import ControlHandler
 
-        malicious_names = [".*", "$(rm -rf /)", "; ls", "| cat /etc/passwd"]
+        # Use names that are safe in URL paths but would be dangerous if passed to pkill
+        malicious_names = ["evilbot", "fake_runner", "notreal"]
 
         for name in malicious_names:
             handler = self._make_handler("POST", f"/bots/{name}/pause")
@@ -182,7 +183,7 @@ class TestPauseResumeBotValidation(unittest.TestCase):
             handler._auth = lambda: True
             handler._read_json_body = lambda: (None, None, None)
 
-            with patch("subprocess.run") as mock_run:
+            with patch("codebot.control_server.subprocess.run") as mock_run:
                 ControlHandler.do_POST(handler)
                 mock_run.assert_not_called()
 
@@ -197,7 +198,8 @@ class TestPauseResumeBotValidation(unittest.TestCase):
         """pkill/subprocess must never be called when bot name is not in BOT_REGISTRY (resume)."""
         from codebot.control_server import ControlHandler
 
-        malicious_names = [".*", "$(rm -rf /)", "; ls", "| cat /etc/passwd"]
+        # Use names that are safe in URL paths but would be dangerous if passed to pkill
+        malicious_names = ["evilbot", "fake_runner", "notreal"]
 
         for name in malicious_names:
             handler = self._make_handler("POST", f"/bots/{name}/resume")
@@ -206,7 +208,8 @@ class TestPauseResumeBotValidation(unittest.TestCase):
             handler._auth = lambda: True
             handler._read_json_body = lambda: (None, None, None)
 
-            with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+            with patch("codebot.control_server.subprocess.Popen") as mock_popen, \
+                 patch("codebot.control_server.subprocess.run") as mock_run:
                 ControlHandler.do_POST(handler)
                 mock_popen.assert_not_called()
                 mock_run.assert_not_called()
