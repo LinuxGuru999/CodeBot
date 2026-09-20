@@ -417,7 +417,10 @@ def _check_config_changes(bots: dict[str, BotState]) -> None:
         entry = new_map.get(base)
         if not entry:
             continue
-        new_interval = entry.get("interval", bot.config.interval_seconds)
+        if base in DECOMPOSER_ROLE_NAMES or base in PLANNING_ROLE_NAMES:
+            new_interval = 30
+        else:
+            new_interval = entry.get("interval", bot.config.interval_seconds)
         new_model = entry.get("model", bot.config.model)
         new_tier = entry.get("tier", bot.config.tier)
         if new_interval != bot.config.interval_seconds or new_model != bot.config.model or new_tier != bot.config.tier:
@@ -832,7 +835,7 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
 
     for role_cfg in unique_planning:
         out.append(BotConfig(
-            role_cfg.name, role_cfg.prompt_file, role_cfg.interval_seconds, role_cfg.heartbeat_timeout,
+            role_cfg.name, role_cfg.prompt_file, 30, 90,
             role_cfg.model, fallback_model=role_cfg.fallback_model,
             clean_exit_wait=False, runner_mode="api", tier=11,
             max_restarts=role_cfg.max_restarts,
