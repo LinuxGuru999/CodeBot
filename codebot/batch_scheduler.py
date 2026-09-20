@@ -268,16 +268,16 @@ def pack_batches(
             for manifest in model_manifests:
                 dropped.append({"name": manifest.get("name", "?"), "manifest": manifest, "reason": "batch-capacity"})
             continue
-        for idx, manifest in enumerate(model_manifests):
+        for start in range(0, len(model_manifests), batch_size):
             if len(batches) < batch_limit:
-                # Accumulate up to batch_size, then append a full batch.
-                if idx % batch_size == 0:
-                    candidate = model_manifests[idx : idx + batch_size]
-                    batches.append(candidate)
+                batches.append(model_manifests[start : start + batch_size])
                 continue
-            # Batch limit just reached — drop this manifest and all remaining.
+            # Batch limit reached — drop every remaining manifest in this
+            # model group and all subsequent groups without slicing.
             limit_reached = True
-            dropped.append({"name": manifest.get("name", "?"), "manifest": manifest, "reason": "batch-capacity"})
+            for manifest in model_manifests[start:]:
+                dropped.append({"name": manifest.get("name", "?"), "manifest": manifest, "reason": "batch-capacity"})
+            break
 
     staggers = [i * int(stagger_s) for i in range(len(batches))]
 

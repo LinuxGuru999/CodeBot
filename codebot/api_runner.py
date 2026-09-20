@@ -20,6 +20,12 @@ Invariants
 - Max total API-call retries is 5 per run (429 exponential backoff capped at 60 s,
   timeout/connection retries capped at 3 with backoff)
 - All tool results are JSON-serialized before appending as tool messages
+
+Security
+--------
+- API keys and secrets are NEVER logged, even partially (no prefixes, hashes, or lengths)
+- Log messages indicate only boolean presence/absence of credentials (e.g., "resolved" or "not found")
+- Constitution §2 compliance: No secrets in code, logs, or error messages
 """
 
 import concurrent.futures
@@ -1840,7 +1846,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     if not api_key:
         _log(f"{bot_name}: FATAL — no API key found (env DIALAGRAM_API_KEY or opencode.jsonc)")
         sys.exit(1)
-    _log(f"{bot_name}: API key resolved")
+    _log(f"{bot_name}: API key resolved (status=present, no key material logged)")
 
     active_model = model
     used_fallback = False

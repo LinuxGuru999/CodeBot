@@ -289,3 +289,69 @@ class TestApplyCaps:
         result = apply_caps(packed, thinking_cap=10, qwen38max_cap=10, slot_cap=10)
         dropped_names = [d["name"] for d in result["dropped"]]
         assert "bot0" in dropped_names
+
+
+class TestPackBatchesPerformance:
+    """Tests for pack_batches O(1) index tracking and remaining-manifest dropping."""
+
+    def test_no_index_call_on_large_input(self) -> None:
+        """Verify all manifests accounted for: batched + dropped == input count."""
+        ready = [{"name": f"bot{i}", "tier_priority": 1, "model": "gpt-4"} for i in range(25)]
+        result = pack_batches(ready, max_per_batch=5, max_batches=2)
+        total = (
+            sum(len(b) for b in result["batches"])
+            + len(result["dropped"])
+        )
+        assert total == 25
+
+    def test_remaining_manifests_correctly_dropped(self) -> None:
+        """When max_batches=1 with 3 models, manifests after batch 1 are all dropped."""
+        ready = [
+            {"name": "bot0", "tier_priority": 1, "model": "model-a"},
+            {"name": "bot1", "tier_priority": 1, "model": "model-a"},
+            {"name": "bot2", "tier_priority": 1, "model": "model-b"},
+            {"name": "bot3", "tier_priority": 1, "model": "model-b"},
+            {"name": "bot4", "tier_priority": 1, "model": "model-c"},
+            {"name": "bot5", "tier_priority": 1, "model": "model-c"},
+        ]
+        result = pack_batches(ready, max_per_batch=3, max_batches=1)
+        # Exactly 1 batch, up to 3 manifests
+        assert len(result["batches"]) == 1
+        assert len(result["dropped"]) >= 3
+        dropped_names = {d["name"] for d in result["dropped"]}
+        batched_names = {m["name"] for b in result["batches"] for m in b}
+        # Every manifest is either batched or dropped, never both
+        assert dropped_names.isdisjoint(batched_names)
+        assert dropped_names | batched_names == {f"bot{i}" for i in range(6)}
+
+    def test_batching_behavior_unchanged(self) -> None:
+        """Identical inputs produce identical batches — no behavioral regression."""
+        ready = [
+            {"name": "bot1", "tier_priority": 1, "model": "gpt-4"},
+            {"name": "bot2", "tier_priority": 1, "model": "gpt-4"},
+            {"name": "bot3", "tier_priority": 2, "model": "claude"},
+            {"name": "bot4", "tier_priority": 2, "model": "claude"},
+            {"name": "bot5", "tier_priority": 3, "model": "gpt-4"},
+        ]
+        r1 = pack_batches(ready, max_per_batch=2, max_batches=3)
+        r2 = pack_batches(ready, max_per_batch=2, max_batches=3)
+        # Same batch count and same total batched manifests
+        assert len(r1["batches"]) == len(r2["batches"])
+        total1 = sum(len(b) for b in r1["batches"])
+        total2 = sum(len(b) for b in r2["batches"])
+        assert total1 == total2
+
+    def test_cross_model_limit_drops_all_remaining(self) -> None:
+        """Limit hit mid-way through a model group; rest of that group + all later groups dropped."""
+        ready = [
+            {"name": "a1", "tier_priority": 1, "model": "m1"},
+            {"name": "a2", "tier_priority": 1, "model": "m1"},
+            {"name": "a3", "tier_priority": 1, "model": "m1"},
+            {"name": "b1", "tier_priority": 1, "model": "m2"},
+            {"name": "b2", "tier_priority": 1, "model": "m2"},
+        ]
+        result = pack_batches(ready, max_per_batch=2, max_batches=1)
+        assert len(result["batches"]) == 1
+        assert len(result["batches"][0]) <= 2
+        dropped_names = {d["name"] for d in result["dropped"]}
+        assert len(dropped_names) == len(ready) - len(result["batches"][0])

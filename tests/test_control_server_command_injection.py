@@ -371,5 +371,79 @@ class TestCommandInjectionPrevention(unittest.TestCase):
             self.assertFalse(validate_bot_name(name), f"Should reject: {repr(name)}")
 
 
+    # --- pkill regex pattern injection tests (CB-9254938-B549) ---
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_stop_rejects_regex_pattern_injection_dot_star(self):
+        """Stop must reject regex patterns like '.*' that would kill all processes."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler(
+            "POST", "/bots/stop", body={"bots": [".*"]}
+        )
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": [".*"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        # Should be rejected by format validation (contains '.') or registry check
+        self.assertIn(status_code, [400, 404])
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_stop_rejects_regex_pattern_injection_python3(self):
+        """Stop must reject patterns like 'python3' not in BOT_REGISTRY."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler(
+            "POST", "/bots/stop", body={"bots": ["python3"]}
+        )
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["python3"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 404)
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+    def test_stop_pkill_pattern_is_anchored_for_valid_bot(self):
+        """Stop must use anchored pkill pattern to prevent regex injection even for valid bots."""
+        from codebot.control_server import ControlHandler
+        import shlex
+
+        mock_bot = MagicMock()
+        mock_bot.name = "my-bot"
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            with patch("codebot.control_server.subprocess.run") as mock_run:
+                handler = self._make_handler(
+                    "POST", "/bots/stop", body={"bots": ["my-bot"]}
+                )
+                responses = []
+                handler._json = lambda code, data, r=responses: r.append((code, data))
+                handler._auth = lambda: True
+                handler._read_json_body = lambda: ({"bots": ["my-bot"]}, None, None)
+
+                ControlHandler.do_POST(handler)
+
+                mock_run.assert_called()
+                call_args = mock_run.call_args
+                cmd = call_args[0][0]
+                # Pattern should be anchored with api_runner\.py prefix and quoted name
+                expected_pattern = f"api_runner\\.py {shlex.quote('my-bot')}"
+                self.assertIn(expected_pattern, cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
