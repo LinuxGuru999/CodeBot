@@ -1695,7 +1695,7 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
         else:
             lines.append(f"│ {'Agent':<24s} {'State':<10s} {'HB':>8s} {'LOG':>8s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s} {'MODEL':<20s}")
             lines.append(_c("│ " + "─"*101, "dim", enabled))
-            for a in agents[:20]:
+            for a in agents[:15]:
                 bucket = _bucket_color(a["bucket"], enabled)
                 hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
                 loga = _age_str(a["log_age"], enabled) if a["log_age"] is not None else _c("-", "gray", enabled)
@@ -1706,8 +1706,8 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
                 name = a["name"][:24]
                 model = (a["model"] or "-")[:20]
                 lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s} {model:<20s}")
-            if len(agents) > 32:
-                lines.append(f"│ ... +{len(agents)-20} more (use botop status --verbose)")
+            if len(agents) > 27:
+                lines.append(f"│ ... +{len(agents)-15} more (use botop status --verbose)")
         lines.append(_c("└──────────────────────────────────────────────────────────────────────────", "dim", enabled))
 
     # tickets
