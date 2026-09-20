@@ -50,7 +50,7 @@ Everything else supports these six modules.
 | `codebot/` | 75 portable core modules (no project knowledge) |
 | `codebot/roles/` | 40 role prompt templates |
 | `codebot/adapters/` | ProjectAdapter implementations |
-| `tests/` | 106 test files |
+| `tests/` | 109 test files |
 | `docs/` | Architecture, API, goals, module docs, ADRs |
 | `.codebot/` | Project contract: project.yaml, constitution.md, quality_gates.yaml, capability_matrix.yaml |
 | `logs/` | Orchestrator and per-agent logs |
