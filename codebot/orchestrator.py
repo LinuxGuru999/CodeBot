@@ -5255,6 +5255,18 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     except Exception as e:
         logger.warning(f"Dynamic scaling failed: {e}")
     try:
+        from codebot.ticket_engine import TicketStore
+        store_path = STATE_DIR / "tickets.json"
+        if not store_path.exists():
+            store_path = Path(".codebot/state/tickets.json")
+        if store_path.exists():
+            ts = TicketStore(store_path)
+            counts = ts.summary()
+            if counts.get("IMPLEMENTING", 0) > 0:
+                _dispatch_tickets_to_implementers(bots)
+    except Exception as e:
+        logger.warning(f"Early implementer dispatch failed: {e}")
+    try:
         _recover_stuck_implementing_tickets(bots)
     except Exception as e:
         logger.warning(f"Stuck ticket recovery failed: {e}")
