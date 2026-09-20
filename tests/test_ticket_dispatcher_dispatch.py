@@ -210,8 +210,13 @@ class TestCorrectBotSelection:
                 spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
 
         # Should still dispatch (to general_implementer fallback or bug's mapping)
-        # The key assertion is no crash and correct fallback behavior
-        assert len(spawned_roles) <= 1
+        # The key assertion is no crash and correct fallback behavior.
+        # When start_bot_fn returns False, the dispatcher may try a second bot
+        # from idle_bots_by_role before falling back to _get_or_create_bot,
+        # so we allow up to 2 attempts but all must be general_implementer.
+        assert len(spawned_roles) <= 2
+        for role in spawned_roles:
+            assert role == "general_implementer"
 
 
 class TestReviewerRoleIndexedLookup:

@@ -390,6 +390,32 @@ def _state_write_lock(bot_name: str) -> Iterator[None]:
             _flock(lock.fileno(), LOCK_UN)
 
 
+@contextmanager
+def _prompt_read_lock(path: Path) -> Iterator[None]:
+    """Acquire an exclusive lock on a prompt file for atomic stat+read.
+
+    Uses fcntl.flock on Unix or msvcrt.locking on Windows.
+    The lock is released when the context manager exits.
+    This prevents race conditions where concurrent writes modify the file
+    between stat() and read_text() calls.
+    """
+    fd = None
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        _flock(fd, LOCK_EX)
+        yield
+    finally:
+        if fd is not None:
+            try:
+                _flock(fd, LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def update_bot_state(bot: BotState, status: str) -> None:
     state_file = STATE_DIR / f"{bot.config.name}.state.json"
     try:
@@ -538,9 +564,24 @@ def _should_skip_run(bot: BotState, last_run_mtime: float, is_demand: bool = Fal
 
 
 def _prepare_prompt_with_context(bot: BotState) -> str:
-    """Read prompt file and inject ticket context + scratchpad handoff."""
+    """Read prompt file and inject ticket context + scratchpad handoff.
+
+    Acquires an exclusive lock on the prompt file before reading to prevent
+    race conditions with concurrent writes that could cause stale/inconsistent reads.
+    """
     prompt_path = BOTS_DIR / bot.config.prompt_file
-    prompt_text = prompt_path.read_text()
+
+    # Read prompt content while holding exclusive lock
+    try:
+        with _prompt_read_lock(prompt_path):
+            prompt_text = prompt_path.read_text()
+    except FileNotFoundError:
+        logger.warning(f"Prompt file not found: {prompt_path}")
+        return ""
+    except Exception as e:
+        logger.error(f"Failed to read prompt file {prompt_path}: {e}")
+        return ""
+
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
     logger.info(f"start_bot '{bot.config.name}': assigned_tid='{assigned_tid}', prompt={len(prompt_text)} chars")
 
