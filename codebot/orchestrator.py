@@ -1,55 +1,42 @@
 #!/usr/bin/env python3
-"""Bot Orchestrator — Thin Controller.
+"""Bot Orchestrator — Thin coordinator delegating to focused modules.
 
 Purpose
 -------
-Coordinates bot lifecycle and ticket dispatching by delegating to
-process_manager, ticket_dispatcher, dispatch_service, and alignment_service.
+Coordinates bot lifecycle by delegating to:
+- process_manager: bot subprocess management and health
+- alignment_coordinator: post-exit alignment events
+- ticket_dispatcher: ticket-to-bot routing and claims
+- worker_scaler: registry, scaling limits, resource checks
+- state_manager: paths, drain/lock, backup/restore
 
-The orchestrator is a pure process manager that spawns bot subprocesses
-and monitors their health. It does NOT contain business logic for
-dispatching, alignment, or lease management.
-
-Invariants
-----------
-- Single process (no multiprocessing)
-- Heartbeat files are the ONLY communication channel from bots
-- Orchestrator never reads bot output files (bots write directly to docs/)
-- Kill signals: SIGTERM first (5s grace), then SIGKILL
-- Max restarts per bot per hour: configurable (default 5)
+The orchestrator contains NO business logic. It only wires modules
+and runs the main event loop.
 """
+from __future__ import annotations
 
-import json
 import logging
-import os
 import signal
 import sys
 import time
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from codebot.process_manager import (
-    BotConfig, BotState, ModelProfile, MODEL_PROFILES,
+    BotConfig, BotState,
     start_bot, stop_bot, restart_bot,
-    is_stuck, is_log_stalled, effective_heartbeat_timeout, model_profile,
-    read_heartbeat, log_mtime, update_bot_state,
-    checkpoint_path, read_checkpoint, STATE_DIR, LOGS_DIR,
-    BOTS_DIR, GATEWAY_MAX_CONCURRENT,
-    GATEWAY_MIN_SPAWN_GAP, ALWAYS_RESPAWN, write_heartbeat,
-    heartbeat_path, _write_json_atomic,
+    is_stuck, effective_heartbeat_timeout, read_heartbeat, update_bot_state,
+    model_profile, BOTS_DIR,
 )
-BACKUP_DIR = STATE_DIR / "backup"
-
+from codebot.alignment_coordinator import write_alignment_event
+from codebot.alignment_service import (
+    run_alignment_pipeline, run_alignment_pipeline_for_all,
+)
 from codebot.ticket_dispatcher import (
     spawn_demand_agents, dispatch_decompose_agents,
     dispatch_planning_agents, advance_reviewed_tickets,
     gatekeeper_verify_tickets, route_ready_tickets,
     process_rework_tickets, recover_deferred_tickets,
     _sweep_orphan_claims,
-)
-from codebot.alignment_service import (
-    run_alignment_pipeline, run_alignment_pipeline_for_all,
 )
 from codebot.dispatch_service import (
     get_pipeline_state, is_needed_bot, apply_agent_availability,
@@ -58,156 +45,118 @@ from codebot.dispatch_service import (
     retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
 )
 from codebot.scratchpad import load_scratchpad, save_scratchpad
-from codebot.orchestrator_services import (
-    is_error_disabled, is_restart_budget_exceeded,
-    is_manifest_error_disabled, is_manifest_restart_budget_exceeded,
-    rotating_slots, worker_reserved_slots,
+from codebot.state_manager import (
+    PathConfig, get_paths, is_draining, set_drain, clear_drain,
+    drain_status, backup_botnet, restore_botnet, check_self_restart,
+    safe_stop_all, set_project_adapter,
+)
+from codebot.worker_scaler import (
+    load_bot_registry, build_bots, rotating_slots, worker_reserved_slots,
     _get_available_memory_mb, _model_tier_for_complexity,
-    _read_state_file, build_bots,
-    CLAIM_TTL_SECONDS, MIN_ROTATING_SLOTS,
+    is_manifest_error_disabled, is_manifest_restart_budget_exceeded,
+    _read_state_file, CLAIM_TTL_SECONDS, MIN_ROTATING_SLOTS,
 )
 
 __all__ = [
-    "BotConfig", "BotState", "ModelProfile", "MODEL_PROFILES",
     "start_bot", "stop_bot", "restart_bot",
-    "is_stuck", "is_log_stalled", "effective_heartbeat_timeout", "model_profile",
-    "read_heartbeat", "log_mtime", "update_bot_state", "checkpoint_path",
-    "read_checkpoint", "STATE_DIR", "LOGS_DIR", "BOTS_DIR", "BACKUP_DIR",
-    "GATEWAY_MAX_CONCURRENT", "GATEWAY_MIN_SPAWN_GAP", "ALWAYS_RESPAWN",
-    "write_heartbeat", "heartbeat_path", "_write_json_atomic",
+    "is_stuck", "effective_heartbeat_timeout", "model_profile",
+    "read_heartbeat", "update_bot_state", "BOTS_DIR",
     "is_draining", "set_drain", "clear_drain", "get_status", "print_status",
     "safe_stop_all", "backup_botnet", "restore_botnet", "drain_status",
     "PathConfig", "set_project_adapter",
+    "rotating_slots", "worker_reserved_slots", "_get_available_memory_mb",
+    "_model_tier_for_complexity", "is_manifest_error_disabled",
+    "is_manifest_restart_budget_exceeded", "_read_state_file",
+    "CLAIM_TTL_SECONDS", "MIN_ROTATING_SLOTS",
 ]
 
-_project_root = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
-_paths_state_dir = _project_root / ".codebot" / "state"
-_paths_logs_dir = _project_root / ".codebot" / "logs"
-_paths_backup_dir = _paths_state_dir / "backup"
-_paths_drain_file = _paths_state_dir / ".drain"
-_paths_update_lock = _paths_state_dir / ".update_lock"
-_paths_restart_file = _paths_state_dir / ".restart"
-
-@dataclass
-class PathConfig:
-    bots_dir: Path
-    state_dir: Path
-    logs_dir: Path
-    backup_dir: Path
-    alignment_events_dir: Path
-    drain_file: Path
-    update_lock: Path
-    restart_file: Path
-
-_PathsCompat = PathConfig
-
-_paths = PathConfig(
-    bots_dir=BOTS_DIR,
-    state_dir=_paths_state_dir, logs_dir=_paths_logs_dir,
-    backup_dir=_paths_backup_dir, drain_file=_paths_drain_file,
-    update_lock=_paths_update_lock, restart_file=_paths_restart_file,
-    alignment_events_dir=_paths_state_dir / "alignment_events",
-)
-ALIGNMENT_EVENTS_DIR = _paths.alignment_events_dir
-
-_paths_state_dir.mkdir(parents=True, exist_ok=True)
-_paths_logs_dir.mkdir(parents=True, exist_ok=True)
-_paths_backup_dir.mkdir(parents=True, exist_ok=True)
-
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(_paths_logs_dir / "orchestrator.log")],
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(get_paths().logs_dir / "orchestrator.log")],
 )
 logger = logging.getLogger("orchestrator")
 
-_adapter_instance: Any = None
 
-def set_adapter_instance(adapter: Any) -> None:
-    global _adapter_instance
-    _adapter_instance = adapter
-
-def set_project_adapter(adapter: Any) -> None:
-    """Update paths from a project adapter without using global path variables."""
-    set_adapter_instance(adapter)
-    try:
-        p = adapter.paths()
-        _paths.bots_dir = getattr(p, 'repository_root', _paths.bots_dir)
-        _paths.state_dir = getattr(p, 'state_dir', _paths.state_dir)
-        _paths.logs_dir = getattr(p, 'logs_dir', _paths.logs_dir)
-        _paths.backup_dir = _paths.state_dir / "backup"
-        _paths.drain_file = _paths.state_dir / ".drain"
-        _paths.update_lock = _paths.state_dir / ".update_lock"
-        _paths.restart_file = _paths.state_dir / ".restart"
-        _paths.alignment_events_dir = _paths.state_dir / "alignment_events"
-    except Exception as e:
-        logger.warning("Failed to update paths from adapter: %s", e)
-
-_COMPAT_PATHS = {"STATE_DIR": "state_dir", "LOGS_DIR": "logs_dir", "BOTS_DIR": "bots_dir",
-                 "BACKUP_DIR": "backup_dir", "ALIGNMENT_EVENTS_DIR": "alignment_events_dir"}
-
-def __getattr__(name: str) -> Any:
-    if name in _COMPAT_PATHS:
-        return getattr(_paths, _COMPAT_PATHS[name])
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def get_status(bots: dict[str, BotState]) -> dict:
+    """Return a dict of bot statuses for display or API."""
+    out: dict[str, dict[str, Any]] = {}
+    for n, b in bots.items():
+        pid = b.process.pid if b.process and b.process.poll() is None else None
+        hb = read_heartbeat(b.config.name)
+        ha = max(0.0, time.time() - hb) if hb > 0 else None
+        pr = model_profile(b.config.model)
+        out[n] = {
+            "enabled": b.config.enabled,
+            "running": pid is not None,
+            "pid": pid,
+            "model": b.config.model,
+            "risk": pr.lockup_risk if pr else "unknown",
+            "eff_timeout": effective_heartbeat_timeout(b),
+            "heartbeat_age_seconds": round(ha, 1) if ha else None,
+            "next_run_in": round(b.next_run_at - time.time(), 1)
+                if b.next_run_at and not pid else None,
+            "restart_count": b.restart_count,
+            "consecutive_errors": b.consecutive_errors,
+        }
+    return out
 
 
+def print_status(bots: dict[str, BotState]) -> None:
+    """Print a human-readable status table to stdout."""
+    st = get_status(bots)
+    print("\n" + "=" * 90 + "\nBOT ORCHESTRATOR STATUS\n" + "=" * 90)
+    for n, i in st.items():
+        if i["running"]:
+            s = "RUNNING"
+        elif not i["enabled"]:
+            s = "DISABLED"
+        elif i["next_run_in"] and i["next_run_in"] > 0:
+            s = "WAITING"
+        else:
+            s = "STOPPED"
+        nxt_val = i.get("next_run_in")
+        nxt_str = f"{nxt_val:.0f}s" if nxt_val and nxt_val > 0 else "-"
+        hb_str = f"{i['heartbeat_age_seconds']}s" if i["heartbeat_age_seconds"] else "-"
+        print(
+            f"  {n:15s} {s:9s} PID={str(i['pid'] or '-'):>6s} "
+            f"HB={hb_str:>7s} NEXT={nxt_str:>6s} "
+            f"eff={i['eff_timeout']:4.0f}s risk={i['risk']:11s} {i['model']}"
+        )
+    print("=" * 90 + "\n")
 
-from codebot.orchestrator_services import load_bot_registry
-
-BOT_REGISTRY = load_bot_registry()
-
-def is_draining() -> bool:
-    return _paths.drain_file.exists()
-
-def _check_self_restart(bots: dict[str, BotState]) -> bool:
-    if not _paths.restart_file.exists():
-        return False
-    try:
-        reason = _paths.restart_file.read_text(encoding="utf-8").strip() or "manual"
-    except OSError:
-        reason = "manual"
-    logger.info(f"Self-restart signal detected (reason: {reason})")
-    for bot in bots.values():
-        if bot.process is not None and bot.process.poll() is None:
-            stop_bot(bot, "self-restart")
-    try:
-        _paths.restart_file.unlink(missing_ok=True)
-    except OSError:
-        pass
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-    return True
-
-def _write_alignment_event(bot_name: str, exit_code: int | None, exit_reason: str, started_at: float | None = None) -> None:
-    try:
-        from codebot.alignment_service import _write_alignment_event as _wae
-        _wae(bot_name, exit_code, exit_reason, started_at)
-    except Exception as e:
-        logger.warning(f"Failed to write alignment event for {bot_name}: {e}")
 
 def check_all_bots(bots: dict[str, BotState]) -> None:
-    """Main health check loop. Delegates business logic to services."""
-    if _check_self_restart(bots):
+    """Main health-check loop. Delegates all business logic to services."""
+    _paths = get_paths()
+    if check_self_restart(bots, stop_bot):
         return
+
     now = time.time()
+
+    # Retry disabled or stuck-starting bots
     for name, bot in bots.items():
         if not bot.config.enabled and bot.process is None:
             if retry_disabled_bot(bot):
                 update_bot_state(bot, "waiting")
-        if bot.config.enabled and bot.process is not None and retry_stuck_starting(bot):
-            logger.info(f"Retrying '{name}' stuck in starting")
+        if bot.config.enabled and bot.process is not None:
+            if retry_stuck_starting(bot):
+                logger.info(f"Retrying '{name}' stuck in starting")
 
+    # Handle exited bots
     for name, bot in list(bots.items()):
         if not bot.config.enabled or bot.process is None or bot.process.poll() is None:
             continue
         exit_code = bot.process.returncode
-        _write_alignment_event(name, exit_code=exit_code,
-                               exit_reason="clean" if exit_code == 0 else "error",
-                               started_at=bot.started_at)
+        write_alignment_event(name, exit_code=exit_code,
+                              exit_reason="clean" if exit_code == 0 else "error",
+                              started_at=bot.started_at)
         try:
             run_alignment_pipeline(name)
         except Exception as e:
             logger.warning(f"Alignment pipeline failed for {name}: {e}")
         bot.process = None
+
         if exit_code == 0:
             bot.consecutive_errors = 0
             transition_ticket_on_success(bot, bots)
@@ -228,30 +177,37 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 old_model = bot.config.model
                 rotate_model_on_error(bot, bots)
                 bot.consecutive_errors = 0
-                logger.warning(f"Bot '{name}' failed 3x on {old_model} -> {bot.config.model}")
-            # Finish scratchpad with error info before transitioning ticket
-            assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+                logger.warning(
+                    f"Bot '{name}' failed 3x on {old_model} -> {bot.config.model}"
+                )
+            assigned_tid = getattr(bot, "_assigned_ticket_id", "")
             if assigned_tid:
                 try:
-                    scratch = load_scratchpad(STATE_DIR, assigned_tid)
+                    scratch = load_scratchpad(get_paths().state_dir, assigned_tid)
                     scratch.mark_error(f"Bot exited with code {exit_code}")
                     scratch.finish_agent(f"error: exit_code={exit_code}")
-                    save_scratchpad(STATE_DIR, scratch)
+                    save_scratchpad(get_paths().state_dir, scratch)
                 except Exception as e:
                     logger.warning(f"Failed to finish scratchpad for ticket {assigned_tid}: {e}")
             transition_ticket_on_error(bot, bots, exit_code)
             bot.next_run_at = now + 5
             update_bot_state(bot, "waiting")
 
+    # Handle stuck bots
     for name, bot in bots.items():
         if not bot.config.enabled or bot.process is None or bot.process.poll() is not None:
             continue
         if is_stuck(bot):
             eff = effective_heartbeat_timeout(bot)
-            hb_age = now - read_heartbeat(bot.config.name) if read_heartbeat(bot.config.name) else 0
+            hb = read_heartbeat(bot.config.name)
+            hb_age = now - hb if hb else 0
             prof = model_profile(bot.config.model)
-            logger.warning(f"Bot '{name}' stuck (hb {hb_age:.0f}s > {eff}s, risk={prof.lockup_risk if prof else '?'})")
-            _write_alignment_event(name, exit_code=None, exit_reason="stuck", started_at=bot.started_at)
+            logger.warning(
+                f"Bot '{name}' stuck (hb {hb_age:.0f}s > {eff}s, "
+                f"risk={prof.lockup_risk if prof else '?'})"
+            )
+            write_alignment_event(name, exit_code=None, exit_reason="stuck",
+                                  started_at=bot.started_at)
             try:
                 run_alignment_pipeline(name)
             except Exception as e:
@@ -259,10 +215,14 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             restart_bot(bot, reason="stuck", bots=bots)
 
     log_bot_statuses(bots)
+
+    # Run dispatcher tasks
     for fn, label in [
         (lambda: _sweep_orphan_claims(bots), "orphan sweep"),
-        (lambda: apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state), "availability"),
-        (lambda: spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot), "demand"),
+        (lambda: apply_agent_availability(bots, stop_fn=stop_bot,
+                                          update_state_fn=update_bot_state), "availability"),
+        (lambda: spawn_demand_agents(bots, get_paths().state_dir,
+                                     start_bot_fn=start_bot), "demand"),
         (lambda: dispatch_decompose_agents(bots, start_bot_fn=start_bot), "decompose"),
         (lambda: dispatch_planning_agents(bots, start_bot_fn=start_bot), "planning"),
         (lambda: advance_reviewed_tickets(bots), "review"),
@@ -276,6 +236,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         except Exception as e:
             logger.warning(f"{label} failed: {e}")
 
+    # Start eligible bots
     pipeline = get_pipeline_state()
     for name, bot in bots.items():
         if not bot.config.enabled or is_draining() or bot.process is not None:
@@ -283,85 +244,17 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         if bot.next_run_at and now < bot.next_run_at:
             continue
         if is_needed_bot(name, pipeline):
-            has_ticket = bool(getattr(bot, '_assigned_ticket_id', ''))
+            has_ticket = bool(getattr(bot, "_assigned_ticket_id", ""))
             start_bot(bot, bots=bots, is_demand=has_ticket)
         else:
             bot.next_run_at = now + bot.config.interval_seconds
             update_bot_state(bot, "waiting")
 
-def get_status(bots: dict[str, BotState]) -> dict:
-    out = {}
-    for n, b in bots.items():
-        pid = b.process.pid if b.process and b.process.poll() is None else None
-        hb = read_heartbeat(b.config.name)
-        ha = max(0.0, time.time() - hb) if hb > 0 else None
-        pr = model_profile(b.config.model)
-        out[n] = {"enabled": b.config.enabled, "running": pid is not None, "pid": pid,
-                  "model": b.config.model, "risk": pr.lockup_risk if pr else "unknown",
-                  "eff_timeout": effective_heartbeat_timeout(b),
-                  "heartbeat_age_seconds": round(ha, 1) if ha else None,
-                  "next_run_in": round(b.next_run_at - time.time(), 1) if b.next_run_at and not pid else None,
-                  "restart_count": b.restart_count, "consecutive_errors": b.consecutive_errors}
-    return out
-
-def print_status(bots: dict[str, BotState]) -> None:
-    st = get_status(bots)
-    print("\n" + "=" * 90 + "\nBOT ORCHESTRATOR STATUS\n" + "=" * 90)
-    for n, i in st.items():
-        s = "RUNNING" if i["running"] else ("DISABLED" if not i["enabled"] else ("WAITING" if i["next_run_in"] and i["next_run_in"] > 0 else "STOPPED"))
-        nxt_val = i.get('next_run_in')
-        nxt_str = f"{nxt_val:.0f}s" if nxt_val and nxt_val > 0 else "-"
-        hb_str = f"{i['heartbeat_age_seconds']}s" if i['heartbeat_age_seconds'] else "-"
-        print(f"  {n:15s} {s:9s} PID={str(i['pid'] or '-'):>6s} HB={hb_str:>7s} NEXT={nxt_str:>6s} eff={i['eff_timeout']:4.0f}s risk={i['risk']:11s} {i['model']}")
-    print("=" * 90 + "\n")
-
-def set_drain(reason: str = "") -> None:
-    _paths.drain_file.write_text(f"{time.time()}\n{reason}\n")
-    logger.info(f"Drain set: {reason}")
-
-def clear_drain() -> None:
-    for f in (_paths.drain_file, _paths.update_lock):
-        try:
-            f.unlink()
-        except FileNotFoundError:
-            pass
-    logger.info("Drain cleared")
-
-def drain_status() -> dict:
-    return {"draining": is_draining(), "drain_file": str(_paths.drain_file) if _paths.drain_file.exists() else None,
-            "update_lock": str(_paths.update_lock) if _paths.update_lock.exists() else None,
-            "drain_reason": _paths.drain_file.read_text().strip() if _paths.drain_file.exists() else None}
-
-def safe_stop_all(bots: dict[str, BotState]) -> dict:
-    set_drain("safe-stop")
-    res = {}
-    for n, b in bots.items():
-        if b.process is None or b.process.poll() is not None:
-            res[n] = "already stopped"
-            update_bot_state(b, "stopped")
-            continue
-        stop_bot(b, "safe-stop")
-        res[n] = "stopped"
-        update_bot_state(b, "drained")
-    return res
-
-def backup_botnet(tag: str | None = None) -> Path:
-    d = _paths.backup_dir / f"botnet-{tag + '-' if tag else ''}{time.strftime('%Y%m%d-%H%M%S')}"
-    d.mkdir(parents=True, exist_ok=True)
-    for p in BOTS_DIR.glob("*.md"):
-        (d / p.name).write_bytes(p.read_bytes())
-    return d
-
-def restore_botnet(backup_dir: Path) -> None:
-    if not backup_dir.exists():
-        raise FileNotFoundError(str(backup_dir))
-    for p in backup_dir.glob("*.md"):
-        (BOTS_DIR / p.name).write_bytes(p.read_bytes())
-
-
 
 def main() -> None:
+    """Entry point: parse args, build bot state, run or dispatch."""
     import argparse
+
     p = argparse.ArgumentParser(description="Bot Orchestrator")
     p.add_argument("--status", action="store_true")
     p.add_argument("--stop-all", action="store_true")
@@ -372,7 +265,9 @@ def main() -> None:
     p.add_argument("--start", nargs="*")
     p.add_argument("--check-interval", type=int, default=30)
     args = p.parse_args()
-    bots = build_bots(BOT_REGISTRY)
+
+    registry = load_bot_registry()
+    bots = build_bots(registry)
 
     if args.status:
         print_status(bots)
@@ -389,7 +284,7 @@ def main() -> None:
         print("Drain cleared.")
         return
     if args.safe_stop or args.drain:
-        safe_stop_all(bots)
+        safe_stop_all(bots, stop_bot)
         print("Safe stop complete.")
         print_status(bots)
         return
@@ -401,7 +296,7 @@ def main() -> None:
         if is_draining():
             print("Refusing --start while draining", file=sys.stderr)
             sys.exit(4)
-        for n in (args.start or [c.name for c in BOT_REGISTRY]):
+        for n in args.start or [b.config.name for b in bots.values()]:
             if n in bots and bots[n].config.enabled:
                 start_bot(bots[n])
         if args.start:
@@ -409,23 +304,27 @@ def main() -> None:
             print_status(bots)
         return
 
+    # Bootstrap adapter
     try:
         from codebot.codebot_bootstrap import bootstrap as _cb
         adapter = _cb(BOTS_DIR)
         if adapter:
             logger.info("Bootstrapped: %s", adapter.project_name())
+            registry = load_bot_registry(adapter)
+            bots = build_bots(registry)
+            # Make adapter available to orchestrator internals
+            import codebot.orchestrator as _self
+            if hasattr(_self, "_adapter_instance"):
+                from codebot.state_manager import set_adapter_instance
+                set_adapter_instance(adapter)
     except ImportError:
         adapter = None
     except Exception as e:
         logger.warning("Bootstrap failed: %s", e)
         adapter = None
 
-    if adapter:
-        import codebot.orchestrator as _self
-        _self.BOT_REGISTRY = _load_bot_registry()
-        bots = _build_bots(_self.BOT_REGISTRY)
-
-    def shutdown_handler(signum, frame):
+    # Signal handling
+    def shutdown_handler(signum, frame):  # noqa: ARG001
         for b in bots.values():
             stop_bot(b, "shutdown")
         sys.exit(0)
@@ -433,10 +332,12 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
 
+    # Initial availability sweep
     if not is_draining():
         for b in bots.values():
-            b._assigned_ticket_id = ''
-        apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state)
+            b._assigned_ticket_id = ""
+        apply_agent_availability(bots, stop_fn=stop_bot,
+                                 update_state_fn=update_bot_state)
         logger.info(f"Overture: pipeline {get_pipeline_state()}")
 
     logger.info("Orchestrator starting, health check every %ds", args.check_interval)
@@ -454,15 +355,6 @@ def main() -> None:
             logger.error(f"Health check error: {e}")
             time.sleep(args.check_interval)
 
+
 if __name__ == "__main__":
     main()
-
-__all__.extend([
-    "ModelProfile", "MODEL_PROFILES", "is_log_stalled",
-    "is_error_disabled", "is_restart_budget_exceeded",
-    "rotating_slots", "worker_reserved_slots",
-    "_get_available_memory_mb", "_model_tier_for_complexity",
-    "is_manifest_error_disabled", "is_manifest_restart_budget_exceeded",
-    "CLAIM_TTL_SECONDS", "MIN_ROTATING_SLOTS",
-    "_read_state_file",
-])
