@@ -643,6 +643,21 @@ class TestMain:
         call_args = mock_migrate.call_args
         assert call_args.kwargs.get('dry_run') is True
 
+    def test_main_with_state_dir(self, tmp_path):
+        """Test --state-dir argument."""
+        custom_state = tmp_path / "custom_state"
+        custom_state.mkdir()
+
+        with patch('codebot.migrate_queue.migrate', return_value=0) as mock_migrate:
+            with patch('sys.argv', ['migrate_queue', '--state-dir', str(custom_state)]):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 0
+        call_args = mock_migrate.call_args
+        state_dir = call_args.args[1]
+        assert str(state_dir).startswith(str(custom_state))
+
     def test_main_combined_arguments(self, tmp_path):
         """Test combining multiple CLI arguments."""
         custom_path = tmp_path / "my_project"
@@ -664,6 +679,33 @@ class TestMain:
         
         assert exc_info.value.code == 0
         call_args = mock_migrate.call_args
+        assert call_args.kwargs.get('dry_run') is True
+
+    def test_main_combined_with_state_dir(self, tmp_path):
+        """Test combining --project, --state-dir, --queue, and --dry-run."""
+        custom_path = tmp_path / "my_project"
+        custom_path.mkdir()
+        (custom_path / "my").mkdir()
+        queue_file = custom_path / "my" / "queue.md"
+        queue_file.write_text("1. **[HIGH]**: Test\n   class: bug")
+        custom_state = tmp_path / "custom_state"
+        custom_state.mkdir()
+
+        with patch('codebot.migrate_queue.migrate', return_value=0) as mock_migrate:
+            with patch('sys.argv', [
+                'migrate_queue',
+                '--project', str(custom_path),
+                '--state-dir', str(custom_state),
+                '--queue', 'my/queue.md',
+                '--dry-run'
+            ]):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 0
+        call_args = mock_migrate.call_args
+        state_dir = call_args.args[1]
+        assert str(state_dir).startswith(str(custom_state))
         assert call_args.kwargs.get('dry_run') is True
 
 

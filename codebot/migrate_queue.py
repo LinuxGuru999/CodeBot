@@ -177,12 +177,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Migrate QUEUE.md to CodeBot TicketStore")
     parser.add_argument("--project", type=str, default=".", help="Project root path")
     parser.add_argument("--queue", type=str, default="docs/triage/QUEUE.md", help="Relative path to QUEUE.md")
+    parser.add_argument("--state-dir", type=str, default=None, help="State directory (default: <project>/.codebot/state)")
     parser.add_argument("--dry-run", action="store_true", help="Parse only, don't write tickets")
     args = parser.parse_args()
 
     project_root = Path(args.project).resolve()
     queue_path = project_root / args.queue
-    state_dir = project_root / ".codebot" / "state"
+    if args.state_dir:
+        state_dir = Path(args.state_dir).resolve()
+    else:
+        state_dir = project_root / ".codebot" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
 
     sys.exit(migrate(queue_path, state_dir, dry_run=args.dry_run))
