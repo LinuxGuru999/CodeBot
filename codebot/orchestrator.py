@@ -1930,6 +1930,7 @@ def _read_bot_status(bot_name: str) -> dict | None:
 
 def _log_bot_statuses(bots: dict[str, "BotState"]) -> None:
     """Log current activity for all running bots from status + tasklog files."""
+    detector = _get_freeze_detector()
     for name, bot in bots.items():
         alive = bot.process is not None and bot.process.poll() is None
         if not alive:
@@ -1950,6 +1951,16 @@ def _log_bot_statuses(bots: dict[str, "BotState"]) -> None:
             + (f" desc={desc[:120]}" if desc else "")
             + (f" | {taskline}" if taskline else "")
         )
+        if detector is not None:
+            progress = 1 if any(t in task for t in ("create_ticket", "write", "transition")) else 0
+            detector.observe(
+                bot_name=name,
+                iteration=iteration,
+                current_task=task,
+                updated_at=status.get("updated_at", time.time()),
+                files_touched=files,
+                progress_actions=progress,
+            )
 
 
 def _read_bot_taskline(bot_name: str) -> str:
@@ -1976,6 +1987,12 @@ def is_log_stalled(bot: BotState) -> bool:
 
 
 def is_stuck(bot: BotState) -> bool:
+    detector = _get_freeze_detector()
+    if detector is not None:
+        report = detector.is_frozen(bot.config.name)
+        if report.frozen:
+            logger.warning(f"Freeze detected for '{bot.config.name}': {report.reason} {report.details}")
+            return True
     eff = effective_heartbeat_timeout(bot)
     last = read_heartbeat(bot.config.name)
     if last == 0.0:
