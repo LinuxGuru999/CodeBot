@@ -126,7 +126,7 @@ class TestDispatchPerformance:
                 spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=start_bot_fn)
                 elapsed = time.perf_counter() - start
 
-        assert elapsed < 0.015, f"Dispatch took {elapsed*1000:.2f}ms, expected <15ms"
+        assert elapsed < 0.005, f"Dispatch took {elapsed*1000:.2f}ms, expected <5ms"
 
 
 class TestCorrectBotSelection:
