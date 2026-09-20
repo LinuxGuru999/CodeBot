@@ -55,33 +55,22 @@ from codebot.process_manager import (
 # ``patch.object(orch, "STATE_DIR", tmp)`` works correctly.
 # ---------------------------------------------------------------------------
 
-def heartbeat_path(bot_name: str):
-    """Patchable wrapper: uses orchestrator-level STATE_DIR when patched."""
-    try:
-        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-        if sd is not None:
-            from pathlib import Path as _P
-            return _P(sd) / f"{bot_name}.heartbeat"
-    except Exception:
-        pass
-    return _pm_heartbeat_path(bot_name)
+# heartbeat_path: thin alias, not patched directly by tests
+heartbeat_path = _pm_heartbeat_path
 
 
 def read_heartbeat(bot_name: str) -> float:
     """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    try:
-        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-        if sd is not None:
-            import datetime as _dt
-            from pathlib import Path as _P
-            hb = _P(sd) / f"{bot_name}.heartbeat"
-            if not hb.exists():
-                return 0.0
-            txt = hb.read_text().strip()
-            try:
-                return float(txt)
-            except (ValueError, OSError):
-                pass
+    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+    if sd is not None:
+        import datetime as _dt
+        hb = Path(sd) / f"{bot_name}.heartbeat"
+        if not hb.exists():
+            return 0.0
+        txt = hb.read_text().strip()
+        try:
+            return float(txt)
+        except (ValueError, OSError):
             try:
                 token = txt.split()[0].replace("Z", "+00:00")
                 d = _dt.datetime.fromisoformat(token)
@@ -89,162 +78,127 @@ def read_heartbeat(bot_name: str) -> float:
                     d = d.replace(tzinfo=_dt.timezone.utc)
                 ts = d.timestamp()
                 now = time.time()
-                if ts > now + 60 or ts < now - 86400:
-                    return 0.0
-                return ts
+                return ts if (now - 86400 <= ts <= now + 60) else 0.0
             except Exception:
                 return 0.0
-    except Exception:
-        pass
     return _pm_read_heartbeat(bot_name)
 
 
 def checkpoint_path(bot_name: str):
     """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    try:
-        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-        if sd is not None:
-            from pathlib import Path as _P
-            return _P(sd) / f"{bot_name}.checkpoint.json"
-    except Exception:
-        pass
+    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+    if sd is not None:
+        return Path(sd) / f"{bot_name}.checkpoint.json"
     return _pm_checkpoint_path(bot_name)
 
 
 def read_checkpoint(bot_name: str):
     """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    try:
-        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-        if sd is not None:
-            from pathlib import Path as _P
-            import json as _json
-            p = _P(sd) / f"{bot_name}.checkpoint.json"
-            bak = p.with_suffix(".bak") if p.suffix == ".json" else _P(str(p) + ".bak")
-            if not p.exists():
-                if bak.exists():
-                    try:
-                        data = _json.loads(bak.read_text(encoding="utf-8"))
-                        if isinstance(data, dict):
-                            return data
-                    except Exception:
-                        pass
-                return None
-            try:
-                raw = p.read_text(encoding="utf-8")
-                data = _json.loads(raw)
-                if isinstance(data, dict):
-                    return data
-                return None
-            except Exception:
-                # Try backup
-                if bak.exists():
-                    try:
-                        data = _json.loads(bak.read_text(encoding="utf-8"))
-                        if isinstance(data, dict):
-                            return data
-                    except Exception:
-                        pass
-                return None
-    except Exception:
-        pass
+    import json as _json
+    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+    if sd is not None:
+        p = Path(sd) / f"{bot_name}.checkpoint.json"
+        bak = p.with_suffix(".bak") if p.suffix == ".json" else Path(str(p) + ".bak")
+        for target in (p, bak):
+            if target.exists():
+                try:
+                    data = _json.loads(target.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    pass
+        return None
     return _pm_read_checkpoint(bot_name)
 
 
-def is_stuck(bot=None, heartbeat_cache=None):
-    """Patchable wrapper for stuck detection."""
-    return _pm_is_stuck(bot, heartbeat_cache=heartbeat_cache)
+# Thin alias — not patched by tests directly
+is_stuck = _pm_is_stuck
 
 
+# Thin aliases for internal use and __all__ backward compatibility.
+# is_log_stalled kept as function because tests patch it via patch.object
 def is_log_stalled(bot=None, model: str = ""):
     """Patchable wrapper for log stall detection."""
     return _pm_is_log_stalled(bot, model)
 
-
-def effective_heartbeat_timeout(bot=None, model: str = "", interval_seconds: int = 0, base_timeout: int = 0):
-    """Patchable wrapper for timeout calculation."""
-    return _pm_effective_heartbeat_timeout(bot, model, interval_seconds, base_timeout)
-
-
-def model_profile(model: str):
-    """Patchable wrapper for model profile lookup."""
-    return _pm_model_profile(model)
+effective_heartbeat_timeout = _pm_effective_heartbeat_timeout
+model_profile = _pm_model_profile
+update_bot_state = _pm_update_bot_state
+log_mtime = _pm_log_mtime
+_write_json_atomic = _pm_write_json_atomic
 
 
-def update_bot_state(bot, status: str):
-    """Patchable wrapper for state updates."""
-    return _pm_update_bot_state(bot, status)
-
-
-def log_mtime(bot_name: str) -> float:
-    """Patchable wrapper for log mtime."""
-    return _pm_log_mtime(bot_name)
-
-
-def _write_json_atomic(path, data):
-    """Patchable wrapper for atomic JSON writes."""
-    return _pm_write_json_atomic(path, data)
-
-
-def _get_code_mtimes():
-    """Patchable wrapper for code mtime detection."""
-    return _pm_get_code_mtimes()
+_get_code_mtimes = _pm_get_code_mtimes
 
 
 def batch_read_heartbeats(bot_names: list):
     """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    try:
-        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-        if sd is not None:
-            import datetime as _dt
-            from pathlib import Path as _P
-            results = {}
-            for name in bot_names:
-                hb = _P(sd) / f"{name}.heartbeat"
-                if not hb.exists():
-                    results[name] = 0.0
-                    continue
-                txt = hb.read_text().strip()
-                ts = 0.0
+    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+    if sd is not None:
+        import datetime as _dt
+        results = {}
+        for name in bot_names:
+            hb = Path(sd) / f"{name}.heartbeat"
+            if not hb.exists():
+                results[name] = 0.0
+                continue
+            txt = hb.read_text().strip()
+            try:
+                results[name] = float(txt)
+            except (ValueError, OSError):
                 try:
-                    ts = float(txt)
-                except (ValueError, OSError):
-                    try:
-                        token = txt.split()[0].replace("Z", "+00:00")
-                        d = _dt.datetime.fromisoformat(token)
-                        if d.tzinfo is None:
-                            d = d.replace(tzinfo=_dt.timezone.utc)
-                        ts = d.timestamp()
-                        now = time.time()
-                        if ts > now + 60 or ts < now - 86400:
-                            ts = 0.0
-                    except Exception:
-                        ts = 0.0
-                results[name] = ts
-            return results
-    except Exception:
-        pass
+                    token = txt.split()[0].replace("Z", "+00:00")
+                    d = _dt.datetime.fromisoformat(token)
+                    if d.tzinfo is None:
+                        d = d.replace(tzinfo=_dt.timezone.utc)
+                    ts = d.timestamp()
+                    now = time.time()
+                    results[name] = ts if (now - 86400 <= ts <= now + 60) else 0.0
+                except Exception:
+                    results[name] = 0.0
+        return results
     return _pm_batch_read_heartbeats(bot_names)
 
 
 # ---------------------------------------------------------------------------
-# Patchable wrappers for orchestrator_services functions
-# Tests call these with different signatures than the extracted versions.
+# Test-compatible manifest wrappers & thin re-exports
 # ---------------------------------------------------------------------------
+from codebot.model_router import select_model_tier as _model_tier_for_complexity
+from codebot.orchestrator_services import _read_state_file as _svc_read_state_file
+
+
+def worker_reserved_slots(max_concurrent=26):
+    """Return number of slots reserved for workers (len of WORKER_POOL)."""
+    return len(WORKER_POOL)
+
+
+def rotating_slots(max_concurrent=26):
+    """Return number of rotating slots available."""
+    return max(MIN_ROTATING_SLOTS, max_concurrent - worker_reserved_slots(max_concurrent))
+
+
+def _read_state_file(bot_name):
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
+    if sd is not None:
+        import json as _json
+        sf = Path(sd) / f"{bot_name}.state.json"
+        if sf.exists():
+            try:
+                data = _json.loads(sf.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+        return {}
+    return _svc_read_state_file(bot_name)
+
 
 def is_manifest_restart_budget_exceeded(manifest, now=None):
-    """Test-compatible wrapper: accepts (manifest_dict, timestamp) or (bot_name_str).
-
-    Original contract from tests:
-      - is_manifest_restart_budget_exceeded({}, time.time()) -> False
-      - is_manifest_restart_budget_exceeded(manifest, now) with patched _read_state_file
-    """
+    """Test-compatible wrapper: accepts (manifest_dict, timestamp) or (bot_name_str)."""
     if now is None:
         now = time.time()
     if isinstance(manifest, str):
-        # Called with bot name — delegate to services
-        from codebot.orchestrator_services import _manifest_restart_budget_exceeded as _svc
-        return _svc(manifest)
-    # Called with manifest dict + now timestamp (test contract)
+        return _svc_manifest_restart_budget_exceeded(manifest)
     max_restarts = manifest.get("max_restarts", 5) if isinstance(manifest, dict) else 5
     if max_restarts == 0:
         return False
@@ -260,15 +214,9 @@ def is_manifest_restart_budget_exceeded(manifest, now=None):
 
 
 def is_manifest_error_disabled(manifest, max_consecutive=3):
-    """Test-compatible wrapper: accepts (manifest_dict, max_consecutive=N) or (bot_name_str).
-
-    Original contract from tests:
-      - is_manifest_error_disabled({}) -> False
-      - is_manifest_error_disabled(manifest, max_consecutive=3)
-    """
+    """Test-compatible wrapper: accepts (manifest_dict, max_consecutive=N) or (bot_name_str)."""
     if isinstance(manifest, str):
-        from codebot.orchestrator_services import _manifest_error_disabled as _svc
-        return _svc(manifest)
+        return _svc_manifest_error_disabled(manifest)
     if not isinstance(manifest, dict) or not manifest:
         return False
     name = manifest.get("name", "")
@@ -283,80 +231,12 @@ def is_manifest_error_disabled(manifest, max_consecutive=3):
     return errors >= max_consecutive
 
 
-def worker_reserved_slots(max_concurrent=26):
-    """Return number of slots reserved for workers (len of WORKER_POOL)."""
-    return len(WORKER_POOL)
-
-
-def rotating_slots(max_concurrent=26):
-    """Return number of rotating slots available."""
-    return max(MIN_ROTATING_SLOTS, max_concurrent - worker_reserved_slots(max_concurrent))
-
-
-def _model_tier_for_complexity(model, complexity, queue_has_tier_work=False):
-    """Test-compatible model tier check.
-
-    Contract from tests:
-      - cheap models (xiaomi-mimo-2.5) accept trivial/small/medium, reject high/critical
-      - expensive models (qwen-3.8-max) accept high/critical
-      - expensive models reject trivial when queue_has_tier_work=True
-      - unknown models always accepted
-    """
-    cheap_models = frozenset({"xiaomi-mimo-2.5"})
-    expensive_models = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
-
-    if model not in cheap_models and model not in expensive_models:
-        # Unknown model — always accepted
-        return True
-
-    if model in cheap_models:
-        if complexity in ("trivial", "small", "medium"):
-            return True
-        return False  # high, critical rejected for cheap models
-
-    if model in expensive_models:
-        if complexity in ("high", "critical"):
-            return True
-        if complexity in ("trivial", "small", "medium"):
-            if queue_has_tier_work:
-                return False
-            return True
-        return True
-
-    return True
-
-
-def _read_state_file(bot_name):
-    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    try:
-        sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-        if sd is not None:
-            import json as _json
-            from pathlib import Path as _P
-            sf = _P(sd) / f"{bot_name}.state.json"
-            if not sf.exists():
-                return {}
-            try:
-                data = _json.loads(sf.read_text(encoding="utf-8"))
-                return data if isinstance(data, dict) else {}
-            except Exception:
-                return {}
-    except Exception:
-        pass
-    from codebot.orchestrator_services import _read_state_file as _svc
-    return _svc(bot_name)
-
-
 # Re-export is_draining with patchable DRAIN_FILE support
 def is_draining():
     """Patchable wrapper: honors orch.DRAIN_FILE patches from tests."""
-    try:
-        df = getattr(sys.modules[__name__], 'DRAIN_FILE', None)
-        if df is not None:
-            from pathlib import Path as _P
-            return _P(df).exists()
-    except Exception:
-        pass
+    df = getattr(sys.modules[__name__], 'DRAIN_FILE', None)
+    if df is not None:
+        return Path(df).exists()
     from codebot.state_manager import is_draining as _sm_is_draining
     return _sm_is_draining()
 
@@ -426,17 +306,10 @@ def __getattr__(name: str) -> Any:
 
 
 # Backward-compatible aliases for orchestrator_services functions
-def _manifest_restart_budget_exceeded(bot_name):
-    return _svc_manifest_restart_budget_exceeded(bot_name)
-
-def _manifest_error_disabled(bot_name):
-    return _svc_manifest_error_disabled(bot_name)
-
-def is_restart_budget_exceeded(bot_name):
-    return _svc_is_restart_budget_exceeded(bot_name)
-
-def is_error_disabled(bot_name):
-    return _svc_is_error_disabled(bot_name)
+_manifest_restart_budget_exceeded = _svc_manifest_restart_budget_exceeded
+_manifest_error_disabled = _svc_manifest_error_disabled
+is_restart_budget_exceeded = _svc_is_restart_budget_exceeded
+is_error_disabled = _svc_is_error_disabled
 
 # Build WORKER_POOL from bot registry for backward compatibility
 def _build_worker_pool() -> frozenset:
@@ -476,30 +349,18 @@ __all__ = [
 
 
 def set_project_adapter(adapter: Any) -> PathConfig:
-    """Delegate to state_manager.set_project_adapter and update local _paths reference.
-
-    Uses module-level reference instead of ``global`` to avoid global-state
-    mutation patterns.  Components should use the returned config object or
-    call ``get_paths()`` after this function has been invoked during bootstrap.
-    """
+    """Delegate to state_manager.set_project_adapter and update local _paths reference."""
     import codebot.orchestrator as _mod
     _mod._paths = _sm_set_project_adapter(adapter)
     return _mod._paths
 
 
-# ---------------------------------------------------------------------------
-# Code-change detection — O(M+B) implementation
-# ---------------------------------------------------------------------------
+# Code-change detection — O(M+B)
 _last_code_mtimes: dict[str, float] = {}
 
 
 def _check_code_changes(bots: dict[str, BotState]) -> None:
-    """Check for source code changes and respawn affected bots.
-
-    O(M+B): O(M) set comprehension for changed modules, O(B) bot iteration.
-    ``_last_code_mtimes`` is module-level state persisting across ticks.
-    Empty on first call — all modules treated as changed (safe, no missed updates).
-    """
+    """Check for source code changes and respawn affected bots."""
     global _last_code_mtimes
     current_mtimes = _get_code_mtimes()
     if not current_mtimes:
@@ -518,18 +379,24 @@ def _check_code_changes(bots: dict[str, BotState]) -> None:
 
 DECOMPOSER_MAX_CONCURRENT = 12
 
-LOG_MAX_BYTES = int(os.environ.get("CODEBOT_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
-LOG_BACKUP_COUNT = int(os.environ.get("CODEBOT_LOG_BACKUPS", "5"))
+def _configure_logging() -> None:
+    """Configure logging separately from dependency resolution."""
+    global LOG_MAX_BYTES, LOG_BACKUP_COUNT
+    LOG_MAX_BYTES = int(os.environ.get("CODEBOT_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+    LOG_BACKUP_COUNT = int(os.environ.get("CODEBOT_LOG_BACKUPS", "5"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[_lh.RotatingFileHandler(
-        get_paths().logs_dir / "orchestrator.log",
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-    )],
-)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[_lh.RotatingFileHandler(
+            get_paths().logs_dir / "orchestrator.log",
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+        )],
+    )
+
+
+_configure_logging()
 logger = logging.getLogger("orchestrator")
 
 
@@ -666,6 +533,16 @@ def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any = None) -
                 update_bot_state(bot, "disabled")
             else:
                 update_bot_state(bot, "waiting")
+            assigned_tid = getattr(bot, "_assigned_ticket_id", "")
+            if assigned_tid:
+                try:
+                    scratch = load_scratchpad(current_paths.state_dir, assigned_tid)
+                    tool_iterations = getattr(scratch, 'iteration', 0)
+                    scratch.mark_error(f"Bot rate-limited (exit_code={exit_code})")
+                    scratch.finish_agent(f"rate-limited after {tool_iterations} iters")
+                    save_scratchpad(current_paths.state_dir, scratch)
+                except Exception as e:
+                    logger.warning(f"Failed to finish scratchpad for ticket {assigned_tid}: {e}")
         else:
             bot.consecutive_errors += 1
             if bot.consecutive_errors >= 3:
@@ -709,31 +586,20 @@ def _handle_stuck_bots(bots: dict[str, BotState], now: float, hb_cache: dict) ->
             restart_bot(bot, reason="stuck", bots=bots)
 
 
-def _run_dispatchers(bots: dict[str, BotState], skip_route_tids: set[str] | None = None) -> None:
-    """Run all dispatcher tasks.  Each resolves its own TicketStore instance."""
-    def _route_with_skip():
-        if skip_route_tids:
-            # Temporarily mark tickets so route_ready_tickets skips them
-            return route_ready_tickets(skip_tids=skip_route_tids)
-        return route_ready_tickets()
+from codebot.dispatch_service import run_all_dispatchers
 
-    tasks = [
-        (lambda: _sweep_orphan_claims(bots), "orphan sweep"),
-        (lambda: apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state), "availability"),
-        (lambda: spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot), "demand"),
-        (lambda: dispatch_decompose_agents(bots, max_agents=DECOMPOSER_MAX_CONCURRENT, start_bot_fn=start_bot), "decompose"),
-        (lambda: dispatch_planning_agents(bots, start_bot_fn=start_bot), "planning"),
-        (lambda: advance_reviewed_tickets(bots), "review"),
-        (lambda: gatekeeper_verify_tickets(), "gatekeeper"),
-        (_route_with_skip, "route"),
-        (lambda: process_rework_tickets(bots), "rework"),
-        (lambda: recover_deferred_tickets(), "deferred"),
-    ]
-    for fn, label in tasks:
-        try:
-            fn()
-        except Exception as e:
-            logger.warning(f"{label} failed: {e}")
+
+def _run_dispatchers(bots: dict[str, BotState], skip_route_tids: set[str] | None = None) -> None:
+    """Thin wrapper delegating to dispatch_service.run_all_dispatchers."""
+    run_all_dispatchers(
+        bots,
+        skip_route_tids=skip_route_tids,
+        start_bot_fn=start_bot,
+        stop_bot_fn=stop_bot,
+        update_state_fn=update_bot_state,
+        max_concurrent=GATEWAY_MAX_CONCURRENT,
+        decomposer_max_concurrent=DECOMPOSER_MAX_CONCURRENT,
+    )
 
 
 def _start_eligible_bots(bots: dict[str, BotState], now: float) -> None:
