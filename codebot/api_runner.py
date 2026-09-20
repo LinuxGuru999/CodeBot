@@ -940,14 +940,23 @@ def _contract(heartbeat_file, ckpt_file):
     )
 
 
-def _call_api(messages, model, api_key, timeout=None):
+def _call_api(messages, model, api_key, timeout=None, bot_name=None):
     """Chunked POST read to dialagram; raises on HTTP/timeout for caller retry."""
     if timeout is None:
         timeout = API_TIMEOUT
+    schemas = TOOL_SCHEMAS
+    if bot_name:
+        base = bot_name.split("-")[0] if "-" in bot_name else bot_name
+        no_bash_roles = frozenset({"decomposer", "implementation_planner",
+            "correctness_reviewer", "security_reviewer", "architecture_reviewer",
+            "test_reviewer", "performance_reviewer", "simplicity_reviewer",
+            "documentation_reviewer", "ux_reviewer"})
+        if base in no_bash_roles:
+            schemas = [s for s in TOOL_SCHEMAS if s.get("function", {}).get("name") != "bash"]
     body = {
         "model": model,
         "messages": messages,
-        "tools": TOOL_SCHEMAS,
+        "tools": schemas,
         "max_tokens": 8000,
     }
     data = json.dumps(body).encode("utf-8")
@@ -2014,7 +2023,10 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                         continue
                     exit_reason = "timeout"
                     sys.exit(1)
-                except Exception:
+                except Exception as exc:
+                    import traceback
+                    _log(f"{bot_name}: unexpected error ({type(exc).__name__}: {exc}), retrying in {delay}s")
+                    _log(f"{bot_name}: traceback: {traceback.format_exc()[:500]}")
                     if total_retries < MAX_RETRIES:
                         delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
                         delay = min(delay, MAX_BACKOFF)
