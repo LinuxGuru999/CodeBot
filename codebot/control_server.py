@@ -53,6 +53,7 @@ import re
 import shlex
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -992,11 +993,23 @@ def main() -> None:
     # This prevents unauthenticated network access in containerized/shared environments.
     if not CONTROL_TOKEN:
         bind_host = "127.0.0.1"
-        logger.critical(
+        # Ensure logging has at least one handler so logger.critical is visible in
+        # container stdout/stderr even when no orchestrator has configured logging.
+        if not logging.getLogger().handlers and not logger.handlers:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+                stream=sys.stderr,
+            )
+        _sec_msg = (
             "SECURITY: CONTROL_TOKEN is not set — binding to 127.0.0.1 only (fail-closed). "
             "All authenticated endpoints will reject requests. "
             "Set CONTROL_TOKEN env var to enable remote API access."
         )
+        logger.critical(_sec_msg)
+        # Duplicate via print to stderr so Fly.io log streams (which may not
+        # capture logging output) always surface this critical warning.
+        print(f"CRITICAL: {_sec_msg}", file=sys.stderr, flush=True)
     else:
         bind_host = "0.0.0.0"
 
