@@ -336,9 +336,9 @@ def _normalize_title_words(title: str) -> frozenset[str]:
 
 class TicketStore:
     SIMILARITY_THRESHOLD = 0.8  # Jaccard threshold for "similar" titles
+    SAVE_DEBOUNCE_SECONDS = 0.5  # Debounce window for batching saves
 
     def __init__(self, path: Path) -> None:
-        import threading
         self._path = path
         self._lock = threading.RLock()
         self._tickets: dict[str, Ticket] = {}
@@ -347,7 +347,17 @@ class TicketStore:
         self._word_index: dict[str, set[str]] = {}
         # Per-state index: state -> set of ticket IDs for O(k) list_by_state lookups
         self._state_index: dict[TicketState, set[str]] = {}
+        # Debounced save mechanism
+        self._save_pending = False
+        self._save_lock = threading.Lock()
+        self._save_timer: threading.Timer | None = None
+        self._shutdown = False
         self._load()
+        # Start background save worker thread
+        self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
+        self._save_worker.start()
+        self._save_queue: list[dict] = []  # Queue of pending save payloads
+        self._save_condition = threading.Condition(self._save_lock)
 
     def _load(self) -> None:
         if not self._path.exists():
