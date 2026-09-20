@@ -45,10 +45,18 @@ if _IS_WINDOWS:
         _msvcrt = None  # type: ignore[assignment]
 
 # Lock operation constants (mirror fcntl values for API compatibility)
-LOCK_SH = 0  # Shared lock
-LOCK_EX = 1  # Exclusive lock
-LOCK_UN = 8  # Unlock
-LOCK_NB = 4  # Non-blocking flag
+LOCK_SH: int = 0
+"""Shared (read) lock. Multiple readers can hold this simultaneously."""
+
+LOCK_EX: int = 1
+"""Exclusive (write) lock. Only one holder at a time; blocks other locks."""
+
+LOCK_UN: int = 8
+"""Unlock operation. Releases any previously held lock on the file descriptor."""
+
+LOCK_NB: int = 4
+"""Non-blocking flag. OR'd with LOCK_SH or LOCK_EX to request immediate return
+if the lock cannot be acquired, rather than blocking until available."""
 
 
 def flock(fd: int | TextIO, operation: int) -> None:
