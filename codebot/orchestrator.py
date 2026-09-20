@@ -2419,7 +2419,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
     prompt_path = BOTS_DIR / bot.config.prompt_file
     if prompt_path.exists() and prompt_path.stat().st_mtime > last_run_mtime:
         inputs_changed = True
-    if not inputs_changed and last_run_mtime > 0 and bot.config.name not in WORKER_POOL and bot.config.name not in ALWAYS_RESPAWN:
+    if not inputs_changed and last_run_mtime > 0 and bot.config.name not in WORKER_POOL and bot.config.name not in ALWAYS_RESPAWN and not is_demand:
         base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
         depths = _get_pipeline_state()
         has_demand = (
