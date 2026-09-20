@@ -153,7 +153,7 @@ class TestPerBotRestartDestructiveValidation(unittest.TestCase):
         status_code, body = responses[0]
         self.assertEqual(status_code, 200)
         self.assertIn("undo", body)
-        self.assertIn("restart", body["undo"].lower())
+        self.assertIn("respawn", body["undo"].lower())
 
 
 class TestPerBotPauseDestructiveValidation(unittest.TestCase):

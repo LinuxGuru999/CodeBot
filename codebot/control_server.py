@@ -740,23 +740,22 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._json(error_code, {"error": error})
             return
 
-        # Destructive endpoint validation: require explicit confirmation
+        # Destructive endpoint validation: require explicit confirmation or dry-run
         DESTRUCTIVE_PATHS = {
             "/bots/stop", "/api/bots/stop", "/control/stop",
             "/control/drain", "/api/control/drain",
             "/control/update", "/api/control/update",
         }
         if path in DESTRUCTIVE_PATHS:
-            force = body.get("force")
-            confirm = body.get("confirm")
             dry_run = body.get("dry_run")
-            if not (force is True or confirm is True):
-                self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
-                return
-            # If dry-run mode, return what would happen without executing
             if dry_run is True:
                 preview = self._get_destructive_preview(path, body)
                 self._json(200, {"ok": True, "dry_run": True, "preview": preview})
+                return
+            force = body.get("force")
+            confirm = body.get("confirm")
+            if not (force is True or confirm is True):
+                self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
                 return
 
         # POST /bots/{name}/restart

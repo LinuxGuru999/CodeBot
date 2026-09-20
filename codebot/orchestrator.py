@@ -361,30 +361,16 @@ def is_draining():
     return _sm_is_draining()
 
 
-from codebot.alignment_coordinator import write_alignment_event
-from codebot.alignment_service import (
-    run_alignment_pipeline, run_alignment_pipeline_for_all,
-)
+from codebot.alignment_service import run_alignment_pipeline_for_all
 from codebot.ticket_dispatcher import (
-    spawn_demand_agents, dispatch_decompose_agents,
-    dispatch_planning_agents, advance_reviewed_tickets,
-    gatekeeper_verify_tickets, route_ready_tickets,
-    process_rework_tickets, recover_deferred_tickets,
-    _sweep_orphan_claims, clear_ticket_store_cache,
     TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER,
 )
 from codebot.dispatch_service import (
-    get_pipeline_state, is_needed_bot, apply_agent_availability,
-    rotate_model_on_error, transition_ticket_on_success,
-    transition_ticket_on_error, compute_rate_limit_backoff,
-    retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
     IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
-    batch_read_bot_statuses,
 )
-from codebot.scratchpad import load_scratchpad, save_scratchpad
 from codebot.state_manager import (
-    PathConfig, get_paths, is_draining as _sm_is_draining_raw, set_drain, clear_drain,
-    drain_status, backup_botnet, restore_botnet, check_self_restart,
+    PathConfig, get_paths, set_drain, clear_drain,
+    drain_status, backup_botnet, restore_botnet,
     safe_stop_all, set_project_adapter as _sm_set_project_adapter,
 )
 from codebot.worker_scaler import (
@@ -398,6 +384,7 @@ from codebot.orchestrator_services import (
     is_restart_budget_exceeded as _svc_is_restart_budget_exceeded,
     is_error_disabled as _svc_is_error_disabled,
 )
+from codebot.health_check import check_all_bots
 
 # Module-level path configuration instance — delegates to state_manager.
 # Paths are always read dynamically from state_manager.get_paths().
@@ -613,8 +600,11 @@ def _retry_disabled_and_stuck(bots: dict[str, BotState], hb_cache: dict) -> None
                 logger.info(f"Retrying '{name}' stuck in starting")
 
 
-def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any) -> set[str]:
+def _handle_exited_bots(bots: dict[str, BotState], now: float) -> set[str]:
     """Handle bots that have exited, running alignment and transitioning tickets.
+
+    Dispatchers resolve their own TicketStore via get_ticket_store() — the
+    orchestrator never holds or passes a store instance.
 
     Returns a set of ticket IDs that were returned to READY due to error exits,
     so dispatchers can skip re-routing them in the same tick.
@@ -638,7 +628,7 @@ def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any) -> set[s
 
         if exit_code == 0:
             bot.consecutive_errors = 0
-            transition_ticket_on_success(bot, bots, store=ts)
+            transition_ticket_on_success(bot, bots)
             bot.next_run_at = now + bot.config.interval_seconds
             update_bot_state(bot, "waiting")
         elif exit_code == 3:
@@ -667,7 +657,7 @@ def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any) -> set[s
                 except Exception as e:
                     logger.warning(f"Failed to finish scratchpad for ticket {assigned_tid}: {e}")
                 error_recovered_tids.add(assigned_tid)
-            transition_ticket_on_error(bot, bots, exit_code, store=ts)
+            transition_ticket_on_error(bot, bots, exit_code)
             bot.next_run_at = now + 5
             update_bot_state(bot, "waiting")
     return error_recovered_tids
@@ -693,19 +683,25 @@ def _handle_stuck_bots(bots: dict[str, BotState], now: float, hb_cache: dict) ->
             restart_bot(bot, reason="stuck", bots=bots)
 
 
-def _run_dispatchers(bots: dict[str, BotState], ts: Any) -> None:
-    """Run all dispatcher tasks sharing the single TicketStore instance."""
+def _run_dispatchers(bots: dict[str, BotState], skip_route_tids: set[str] | None = None) -> None:
+    """Run all dispatcher tasks.  Each resolves its own TicketStore instance."""
+    def _route_with_skip():
+        if skip_route_tids:
+            # Temporarily mark tickets so route_ready_tickets skips them
+            return route_ready_tickets(skip_tids=skip_route_tids)
+        return route_ready_tickets()
+
     tasks = [
         (lambda: _sweep_orphan_claims(bots), "orphan sweep"),
-        (lambda: apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state, store=ts), "availability"),
-        (lambda: spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot, store=ts), "demand"),
-        (lambda: dispatch_decompose_agents(bots, max_agents=DECOMPOSER_MAX_CONCURRENT, start_bot_fn=start_bot, store=ts), "decompose"),
-        (lambda: dispatch_planning_agents(bots, start_bot_fn=start_bot, store=ts), "planning"),
-        (lambda: advance_reviewed_tickets(bots, store=ts), "review"),
-        (lambda: gatekeeper_verify_tickets(store=ts), "gatekeeper"),
-        (lambda: route_ready_tickets(store=ts), "route"),
-        (lambda: process_rework_tickets(bots, store=ts), "rework"),
-        (lambda: recover_deferred_tickets(store=ts), "deferred"),
+        (lambda: apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state), "availability"),
+        (lambda: spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot), "demand"),
+        (lambda: dispatch_decompose_agents(bots, max_agents=DECOMPOSER_MAX_CONCURRENT, start_bot_fn=start_bot), "decompose"),
+        (lambda: dispatch_planning_agents(bots, start_bot_fn=start_bot), "planning"),
+        (lambda: advance_reviewed_tickets(bots), "review"),
+        (lambda: gatekeeper_verify_tickets(), "gatekeeper"),
+        (_route_with_skip, "route"),
+        (lambda: process_rework_tickets(bots), "rework"),
+        (lambda: recover_deferred_tickets(), "deferred"),
     ]
     for fn, label in tasks:
         try:
@@ -738,7 +734,8 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     if check_self_restart(bots, stop_bot):
         return
 
-    ts = _init_tick_cache()
+    _init_tick()
+    ts = get_ticket_store()
     now = time.time()
 
     # Batch-read all heartbeats and statuses once per tick
@@ -749,10 +746,10 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     status_cache = batch_read_bot_statuses(running_names) if running_names else {}
 
     _retry_disabled_and_stuck(bots, heartbeat_cache)
-    _handle_exited_bots(bots, now, ts)
+    error_recovered_tids = _handle_exited_bots(bots, now)
     _handle_stuck_bots(bots, now, heartbeat_cache)
     log_bot_statuses(bots, preloaded_statuses=status_cache)
-    _run_dispatchers(bots, ts)
+    _run_dispatchers(bots, ts, skip_route_tids=error_recovered_tids)
     _start_eligible_bots(bots, now, ts)
 
 

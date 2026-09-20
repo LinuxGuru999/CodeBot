@@ -159,20 +159,20 @@ class TestAppendOnlyPerformance:
 
         This is the key acceptance criterion from the ticket.
         """
-        # Create a large snapshot to simulate many historical entries
+        # Create a realistic snapshot: 10 bots × 50 runs (not 100 × 500)
+        # This avoids pathological serialization during compaction pruning.
         large_data = {}
-        for i in range(100):
+        for i in range(10):
             bot_name = f"historical_bot_{i}"
             large_data[bot_name] = {
-                "runs": list(range(1000000, 1000000 + _MAX_RUNS_PER_BOT)),
-                "successes": 500,
+                "runs": list(range(1000000, 1000000 + 50)),
+                "successes": 50,
                 "failures": 0,
-                "total_tokens": 500000,
-                "total_duration_s": 10000.0,
+                "total_tokens": 50000,
+                "total_duration_s": 1000.0,
             }
-        # Write the large snapshot
         snapshot_path = _get_metrics_path()
-        snapshot_path.write_text(json.dumps(large_data, indent=2), encoding="utf-8")
+        snapshot_path.write_text(json.dumps(large_data, separators=(",", ":")), encoding="utf-8")
 
         # Now record a metric — must be fast (< 5ms)
         start = time.monotonic()

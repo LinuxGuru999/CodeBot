@@ -1241,6 +1241,7 @@ def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> 
         if any(r.id == tid for r in results):
             logger.info(f"Review verdict: {tid} -> {target_state.value}")
 
+    tids_to_clean = {tid for tid, _ in tickets_to_clean}
     for tid, review_claims in tickets_to_clean:
         for claim_file in review_claims:
             release_claim(claim_file.name)
@@ -1248,9 +1249,11 @@ def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> 
                 claim_file.unlink()
             except OSError:
                 pass
-        for name, bot in bots.items():
-            if getattr(bot, '_assigned_ticket_id', '') == tid:
-                bot._assigned_ticket_id = ''
+                
+    # O(B) pass to clear assignments instead of O(T*B) nested loop
+    for name, bot in bots.items():
+        if getattr(bot, '_assigned_ticket_id', '') in tids_to_clean:
+            bot._assigned_ticket_id = ''
 
     return advanced
 
@@ -1368,11 +1371,16 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
     return advanced
 
 
-def route_ready_tickets(store: Any | None = None) -> int:
+def route_ready_tickets(store: Any | None = None, skip_tids: set[str] | None = None) -> int:
     """Route READY tickets: decomposer sub-tickets to PLANNING, originals to DECOMPOSE.
 
     Uses batch_transition to apply all state changes in memory and save once,
     avoiding O(K*N) serialization cost per dispatch cycle.
+
+    Args:
+        store: Optional pre-loaded TicketStore instance.
+        skip_tids: Ticket IDs to skip routing this tick (e.g., just returned
+            to READY by error recovery — prevents immediate re-routing).
     """
     try:
         from codebot.ticket_engine import TicketState
@@ -1387,11 +1395,13 @@ def route_ready_tickets(store: Any | None = None) -> int:
     if not ready:
         return 0
 
+    _skip = skip_tids or set()
+
     # Collect all transitions first, then apply in a single batch
     transitions: list[tuple[str, Any, list[dict] | None]] = []
     for ticket in ready:
         tid = getattr(ticket, 'id', '')
-        if not tid:
+        if not tid or tid in _skip:
             continue
         source = getattr(ticket, 'source', '')
         if source == 'decomposer':

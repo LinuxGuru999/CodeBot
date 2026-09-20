@@ -32,7 +32,6 @@ def _make_paths_for(tmp_path: Path) -> PathConfig:
         update_lock=tmp_path / ".update_lock",
         restart_file=tmp_path / ".restart",
     )
-from codebot.state_manager import PathConfig
 
 
 def test_count_api_runner_processes_matches_module_invocation():
@@ -115,14 +114,8 @@ def test_concurrent_prompt_read(tmp_path):
         )
         bot_state = BotState(config=bot_config)
 
-        # Patch get_paths to use tmp_path as bots_dir
-        _mock_paths = PathConfig(
-            bots_dir=tmp_path, state_dir=tmp_path, logs_dir=tmp_path,
-            backup_dir=tmp_path, alignment_events_dir=tmp_path,
-            drain_file=tmp_path / ".drain", update_lock=tmp_path / ".update_lock",
-            restart_file=tmp_path / ".restart",
-        )
-        with patch("codebot.process_manager.get_paths", return_value=_mock_paths):
+        # Patch BOTS_DIR to use tmp_path (honored by _resolve_bots_dir)
+        with patch("codebot.process_manager.BOTS_DIR", tmp_path):
             iterations = 0
             while not stop_event.is_set() and iterations < 100:
                 try:
@@ -182,13 +175,7 @@ def test_prepare_prompt_with_context_locks_file(tmp_path):
     )
     bot_state = BotState(config=bot_config)
 
-    _mock_paths = PathConfig(
-        bots_dir=tmp_path, state_dir=tmp_path, logs_dir=tmp_path,
-        backup_dir=tmp_path, alignment_events_dir=tmp_path,
-        drain_file=tmp_path / ".drain", update_lock=tmp_path / ".update_lock",
-        restart_file=tmp_path / ".restart",
-    )
-    with patch("codebot.process_manager.get_paths", return_value=_mock_paths):
+    with patch("codebot.process_manager.BOTS_DIR", tmp_path):
         content = _prepare_prompt_with_context(bot_state)
 
     # Should get the content (may have git context appended)

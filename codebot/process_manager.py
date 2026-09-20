@@ -50,31 +50,52 @@ logger = logging.getLogger(__name__)
 
 def _resolve_state_dir() -> Path:
     """Resolve state dir, honoring module-level STATE_DIR test patches."""
+    # Check for an explicit module-level patch first (existing tests patch
+    # codebot.process_manager.STATE_DIR to a tmp dir). This takes precedence
+    # even over a patched get_paths, matching pre-refactor behavior where the
+    # global was read directly.
     try:
+        current_default = _project_root / ".codebot" / "state"
         mod = sys.modules.get(__name__)
         sd = getattr(mod, "STATE_DIR", None) if mod is not None else None
-        current = get_paths().state_dir
-        # patch("codebot.process_manager.STATE_DIR", tmp) replaces the global
-        # with tmp_path; honor it so existing tests keep working, otherwise
-        # use the adapter-provided dynamic path.
-        if sd is not None and Path(sd) != Path(current):
+        if sd is not None and Path(sd) != Path(current_default):
             return Path(sd)
     except Exception:
         pass
-    return get_paths().state_dir
+    try:
+        return get_paths().state_dir
+    except Exception:
+        try:
+            mod = sys.modules.get(__name__)
+            sd = getattr(mod, "STATE_DIR", None) if mod is not None else None
+            if sd is not None:
+                return Path(sd)
+        except Exception:
+            pass
+        raise
 
 
 def _resolve_logs_dir() -> Path:
     """Resolve logs dir, honoring module-level LOGS_DIR test patches."""
     try:
+        current_default = _project_root / ".codebot" / "logs"
         mod = sys.modules.get(__name__)
         ld = getattr(mod, "LOGS_DIR", None) if mod is not None else None
-        current = get_paths().logs_dir
-        if ld is not None and Path(ld) != Path(current):
+        if ld is not None and Path(ld) != Path(current_default):
             return Path(ld)
     except Exception:
         pass
-    return get_paths().logs_dir
+    try:
+        return get_paths().logs_dir
+    except Exception:
+        try:
+            mod = sys.modules.get(__name__)
+            ld = getattr(mod, "LOGS_DIR", None) if mod is not None else None
+            if ld is not None:
+                return Path(ld)
+        except Exception:
+            pass
+        raise
 
 
 def _resolve_bots_dir() -> Path:
@@ -82,12 +103,21 @@ def _resolve_bots_dir() -> Path:
     try:
         mod = sys.modules.get(__name__)
         bd = getattr(mod, "BOTS_DIR", None) if mod is not None else None
-        current = get_paths().bots_dir
-        if bd is not None and Path(bd) != Path(current):
+        if bd is not None and Path(bd) != Path(_project_root):
             return Path(bd)
     except Exception:
         pass
-    return get_paths().bots_dir
+    try:
+        return get_paths().bots_dir
+    except Exception:
+        try:
+            mod = sys.modules.get(__name__)
+            bd = getattr(mod, "BOTS_DIR", None) if mod is not None else None
+            if bd is not None:
+                return Path(bd)
+        except Exception:
+            pass
+        raise
 
 
 def read_heartbeat(bot_name: str) -> float:
@@ -653,18 +683,19 @@ def _update_bot_after_launch(bot: BotState, state_data: dict) -> None:
 def _launch_bot_subprocess(bot: BotState, message: str, heartbeat_file: Path,
                            ckpt_file: Path, state_data: dict) -> bool:
     """Launch bot subprocess with mission message. Returns True on success."""
-    paths = get_paths()
-    mission_file = paths.logs_dir / f"{bot.config.name}.mission"
+    logs_dir = _resolve_logs_dir()
+    bots_dir = _resolve_bots_dir()
+    mission_file = logs_dir / f"{bot.config.name}.mission"
     mission_file.write_text(message, encoding="utf-8")
     child_env = os.environ.copy()
-    child_env["PYTHONPATH"] = str(paths.bots_dir)
-    log_file = paths.logs_dir / f"{bot.config.name}.log"
+    child_env["PYTHONPATH"] = str(bots_dir)
+    log_file = logs_dir / f"{bot.config.name}.log"
     try:
         log_fh = open(log_file, "a")
         args = _build_popen_args(bot, heartbeat_file, ckpt_file, mission_file)
         process = subprocess.Popen(
             args, stdout=log_fh, stderr=subprocess.STDOUT,
-            cwd=str(paths.bots_dir), env=child_env, start_new_session=True,
+            cwd=str(bots_dir), env=child_env, start_new_session=True,
         )
         bot.process = process
         _update_bot_after_launch(bot, state_data)
@@ -687,13 +718,14 @@ def _launch_bot_subprocess(bot: BotState, message: str, heartbeat_file: Path,
 
 def _init_and_prepare_bot(bot: BotState, resume_checkpoint: bool) -> tuple[Path, Path, str]:
     """Initialize state, prepare prompt, and build mission message. Returns (heartbeat_file, ckpt_file, message)."""
-    paths = get_paths()
-    prompt_file = paths.bots_dir / bot.config.prompt_file
+    bots_dir = _resolve_bots_dir()
+    state_dir = _resolve_state_dir()
+    prompt_file = bots_dir / bot.config.prompt_file
     if not prompt_file.exists():
         raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
 
     state_data = {"bot": bot.config.name, "started": time.time(), "session": 0, "status": "starting"}
-    _write_json_atomic(paths.state_dir / f"{bot.config.name}.state.json", state_data)
+    _write_json_atomic(state_dir / f"{bot.config.name}.state.json", state_data)
     write_heartbeat(bot.config.name)
     bot.last_heartbeat = time.time()
 
@@ -717,8 +749,8 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
               bots: dict[str, BotState] | None = None,
               is_overture: bool = False, is_demand: bool = False) -> bool:
     """Spawn a bot as a subprocess. Returns True on success."""
-    paths = get_paths()
-    if (paths.state_dir / f"{bot.config.name}.paused").exists():
+    state_dir = _resolve_state_dir()
+    if (state_dir / f"{bot.config.name}.paused").exists():
         update_bot_state(bot, "paused")
         return False
 
@@ -781,7 +813,7 @@ def stop_bot(bot: BotState, reason: str = "manual") -> bool:
 def restart_bot(bot: BotState, reason: str = "stuck",
                 bots: dict[str, BotState] | None = None) -> bool:
     """Stop and restart a bot. Respects rate limits."""
-    per_bot_drain = get_paths().state_dir / f".drain_{bot.config.name}"
+    per_bot_drain = _resolve_state_dir() / f".drain_{bot.config.name}"
     if per_bot_drain.exists():
         try:
             per_bot_drain.unlink()
@@ -818,7 +850,7 @@ def restart_bot(bot: BotState, reason: str = "stuck",
 
 
 def _is_queued(bot: BotState) -> bool:
-    state_file = get_paths().state_dir / f"{bot.config.name}.state.json"
+    state_file = _resolve_state_dir() / f"{bot.config.name}.state.json"
     try:
         if state_file.exists():
             return json.loads(state_file.read_text()).get("status") == "queued"
@@ -887,7 +919,7 @@ def _load_ticket_context(ticket_id: str) -> str:
 
 def _manifest_restart_record(name: str, now: float) -> None:
     with _state_write_lock(name):
-        state_file = get_paths().state_dir / f"{name}.state.json"
+        state_file = _resolve_state_dir() / f"{name}.state.json"
         try:
             if state_file.exists():
                 state = json.loads(state_file.read_text())
