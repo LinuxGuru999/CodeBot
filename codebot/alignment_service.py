@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -33,8 +34,52 @@ logger = logging.getLogger(__name__)
 # Paths resolved relative to the package root
 _CODEBOT_PKG_DIR = Path(__file__).parent
 _project_root = _CODEBOT_PKG_DIR.parent
-STATE_DIR = _project_root / "state"
+STATE_DIR = _project_root / ".codebot" / "state"
 ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
+
+# T4.3 incremental adapter seam: when a ProjectAdapter is provided, its
+# state_dir overrides the static default above (mirrors findings_log.py /
+# rl_engine.py). Also honours CODEBOT_STATE_DIR / CODEBOT_PROJECT_ROOT
+# env vars so all agents resolve the same location without an adapter.
+_adapter_instance: Any | None = None
+
+
+def set_project_adapter(adapter: Any) -> None:
+    """Inject a ProjectAdapter; its state_dir becomes the alignment state location."""
+    global _adapter_instance, STATE_DIR, ALIGNMENT_EVENTS_DIR
+    _adapter_instance = adapter
+    try:
+        p = adapter.paths()  # type: ignore[union-attr]
+        STATE_DIR = p.state_dir
+        ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
+    except Exception:
+        pass
+
+
+def get_adapter() -> Any | None:
+    """Return the injected ProjectAdapter, if any."""
+    return _adapter_instance
+
+
+def _resolve_state_dir() -> Path:
+    """Resolve the project state dir: adapter > env > static default."""
+    if _adapter_instance is not None:
+        try:
+            return _adapter_instance.paths().state_dir  # type: ignore[union-attr]
+        except Exception:
+            pass
+    env_state = os.environ.get("CODEBOT_STATE_DIR")
+    if env_state:
+        return Path(env_state)
+    env_root = os.environ.get("CODEBOT_PROJECT_ROOT")
+    if env_root:
+        return Path(env_root) / ".codebot" / "state"
+    return STATE_DIR
+
+
+def _resolve_events_dir() -> Path:
+    """Resolve the alignment events dir based on current state dir."""
+    return _resolve_state_dir() / "alignment_events"
 
 
 def _collect_reviewer_feedback_for_trigger(bot_name: str) -> list[dict]:
@@ -45,12 +90,13 @@ def _collect_reviewer_feedback_for_trigger(bot_name: str) -> list[dict]:
     optimizer to address recurring issues.
     """
     feedback_items = []
+    state_dir = _resolve_state_dir()
     review_files = [
-        STATE_DIR / "security_review.json",
-        STATE_DIR / "architecture_review.json",
-        STATE_DIR / "correctness_review.json",
-        STATE_DIR / "test_review.json",
-        STATE_DIR / "documentation_review.json",
+        state_dir / "security_review.json",
+        state_dir / "architecture_review.json",
+        state_dir / "correctness_review.json",
+        state_dir / "test_review.json",
+        state_dir / "documentation_review.json",
     ]
     for rf in review_files:
         if rf.exists():
@@ -106,7 +152,8 @@ def run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
             logger.warning("rl_engine not available, skipping alignment pipeline")
             return False
 
-    event_file = ALIGNMENT_EVENTS_DIR / f"{bot_name}.exit.json"
+    events_dir = _resolve_events_dir()
+    event_file = events_dir / f"{bot_name}.exit.json"
     if not event_file.exists():
         return False
 
