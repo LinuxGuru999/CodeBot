@@ -3610,16 +3610,17 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
             continue
 
         if not should_enable and bot.config.enabled:
+            bot.config.enabled = False
             if bot.process is not None and bot.process.poll() is None:
-            try:
-                bot.process.terminate()
-                bot.process.wait(timeout=5)
-            except Exception:
                 try:
-                    bot.process.kill()
+                    bot.process.terminate()
+                    bot.process.wait(timeout=5)
                 except Exception:
-                    pass
-            bot.process = None
+                    try:
+                        bot.process.kill()
+                    except Exception:
+                        pass
+                bot.process = None
             write_heartbeat(bot.config.name)
             update_bot_state(bot, "disabled")
             status_path = STATE_DIR / f"{bot.config.name}.status.json"
@@ -3630,6 +3631,9 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
                 _write_json_atomic(status_path, sdata)
             except Exception:
                 pass
+        elif should_enable and not bot.config.enabled:
+            bot.config.enabled = True
+            logger.info(f"[queue-scale] Re-enabled '{name}': work available in queue")
 
 
 def due_bots_first(bots: dict[str, BotState]) -> list[str]:
