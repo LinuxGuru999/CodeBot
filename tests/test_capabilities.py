@@ -46,20 +46,20 @@ class TestIsBlockedUrl:
 class TestExtractTextFromHtml:
     def test_strips_tags(self):
         html = "<p>Hello <b>world</b></p>"
-        text = _extract_text_from_html(html)
+        text = extract_text_from_html(html)
         assert "Hello" in text
         assert "world" in text
         assert "<p>" not in text
 
     def test_strips_script(self):
         html = "<p>Visible</p><script>alert('xss')</script>"
-        text = _extract_text_from_html(html)
+        text = extract_text_from_html(html)
         assert "Visible" in text
         assert "alert" not in text
 
     def test_strips_style(self):
         html = "<p>Text</p><style>.x{color:red}</style>"
-        text = _extract_text_from_html(html)
+        text = extract_text_from_html(html)
         assert "Text" in text
         assert "color" not in text
 
@@ -305,7 +305,7 @@ class TestComputeChunks:
         from codebot.ticket_engine import create_ticket, TicketClass, Severity
         t = create_ticket("T", TicketClass.BUG, Severity.MEDIUM, "s", "e", "p", "d",
                           ["ac"], affected_modules=["a.py", "b.py", "c.py", "d.py", "e.py"])
-        chunks = _compute_chunks(t, None)
+        chunks = compute_chunks(t, None)
         assert len(chunks) >= 2
         assert all("modules" in c for c in chunks)
 
@@ -314,5 +314,5 @@ class TestComputeChunks:
         modules = [f"file{i}.py" for i in range(50)]
         t = create_ticket("T", TicketClass.BUG, Severity.MEDIUM, "s", "e", "p", "d",
                           ["ac"], affected_modules=modules)
-        chunks = _compute_chunks(t, None)
+        chunks = compute_chunks(t, None)
         assert len(chunks) <= 10

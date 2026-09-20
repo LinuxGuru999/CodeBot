@@ -248,7 +248,22 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any]) -> None:
     """Transition assigned ticket when bot exits cleanly (exit code 0)."""
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
     if not assigned_tid:
-        return
+        logger.info(f"transition_ticket_on_success: {bot.config.name} has no assigned_tid, checking claims")
+        try:
+            claims_dir = STATE_DIR / "claims"
+            if claims_dir.exists():
+                for cf in claims_dir.glob(f"*.{bot.config.name}.json"):
+                    data = json.loads(cf.read_text(encoding="utf-8"))
+                    tid = data.get("ticket_id", "")
+                    if tid:
+                        assigned_tid = tid
+                        bot._assigned_ticket_id = tid
+                        logger.info(f"Recovered assigned_tid={tid} from claim file for {bot.config.name}")
+                        break
+        except Exception:
+            pass
+        if not assigned_tid:
+            return
     
     base_role = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
     

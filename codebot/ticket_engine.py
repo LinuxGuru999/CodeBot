@@ -242,8 +242,15 @@ class Ticket:
         d["risk"] = self.risk.value
         return d
 
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), indent=2)
+    def to_json(self, *, pretty: bool = False) -> str:
+        """Serialize ticket to JSON string.
+
+        Uses compact JSON by default for performance. Pass pretty=True
+        only for debugging or human-readable output.
+        """
+        if pretty:
+            return json.dumps(self.to_dict(), indent=2)
+        return json.dumps(self.to_dict(), separators=(",", ":"))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Ticket:

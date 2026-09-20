@@ -159,15 +159,14 @@ class TestRiskThresholdConfigurable:
     """Verify the risk threshold for planning enforcement is configurable."""
 
     def test_default_threshold_is_medium(self) -> None:
-        from codebot.ticket_engine import MIN_RISK_FOR_PLANNING
-        assert MIN_RISK_FOR_PLANNING == RiskLevel.MEDIUM
+        from codebot.ticket_engine import get_min_risk_for_planning
+        assert get_min_risk_for_planning() == RiskLevel.MEDIUM
 
     def test_threshold_change_affects_enforcement(self, tmp_path: Path) -> None:
         """When threshold is raised to HIGH, medium-risk tickets pass without plan."""
         import codebot.ticket_engine as te
-        original = te.MIN_RISK_FOR_PLANNING
         try:
-            te.MIN_RISK_FOR_PLANNING = RiskLevel.HIGH
+            te.set_min_risk_for_planning(RiskLevel.HIGH)
 
             store = TicketStore(tmp_path / "tickets.json")
             t = create_ticket(
@@ -182,4 +181,4 @@ class TestRiskThresholdConfigurable:
             updated = store.transition(t.id, TicketState.IMPLEMENTING)
             assert updated.state == TicketState.IMPLEMENTING
         finally:
-            te.MIN_RISK_FOR_PLANNING = original
+            te.set_min_risk_for_planning(RiskLevel.MEDIUM)
