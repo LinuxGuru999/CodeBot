@@ -295,48 +295,22 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 logger.info(f"Checkpoint handoff ready for '{name}': excess={hb_age - eff:.0f}s")
             restart_bot(bot, reason="stuck", bots=bots)
 
-    # Delegate service calls
+    # Delegate to services (each wrapped to prevent cascade failures)
     log_bot_statuses(bots)
-    try:
-        _sweep_orphan_claims(bots)
-    except Exception:
-        pass
-    try:
-        apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state)
-    except Exception as e:
-        logger.warning(f"Agent availability check failed: {e}")
-    try:
-        spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot)
-    except Exception as e:
-        logger.warning(f"Demand agent spawn failed: {e}")
-    try:
-        dispatch_decompose_agents(bots, start_bot_fn=start_bot)
-    except Exception as e:
-        logger.warning(f"Decompose dispatch failed: {e}")
-    try:
-        dispatch_planning_agents(bots, start_bot_fn=start_bot)
-    except Exception as e:
-        logger.warning(f"Planning dispatch failed: {e}")
-    try:
-        advance_reviewed_tickets(bots)
-    except Exception as e:
-        logger.warning(f"Review advance failed: {e}")
-    try:
-        gatekeeper_verify_tickets()
-    except Exception as e:
-        logger.warning(f"Gatekeeper verify failed: {e}")
-    try:
-        route_ready_tickets()
-    except Exception as e:
-        logger.warning(f"Route ready tickets failed: {e}")
-    try:
-        process_rework_tickets(bots)
-    except Exception as e:
-        logger.warning(f"Process rework tickets failed: {e}")
-    try:
-        recover_deferred_tickets()
-    except Exception as e:
-        logger.warning(f"Recover deferred tickets failed: {e}")
+    for fn, label in [
+        (lambda: _sweep_orphan_claims(bots), "orphan sweep"),
+        (lambda: apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state), "availability"),
+        (lambda: spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot), "demand spawn"),
+        (lambda: dispatch_decompose_agents(bots, start_bot_fn=start_bot), "decompose"),
+        (lambda: dispatch_planning_agents(bots, start_bot_fn=start_bot), "planning"),
+        (lambda: advance_reviewed_tickets(bots), "review advance"),
+        (lambda: gatekeeper_verify_tickets(), "gatekeeper"),
+        (lambda: route_ready_tickets(), "route ready"),
+        (lambda: process_rework_tickets(bots), "rework"),
+        (lambda: recover_deferred_tickets(), "deferred recovery"),
+    ]:
+        try: fn()
+        except Exception as e: logger.warning(f"{label} failed: {e}")
 
     # Spawn interval-based bots
     pipeline = get_pipeline_state()
@@ -360,98 +334,61 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 # ---------------------------------------------------------------------------
 
 def get_status(bots: dict[str, BotState]) -> dict:
-    status = {}
-    for name, bot in bots.items():
-        process_pid = bot.process.pid if bot.process is not None and bot.process.poll() is None else None
-        running = process_pid is not None
-        hb_val = read_heartbeat(bot.config.name)
-        hb_age = time.time() - hb_val if hb_val > 0 else None
-        if hb_age is not None and hb_age < 0:
-            hb_age = 0.0
-        prof = model_profile(bot.config.model)
-        status[name] = {
-            "enabled": bot.config.enabled, "running": running, "pid": process_pid,
-            "model": bot.config.model, "risk": prof.lockup_risk if prof else "unknown",
-            "eff_timeout": effective_heartbeat_timeout(bot),
-            "heartbeat_age_seconds": round(hb_age, 1) if hb_age else None,
-            "next_run_in": round(bot.next_run_at - time.time(), 1) if bot.next_run_at and not running else None,
-            "restart_count": bot.restart_count, "consecutive_errors": bot.consecutive_errors,
-        }
-    return status
+    out = {}
+    for n, b in bots.items():
+        pid = b.process.pid if b.process and b.process.poll() is None else None
+        hb = read_heartbeat(b.config.name); ha = max(0.0, time.time() - hb) if hb > 0 else None
+        pr = model_profile(b.config.model)
+        out[n] = {"enabled": b.config.enabled, "running": pid is not None, "pid": pid,
+                  "model": b.config.model, "risk": pr.lockup_risk if pr else "unknown",
+                  "eff_timeout": effective_heartbeat_timeout(b),
+                  "heartbeat_age_seconds": round(ha, 1) if ha else None,
+                  "next_run_in": round(b.next_run_at - time.time(), 1) if b.next_run_at and not pid else None,
+                  "restart_count": b.restart_count, "consecutive_errors": b.consecutive_errors}
+    return out
 
 
 def print_status(bots: dict[str, BotState]) -> None:
-    status = get_status(bots)
-    print("\n" + "=" * 90)
-    print("BOT ORCHESTRATOR STATUS")
-    print("=" * 90)
-    for name, info in status.items():
-        state = "RUNNING" if info["running"] else ("WAITING" if info["next_run_in"] and info["next_run_in"] > 0 else "STOPPED")
-        if not info["enabled"]:
-            state = "DISABLED"
-        hb = f"{info['heartbeat_age_seconds']}s" if info["heartbeat_age_seconds"] else "-"
-        nxt = f"{info['next_run_in']:.0f}s" if info["next_run_in"] and info["next_run_in"] > 0 else "-"
-        pid = str(info['pid']) if info['pid'] else "-"
-        print(f"  {name:15s} {state:9s} PID={pid:6s} HB={hb:7s} NEXT={nxt:6s} eff={info['eff_timeout']:4.0f}s risk={info['risk']:11s} {info['model']}")
+    st = get_status(bots)
+    print("\n" + "=" * 90 + "\nBOT ORCHESTRATOR STATUS\n" + "=" * 90)
+    for n, i in st.items():
+        s = "RUNNING" if i["running"] else ("DISABLED" if not i["enabled"] else ("WAITING" if i["next_run_in"] and i["next_run_in"] > 0 else "STOPPED"))
+        print(f"  {n:15s} {s:9s} PID={str(i['pid'] or '-'):>6s} HB={str(i['heartbeat_age_seconds'])+'s' if i['heartbeat_age_seconds'] else '-':>7s} "
+              f"NEXT={f\"{i['next_run_in']:.0f}s\" if i['next_run_in'] and i['next_run_in']>0 else '-':>6s} eff={i['eff_timeout']:4.0f}s risk={i['risk']:11s} {i['model']}")
     print("=" * 90 + "\n")
 
 
 def set_drain(reason: str = "") -> None:
-    _paths_drain_file.write_text(f"{time.time()}\n{reason}\n")
-    logger.info(f"Drain flag set: {reason}")
-
+    _paths_drain_file.write_text(f"{time.time()}\n{reason}\n"); logger.info(f"Drain set: {reason}")
 
 def clear_drain() -> None:
     for f in (_paths_drain_file, _paths_update_lock):
-        try:
-            f.unlink()
-        except FileNotFoundError:
-            pass
+        try: f.unlink()
+        except FileNotFoundError: pass
     logger.info("Drain cleared")
 
-
 def drain_status() -> dict:
-    return {
-        "draining": is_draining(),
-        "drain_file": str(_paths_drain_file) if _paths_drain_file.exists() else None,
-        "update_lock": str(_paths_update_lock) if _paths_update_lock.exists() else None,
-        "drain_reason": _paths_drain_file.read_text().strip() if _paths_drain_file.exists() else None,
-    }
-
+    return {"draining": is_draining(), "drain_file": str(_paths_drain_file) if _paths_drain_file.exists() else None,
+            "update_lock": str(_paths_update_lock) if _paths_update_lock.exists() else None,
+            "drain_reason": _paths_drain_file.read_text().strip() if _paths_drain_file.exists() else None}
 
 def safe_stop_all(bots: dict[str, BotState]) -> dict:
-    set_drain("safe-stop requested")
-    results: dict[str, str] = {}
-    for name, bot in bots.items():
-        if bot.process is None or bot.process.poll() is not None:
-            results[name] = "already stopped"
-            update_bot_state(bot, "stopped")
-            continue
-        logger.info(f"Safe-stopping {name}")
-        stop_bot(bot, reason="safe-stop drain")
-        results[name] = "stopped"
-        update_bot_state(bot, "drained")
-    logger.info(f"Safe stop complete: {results}")
-    return results
-
+    set_drain("safe-stop"); res = {}
+    for n, b in bots.items():
+        if b.process is None or b.process.poll() is not None:
+            res[n] = "already stopped"; update_bot_state(b, "stopped"); continue
+        stop_bot(b, "safe-stop"); res[n] = "stopped"; update_bot_state(b, "drained")
+    logger.info(f"Safe stop: {res}"); return res
 
 def backup_botnet(tag: str | None = None) -> Path:
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    name = f"botnet-{tag}-{ts}" if tag else f"botnet-{ts}"
-    dest = _paths_backup_dir / name
-    dest.mkdir(parents=True, exist_ok=True)
-    for p in BOTS_DIR.glob("*.md"):
-        (dest / p.name).write_bytes(p.read_bytes())
-    logger.info(f"Botnet backup -> {dest}")
-    return dest
-
+    d = _paths_backup_dir / f"botnet-{tag+'-'if tag else ''}{time.strftime('%Y%m%d-%H%M%S')}"
+    d.mkdir(parents=True, exist_ok=True)
+    for p in BOTS_DIR.glob("*.md"): (d / p.name).write_bytes(p.read_bytes())
+    logger.info(f"Backup -> {d}"); return d
 
 def restore_botnet(backup_dir: Path) -> None:
-    if not backup_dir.exists():
-        raise FileNotFoundError(str(backup_dir))
-    for p in backup_dir.glob("*.md"):
-        (BOTS_DIR / p.name).write_bytes(p.read_bytes())
-    logger.info(f"Restored botnet from {backup_dir}")
+    if not backup_dir.exists(): raise FileNotFoundError(str(backup_dir))
+    for p in backup_dir.glob("*.md"): (BOTS_DIR / p.name).write_bytes(p.read_bytes())
 
 
 # ---------------------------------------------------------------------------
