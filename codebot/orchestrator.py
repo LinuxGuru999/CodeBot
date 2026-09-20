@@ -738,7 +738,7 @@ WORKER_FALLBACK_CYCLE = (
 
 
 def _count_actionable_queue_items() -> int:
-    """Count actionable items via TicketStore only. No QUEUE.md fallback."""
+    """Count actionable items via TicketStore only. Returns 0 when unavailable."""
     try:
         from codebot.ticket_engine import TicketStore, TicketState
         store_path = STATE_DIR / "tickets.json"
@@ -3200,8 +3200,8 @@ def rotate_logs(max_bytes: int = 10_000_000, keep: int = 1) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _parse_queue_complexity(queue_path: Path) -> dict[str, str]:
-    """No-op: QUEUE.md parsing removed. Returns empty dict."""
+def _parse_queue_complexity() -> dict[str, str]:
+    """No-op: legacy queue parsing removed. Returns empty dict."""
     return {}
 
 
@@ -4479,16 +4479,14 @@ def _dispatch_manifest_batches(packed: dict, bots: dict[str, BotState]) -> None:
     except Exception:
         run_batch_fn = None
 
-    queue_path = BOTS_DIR / "docs" / "triage" / "QUEUE.md"
     queue_text_for_items = packed.get("queue_text") if isinstance(packed, dict) else None
+    queue_items: dict[str, str] = {}
     if isinstance(queue_text_for_items, str) and queue_text_for_items:
         try:
             from codebot.readiness import _parse_queue_complexity_from_text as _pqct  # type: ignore
+            queue_items = _pqct(queue_text_for_items)
         except ImportError:
-            _pqct = None  # type: ignore
-        queue_items = _pqct(queue_text_for_items) if _pqct is not None else _parse_queue_complexity(queue_path)
-    else:
-        queue_items = _parse_queue_complexity(queue_path)
+            pass
 
     for idx, batch in enumerate(batches):
         if not isinstance(batch, list):
@@ -5150,6 +5148,41 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         _spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT)
     except Exception as e:
         logger.warning(f"Demand agent spawn failed: {e}")
+    for name, bot in list(bots.items()):
+        if not bot.config.enabled:
+            continue
+        if bot.process is None or bot.process.poll() is None:
+            continue
+        exit_code = bot.process.returncode
+        base_role = name.split("-")[0] if "-" in name else name
+        if base_role not in IMPLEMENTER_ROLE_NAMES and base_role not in REVIEWER_ROLE_NAMES:
+            continue
+        assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+        if assigned_tid and exit_code == 0:
+            try:
+                from codebot.ticket_engine import TicketStore, TicketState
+                store_path = STATE_DIR / "tickets.json"
+                if not store_path.exists():
+                    store_path = Path(".codebot/state/tickets.json")
+                if store_path.exists():
+                    ts = TicketStore(store_path)
+                    t = ts.get(assigned_tid)
+                    if t is not None:
+                        if base_role in REVIEWER_ROLE_NAMES:
+                            if t.state == TicketState.REVIEWING:
+                                ts.transition(assigned_tid, TicketState.VERIFYING)
+                                logger.info(f"Pre-recovery: {assigned_tid} -> VERIFYING (reviewer {name})")
+                        else:
+                            if t.state == TicketState.IMPLEMENTING:
+                                ts.transition(assigned_tid, TicketState.REVIEWING)
+                                logger.info(f"Pre-recovery: {assigned_tid} -> REVIEWING ({name})")
+                    claims_dir = STATE_DIR / "claims"
+                    for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
+                        cf.unlink(missing_ok=True)
+            except Exception as te:
+                logger.warning(f"Pre-recovery transition failed for {assigned_tid}: {te}")
+            bot._assigned_ticket_id = ''
+        bot.process = None
     try:
         _recover_stuck_implementing_tickets(bots)
     except Exception as e:
