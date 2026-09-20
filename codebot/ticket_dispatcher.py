@@ -128,8 +128,34 @@ MODEL_TIER_EXPENSIVE = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen
 _model_rotation_index = 0
 
 
+_ticket_store_cache: Any = None
+
+
+def clear_ticket_store_cache() -> None:
+    """Invalidate the cached TicketStore so the next access reloads from disk.
+
+    Called at the start of each orchestrator health-check tick to ensure
+    we read tickets.json exactly once per cycle rather than once per
+    dispatcher function invocation.
+    """
+    global _ticket_store_cache
+    _ticket_store_cache = None
+    logger.debug("TicketStore cache cleared")
+
+
 def _get_ticket_store():
-    """Get TicketStore instance with caching."""
+    """Get TicketStore instance with per-tick caching.
+
+    Returns a shared, module-level TicketStore that is only instantiated
+    once between calls to ``clear_ticket_store_cache()``.  This eliminates
+    redundant disk reads and JSON parses when multiple dispatcher functions
+    are invoked within a single orchestrator tick.
+    """
+    global _ticket_store_cache
+    if _ticket_store_cache is not None:
+        logger.debug("Returning cached TicketStore")
+        return _ticket_store_cache
+
     try:
         from codebot.ticket_engine import TicketStore
     except ImportError:
@@ -142,7 +168,9 @@ def _get_ticket_store():
         return None
 
     try:
-        return TicketStore(store_path)
+        _ticket_store_cache = TicketStore(store_path)
+        logger.debug("Creating new TicketStore (cache miss)")
+        return _ticket_store_cache
     except Exception:
         return None
 
@@ -454,19 +482,12 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
 def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None) -> int:
     """Dispatch DECOMPOSE tickets to decomposer agents."""
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
 
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
 
     decomposing = ts.list_by_state(TicketState.DECOMPOSE)
@@ -616,19 +637,12 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
 def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None) -> int:
     """Dispatch PLANNING tickets to planner agents."""
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
 
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
 
     planning = ts.list_by_state(TicketState.PLANNING)
@@ -700,9 +714,17 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
 
         plan_file = plans_dir / f"{tid}.plan.json"
         if plan_file.exists():
-            transitions.append((tid, TicketState.IMPLEMENTING, None))
-            transition_tids.append(tid)
-            continue
+            try:
+                json.loads(plan_file.read_text(encoding="utf-8"))
+                transitions.append((tid, TicketState.IMPLEMENTING, None))
+                transition_tids.append(tid)
+                continue
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    plan_file.unlink()
+                    logger.warning(f"Deleted malformed plan for {tid}, re-queuing for planning")
+                except OSError:
+                    pass
 
         if tid in active_claims:
             continue
@@ -774,19 +796,12 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
     avoiding O(K*N) serialization cost per dispatch cycle.
     """
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
 
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
 
     reviewing = ts.list_by_state(TicketState.REVIEWING)
@@ -909,19 +924,12 @@ def gatekeeper_verify_tickets() -> int:
     avoiding O(K*N) serialization cost per dispatch cycle.
     """
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
 
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
 
     verifying = ts.list_by_state(TicketState.VERIFYING)
@@ -1025,19 +1033,12 @@ def route_ready_tickets() -> int:
     avoiding O(K*N) serialization cost per dispatch cycle.
     """
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
 
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
 
     ready = ts.list_by_state(TicketState.READY)
@@ -1086,14 +1087,15 @@ def process_rework_tickets(bots: dict[str, Any]) -> int:
     Uses batch_transition to apply all state changes in memory and save once,
     avoiding O(K*N) serialization cost per dispatch cycle.
     """
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
+    try:
+        from codebot.ticket_engine import TicketState
+    except ImportError:
+        return 0
+
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
-        ts = TicketStore(store_path)
         rework = ts.list_by_state(TicketState.REWORK)
     except Exception:
         return 0
@@ -1143,14 +1145,15 @@ def recover_deferred_tickets() -> int:
     Uses batch_transition to apply all state changes in memory and save once,
     avoiding O(K*N) serialization cost per dispatch cycle.
     """
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
+    try:
+        from codebot.ticket_engine import TicketState
+    except ImportError:
+        return 0
+
+    ts = _get_ticket_store()
+    if ts is None:
         return 0
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
-        ts = TicketStore(store_path)
         deferred = ts.list_by_state(TicketState.DEFERRED)
         decompose_count = len(ts.list_by_state(TicketState.DECOMPOSE))
     except Exception:

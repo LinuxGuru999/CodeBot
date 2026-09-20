@@ -26,7 +26,6 @@ POST /bots/stop                → body {"bots": [...] } or {} for all
 POST /control/drain            → create state/.drain
 POST /control/clear-drain      → remove state/.drain
 POST /control/update           → run safe_update.sh --force
-GET  /state                    → raw orchestrator state dir listing (debug)
 GET  /scheduler/status         → versioned redacted ops status (budget, drain,
                                  dead-letter ids, queue/lease counts, paused/disabled,
                                  starvation ages, batch caps, per-model actuals)
@@ -672,20 +671,6 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok", "time": time.time()})
             return
 
-        if path in ("/state", "/api/state"):
-            try:
-                files = []
-                for p in sorted(STATE_DIR.glob("*")):
-                    try:
-                        st = p.stat()
-                        files.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
-                    except Exception:
-                        pass
-                self._json(200, files)
-            except Exception as e:
-                self._json(500, {"error": str(e)})
-            return
-
         self._json(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802
@@ -701,6 +686,19 @@ class ControlHandler(BaseHTTPRequestHandler):
         if error_code is not None:
             self._json(error_code, {"error": error})
             return
+
+        # Destructive endpoint validation: require explicit confirmation
+        DESTRUCTIVE_PATHS = {
+            "/bots/stop", "/api/bots/stop", "/control/stop",
+            "/control/drain", "/api/control/drain",
+            "/control/update", "/api/control/update",
+        }
+        if path in DESTRUCTIVE_PATHS:
+            force = body.get("force")
+            confirm = body.get("confirm")
+            if not (force is True or confirm is True):
+                self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
+                return
 
         # POST /bots/{name}/restart
         m = re.match(r"^/(?:api/)?bots/([^/]+)/restart$", path)

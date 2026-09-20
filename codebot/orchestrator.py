@@ -44,7 +44,7 @@ from codebot.ticket_dispatcher import (
     dispatch_planning_agents, advance_reviewed_tickets,
     gatekeeper_verify_tickets, route_ready_tickets,
     process_rework_tickets, recover_deferred_tickets,
-    _sweep_orphan_claims,
+    _sweep_orphan_claims, clear_ticket_store_cache,
 )
 from codebot.dispatch_service import (
     get_pipeline_state, is_needed_bot, apply_agent_availability,
@@ -144,6 +144,9 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     _paths = get_paths()
     if check_self_restart(bots, stop_bot):
         return
+
+    # Clear TicketStore cache to ensure fresh data for this tick
+    clear_ticket_store_cache()
 
     now = time.time()
 

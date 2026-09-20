@@ -58,6 +58,11 @@ except ImportError:
     _HAS_RATE_LIMITER = False
     _rate_limiter = None  # type: ignore
 
+# Bounded I/O: Constitutional invariant §4 — all HTTP reads must have a size cap.
+# 1 MiB is generous for API response payloads while preventing memory exhaustion
+# from a malicious or misbehaving server.
+MAX_RESPONSE_BYTES = 1 * 1024 * 1024  # 1 MiB
+
 
 def _wait_for_rate_limit(model: str) -> float:
     """Wait according to adaptive rate limiter, return actual delay."""
@@ -1169,7 +1174,7 @@ def _execute_provider_session(
                     _write_checkpoint(ck_path, bot_name, "rate_limited_yield")
                     return _result("rate_limited_yield")
                 try:
-                    body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+                    body = exc.read(MAX_RESPONSE_BYTES).decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
                     if "429" in body or "rate" in body.lower():
                         if rate_429_retries < MAX_429_RETRIES:
                             delay = BACKOFFS[min(rate_429_retries, len(BACKOFFS) - 1)]
@@ -1956,7 +1961,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                         exit_reason = "rate_limited_yield"
                         sys.exit(3)
                     try:
-                        body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+                        body = exc.read(MAX_RESPONSE_BYTES).decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
                         if "429" in body or "rate" in body.lower():
                             _record_rate_limit(active_model, None)
                             if total_retries < MAX_429_RETRIES:
