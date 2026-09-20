@@ -13,12 +13,16 @@ import codebot.control_client as cc
 
 
 class FakeResponse:
+    """Mock HTTP response for urllib.request.urlopen context manager."""
     def __init__(self, body: bytes, status: int = 200):
         self._body = body
         self.status = status
+        self.code = status  # urllib uses .code in some contexts
 
-    def read(self):
-        return self._body
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            return self._body
+        return self._body[:size]
 
     def __enter__(self):
         return self
