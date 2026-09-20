@@ -570,7 +570,7 @@ class TestCreateTicketTool:
         assert result["success"] is True
         store_path = adapter.paths().state_dir / "tickets.json"
         store = TicketStore(store_path)
-        tickets = store.list_all()
+        tickets = store.list_by_state(TicketState.DISCOVERED)
         ticket = [t for t in tickets if t.title == "ID format test"][0]
         assert ticket.id.startswith("CB-"), f"Ticket ID must start with CB-, got {ticket.id}"
 
@@ -591,9 +591,8 @@ class TestCreateTicketTool:
         assert result["success"] is True
         store_path = adapter.paths().state_dir / "tickets.json"
         store = TicketStore(store_path)
-        tickets = store.list_all()
+        tickets = store.list_by_state(TicketState.DISCOVERED)
         ticket = [t for t in tickets if t.title == "State test"][0]
-        from codebot.ticket_engine import TicketState
         assert ticket.state == TicketState.DISCOVERED
 
     def test_ticket_with_all_fields(self, tmp_path):
@@ -615,7 +614,7 @@ class TestCreateTicketTool:
         assert result["success"] is True
         store_path = adapter.paths().state_dir / "tickets.json"
         store = TicketStore(store_path)
-        tickets = store.list_all()
+        tickets = store.list_by_state(TicketState.DISCOVERED)
         ticket = [t for t in tickets if t.title == "Full field test"][0]
         assert ticket.ticket_class == TicketClass.SECURITY
         assert ticket.severity == Severity.CRITICAL
@@ -640,7 +639,7 @@ class TestCreateTicketTool:
         assert result["success"] is True
         store_path = adapter.paths().state_dir / "tickets.json"
         store = TicketStore(store_path)
-        tickets = store.list_all()
+        tickets = store.list_by_state(TicketState.DISCOVERED)
         ticket = [t for t in tickets if t.ticket_class == TicketClass.BUG]
         assert len(ticket) >= 1
         # The title should have fallen back to problem_statement
@@ -663,7 +662,7 @@ class TestCreateTicketTool:
         assert result["success"] is True
         store_path = adapter.paths().state_dir / "tickets.json"
         store = TicketStore(store_path)
-        tickets = store.list_all()
+        tickets = store.list_by_state(TicketState.DISCOVERED)
         ticket = [t for t in tickets if t.title == "AC parsing test"][0]
         assert len(ticket.acceptance_criteria) == 3
         assert "First criterion" in ticket.acceptance_criteria

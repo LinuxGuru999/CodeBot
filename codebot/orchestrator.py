@@ -145,6 +145,75 @@ def _get_ticket_store() -> Any:
     except Exception:
         return None
 
+# ---------------------------------------------------------------------------
+# Per-tick heartbeat and log mtime cache — avoids repeated file reads in health loop
+# ---------------------------------------------------------------------------
+_HEARTBEAT_CACHE: dict[str, tuple[float, float]] = {}  # bot_name -> (timestamp, file_mtime)
+_LOG_MTIME_CACHE: dict[str, tuple[float, float]] = {}   # bot_name -> (mtime, file_mtime)
+
+
+def _refresh_heartbeat_cache(bot_names: list[str]) -> None:
+    """Bulk-read heartbeat files for all bots, updating cache only when files change.
+
+    This eliminates N individual file open/read/close operations per tick.
+    Instead, we stat all files first, then only read those whose mtime changed.
+    """
+    global _HEARTBEAT_CACHE
+    now = time.time()
+    for bot_name in bot_names:
+        hb_path = STATE_DIR / f"{bot_name}.heartbeat"
+        try:
+            stat_result = hb_path.stat()
+            current_mtime = stat_result.st_mtime
+        except OSError:
+            # File doesn't exist or can't be accessed
+            cached = _HEARTBEAT_CACHE.get(bot_name)
+            if cached is not None:
+                del _HEARTBEAT_CACHE[bot_name]
+            continue
+
+        cached = _HEARTBEAT_CACHE.get(bot_name)
+        if cached is not None and cached[1] == current_mtime:
+            # File unchanged, keep cached value
+            continue
+
+        # File changed or not cached, read it
+        try:
+            txt = hb_path.read_text().strip()
+            try:
+                ts = float(txt)
+            except (ValueError, OSError):
+                ts = 0.0
+            _HEARTBEAT_CACHE[bot_name] = (ts, current_mtime)
+        except OSError:
+            _HEARTBEAT_CACHE[bot_name] = (0.0, current_mtime)
+
+
+def _refresh_log_mtime_cache(bot_names: list[str]) -> None:
+    """Bulk-stat log files for all bots, updating cache only when files change.
+
+    Uses os.stat which is much cheaper than opening/reading the file.
+    """
+    global _LOG_MTIME_CACHE
+    for bot_name in bot_names:
+        log_p = LOGS_DIR / f"{bot_name}.log"
+        try:
+            stat_result = log_p.stat()
+            current_mtime = stat_result.st_mtime
+        except OSError:
+            cached = _LOG_MTIME_CACHE.get(bot_name)
+            if cached is not None:
+                del _LOG_MTIME_CACHE[bot_name]
+            continue
+
+        cached = _LOG_MTIME_CACHE.get(bot_name)
+        if cached is not None and cached[1] == current_mtime:
+            # File unchanged, keep cached value
+            continue
+
+        _LOG_MTIME_CACHE[bot_name] = (current_mtime, current_mtime)
+
+
 # T4.3 incremental adapter seam: when a ProjectAdapter is provided, its paths
 # override the defaults above.
 _adapter_instance: Any = None
@@ -799,7 +868,7 @@ def _peek_ticket_classes() -> list[str]:
     try:
         ts = _get_ticket_store()
         if ts is not None:
-            ready = ts.list_ready()
+            ready = ts.list_ready_raw()
             classes = []
             for t in ready:
                 tc = getattr(t, 'ticket_class', None)
@@ -1128,15 +1197,27 @@ def write_heartbeat(bot_name: str) -> None:
     hb.write_text(str(time.time()))
 
 def read_heartbeat(bot_name: str) -> float:
-    """Read bot's last heartbeat timestamp. Returns 0 if missing/stale/corrupt."""
+    """Read bot's last heartbeat timestamp. Returns 0 if missing/stale/corrupt.
+
+    Uses in-memory cache populated by _refresh_heartbeat_cache() to avoid
+    individual file reads. Falls back to direct read if cache miss.
+    """
+    # Try cache first
+    cached = _HEARTBEAT_CACHE.get(bot_name)
+    if cached is not None:
+        return cached[0]
+
+    # Cache miss - fall back to direct read (should be rare after bulk refresh)
     hb = heartbeat_path(bot_name)
     if not hb.exists():
         return 0.0
     txt = hb.read_text().strip()
     try:
-        return float(txt)
+        ts = float(txt)
     except (ValueError, OSError):
         pass
+    else:
+        return ts
     try:
         import datetime
         token = txt.split()[0]
@@ -1157,6 +1238,17 @@ def log_path(bot_name: str) -> Path:
 
 
 def log_mtime(bot_name: str) -> float:
+    """Return log file mtime. Uses in-memory cache to avoid repeated stat calls.
+
+    Cache is populated by _refresh_log_mtime_cache() at start of each health tick.
+    Falls back to direct stat if cache miss.
+    """
+    # Try cache first
+    cached = _LOG_MTIME_CACHE.get(bot_name)
+    if cached is not None:
+        return cached[0]
+
+    # Cache miss - fall back to direct stat
     lp = log_path(bot_name)
     try:
         return lp.stat().st_mtime
@@ -1898,7 +1990,7 @@ def _auto_push_to_master() -> None:
             ready_count = 0
             if store_path.exists():
                 ts = TicketStore(store_path)
-                ready_count = len(ts.list_ready())
+                ready_count = len(ts.list_ready_raw())
         except Exception:
             ready_count = 0
 
@@ -1963,7 +2055,7 @@ def _auto_triage_backlog() -> int:
         ts = TicketStore(store_path)
     except Exception:
         return 0
-    ready_count = len(ts.list_ready())
+    ready_count = len(ts.list_ready_raw())
     discovered = ts.list_by_state(TicketState.DISCOVERED)
     validating = ts.list_by_state(TicketState.VALIDATING)
     triaged = ts.list_by_state(TicketState.TRIAGED)
@@ -4019,7 +4111,7 @@ def _manifest_load_queue_text() -> str:
             store_path = Path(".codebot/state/tickets.json")
         if store_path.exists():
             ts = TicketStore(store_path)
-            ready = ts.list_ready()
+            ready = ts.list_ready_raw()
             if ready:
                 lines = []
                 for t in ready:
@@ -4567,6 +4659,12 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
             if bot.process is not None:
                 update_bot_state(bot, "drained")
         return
+
+    # Bulk-refresh heartbeat and log mtime caches to minimize file I/O
+    bot_names = list(bots.keys())
+    _refresh_heartbeat_cache(bot_names)
+    _refresh_log_mtime_cache(bot_names)
+
     now = time.time()
     # Retry disabled bots after 10s cooldown
     for name, bot in bots.items():
@@ -5131,6 +5229,12 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             if bot.process is not None:
                 update_bot_state(bot, "drained")
         return
+
+    # Bulk-refresh heartbeat and log mtime caches to minimize file I/O
+    bot_names = list(bots.keys())
+    _refresh_heartbeat_cache(bot_names)
+    _refresh_log_mtime_cache(bot_names)
+
     now = time.time()
 
     try:

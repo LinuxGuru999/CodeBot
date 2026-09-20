@@ -18,8 +18,12 @@ from http.client import HTTPConnection
 from unittest.mock import patch
 
 # Set CONTROL_TOKEN before importing control_server so auth works in tests
-os.environ.setdefault("CONTROL_TOKEN", "test-token-for-security-headers")
+os.environ["CONTROL_TOKEN"] = "test-token-for-security-headers"
+os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
 
+import importlib
+import codebot.control_server as _cs_mod
+importlib.reload(_cs_mod)
 from codebot.control_server import ControlHandler, ThreadingHTTPServer, PORT
 
 

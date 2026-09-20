@@ -376,6 +376,7 @@ class TicketStore:
 
     def _load(self) -> None:
         if not self._path.exists():
+            self._build_approval_cache()
             return
         try:
             lock_path = self._path.with_suffix(".lock")
@@ -398,6 +399,7 @@ class TicketStore:
             self._evidence_index = {}
             self._word_index = {}
             self._state_index = {}
+        self._build_approval_cache()
 
     def _index_title(self, ticket: Ticket) -> None:
         """Add ticket title words to the inverted index."""
@@ -544,18 +546,19 @@ class TicketStore:
         except Exception:
             return False
 
-    def _has_gate_approval(self, ticket_id: str) -> bool:
-        """Check if the latest gate result for ticket_id indicates approval.
+    def _build_approval_cache(self) -> None:
+        """Build in-memory cache of latest gate approvals from gate_results.jsonl.
 
-        Reads gate_results.jsonl from the state directory and looks for the
-        most recent entry for ticket_id.  Returns True only if that entry
-        exists *and* ``passed`` is True.
+        Scans the file once at startup to populate _approval_cache.
+        Subsequent lookups use the cache for O(1) access.
+        Must be called while holding self._lock or during __init__ before
+        other threads can access the store.
         """
         gate_path = self._path.parent / "gate_results.jsonl"
+        self._approval_cache.clear()
         if not gate_path.exists():
-            return False
+            return
         try:
-            last_record: dict[str, Any] | None = None
             with open(gate_path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -563,13 +566,46 @@ class TicketStore:
                         continue
                     try:
                         record = json.loads(line)
-                        if record.get("ticket_id") == ticket_id:
-                            last_record = record
+                        tid = record.get("ticket_id")
+                        if tid:
+                            self._approval_cache[tid] = record.get("passed") is True
                     except json.JSONDecodeError:
                         continue
-            return last_record is not None and last_record.get("passed") is True
         except OSError:
-            return False
+            pass
+
+    def record_gate_result(self, ticket_id: str, passed: bool, **extra: Any) -> None:
+        """Record a gate result and update the approval cache atomically.
+
+        Appends to gate_results.jsonl under exclusive lock and updates
+        _approval_cache so subsequent _has_gate_approval calls are O(1).
+        """
+        gate_path = self._path.parent / "gate_results.jsonl"
+        record: dict[str, Any] = {
+            "ticket_id": ticket_id,
+            "passed": passed,
+            "timestamp": time.time(),
+        }
+        record.update(extra)
+        with self._lock:
+            try:
+                gate_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(gate_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+                self._approval_cache[ticket_id] = passed
+            except OSError:
+                pass
+
+    def _has_gate_approval(self, ticket_id: str) -> bool:
+        """Check if the latest gate result for ticket_id indicates approval.
+
+        Uses the in-memory _approval_cache for O(1) lookup instead of
+        scanning gate_results.jsonl on every call. The cache is populated
+        at load time via _build_approval_cache and updated on each
+        record_gate_result call.
+        """
+        with self._lock:
+            return self._approval_cache.get(ticket_id, False)
 
     def transition(self, ticket_id: str, new_state: TicketState, reviewer_feedback: list[dict] | None = None) -> Ticket:
         with self._lock:
