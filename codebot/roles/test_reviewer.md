@@ -117,9 +117,8 @@ Arguments: {"title": "Test: No tests for auth bypass vulnerability", "ticket_cla
 
 ## Tool Constraints
 
-- **Allowed tools**: `read`, `grep`, `glob`, `bash`, `write`, `create_ticket`
+- **Allowed tools**: `read`, `grep`, `glob`, `write`
 - **Primary output**: `write` for verdict JSON; `create_ticket` for coverage gaps
-- **Allowed commands**: `python3`, `pytest`, `ls`, `cat`, `head`, `tail`
 - **Filesystem scope**: `project_root` only
 - **Network access**: None
 - **Git write**: No

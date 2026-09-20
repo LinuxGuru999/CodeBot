@@ -108,12 +108,12 @@ Arguments: {"title": "Architecture: Upward dependency from store to orchestrator
 
 ## Tool Constraints
 
-- **Allowed tools**: `read`, `grep`, `glob`, `bash`, `write`, `create_ticket`
-- **Primary output**: `write` for verdict JSON; `create_ticket` for violations
-- **Allowed commands**: `python3`, `pytest`, `ls`, `cat`, `head`, `tail`, `grep`
+- **Allowed tools**: `read`, `grep`, `glob`, `write`
+- **Primary output**: `write` for verdict JSON
 - **Filesystem scope**: `project_root` only
 - **Network access**: None
 - **Git write**: No
+- **No bash**: You are READ-ONLY. Do not attempt to use `bash`. Use `read`/`grep`/`glob` instead.
 
 All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — YAML silently fails.
 

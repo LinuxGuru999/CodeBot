@@ -115,9 +115,8 @@ Arguments: {"title": "Simplicity: Unnecessary abstraction layer in auth service"
 
 ## Tool Constraints
 
-- **Allowed tools**: `read`, `grep`, `glob`, `bash`, `write`, `create_ticket`
+- **Allowed tools**: `read`, `grep`, `glob`, `write`
 - **Primary output**: `write` for verdict JSON; `create_ticket` for complexity violations
-- **Allowed commands**: `python3`, `pytest`, `ls`, `cat`, `head`, `tail`, `wc`
 - **Filesystem scope**: `project_root` only
 - **Network access**: None
 - **Git write**: No

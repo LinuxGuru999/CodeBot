@@ -115,9 +115,8 @@ Arguments: {"title": "Critical: SQL injection in search endpoint", "ticket_class
 
 ## Tool Constraints
 
-- **Allowed tools**: `read`, `grep`, `glob`, `bash`, `write`, `create_ticket`
+- **Allowed tools**: `read`, `grep`, `glob`, `write`
 - **Primary output**: `write` for verdict JSON; `create_ticket` for escalation only
-- **Allowed commands**: `python3`, `pytest`, `ls`, `cat`, `head`, `tail`
 - **Filesystem scope**: `project_root` only
 - **Network access**: None
 - **Git write**: No

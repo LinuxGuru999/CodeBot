@@ -1897,7 +1897,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
 
     try:
         def _model_responder(msgs):
-            nonlocal active_model, total_retries, timeout_retries, exit_reason, used_fallback
+            nonlocal active_model, total_retries, timeout_retries, exit_reason, used_fallback, _fallback_idx
             while True:
                 try:
                     _wait_for_rate_limit(active_model)
@@ -1958,6 +1958,13 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                         raise
                     except Exception:
                         pass
+                    if _fallback_idx < len(_fallback_chain):
+                        active_model = _fallback_chain[_fallback_idx]
+                        _fallback_idx += 1
+                        total_retries = 0
+                        timeout_retries = 0
+                        _log(f"{bot_name}: HTTP error on primary, switching to fallback {active_model}")
+                        continue
                     _log(f"{bot_name}: FATAL — all fallback models exhausted")
                     exit_reason = "http_error"
                     sys.exit(1)

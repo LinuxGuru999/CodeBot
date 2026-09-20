@@ -128,9 +128,8 @@ Arguments: {"title": "Performance: O(n²) loop in request handler", "ticket_clas
 
 ## Tool Constraints
 
-- **Allowed tools**: `read`, `grep`, `glob`, `bash`, `write`, `create_ticket`
+- **Allowed tools**: `read`, `grep`, `glob`, `write`
 - **Primary output**: `write` for verdict JSON; `create_ticket` for regressions
-- **Allowed commands**: `python3`, `pytest`, `ls`, `cat`, `head`, `tail`, `time`
 - **Filesystem scope**: `project_root` only
 - **Network access**: None
 - **Git write**: No

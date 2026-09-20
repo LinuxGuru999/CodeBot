@@ -3291,7 +3291,7 @@ def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
 
 
 def _route_ready_tickets() -> int:
-    """Route all READY tickets into DECOMPOSE for breakdown before planning."""
+    """Route READY tickets: decomposer sub-tickets to PLANNING, originals to DECOMPOSE."""
     try:
         from codebot.ticket_engine import TicketStore, TicketState
     except ImportError:
@@ -3315,9 +3315,14 @@ def _route_ready_tickets() -> int:
         tid = getattr(ticket, 'id', '')
         if not tid:
             continue
+        source = getattr(ticket, 'source', '')
         try:
-            ts.transition(tid, TicketState.DECOMPOSE)
-            logger.info(f"Routed {tid} READY -> DECOMPOSE")
+            if source == 'decomposer':
+                ts.transition(tid, TicketState.PLANNING)
+                logger.info(f"Routed {tid} READY -> PLANNING (decomposer sub-ticket)")
+            else:
+                ts.transition(tid, TicketState.DECOMPOSE)
+                logger.info(f"Routed {tid} READY -> DECOMPOSE")
             routed += 1
         except ValueError as e:
             logger.debug(f"Failed to route {tid}: {e}")
@@ -3678,6 +3683,7 @@ def _recover_deferred_tickets() -> int:
         from codebot.ticket_engine import TicketStore, TicketState
         ts = TicketStore(store_path)
         deferred = ts.list_by_state(TicketState.DEFERRED)
+        decompose_count = len(ts.list_by_state(TicketState.DECOMPOSE))
     except Exception:
         return 0
     if not deferred:
@@ -3685,8 +3691,12 @@ def _recover_deferred_tickets() -> int:
     recovered = 0
     for ticket in deferred:
         try:
-            ts.transition(ticket.id, TicketState.READY)
-            logger.info(f"Recovered deferred ticket {ticket.id} -> READY")
+            if decompose_count == 0:
+                ts.transition(ticket.id, TicketState.DECOMPOSE)
+                logger.info(f"Recovered deferred ticket {ticket.id} -> DECOMPOSE (queue cleared)")
+            else:
+                ts.transition(ticket.id, TicketState.READY)
+                logger.info(f"Recovered deferred ticket {ticket.id} -> READY")
             recovered += 1
         except ValueError as e:
             logger.warning(f"Deferred ticket {ticket.id} recovery failed: {e}")
@@ -4893,6 +4903,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     if USE_MANIFEST_SCHEDULER:
         return _check_all_bots_manifest(bots)
     _apply_agent_availability(bots)
+    _sweep_orphan_claims(bots)
     rotate_logs()
     _check_prompt_changes(bots)
     _check_code_changes(bots)

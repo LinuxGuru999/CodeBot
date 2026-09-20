@@ -112,7 +112,7 @@ Arguments: {"title": "Documentation: API contract describes non-existent endpoin
 
 ## Tool Constraints
 
-- **Allowed tools**: `read`, `grep`, `glob`, `bash`, `write`, `create_ticket`
+- **Allowed tools**: `read`, `grep`, `glob`, `write`
 - **Primary output**: `write` for verdict JSON; `create_ticket` for documentation drift
 - **Allowed commands**: `python3`, `ls`, `cat`, `head`, `tail`
 - **Filesystem scope**: `project_root` only

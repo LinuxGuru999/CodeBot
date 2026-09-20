@@ -119,6 +119,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     }),
     TicketState.READY: frozenset({
         TicketState.DECOMPOSE,
+        TicketState.PLANNING,
         TicketState.DEFERRED,
     }),
     TicketState.DECOMPOSE: frozenset({
@@ -161,6 +162,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     TicketState.DEFERRED: frozenset({
         TicketState.READY,
         TicketState.TRIAGED,
+        TicketState.DECOMPOSE,
     }),
     # Terminal states
     TicketState.COMPLETE: frozenset(),
