@@ -1415,13 +1415,7 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
         1 for b in bots.values()
         if b.process is not None and b.process.poll() is None
     )
-    always_on_names = {"scheduler", "conflict_resolver"}
-    demand_running = sum(
-        1 for name, b in bots.items()
-        if b.process is not None and b.process.poll() is None
-        and name.split("-")[0] not in always_on_names
-    )
-    budget = max(0, max_concurrent - demand_running)
+    budget = max(0, max_concurrent - running_count)
     if budget <= 0:
         return 0
 

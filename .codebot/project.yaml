@@ -82,7 +82,7 @@ security:
   bearer_token_auth: false
   password_hashing: "none"
   rate_limiting: true
-  security_headers: false
+  security_headers: true
   blocklist_validation: true
   tls_verification_default: true
 

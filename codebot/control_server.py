@@ -448,9 +448,9 @@ class ControlHandler(BaseHTTPRequestHandler):
             return None
 
         if not CONTROL_TOKEN:
-            logger.warning(
-                "CONTROL_TOKEN is not set — all authenticated requests are rejected "
-                "(set CONTROL_TOKEN env var to enable API access)"
+            logger.critical(
+                "SECURITY: CONTROL_TOKEN is not set — rejecting all authenticated requests. "
+                "Set CONTROL_TOKEN env var to enable API access. This is a fail-closed security measure."
             )
             return False
         auth = self.headers.get("Authorization", "")
@@ -867,8 +867,8 @@ def main() -> None:
     # This prevents unauthenticated network access in containerized/shared environments.
     if not CONTROL_TOKEN:
         bind_host = "127.0.0.1"
-        logger.warning(
-            "CONTROL_TOKEN is not set — binding to 127.0.0.1 only. "
+        logger.critical(
+            "SECURITY: CONTROL_TOKEN is not set — binding to 127.0.0.1 only (fail-closed). "
             "All authenticated endpoints will reject requests. "
             "Set CONTROL_TOKEN env var to enable remote API access."
         )

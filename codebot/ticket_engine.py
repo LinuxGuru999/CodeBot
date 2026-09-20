@@ -610,6 +610,16 @@ class TicketStore:
             ticket_ids = self._state_index.get(state, set())
             return [self._tickets[tid] for tid in ticket_ids if tid in self._tickets]
 
+    def list_ready_raw(self) -> list[Ticket]:
+        """Return READY tickets without sorting (O(n)).
+
+        Use this when callers only need to inspect ticket classes or count
+        ready tickets and do not require severity ordering.
+        """
+        with self._lock:
+            ready_ids = self._state_index.get(TicketState.READY, set())
+            return [self._tickets[tid] for tid in ready_ids if tid in self._tickets]
+
     def list_ready(self) -> list[Ticket]:
         severity_order = {
             Severity.CRITICAL: 0,
@@ -617,10 +627,7 @@ class TicketStore:
             Severity.MEDIUM: 2,
             Severity.LOW: 3,
         }
-        with self._lock:
-            ready_ids = self._state_index.get(TicketState.READY, set())
-            ready = [self._tickets[tid] for tid in ready_ids if tid in self._tickets]
-        return sorted(ready, key=lambda t: severity_order.get(t.severity, 99))
+        return sorted(self.list_ready_raw(), key=lambda t: severity_order.get(t.severity, 99))
 
     def count(self) -> int:
         with self._lock:

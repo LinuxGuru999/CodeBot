@@ -415,6 +415,18 @@ class TestMigrateDeduplication:
             store = TicketStore(state_dir / "codebot_tickets.json")
             assert store.count() == 0
 
+    def test_value_error_non_duplicate_prints_stderr(self, tmp_path, capsys):
+        """Non-duplicate ValueError prints to stderr."""
+        text = make_item_block(1, title="err item", fields={"Class": "bug"})
+        q = write_queue(tmp_path, text)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        with patch("codebot.migrate_queue.create_ticket", side_effect=ValueError("validation issue")):
+            migrate(q, state_dir)
+        captured = capsys.readouterr()
+        assert "SKIP" in captured.err
+        assert "validation issue" in captured.err
+
 
 # ===========================================================================
 # migrate — state transitions
