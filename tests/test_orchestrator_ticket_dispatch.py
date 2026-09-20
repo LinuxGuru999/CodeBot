@@ -257,10 +257,10 @@ class TestTicketStoreExclusiveDispatch:
         """get_ticket_store returns None when tickets.json is missing."""
         from codebot.ticket_dispatcher import get_ticket_store, clear_ticket_store_cache
 
-        # Change CWD to tmp_path so the fallback Path(".codebot/state/tickets.json")
-        # resolves under tmp_path (which has no tickets.json), not the real project
         empty_dir = tmp_path / "empty_state"
         empty_dir.mkdir()
+        # Change CWD to empty_dir so the fallback Path(".codebot/state/tickets.json")
+        # resolves under empty_dir (which has no tickets.json), not in project root
         monkeypatch.chdir(empty_dir)
         with patch("codebot.ticket_dispatcher.STATE_DIR", empty_dir):
             clear_ticket_store_cache()
