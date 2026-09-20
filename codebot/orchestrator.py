@@ -30,14 +30,74 @@ from pathlib import Path
 from typing import Any
 
 from codebot.process_manager import (
-    BotConfig, BotState, start_bot, stop_bot, restart_bot,
-    is_stuck, effective_heartbeat_timeout, model_profile,
+    BotConfig, BotState, ModelProfile, MODEL_PROFILES,
+    start_bot, stop_bot, restart_bot,
+    is_stuck, is_log_stalled, effective_heartbeat_timeout, model_profile,
     read_heartbeat, log_mtime, update_bot_state,
     checkpoint_path, read_checkpoint, STATE_DIR, LOGS_DIR,
-    BOTS_DIR, BACKUP_DIR, GATEWAY_MAX_CONCURRENT,
+    BOTS_DIR, GATEWAY_MAX_CONCURRENT,
     GATEWAY_MIN_SPAWN_GAP, ALWAYS_RESPAWN, write_heartbeat,
     heartbeat_path, _write_json_atomic,
+    _manifest_restart_budget_exceeded, _manifest_error_disabled,
 )
+
+# BACKUP_DIR is not in process_manager, define locally
+BACKUP_DIR = STATE_DIR / "backup"
+
+# Backward compatibility stubs for functions removed from orchestrator
+def is_error_disabled(bot_name: str) -> bool:
+    """Check if a bot is disabled due to errors."""
+    return _manifest_error_disabled(bot_name)
+
+def is_restart_budget_exceeded(bot_name: str) -> bool:
+    """Check if restart budget is exceeded for a bot."""
+    return _manifest_restart_budget_exceeded(bot_name)
+
+def rotating_slots(max_concurrent: int = 26) -> int:
+    """Return number of rotating slots available."""
+    try:
+        from codebot.process_manager import _count_api_runner_processes
+        running = _count_api_runner_processes()
+        return max(0, max_concurrent - running)
+    except Exception:
+        return 0
+
+def worker_reserved_slots() -> int:
+    """Return number of slots reserved for workers."""
+    return 2
+
+def _get_available_memory_mb() -> float:
+    """Return available system memory in MB."""
+    try:
+        meminfo = Path("/proc/meminfo").read_text()
+        for line in meminfo.splitlines():
+            if line.startswith("MemAvailable:"):
+                parts = line.split()
+                return float(parts[1]) / 1024  # kB to MB
+    except Exception:
+        pass
+    return 0.0
+
+def _model_tier_for_complexity(model: str, complexity: str, queue_has_tier_work: bool = False) -> bool:
+    """Check if model is appropriate for given complexity tier."""
+    cheap_models = frozenset({"xiaomi-mimo-2.5"})
+    expensive_models = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
+    
+    if complexity in ("trivial", "small", "medium"):
+        return True
+    if complexity == "high":
+        return model in expensive_models or model not in cheap_models
+    if complexity == "critical":
+        return model in expensive_models
+    return True
+
+# Re-export for backward compatibility
+__all__.extend([
+    "ModelProfile", "MODEL_PROFILES", "is_log_stalled",
+    "is_error_disabled", "is_restart_budget_exceeded",
+    "rotating_slots", "worker_reserved_slots",
+    "_get_available_memory_mb", "_model_tier_for_complexity",
+])
 from codebot.ticket_dispatcher import (
     spawn_demand_agents, dispatch_decompose_agents,
     dispatch_planning_agents, advance_reviewed_tickets,
@@ -75,16 +135,20 @@ _paths_update_lock = _paths_state_dir / ".update_lock"
 _paths_restart_file = _paths_state_dir / ".restart"
 
 @dataclass
-class _PathsCompat:
+class PathConfig:
+    bots_dir: Path
     state_dir: Path
     logs_dir: Path
     backup_dir: Path
+    alignment_events_dir: Path
     drain_file: Path
     update_lock: Path
     restart_file: Path
-    alignment_events_dir: Path
 
-_paths = _PathsCompat(
+_PathsCompat = PathConfig  # backward compat alias
+
+_paths = PathConfig(
+    bots_dir=BOTS_DIR,
     state_dir=_paths_state_dir, logs_dir=_paths_logs_dir,
     backup_dir=_paths_backup_dir, drain_file=_paths_drain_file,
     update_lock=_paths_update_lock, restart_file=_paths_restart_file,
@@ -107,6 +171,31 @@ _adapter_instance: Any = None
 def set_adapter_instance(adapter: Any) -> None:
     global _adapter_instance
     _adapter_instance = adapter
+
+def set_project_adapter(adapter: Any) -> None:
+    """Update paths from a project adapter without using global path variables."""
+    set_adapter_instance(adapter)
+    try:
+        p = adapter.paths()
+        _paths.bots_dir = getattr(p, 'repository_root', _paths.bots_dir)
+        _paths.state_dir = getattr(p, 'state_dir', _paths.state_dir)
+        _paths.logs_dir = getattr(p, 'logs_dir', _paths.logs_dir)
+        _paths.backup_dir = _paths.state_dir / "backup"
+        _paths.drain_file = _paths.state_dir / ".drain"
+        _paths.update_lock = _paths.state_dir / ".update_lock"
+        _paths.restart_file = _paths.state_dir / ".restart"
+        _paths.alignment_events_dir = _paths.state_dir / "alignment_events"
+    except Exception as e:
+        logger.warning("Failed to update paths from adapter: %s", e)
+
+# Backward compatibility: allow module-level attribute access for paths
+_COMPAT_PATHS = {"STATE_DIR": "state_dir", "LOGS_DIR": "logs_dir", "BOTS_DIR": "bots_dir",
+                 "BACKUP_DIR": "backup_dir", "ALIGNMENT_EVENTS_DIR": "alignment_events_dir"}
+
+def __getattr__(name: str) -> Any:
+    if name in _COMPAT_PATHS:
+        return getattr(_paths, _COMPAT_PATHS[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 def _load_bot_registry() -> list[BotConfig]:
     if _adapter_instance is not None:
