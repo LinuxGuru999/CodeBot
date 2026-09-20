@@ -1869,7 +1869,8 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     tool_iterations = 0
     total_retries = 0
     timeout_retries = 0
-    MAX_429_RETRIES = 5
+    MAX_429_RETRIES = 10
+    MIN_429_BACKOFF = 10.0
     continue_nudges = 0
     exit_reason = "unknown"
     tickets_created = 0
@@ -1932,12 +1933,12 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                         _record_rate_limit(active_model, retry_after)
                         if total_retries < MAX_429_RETRIES:
                             if retry_after:
-                                delay = retry_after
+                                delay = max(retry_after, MIN_429_BACKOFF)
                             elif _HAS_RATE_LIMITER and _rate_limiter:
                                 state = _rate_limiter._get_state(active_model)
-                                delay = state.effective_interval
+                                delay = max(state.effective_interval, MIN_429_BACKOFF)
                             else:
-                                delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
+                                delay = max(BACKOFFS[min(total_retries, len(BACKOFFS) - 1)], MIN_429_BACKOFF)
                             delay = min(delay, MAX_BACKOFF)
                             _log(f"{bot_name}: 429 rate-limited, retrying in {delay:.1f}s ({total_retries+1}/{MAX_429_RETRIES})")
                             _write_heartbeat(heartbeat_file)
@@ -1955,9 +1956,9 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                             if total_retries < MAX_429_RETRIES:
                                 if _HAS_RATE_LIMITER and _rate_limiter:
                                     state = _rate_limiter._get_state(active_model)
-                                    delay = state.effective_interval
+                                    delay = max(state.effective_interval, MIN_429_BACKOFF)
                                 else:
-                                    delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
+                                    delay = max(BACKOFFS[min(total_retries, len(BACKOFFS) - 1)], MIN_429_BACKOFF)
                                 delay = min(delay, MAX_BACKOFF)
                                 _log(f"{bot_name}: rate-limited (body), retrying in {delay:.1f}s ({total_retries+1}/{MAX_429_RETRIES})")
                                 _write_heartbeat(heartbeat_file)

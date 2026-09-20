@@ -338,8 +338,9 @@ class TicketStore:
     SIMILARITY_THRESHOLD = 0.8  # Jaccard threshold for "similar" titles
     SAVE_DEBOUNCE_SECONDS = 0.5  # Debounce window for batching saves
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, pretty: bool = False) -> None:
         self._path = path
+        self._pretty = pretty
         self._lock = threading.RLock()
         self._tickets: dict[str, Ticket] = {}
         self._evidence_index: dict[str, str] = {}
@@ -487,7 +488,7 @@ class TicketStore:
                     try:
                         self._backup()
                         tmp = self._path.with_suffix(".tmp")
-                        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                        tmp.write_text(json.dumps(payload, indent=2 if self._pretty else None), encoding="utf-8")
                         tmp.replace(self._path)
                     finally:
                         flock(lock_fd, LOCK_UN)

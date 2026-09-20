@@ -5741,6 +5741,23 @@ def main() -> None:
                 pass
         bots[config.name] = bot
 
+    registered_names = set(bots.keys())
+    for sf in STATE_DIR.glob("*.state.json"):
+        sname = sf.stem.replace(".state", "")
+        if sname not in registered_names:
+            try:
+                sf.unlink()
+            except OSError:
+                pass
+        else:
+            try:
+                sdata = json.loads(sf.read_text())
+                if isinstance(sdata, dict) and sdata.get("status") != "waiting":
+                    sdata["status"] = "waiting"
+                    sf.write_text(json.dumps(sdata, indent=2))
+            except Exception:
+                pass
+
     if args.status:
         print_status(bots)
         if is_draining():
