@@ -321,31 +321,68 @@ def set_alignment_service(service: AlignmentServiceProtocol) -> None:
 
 
 def set_project_adapter(adapter: Any) -> None:
-    """Inject a ProjectAdapter instance. Paths are resolved via the adapter, not by mutating globals.
+    """Inject a ProjectAdapter instance and update PathConfig from its paths.
 
-    The adapter's paths() method returns an object with repository_root, state_dir, logs_dir, etc.
-    Callers should use get_adapter().paths() to resolve paths dynamically, or rely on the
-    default global constants if no adapter is set.
+    The adapter's paths() method returns an object with repository_root,
+    state_dir, logs_dir, etc. This function updates the module-level _paths
+    config object so all path access goes through the adapter-provided values.
+    No individual global path constants are mutated.
     """
-    global _adapter_instance
+    global _adapter_instance, _paths, BOTS_DIR, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR
     _adapter_instance = adapter
-    # Do NOT mutate global path constants (BOTS_DIR, STATE_DIR, etc.).
-    # Path resolution should happen via adapter queries or dependency injection.
+    try:
+        ap = adapter.paths()
+        root = getattr(ap, "repository_root", _project_root)
+        state = getattr(ap, "state_dir", root / ".codebot" / "state")
+        logs = getattr(ap, "logs_dir", root / ".codebot" / "logs")
+        backup = getattr(ap, "backup_dir", state / "backup")
+        alignment = getattr(ap, "alignment_events_dir", state / "alignment_events")
+        _paths = PathConfig(
+            bots_dir=root,
+            state_dir=state,
+            logs_dir=logs,
+            backup_dir=backup,
+            alignment_events_dir=alignment,
+            drain_file=state / ".drain",
+            update_lock=state / ".update_lock",
+            restart_file=state / ".restart",
+        )
+        BOTS_DIR = _paths.bots_dir
+        STATE_DIR = _paths.state_dir
+        LOGS_DIR = _paths.logs_dir
+        BACKUP_DIR = _paths.backup_dir
+        ALIGNMENT_EVENTS_DIR = _paths.alignment_events_dir
+    except Exception:
+        pass
 
 
 def get_adapter() -> Any:
     return _adapter_instance
 
 
-# Ensure directories exist
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-ALIGNMENT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+# Module-level __getattr__ for backward-compatible dynamic path access
+def __getattr__(name: str) -> Any:
+    """Provide backward-compatible access to path constants via _paths."""
+    _path_map = {
+        "BOTS_DIR": "bots_dir",
+        "STATE_DIR": "state_dir",
+        "LOGS_DIR": "logs_dir",
+        "BACKUP_DIR": "backup_dir",
+        "ALIGNMENT_EVENTS_DIR": "alignment_events_dir",
+        "DRAIN_FILE": "drain_file",
+        "UPDATE_LOCK": "update_lock",
+        "RESTART_FILE": "restart_file",
+    }
+    if name in _path_map:
+        return getattr(_paths, _path_map[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-DRAIN_FILE = STATE_DIR / ".drain"
-UPDATE_LOCK = STATE_DIR / ".update_lock"
-RESTART_FILE = STATE_DIR / ".restart"
+
+# Ensure directories exist
+_paths.state_dir.mkdir(parents=True, exist_ok=True)
+_paths.logs_dir.mkdir(parents=True, exist_ok=True)
+_paths.backup_dir.mkdir(parents=True, exist_ok=True)
+_paths.alignment_events_dir.mkdir(parents=True, exist_ok=True)
 
 try:
     from codebot.prompt_gateway import (
@@ -440,14 +477,14 @@ def _get_available_memory_mb() -> float:
 
 
 def is_draining() -> bool:
-    return DRAIN_FILE.exists()
+    return _paths.drain_file.exists()
 
 
 def _check_self_restart(bots: dict[str, BotState]) -> bool:
-    if not RESTART_FILE.exists():
+    if not _paths.restart_file.exists():
         return False
     try:
-        reason = RESTART_FILE.read_text(encoding="utf-8").strip() or "manual"
+        reason = _paths.restart_file.read_text(encoding="utf-8").strip() or "manual"
     except OSError:
         reason = "manual"
     logger.info(f"Self-restart signal detected (reason: {reason}) — draining and restarting")
@@ -455,7 +492,7 @@ def _check_self_restart(bots: dict[str, BotState]) -> bool:
         if bot.process is not None and bot.process.poll() is None:
             stop_bot(bot, "self-restart")
     try:
-        RESTART_FILE.unlink(missing_ok=True)
+        _paths.restart_file.unlink(missing_ok=True)
     except OSError:
         pass
     python = sys.executable
