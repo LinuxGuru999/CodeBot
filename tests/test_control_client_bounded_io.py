@@ -125,19 +125,21 @@ class TestControlClientBoundedIO(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(data, {})
 
-    @patch("codebot.control_client.urllib.request.urlopen")
     def test_no_unbounded_read_calls_in_code(self):
         """Verify no unbounded .read() calls exist in control_client source."""
         import inspect
+        import re
         import codebot.control_client as cc
 
         source = inspect.getsource(cc)
-        # Check that all resp.read() calls include an argument
-        import re
-        # Match resp.read() without arguments
-        unbounded_reads = re.findall(r'resp\.read\(\)', source)
-        self.assertEqual(len(unbounded_reads), 0, 
-            f"Found unbounded resp.read() calls: {unbounded_reads}")
+        # Check that all resp.read() and e.read() calls include an argument
+        # Match .read() without arguments on response/error objects
+        unbounded_resp_reads = re.findall(r'resp\.read\(\)', source)
+        unbounded_error_reads = re.findall(r'e\.read\(\)', source)
+        self.assertEqual(len(unbounded_resp_reads), 0, 
+            f"Found unbounded resp.read() calls: {unbounded_resp_reads}")
+        self.assertEqual(len(unbounded_error_reads), 0, 
+            f"Found unbounded e.read() calls: {unbounded_error_reads}")
 
 
 if __name__ == "__main__":

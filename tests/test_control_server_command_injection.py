@@ -228,7 +228,7 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         from codebot.control_server import ControlHandler
 
         handler = self._make_handler(
-            "POST", "/bots/stop", body={"bots": ["valid-bot", "evil; rm -rf /"]}
+            "POST", "/bots/stop", body={"bots": ["valid-bot", "evil; rm -rf /"], "force": True}
         )
         responses = []
         handler._json = lambda code, data, r=responses: r.append((code, data))
