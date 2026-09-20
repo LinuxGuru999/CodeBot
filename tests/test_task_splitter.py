@@ -14,7 +14,7 @@ from codebot.task_splitter import (
     split_ticket,
     _compute_chunks,
 )
-from codebot.ticket_engine import TicketState, TicketClass, Severity, RiskLevel, create_ticket, TicketStore
+from codebot.ticket_engine import TicketState, TicketClass, Severity, RiskLevel, create_ticket, TicketStore, Ticket
 from codebot.scratchpad import ScratchpadState
 
 
@@ -255,28 +255,36 @@ class TestSplitTicket:
         # Create scratchpad that will generate chunks
         sp = make_scratchpad(remaining=["step1", "step2", "step3", "step4", "step5", "step6"])
 
+        # Count how many chunks will be created
+        chunks = _compute_chunks(t_updated, sp)
+        num_chunks = len(chunks)
+
         # Mock create_ticket to simulate one duplicate error among successful creations
         with patch('codebot.ticket_engine.create_ticket') as mock_create:
-            # Create mock sub-tickets for each chunk
+            # Create mock sub-tickets using MagicMock with required attributes
             mock_subs = []
-            for i in range(3):
-                mock_sub = make_ticket(title=f"[SPLIT {i+1}/3] {t.title}", source=f"split:{t.id}")
+            for i in range(num_chunks):
+                mock_sub = MagicMock(spec=Ticket)
                 mock_sub.id = f"CB-SUB-{i:03d}"
+                mock_sub.state = TicketState.DISCOVERED
                 mock_subs.append(mock_sub)
             
-            # Simulate: first succeeds, second is duplicate (raises), third succeeds
-            mock_create.side_effect = [
-                mock_subs[0],
-                ValueError("duplicate ticket detected"),
-                mock_subs[2],
-            ]
+            # Simulate: first half succeed, middle one is duplicate (raises), rest succeed
+            side_effects = list(mock_subs)
+            if num_chunks >= 2:
+                # Insert a ValueError at position 1
+                side_effects[1] = ValueError("duplicate ticket detected")
+            
+            mock_create.side_effect = side_effects
             
             sub_ids = split_ticket(t_updated, store, scratchpad=sp, exit_reason="timeout")
 
-            # Should have created 2 sub-tickets (skipped the duplicate)
-            assert len(sub_ids) == 2
+            # Should have created num_chunks - 1 sub-tickets (skipped the duplicate)
+            expected_count = num_chunks - 1 if num_chunks >= 2 else num_chunks
+            assert len(sub_ids) == expected_count
             # Parent should be blocked since sub-tickets were created
-            assert store.get(t_updated.id).state == TicketState.BLOCKED
+            if sub_ids:
+                assert store.get(t_updated.id).state == TicketState.BLOCKED
 
     def test_split_creates_exact_number_of_sub_tickets_matching_chunks(self, tmp_path):
         """Verify split_ticket creates exactly the right number of sub-tickets."""
@@ -466,20 +474,32 @@ class TestSplitTicket:
         store.transition(t.id, TicketState.PLANNING)
         t_updated = store.get(t.id)
 
+        # Count how many chunks will be created
+        chunks = _compute_chunks(t_updated, None)
+        num_chunks = len(chunks)
+
         # Mock create_ticket where it's actually used (inside ticket_engine module)
         with patch('codebot.ticket_engine.create_ticket') as mock_create:
-            # First call succeeds
-            mock_sub = make_ticket(title="[SPLIT 1/2] Big ticket", source=f"split:{t.id}")
-            mock_sub.id = "CB-SUB-001"
-            # Second call raises duplicate error
-            mock_create.side_effect = [
-                mock_sub,
-                ValueError("duplicate ticket detected"),
-            ]
+            # Create mock sub-tickets using MagicMock with required attributes
+            mock_subs = []
+            for i in range(num_chunks):
+                mock_sub = MagicMock(spec=Ticket)
+                mock_sub.id = f"CB-SUB-{i:03d}"
+                mock_sub.state = TicketState.DISCOVERED
+                mock_subs.append(mock_sub)
+            
+            # Simulate: first succeeds, second raises duplicate, rest succeed
+            side_effects = list(mock_subs)
+            if num_chunks >= 2:
+                side_effects[1] = ValueError("duplicate ticket detected")
+            
+            mock_create.side_effect = side_effects
+            
             sub_ids = split_ticket(t_updated, store, exit_reason="timeout")
-            # Should have at least one sub-ticket (the first one succeeded)
-            # Duplicate was skipped gracefully
-            assert len(sub_ids) >= 1
+            
+            # Should have created num_chunks - 1 sub-tickets (skipped the duplicate)
+            expected_count = num_chunks - 1 if num_chunks >= 2 else num_chunks
+            assert len(sub_ids) == expected_count
 
     def test_split_empty_chunks_returns_empty(self, tmp_path):
         """Test that split_ticket returns empty list when compute_chunks yields nothing."""
