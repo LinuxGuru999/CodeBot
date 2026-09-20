@@ -146,3 +146,112 @@ class TestRateLimiterThreadSafety:
         # After 50 failures (5 threads * 10), should definitely be blocked
         allowed, _ = limiter.is_allowed(ip)
         assert allowed is False
+
+
+class TestFailClosedSecurity:
+    """Tests for fail-closed behavior when CONTROL_TOKEN is unset (CB-6048497-D3F1)."""
+
+    def _make_handler(self, method: str, path: str, token: str | None = None):
+        """Create a mock ControlHandler for testing."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        if token is not None:
+            handler.headers["Authorization"] = f"Bearer {token}"
+        handler._json = MagicMock()
+        # Bind real methods to the mock
+        handler._auth = ControlHandler._auth.__get__(handler, ControlHandler)
+        return handler
+
+    def test_auth_rejects_when_no_token_set(self):
+        """When CONTROL_TOKEN is empty and no bypass, _auth must return False."""
+        handler = self._make_handler("GET", "/bots")
+        with patch("codebot.control_server.CONTROL_TOKEN", ""), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            result = handler._auth()
+        assert result is False
+
+    def test_auth_rejects_all_protected_get_endpoints_without_token(self):
+        """All protected GET endpoints must return 401 when CONTROL_TOKEN is unset."""
+        from codebot.control_server import ControlHandler
+
+        protected_paths = ["/bots", "/bots/test-bot", "/state", "/scheduler/status"]
+        for path in protected_paths:
+            handler = self._make_handler("GET", path)
+            with patch("codebot.control_server.CONTROL_TOKEN", ""), \
+                 patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+                result = handler._auth()
+            assert result is False, f"Expected auth rejection for {path}"
+
+    def test_auth_rejects_post_endpoints_without_token(self):
+        """All POST endpoints must return 401 when CONTROL_TOKEN is unset."""
+        protected_paths = ["/bots/start", "/bots/stop", "/control/drain", "/control/update"]
+        for path in protected_paths:
+            handler = self._make_handler("POST", path)
+            with patch("codebot.control_server.CONTROL_TOKEN", ""), \
+                 patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+                result = handler._auth()
+            assert result is False, f"Expected auth rejection for POST {path}"
+
+    def test_health_endpoint_public_without_token(self):
+        """/health must remain accessible without authentication."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/health"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        handler._json = MagicMock()
+        handler.rfile = io.BytesIO(b"")
+        handler.wfile = io.BytesIO()
+        handler.requestline = "GET /health HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.command = "GET"
+
+        # do_GET handles /health before calling _auth
+        with patch("codebot.control_server.CONTROL_TOKEN", ""), \
+             patch("codebot.control_server.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            ControlHandler.do_GET(handler)
+
+        # Should have sent 200 response, not 401
+        handler._json.assert_called_once()
+        call_args = handler._json.call_args
+        assert call_args[0][0] == 200, f"Expected 200 for /health, got {call_args[0][0]}"
+        assert call_args[0][1]["status"] == "ok"
+
+    def test_critical_log_emitted_on_missing_token(self, caplog):
+        """CRITICAL log must be emitted when CONTROL_TOKEN is missing."""
+        handler = self._make_handler("GET", "/bots")
+        with caplog.at_level(logging.CRITICAL), \
+             patch("codebot.control_server.CONTROL_TOKEN", ""), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            handler._auth()
+        assert any("CONTROL_TOKEN is not set" in record.message for record in caplog.records)
+        assert any(record.levelno >= logging.CRITICAL for record in caplog.records)
+
+    def test_allow_unauthenticated_bypass(self):
+        """CONTROL_ALLOW_UNAUTHENTICATED=1 should permit access when token is unset."""
+        handler = self._make_handler("GET", "/bots")
+        with patch("codebot.control_server.CONTROL_TOKEN", ""), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", True):
+            result = handler._auth()
+        assert result is True
+
+    def test_valid_token_accepted(self):
+        """Valid Bearer token should be accepted."""
+        handler = self._make_handler("GET", "/bots", token="my-secret-token")
+        with patch("codebot.control_server.CONTROL_TOKEN", "my-secret-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            result = handler._auth()
+        assert result is True
+
+    def test_invalid_token_rejected(self):
+        """Invalid Bearer token should be rejected."""
+        handler = self._make_handler("GET", "/bots", token="wrong-token")
+        with patch("codebot.control_server.CONTROL_TOKEN", "my-secret-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            result = handler._auth()
+        assert result is False

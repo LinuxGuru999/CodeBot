@@ -194,6 +194,48 @@ class TestPauseResumeBotValidation(unittest.TestCase):
             self.assertIn("unknown bot", body.get("error", "").lower())
 
     @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_pause_rejects_regex_injection_dot_star(self):
+        """Pause endpoint must reject '.*' which could inject regex into pkill."""
+        from codebot.control_server import ControlHandler
+
+        # .* is invalid per validate_bot_name (contains '.')
+        handler = self._make_handler("POST", "/bots/.*/pause")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: (None, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_pause_rejects_process_killing_python3(self):
+        """Pause endpoint must reject 'python3' which could kill all python processes."""
+        from codebot.control_server import ControlHandler
+
+        # python3 is valid format but not in registry -> 404
+        handler = self._make_handler("POST", "/bots/python3/pause")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: (None, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 404)
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
     def test_pkill_not_called_with_unvalidated_input_resume(self):
         """pkill/subprocess must never be called when bot name is not in BOT_REGISTRY (resume)."""
         from codebot.control_server import ControlHandler

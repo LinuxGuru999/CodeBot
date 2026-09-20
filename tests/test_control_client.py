@@ -13,8 +13,14 @@ import json
 import os
 import sys
 import unittest
+import importlib
 from io import StringIO
 from unittest.mock import patch, MagicMock
+
+# Set environment variables BEFORE importing the module
+# Module-level TOKEN/URL are set at import time
+os.environ.setdefault("CONTROL_URL", "http://127.0.0.1:8081")
+os.environ.setdefault("CONTROL_TOKEN", "test-token")
 
 # Import the module under test
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -25,15 +31,17 @@ class TestReqFunction(unittest.TestCase):
     """Test the req() HTTP client function."""
 
     def setUp(self):
-        """Reset environment variables before each test."""
+        """Reset environment variables and reload module before each test."""
         self.original_url = os.environ.get("CONTROL_URL")
         self.original_token = os.environ.get("CONTROL_TOKEN")
         # Default to localhost for tests
         os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
         os.environ["CONTROL_TOKEN"] = "test-token"
+        # Reload module to pick up new env vars (module-level TOKEN/URL)
+        importlib.reload(control_client)
 
     def tearDown(self):
-        """Restore original environment variables."""
+        """Restore original environment variables and reload module."""
         if self.original_url is None:
             os.environ.pop("CONTROL_URL", None)
         else:
@@ -42,17 +50,11 @@ class TestReqFunction(unittest.TestCase):
             os.environ.pop("CONTROL_TOKEN", None)
         else:
             os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
 
-    @patch('urllib.request.Request')
     @patch('urllib.request.urlopen')
-    def test_req_get_success_json(self, mock_urlopen, mock_request):
+    def test_req_get_success_json(self, mock_urlopen):
         """req() sends correct GET request and parses JSON response."""
-        # Setup mock request object
-        mock_req_instance = MagicMock()
-        mock_req_instance.method = "GET"
-        mock_req_instance.full_url = "http://127.0.0.1:8081/bots"
-        mock_request.return_value = mock_req_instance
-        
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({"status": "ok", "count": 5}).encode()
         mock_response.status = 200
@@ -62,11 +64,14 @@ class TestReqFunction(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(body, {"status": "ok", "count": 5})
-        # Verify Request was called with correct headers
-        mock_request.assert_called_once()
-        call_kwargs = mock_request.call_args[1]
-        self.assertIn("Authorization", call_kwargs["headers"])
-        self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer test-token")
+        # Verify urlopen was called and extract the Request object passed to it
+        mock_urlopen.assert_called_once()
+        call_args = mock_urlopen.call_args
+        request_obj = call_args[0][0]  # First positional arg is the Request object
+        # Check headers via the Request object's header_items() method
+        headers = dict(request_obj.header_items())
+        self.assertIn("Authorization", headers)
+        self.assertEqual(headers["Authorization"], "Bearer test-token")
 
     @patch('urllib.request.urlopen')
     def test_req_post_with_body(self, mock_urlopen):
@@ -167,6 +172,7 @@ class TestCmdStatus(unittest.TestCase):
         self.original_token = os.environ.get("CONTROL_TOKEN")
         os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
         os.environ["CONTROL_TOKEN"] = ""
+        importlib.reload(control_client)
         self.held_output = StringIO()
         self.original_stdout = sys.stdout
         sys.stdout = self.held_output
@@ -181,6 +187,7 @@ class TestCmdStatus(unittest.TestCase):
             os.environ.pop("CONTROL_TOKEN", None)
         else:
             os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
 
     @patch('codebot.control_client.req')
     def test_cmd_status_success(self, mock_req):
@@ -220,6 +227,7 @@ class TestCmdDeadLetterRetry(unittest.TestCase):
         self.original_token = os.environ.get("CONTROL_TOKEN")
         os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
         os.environ["CONTROL_TOKEN"] = "test-token"
+        importlib.reload(control_client)
         self.held_output = StringIO()
         self.original_stdout = sys.stdout
         sys.stdout = self.held_output
@@ -234,6 +242,7 @@ class TestCmdDeadLetterRetry(unittest.TestCase):
             os.environ.pop("CONTROL_TOKEN", None)
         else:
             os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
 
     @patch('codebot.control_client.req')
     def test_cmd_dead_letter_retry_success(self, mock_req):
@@ -266,6 +275,7 @@ class TestEdgeCases(unittest.TestCase):
         self.original_token = os.environ.get("CONTROL_TOKEN")
         os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
         os.environ["CONTROL_TOKEN"] = ""
+        importlib.reload(control_client)
 
     def tearDown(self):
         if self.original_url is None:
@@ -276,6 +286,7 @@ class TestEdgeCases(unittest.TestCase):
             os.environ.pop("CONTROL_TOKEN", None)
         else:
             os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
 
     @patch('urllib.request.urlopen')
     def test_req_url_trailing_slash_handling(self, mock_urlopen):
