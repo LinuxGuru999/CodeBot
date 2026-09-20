@@ -2279,8 +2279,13 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
                         break
                 except OSError:
                     pass
+    is_demand_driven = False
+    if bot_name:
+        base = bot_name.split("-")[0] if "-" in bot_name else bot_name
+        if base in ("decomposer", "implementation_planner"):
+            is_demand_driven = True
     since_last = now - _last_spawn_time
-    if since_last < _SPAWN_STAGGER_SECONDS and not has_assignment and not is_overture:
+    if since_last < _SPAWN_STAGGER_SECONDS and not has_assignment and not is_overture and not is_demand_driven:
         return False, f"stagger {since_last:.1f}s < {_SPAWN_STAGGER_SECONDS}s"
 
     if runner_mode == "api":
@@ -2294,7 +2299,7 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
     except Exception:
         last = 0.0
     gap = now - last
-    if not is_overture and not has_assignment:
+    if not is_overture and not has_assignment and not is_demand_driven:
         if bot_name in WORKER_POOL:
             worker_gap = max(3, GATEWAY_MIN_SPAWN_GAP // 4)
             if gap < worker_gap:
