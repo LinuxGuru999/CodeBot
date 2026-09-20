@@ -4957,6 +4957,36 @@ def _process_verifying_tickets() -> None:
                         pass
                     continue
 
+                files_actually_modified = False
+                for mod in changed_files[:5]:
+                    try:
+                        r = subprocess.run(
+                            ["git", "diff", "--name-only", "HEAD~5", "--", mod],
+                            capture_output=True, text=True,
+                            cwd=str(Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))),
+                            timeout=10,
+                        )
+                        if r.stdout.strip():
+                            files_actually_modified = True
+                            break
+                    except Exception:
+                        pass
+                if not files_actually_modified:
+                    try:
+                        ts_fresh = TicketStore(store_path)
+                        t = ts_fresh.get(ticket.id)
+                        if t and t.state == TicketState.VERIFYING:
+                            rework_count = getattr(t, 'rework_count', 0)
+                            if rework_count < 3:
+                                ts_fresh.transition(ticket.id, TicketState.REWORK)
+                                logger.info(f"Gatekeeper: {ticket.id} -> REWORK (no files actually modified in git)")
+                            else:
+                                ts_fresh.transition(ticket.id, TicketState.REJECTED)
+                                logger.warning(f"Gatekeeper: {ticket.id} -> REJECTED (no modifications after {rework_count} reworks)")
+                    except ValueError:
+                        pass
+                    continue
+
                 gk = Gatekeeper(
                     state_dir=STATE_DIR,
                     policy_path=STATE_DIR.parent / "quality_gates.yaml" if (STATE_DIR.parent / "quality_gates.yaml").exists() else None,
