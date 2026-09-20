@@ -351,6 +351,97 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestTimingSafeComparison(unittest.TestCase):
+    """Verify that token comparison uses timing-safe hmac.compare_digest.
+
+    Ticket: CB-3488569-8A5E — Timing attack on bearer token comparison
+    Acceptance: test verifies timing-safe comparison is used
+    """
+
+    def test_auth_method_uses_hmac_compare_digest(self):
+        """Verify _auth() uses hmac.compare_digest for constant-time comparison."""
+        import pathlib
+        cs_path = pathlib.Path(__file__).parent.parent / "codebot" / "control_server.py"
+        source = cs_path.read_text()
+
+        # Find the _auth method
+        auth_start = source.find("def _auth(self)")
+        self.assertNotEqual(auth_start, -1, "_auth method not found")
+
+        # Get the method body
+        auth_body_end = source.find("\n    def ", auth_start + 1)
+        if auth_body_end == -1:
+            auth_body_end = source.find("\ndef ", auth_start + 1)
+        if auth_body_end == -1:
+            auth_body_end = len(source)
+        auth_body = source[auth_start:auth_body_end]
+
+        # Verify hmac.compare_digest is used
+        self.assertIn("hmac.compare_digest", auth_body,
+                       "_auth() must use hmac.compare_digest for timing-safe token comparison")
+
+        # Verify no == comparison on auth/token material in _auth
+        # Check that we're not using == for comparing the auth header value
+        self.assertNotIn("auth == expected", auth_body,
+                         "_auth() must not use == for token comparison")
+        self.assertNotIn("auth.strip() == expected", auth_body,
+                         "_auth() must not use == for token comparison")
+
+    def test_telemetry_handler_uses_hmac_compare_digest(self):
+        """Verify _handle_telemetry() uses hmac.compare_digest for constant-time comparison."""
+        import pathlib
+        cs_path = pathlib.Path(__file__).parent.parent / "codebot" / "control_server.py"
+        source = cs_path.read_text()
+
+        # Find the _handle_telemetry method
+        telemetry_start = source.find("def _handle_telemetry(self")
+        self.assertNotEqual(telemetry_start, -1, "_handle_telemetry method not found")
+
+        # Get the method body
+        telemetry_body_end = source.find("\n    def ", telemetry_start + 1)
+        if telemetry_body_end == -1:
+            telemetry_body_end = source.find("\ndef ", telemetry_start + 1)
+        if telemetry_body_end == -1:
+            telemetry_body_end = len(source)
+        telemetry_body = source[telemetry_start:telemetry_body_end]
+
+        # Verify hmac.compare_digest is used
+        self.assertIn("hmac.compare_digest", telemetry_body,
+                       "_handle_telemetry() must use hmac.compare_digest for timing-safe token comparison")
+
+    def test_no_equals_comparison_on_token_material(self):
+        """Verify no == comparison is used on CONTROL_TOKEN or auth header values."""
+        import pathlib
+        cs_path = pathlib.Path(__file__).parent.parent / "codebot" / "control_server.py"
+        source = cs_path.read_text()
+
+        # Check that there's no direct == comparison involving auth tokens
+        # We allow == for checking if CONTROL_TOKEN is empty ("if not CONTROL_TOKEN")
+        # but not for comparing actual token values
+
+        # Find all lines with == that involve token/auth comparison patterns
+        lines = source.split("\n")
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            # Skip comments and empty lines
+            if stripped.startswith("#") or not stripped:
+                continue
+            # Check for dangerous patterns: comparing auth/token values with ==
+            # Allow: if not CONTROL_TOKEN, CONTROL_TOKEN == "", etc. (emptiness checks)
+            # Disallow: auth == expected, token == something, etc. (value comparisons)
+            if "==" in stripped:
+                # Skip emptiness checks and string literal comparisons for config
+                if "CONTROL_TOKEN" in stripped and ('""' in stripped or "''" in stripped or "not " in stripped):
+                    continue
+                if "TELEMETRY_TOKEN" in stripped and ('""' in stripped or "''" in stripped or "not " in stripped):
+                    continue
+                # Flag any == comparison involving auth variables
+                if any(var in stripped for var in ["auth", "expected", "token"]):
+                    # Make sure it's not inside a comment
+                    if not stripped.startswith("#"):
+                        self.fail(f"Line {i} uses == for potential token comparison: {stripped}")
+
+
 class TestRateLimiterUnit(unittest.TestCase):
     """Unit tests for RateLimiter class behavior."""
 

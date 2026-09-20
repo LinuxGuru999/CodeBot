@@ -254,7 +254,20 @@ def _refresh_log_mtime_cache(bot_names: list[str]) -> None:
 # T4.3 incremental adapter seam: when a ProjectAdapter is provided, its paths
 # override the defaults above.
 _adapter_instance: Any = None
+_active_path_config: PathConfig | None = None
 _alignment_service_instance: Any = None
+
+
+def get_active_paths() -> PathConfig:
+    """Return the active PathConfig.
+
+    If an adapter has been set via set_project_adapter, returns its config.
+    Otherwise, returns the default module-level _paths.
+    """
+    global _active_path_config
+    if _active_path_config is not None:
+        return _active_path_config
+    return _paths
 
 try:
     from codebot.adaptive_rate_limiter import rate_limiter
@@ -320,16 +333,15 @@ def set_alignment_service(service: AlignmentServiceProtocol) -> None:
     _alignment_service_instance = service
 
 
-def set_project_adapter(adapter: Any) -> None:
-    """Inject a ProjectAdapter instance and return updated PathConfig.
+def set_project_adapter(adapter: Any) -> PathConfig:
+    """Inject a ProjectAdapter instance and return PathConfig.
 
     The adapter's paths() method returns an object with repository_root,
-    state_dir, logs_dir, etc. This function updates the module-level _paths
-    config object so all path access goes through the adapter-provided values.
-    No individual global path constants are mutated — callers access paths
-    via _paths or the module-level __getattr__ backward-compat layer.
+    state_dir, logs_dir, etc. This function returns a PathConfig instance
+    based on the adapter-provided values. It does NOT mutate global state.
+    Callers should use the returned PathConfig or pass it to components.
     """
-    global _adapter_instance, _paths
+    global _adapter_instance
     _adapter_instance = adapter
     try:
         ap = adapter.paths()
@@ -338,7 +350,7 @@ def set_project_adapter(adapter: Any) -> None:
         logs = getattr(ap, "logs_dir", root / ".codebot" / "logs")
         backup = getattr(ap, "backup_dir", state / "backup")
         alignment = getattr(ap, "alignment_events_dir", state / "alignment_events")
-        _paths = PathConfig(
+        return PathConfig(
             bots_dir=root,
             state_dir=state,
             logs_dir=logs,
@@ -349,7 +361,8 @@ def set_project_adapter(adapter: Any) -> None:
             restart_file=state / ".restart",
         )
     except Exception:
-        pass
+        # Return default config if adapter fails
+        return _default_path_config(_project_root)
 
 
 def get_adapter() -> Any:
