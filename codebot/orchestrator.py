@@ -4837,7 +4837,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                     except Exception as te:
                         logger.warning(f"Ticket transition failed for {assigned_tid}: {te}")
                     bot._assigned_ticket_id = ''
-                if base_role in DISCOVERY_ROLE_NAMES | (PLANNING_ROLE_NAMES - {"implementation_planner"}):
+            if base_role in DISCOVERY_ROLE_NAMES:
                     stream_path = LOGS_DIR / f"{name}.stream.json"
                     created_ticket = False
                     if stream_path.exists():
