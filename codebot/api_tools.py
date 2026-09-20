@@ -36,7 +36,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -77,30 +76,6 @@ except ImportError:
         LOCK_UN = 8
 
 logger = logging.getLogger(__name__)
-
-# Per-path threading locks for serializing in-process concurrent edits.
-# fcntl.flock() does not reliably serialize threads within the same process
-# when each thread opens a separate file descriptor, so we use an additional
-# threading.Lock keyed by resolved file path.
-_edit_locks: dict[str, threading.Lock] = {}
-_edit_locks_guard = threading.Lock()  # protects _edit_locks dict mutations
-
-
-def _get_edit_lock(path: Path) -> threading.Lock:
-    """Return a per-path threading.Lock, creating it on first access."""
-    key = str(path)
-    # Fast path: lock already exists (no dict mutation needed)
-    lock = _edit_locks.get(key)
-    if lock is not None:
-        return lock
-    # Slow path: create lock under guard
-    with _edit_locks_guard:
-        # Double-check after acquiring guard
-        lock = _edit_locks.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _edit_locks[key] = lock
-        return lock
 
 
 MAX_READ_BYTES = 1_000_000
@@ -289,18 +264,13 @@ def edit(path, old_string, new_string):
     """Surgically replace old_string with new_string in a file.
 
     Fails if old_string is not found or found multiple times (no ambiguity).
-    Writes atomically via tmp+replace. Uses two layers of locking to serialize
-    concurrent edits and prevent lost updates:
+    Writes atomically via tmp+replace. Uses advisory file locking to serialize
+    concurrent edits and prevent lost updates.
 
-    1. A per-path threading.Lock for in-process serialization (primary).
-       fcntl.flock() does not reliably serialize threads within the same process
-       when each thread opens a separate file descriptor, so a threading.Lock
-       is the authoritative serialization mechanism.
-    2. Advisory flock(LOCK_EX) on a sidecar .lock file for cross-process
-       serialization (best-effort; same in-process caveat applies).
-
-    The threading.Lock is acquired before flock and released after it, so the
-    entire read-validate-write-replace cycle is atomic within a process.
+    An exclusive flock(LOCK_EX) is acquired on a sidecar .lock file before
+    reading the target file, and held through validation and atomic replace.
+    This serializes concurrent edit() calls both across processes and across
+    threads within the same process.
 
     Args:
         path: File to edit.
@@ -311,7 +281,6 @@ def edit(path, old_string, new_string):
         Dict with keys success, output, error. Never raises.
     """
     lock_fd = None
-    thread_lock = None
     try:
         p = resolve_workspace_path(path, WORKSPACE_ROOT)
         if p is None:
@@ -319,53 +288,38 @@ def edit(path, old_string, new_string):
         if not p.exists():
             return {"success": False, "output": "", "error": f"file not found: {path}"}
 
-        # Layer 1: In-process serialization via threading.Lock (primary).
-        # This is authoritative because fcntl.flock() does not reliably block
-        # between threads in the same process on Linux.
-        thread_lock = _get_edit_lock(p)
-        thread_lock.acquire()
-        try:
-            # Layer 2: Cross-process advisory lock via flock(LOCK_EX).
-            # Best-effort: fcntl.flock() on a sidecar .lock file provides
-            # mutual exclusion between cooperating external processes that
-            # also use flock, but cannot serialize within this process.
-            lock_path = Path(str(p) + ".lock")
-            lock_fd = open(lock_path, "a+")
-            flock(lock_fd.fileno(), LOCK_EX)
+        # Acquire exclusive advisory lock on a sidecar .lock file before reading.
+        # This serializes concurrent edit() calls across threads and processes.
+        lock_path = Path(str(p) + ".lock")
+        lock_fd = open(lock_path, "a+")
+        flock(lock_fd.fileno(), LOCK_EX)
 
-            # Read the target file while holding both locks
-            text = p.read_text(encoding="utf-8")
-            count = text.count(old_string)
-            if count == 0:
-                return {"success": False, "output": "", "error": f"old_string not found in {path}"}
-            if count > 1:
-                return {"success": False, "output": "", "error": f"old_string found {count} times in {path} — must be unambiguous"}
-            new_text = text.replace(old_string, new_string, 1)
+        # Read the target file while holding the lock
+        text = p.read_text(encoding="utf-8")
+        count = text.count(old_string)
+        if count == 0:
+            return {"success": False, "output": "", "error": f"old_string not found in {path}"}
+        if count > 1:
+            return {"success": False, "output": "", "error": f"old_string found {count} times in {path} — must be unambiguous"}
+        new_text = text.replace(old_string, new_string, 1)
 
-            # Atomic write via tmp+replace while still holding both locks
-            unique_id = f"{os.getpid()}.{time.monotonic_ns()}"
-            tmp = Path(str(p) + f".tmp.{unique_id}")
-            tmp.write_text(new_text, encoding="utf-8")
-            tmp.replace(p)
-            return {"success": True, "output": f"Edited {path} ({count} replacement)", "error": None}
-        finally:
-            # Release cross-process flock and close the lock fd
-            if lock_fd is not None:
-                try:
-                    flock(lock_fd.fileno(), LOCK_UN)
-                except Exception:
-                    pass
-                try:
-                    lock_fd.close()
-                except Exception:
-                    pass
+        # Atomic write via tmp+replace while still holding the lock
+        unique_id = f"{os.getpid()}.{time.monotonic_ns()}"
+        tmp = Path(str(p) + f".tmp.{unique_id}")
+        tmp.write_text(new_text, encoding="utf-8")
+        tmp.replace(p)
+        return {"success": True, "output": f"Edited {path} ({count} replacement)", "error": None}
     except Exception as exc:
         return {"success": False, "output": "", "error": str(exc)}
     finally:
-        # Release the in-process threading.Lock last (outermost lock)
-        if thread_lock is not None:
+        # Release lock and close the lock file descriptor
+        if lock_fd is not None:
             try:
-                thread_lock.release()
+                flock(lock_fd.fileno(), LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_fd.close()
             except Exception:
                 pass
 

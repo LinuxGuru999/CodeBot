@@ -50,45 +50,66 @@ def set_adapter_instance(adapter: Any) -> None:
     global _adapter_instance
     _adapter_instance = adapter
 
-def set_project_adapter(adapter: Any) -> None:
+def set_project_adapter(adapter: Any) -> PathConfig:
+    """Return a new PathConfig derived from the adapter without mutating globals.
+
+    Components should use the returned config object or call get_paths() after
+    this function has been invoked during bootstrap.  The module-level _paths
+    reference is reassigned atomically so that subsequent get_paths() calls
+    observe the updated configuration, but no ``global`` keyword is used and
+    no individual fields are mutated in-place.
+    """
+    import codebot.state_manager as _self
     set_adapter_instance(adapter)
+    current = _self._paths
     try:
         p = adapter.paths()
-        _paths.bots_dir = getattr(p, 'repository_root', _paths.bots_dir)
-        _paths.state_dir = getattr(p, 'state_dir', _paths.state_dir)
-        _paths.logs_dir = getattr(p, 'logs_dir', _paths.logs_dir)
-        _paths.backup_dir = _paths.state_dir / "backup"
-        _paths.drain_file = _paths.state_dir / ".drain"
-        _paths.update_lock = _paths.state_dir / ".update_lock"
-        _paths.restart_file = _paths.state_dir / ".restart"
-        _paths.alignment_events_dir = _paths.state_dir / "alignment_events"
+        new_bots_dir = getattr(p, 'repository_root', current.bots_dir)
+        new_state_dir = getattr(p, 'state_dir', current.state_dir)
+        new_logs_dir = getattr(p, 'logs_dir', current.logs_dir)
+        new_config = PathConfig(
+            bots_dir=new_bots_dir,
+            state_dir=new_state_dir,
+            logs_dir=new_logs_dir,
+            backup_dir=new_state_dir / "backup",
+            drain_file=new_state_dir / ".drain",
+            update_lock=new_state_dir / ".update_lock",
+            restart_file=new_state_dir / ".restart",
+            alignment_events_dir=new_state_dir / "alignment_events",
+        )
+        for d in (new_config.state_dir, new_config.logs_dir, new_config.backup_dir, new_config.alignment_events_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        _self._paths = new_config
     except Exception as e:
         logger.warning("Failed to update paths from adapter: %s", e)
+    return _self._paths
 
 def is_draining() -> bool:
-    return _paths.drain_file.exists()
+    return get_paths().drain_file.exists()
 
 def set_drain(reason: str = "") -> None:
-    _paths.drain_file.write_text(f"{time.time()}\n{reason}\n")
+    get_paths().drain_file.write_text(f"{time.time()}\n{reason}\n")
     logger.info(f"Drain set: {reason}")
 
 def clear_drain() -> None:
-    for f in (_paths.drain_file, _paths.update_lock):
+    p = get_paths()
+    for f in (p.drain_file, p.update_lock):
         try: f.unlink()
         except FileNotFoundError: pass
     logger.info("Drain cleared")
 
 def drain_status() -> dict:
+    p = get_paths()
     return {
         "draining": is_draining(),
-        "drain_file": str(_paths.drain_file) if _paths.drain_file.exists() else None,
-        "update_lock": str(_paths.update_lock) if _paths.update_lock.exists() else None,
-        "drain_reason": _paths.drain_file.read_text().strip() if _paths.drain_file.exists() else None,
+        "drain_file": str(p.drain_file) if p.drain_file.exists() else None,
+        "update_lock": str(p.update_lock) if p.update_lock.exists() else None,
+        "drain_reason": p.drain_file.read_text().strip() if p.drain_file.exists() else None,
     }
 
 def backup_botnet(tag: str | None = None) -> Path:
     from codebot.process_manager import BOTS_DIR
-    d = _paths.backup_dir / f"botnet-{tag + '-' if tag else ''}{time.strftime('%Y%m%d-%H%M%S')}"
+    d = get_paths().backup_dir / f"botnet-{tag + '-' if tag else ''}{time.strftime('%Y%m%d-%H%M%S')}"
     d.mkdir(parents=True, exist_ok=True)
     for p in BOTS_DIR.glob("*.md"):
         (d / p.name).write_bytes(p.read_bytes())
@@ -102,10 +123,11 @@ def restore_botnet(backup_dir: Path) -> None:
         (BOTS_DIR / p.name).write_bytes(p.read_bytes())
 
 def check_self_restart(bots: dict, stop_fn) -> bool:
-    if not _paths.restart_file.exists():
+    p = get_paths()
+    if not p.restart_file.exists():
         return False
     try:
-        reason = _paths.restart_file.read_text(encoding="utf-8").strip() or "manual"
+        reason = p.restart_file.read_text(encoding="utf-8").strip() or "manual"
     except OSError:
         reason = "manual"
     logger.info(f"Self-restart signal detected (reason: {reason})")
@@ -113,7 +135,7 @@ def check_self_restart(bots: dict, stop_fn) -> bool:
         if bot.process is not None and bot.process.poll() is None:
             stop_fn(bot, "self-restart")
     try:
-        _paths.restart_file.unlink(missing_ok=True)
+        p.restart_file.unlink(missing_ok=True)
     except OSError:
         pass
     os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -134,4 +156,5 @@ def safe_stop_all(bots: dict, stop_fn) -> dict:
     return res
 
 def get_paths() -> PathConfig:
-    return _paths
+    import codebot.state_manager as _self
+    return _self._paths
