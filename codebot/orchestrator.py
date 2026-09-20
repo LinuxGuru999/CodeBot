@@ -3012,6 +3012,36 @@ def _write_alignment_event(
                 log_bytes = lp.stat().st_size
         except Exception:
             pass
+        tool_failures = 0
+        command_denials = 0
+        try:
+            sp = LOGS_DIR / f"{bot_name}.stream.json"
+            if sp.exists():
+                raw = sp.read_text(errors="ignore")
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(msg, dict):
+                        continue
+                    role = msg.get("role")
+                    content = msg.get("content", "")
+                    if role == "tool":
+                        try:
+                            result = json.loads(content) if isinstance(content, str) and content else {}
+                        except Exception:
+                            result = {}
+                        if isinstance(result, dict) and not result.get("success", True):
+                            tool_failures += 1
+                            err = str(result.get("error", ""))
+                            if "command denied" in err or "path denied" in err:
+                                command_denials += 1
+        except Exception:
+            pass
         payload: dict = {
             "bot": bot_name,
             "exit_code": exit_code,
@@ -3025,6 +3055,8 @@ def _write_alignment_event(
             "checkpoint_path": f"state/{bot_name}.checkpoint.json",
             "heartbeat_age_at_exit": round(hb_age, 1) if hb_age is not None else None,
             "log_bytes_at_exit": log_bytes,
+            "tool_failures": tool_failures,
+            "command_denials": command_denials,
             "processed": False,
             "processed_at": None,
             "version": 1,
@@ -3111,6 +3143,32 @@ def _run_alignment_pipeline_for_all() -> None:
         logger.info("Metrics collected after alignment sweep")
     except Exception as e:
         logger.warning(f"Metrics collection failed: {e}")
+
+
+TOOL_FAILURE_ROTATION_THRESHOLD = 5
+
+
+def _rotate_model_on_tool_failures(bot_name: str, bot: BotState, bots: dict[str, BotState]) -> bool:
+    event_file = ALIGNMENT_EVENTS_DIR / f"{bot_name}.exit.json"
+    if not event_file.exists():
+        return False
+    try:
+        event = json.loads(event_file.read_text())
+    except Exception:
+        return False
+    failures = int(event.get("tool_failures", 0))
+    denials = int(event.get("command_denials", 0))
+    if failures < TOOL_FAILURE_ROTATION_THRESHOLD and denials < 3:
+        return False
+    old_model = bot.config.model
+    _rotate_model_on_error(bot, bots)
+    if bot.config.model != old_model:
+        logger.warning(
+            f"Bot '{bot_name}' rotated model {old_model} -> {bot.config.model} "
+            f"(tool_failures={failures}, command_denials={denials})"
+        )
+        return True
+    return False
 
 
 def write_checkpoint_handoff(bot_name: str, payload: dict) -> None:
@@ -4689,6 +4747,11 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                 _run_alignment_pipeline(name)
             except Exception as e:
                 logger.warning(f"Alignment pipeline failed for {name}: {e}")
+            if exit_code == 0:
+                try:
+                    _rotate_model_on_tool_failures(name, bot, bots)
+                except Exception as e:
+                    logger.warning(f"Tool failure model rotation check failed for {name}: {e}")
             bot.process = None
             try:
                 _manifest_error_record(name, is_error=(exit_code != 0))
@@ -5287,6 +5350,11 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 _run_alignment_pipeline(name)
             except Exception as e:
                 logger.warning(f"Alignment pipeline failed for {name}: {e}")
+            if exit_code == 0:
+                try:
+                    _rotate_model_on_tool_failures(name, bot, bots)
+                except Exception as e:
+                    logger.warning(f"Tool failure model rotation check failed for {name}: {e}")
             bot.process = None
             if exit_code == 3:
                 bot.consecutive_errors += 1
