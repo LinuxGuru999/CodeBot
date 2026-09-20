@@ -34,9 +34,7 @@ import time
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional
-
-from typing import Protocol, Any
+from typing import Any, Iterator, Optional, Protocol
 
 # ---------------------------------------------------------------------------
 # Cross-platform file locking
@@ -82,20 +80,59 @@ except ImportError:
     LOCK_UN = 8
 
 # ---------------------------------------------------------------------------
-# Paths — resolved via ProjectAdapter; fallback to CODEBOT_PROJECT_ROOT env or cwd
+# Paths — resolved via PathConfig; fallback to CODEBOT_PROJECT_ROOT env or cwd
 # ---------------------------------------------------------------------------
 
 _CODEBOT_PKG_DIR = Path(__file__).parent
 _project_root = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
 
-BOTS_DIR = _project_root
-STATE_DIR = _project_root / ".codebot" / "state"
-LOGS_DIR = _project_root / ".codebot" / "logs"
-BACKUP_DIR = _project_root / ".codebot" / "state" / "backup"
+
+@dataclass
+class PathConfig:
+    """Encapsulated path configuration for the orchestrator.
+
+    Replaces mutable module-level global path constants with a single
+    dataclass instance that can be updated via dependency injection
+    (set_project_adapter) without mutating individual globals.
+    """
+    bots_dir: Path
+    state_dir: Path
+    logs_dir: Path
+    backup_dir: Path
+    alignment_events_dir: Path
+    drain_file: Path
+    update_lock: Path
+    restart_file: Path
+
+
+def _default_path_config(root: Path) -> PathConfig:
+    """Build default PathConfig from a project root directory."""
+    state = root / ".codebot" / "state"
+    return PathConfig(
+        bots_dir=root,
+        state_dir=state,
+        logs_dir=root / ".codebot" / "logs",
+        backup_dir=state / "backup",
+        alignment_events_dir=state / "alignment_events",
+        drain_file=state / ".drain",
+        update_lock=state / ".update_lock",
+        restart_file=state / ".restart",
+    )
+
+
+_paths = _default_path_config(_project_root)
+
+# Backward-compatible aliases pointing to the config object.
+# Module-level __getattr__ provides dynamic access for external code.
+BOTS_DIR = _paths.bots_dir
+STATE_DIR = _paths.state_dir
+LOGS_DIR = _paths.logs_dir
+BACKUP_DIR = _paths.backup_dir
+ALIGNMENT_EVENTS_DIR = _paths.alignment_events_dir
+
 _QUEUE_SNAPSHOT: tuple[Path, float, str] | None = None
 _MANIFEST_SNAPSHOT: tuple[Path, tuple[tuple[str, float], ...], dict[str, dict]] | None = None
 _CHECKPOINT_SNAPSHOTS: dict[Path, tuple[float, list[str] | int]] = {}
-ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
 
 # ---------------------------------------------------------------------------
 # Per-tick TicketStore cache — avoids repeated disk reads in health loop

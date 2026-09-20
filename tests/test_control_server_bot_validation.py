@@ -262,6 +262,48 @@ class TestPauseResumeBotValidation(unittest.TestCase):
                              f"Expected 404 for unvalidated bot name '{name}', got {status_code}")
             self.assertIn("unknown bot", body.get("error", "").lower())
 
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_resume_rejects_regex_injection_dot_star(self):
+        """Resume endpoint must reject '.*' which could inject regex into pkill."""
+        from codebot.control_server import ControlHandler
+
+        # .* is invalid per validate_bot_name (contains '.')
+        handler = self._make_handler("POST", "/bots/.*/resume")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: (None, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_resume_rejects_process_killing_python3(self):
+        """Resume endpoint must reject 'python3' which could kill all python processes."""
+        from codebot.control_server import ControlHandler
+
+        # python3 is valid format but not in registry -> 404
+        handler = self._make_handler("POST", "/bots/python3/resume")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: (None, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 404)
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
 
 class TestCommandInjectionPrevention(unittest.TestCase):
     """Verify that command injection attempts are rejected across all endpoints.
