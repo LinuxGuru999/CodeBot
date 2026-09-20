@@ -3262,12 +3262,16 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
 
     idle_decomposers = []
     unassigned_running = []
+    busy_ticket_ids: set[str] = set()
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name
-        if base_name not in DECOMPOSER_ROLE_NAMES:
+        if not _is_decomposer_role(name):
             continue
         if bot.process is not None and bot.process.poll() is None:
-            if not getattr(bot, '_assigned_ticket_id', ''):
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                busy_ticket_ids.add(assigned)
+            else:
                 unassigned_running.append((name, bot))
         else:
             idle_decomposers.append((name, bot))
@@ -3298,6 +3302,9 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
             continue
 
         if tid in active_claims:
+            continue
+
+        if tid in busy_ticket_ids:
             continue
 
         if not available:
@@ -3401,6 +3408,9 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
             continue
 
         if tid in active_claims:
+            continue
+
+        if tid in busy_ticket_ids:
             continue
 
         if not available:
