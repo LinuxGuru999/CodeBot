@@ -3335,6 +3335,11 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
             break
 
         bot_name, bot = available.pop(0)
+
+        existing_claim = claims_dir / f"{tid}.{bot_name}.json"
+        if existing_claim.exists():
+            continue
+
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
             claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "decompose"}
@@ -3344,15 +3349,11 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
         except OSError:
             continue
 
-        current_assignment = getattr(bot, '_assigned_ticket_id', '')
         bot._assigned_ticket_id = tid
         dispatched += 1
         logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
-        if current_assignment == tid:
+        if bot.process is not None and bot.process.poll() is None:
             pass
-        elif bot.process is not None and bot.process.poll() is None:
-            stop_bot(bot, f"restarting with decomposition {tid}")
-            start_bot(bot, bots=bots)
         else:
             start_bot(bot, bots=bots)
 
@@ -3470,6 +3471,11 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
             break
 
         bot_name, bot = available.pop(0)
+
+        existing_claim = claims_dir / f"{tid}.{bot_name}.json"
+        if existing_claim.exists():
+            continue
+
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
             claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "planning"}
@@ -3479,15 +3485,11 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
         except OSError:
             continue
 
-        current_assignment = getattr(bot, '_assigned_ticket_id', '')
         bot._assigned_ticket_id = tid
         dispatched += 1
         logger.info(f"Dispatched planning for {tid} -> {bot_name}")
-        if current_assignment == tid:
+        if bot.process is not None and bot.process.poll() is None:
             pass
-        elif bot.process is not None and bot.process.poll() is None:
-            stop_bot(bot, f"restarting with planning {tid}")
-            start_bot(bot, bots=bots)
         else:
             start_bot(bot, bots=bots)
 
