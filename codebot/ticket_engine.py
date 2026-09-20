@@ -353,11 +353,10 @@ class TicketStore:
         self._save_timer: threading.Timer | None = None
         self._shutdown = False
         self._load()
-        # Start background save worker thread
-        self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
-        self._save_worker.start()
         self._save_queue: list[dict] = []
         self._save_condition = threading.Condition(self._save_lock)
+        self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
+        self._save_worker.start()
 
     def _save_worker_loop(self) -> None:
         while not self._shutdown:
