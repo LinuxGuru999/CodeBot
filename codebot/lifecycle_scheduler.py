@@ -152,11 +152,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
     ),
 )
 
-ALWAYS_ON_AGENTS: frozenset[str] = frozenset({
-    "scheduler",
-    "conflict_resolver",
-    "budget_controller",
-})
+ALWAYS_ON_AGENTS: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

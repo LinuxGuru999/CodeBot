@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -59,6 +60,7 @@ class CostTracker:
         self._summary_cache: dict[str, Any] | None = None
         self._cache_file_mtime: float | None = None
         self._cache_file_size: int | None = None
+        self._cache_lock = threading.Lock()
 
     def record_phase_cost(
         self,

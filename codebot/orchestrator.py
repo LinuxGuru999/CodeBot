@@ -240,9 +240,7 @@ RATE_LIMIT_BACKOFF_MAX = int(os.getenv("CODEBOT_RATE_LIMIT_BACKOFF_MAX", "3600")
 RATE_LIMIT_DISABLE_AFTER = int(os.getenv("CODEBOT_RATE_LIMIT_DISABLE_AFTER", "20"))
 _metrics_tick = 0
 
-ALWAYS_RESPAWN = frozenset({
-    "scheduler", "conflict_resolver",
-})
+ALWAYS_RESPAWN: frozenset[str] = frozenset()
 
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
     "bug": "general_implementer",
@@ -5865,18 +5863,8 @@ def main() -> None:
             [b for b in bots.values() if b.config.enabled],
             key=lambda b: (dynamic.get(b.config.name, TIER_PRIORITY.get(b.config.name, 2)), b.config.interval_seconds),
         )
-        always_on_roles = frozenset({"scheduler", "conflict_resolver"})
         needed = []
-        for bot in order:
-            base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
-            if base not in always_on_roles:
-                continue
-            if _is_needed_bot(bot.config.name, pipeline):
-                needed.append(bot)
-        logger.info(f"Overture: {len(needed)}/{len(order)} bots needed, staggered start ({_SPAWN_STAGGER_SECONDS}s interval)")
-        for bot in needed:
-            start_bot(bot, bots=bots, is_overture=True)
-            time.sleep(_SPAWN_STAGGER_SECONDS)
+        logger.info(f"Overture: {len(needed)}/{len(order)} bots needed (always-on removed)")
 
     logger.info("Orchestrator starting")
     logger.info(f"Health check every {args.check_interval}s")
