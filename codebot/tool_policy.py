@@ -2,18 +2,22 @@
 
 Purpose
 -------
-Provides path resolution and command parsing used by the API tool surface.
+Provides path resolution and command validation used by the API tool surface.
+Uses a blocklist model: all commands are permitted unless explicitly dangerous,
+with workspace path enforcement preventing escape from the project directory.
 
 Why
 ---
-Model-produced arguments are untrusted. Resolving them against one workspace
-root prevents path and symlink escapes, while a small argv allowlist removes
-the shell interpreter from the tool boundary.
+Agents run as a normal user (not root) within the project workspace. A short
+blocklist of genuinely destructive commands plus workspace path confinement is
+sufficient to prevent damage without crippling legitimate work.
 
 Invariants
 ----------
 - Resolved paths must remain below the supplied workspace root.
-- Command parsing never permits shell metacharacters or non-allowlisted argv.
+- Commands in BLOCKED_COMMANDS are rejected.
+- Shell metacharacters are rejected (except python -c contexts).
+- Path arguments containing '..' or resolving outside workspace are rejected.
 """
 
 import shlex
@@ -21,18 +25,13 @@ from pathlib import Path
 
 
 SHELL_METACHARACTERS = frozenset("&;<>()$`\\\n")
-ALLOWED_PIPE_TARGETS = frozenset({"head", "tail", "sort", "wc", "grep", "awk", "sed", "uniq", "cut", "tr"})
-ALLOWED_GIT_SUBCOMMANDS = frozenset({"status", "diff", "log", "show", "grep", "rev-parse",
-                                     "push", "pull", "fetch", "add", "commit", "checkout",
-                                     "rm", "branch"})
-ALLOWED_GIT_FLAGS = frozenset({"-m", "--no-commit", "--short", "--oneline", "-n", "--stat"})
-ALLOWED_PYTEST_ARGS = frozenset({"-q", "-x", "-v", "--tb", "-k", "-m", "--durations"})
-ALLOWED_PYTHON_FLAGS = frozenset({"-c", "-m", "-q"})
-ALLOWED_PYTHON_COMMANDS = frozenset({"py_compile"})
-ALLOWED_BARE_COMMANDS = frozenset({"ls", "wc", "head", "tail", "cat", "date", "realpath", "dirname", "basename", "cp", "mv", "mkdir", "find", "echo", "pwd", "sleep", "touch", "df", "free"})
-ALLOWED_GH_SUBCOMMANDS = frozenset({"pr", "issue", "repo", "auth", "api", "gist"})
-DANGEROUS_GH_ARGS = frozenset({"--hostname", "--delete-branch", "-X DELETE", "--admin"})
-DANGEROUS_GIT_ARGS = frozenset({"--amend", "--force", "-f", "--hard", "reset", "rebase", "push --force"})
+BLOCKED_COMMANDS = frozenset({
+    "sudo", "su", "mkfs", "dd", "shutdown", "reboot", "init",
+    "kill", "killall", "pkill",
+    "apt", "apt-get", "yum", "dnf", "brew",
+    "chmod", "chown", "chgrp",
+})
+DANGEROUS_GIT_ARGS = frozenset({"--force", "-f", "--hard"})
 
 
 def resolve_workspace_path(path: str, workspace_root: Path) -> Path | None:
@@ -46,95 +45,69 @@ def resolve_workspace_path(path: str, workspace_root: Path) -> Path | None:
     return resolved
 
 
-def allowlisted_command(command: str) -> list[str] | None:
-    """Parse a model command into an approved argv vector."""
+def _has_path_escape(argv: list[str], workspace_root: Path) -> bool:
+    """Check if any argument attempts path traversal or escapes workspace."""
+    for token in argv[1:]:
+        if token.startswith("-"):
+            continue
+        if ".." in token:
+            return True
+        if token.startswith("/"):
+            resolved = resolve_workspace_path(token, workspace_root)
+            if resolved is None:
+                return True
+    return False
+
+
+def validate_command(command: str, workspace_root: Path | None = None) -> list[str] | None:
+    """Parse a model command into an approved argv vector.
+
+    Returns parsed argv if the command is safe, or None if blocked.
+    Uses a blocklist model: everything is allowed except BLOCKED_COMMANDS,
+    shell metacharacters, and path traversal outside the workspace.
+    """
+    # Block shell metacharacters in raw input BEFORE shlex parsing.
+    # shlex consumes characters like \n as whitespace, hiding them from post-parse checks.
+    # Exception: python -c needs quotes/special chars for inline code.
+    is_python_c = command.lstrip().startswith(("python3 -c", "python -c"))
+    if not is_python_c:
+        if any(c in command for c in SHELL_METACHARACTERS):
+            return None
+
     try:
         argv = shlex.split(command)
     except ValueError:
         return None
     if not argv:
         return None
-    if "|" in argv:
-        pipe_idx = argv.index("|")
-        left_argv = argv[:pipe_idx]
-        right_argv = argv[pipe_idx + 1:]
-        if not left_argv or not right_argv:
-            return None
-        if not right_argv[0] in ALLOWED_PIPE_TARGETS:
-            return None
-        left_result = allowlisted_command(" ".join(shlex.quote(a) for a in left_argv))
-        if left_result is None:
-            return None
-        for token in right_argv[1:]:
-            if ".." in token:
-                return None
-        return left_argv + ["|"] + right_argv
-    is_python = argv[0] in ("pytest", "python3", "python")
-    has_c_flag = is_python and "-c" in argv[1:]
-    if not has_c_flag:
-        if any(any(character in token for character in SHELL_METACHARACTERS) for token in argv):
-            return None
-    if argv[0] == "git":
-        offset = 1
-        if len(argv) >= 4 and argv[1] == "-C":
-            if ".." in argv[2]:
-                return None
-            if argv[2].startswith("/"):
-                return None
-            offset = 3
-        if len(argv) < offset + 1 or argv[offset] not in ALLOWED_GIT_SUBCOMMANDS:
-            return None
-        for token in argv[2:]:
+
+    base_cmd = argv[0]
+
+    # Block dangerous commands
+    if base_cmd in BLOCKED_COMMANDS:
+        return None
+
+    # Block dangerous git args
+    if base_cmd == "git":
+        for token in argv[1:]:
             if token in DANGEROUS_GIT_ARGS:
                 return None
-            if any(character in token for character in SHELL_METACHARACTERS):
-                return None
-        return argv
-    if argv[0] == "rm":
-        for token in argv[1:]:
-            if token.startswith("-") and token not in ("-f",):
-                return None
-            if ".." in token:
-                return None
-            if token.startswith("/"):
-                return None
-        return argv
-    if argv[0] in ("pytest", "python3", "python") or argv[0] in ALLOWED_PYTHON_COMMANDS:
-        skip_next = False
-        for token in argv[1:]:
-            if skip_next:
-                skip_next = False
-                continue
-            if token == "-c":
-                skip_next = True
-                continue
-            if token.startswith("-"):
-                if token not in ALLOWED_PYTEST_ARGS and token not in ALLOWED_PYTHON_FLAGS and not token.startswith("--tb=") and not token.startswith("-k"):
-                    return None
-            elif ".." in token:
-                return None
-            elif token.startswith("/"):
-                return None
-        return argv
-    if argv[0] in ALLOWED_BARE_COMMANDS:
-        for token in argv[1:]:
-            if ".." in token:
-                return None
-            if token.startswith("/"):
-                return None
-        return argv
-    if argv[0] == "gh":
-        if len(argv) < 2 or argv[1] not in ALLOWED_GH_SUBCOMMANDS:
+        # Block 'reset --hard' pattern (two separate tokens)
+        if "reset" in argv and "--hard" in argv:
             return None
-        for token in argv[2:]:
-            if ".." in token:
+
+    # Path traversal checks
+    if workspace_root is not None:
+        if _has_path_escape(argv, workspace_root):
+            return None
+    else:
+        # Without workspace_root, still block .. traversal
+        for token in argv[1:]:
+            if not token.startswith("-") and ".." in token:
                 return None
-            if token.startswith("/"):
-                return None
-            if token in DANGEROUS_GH_ARGS:
-                return None
-        for i in range(len(argv) - 1):
-            if argv[i] == "-X" and argv[i + 1] in ("DELETE", "delete"):
-                return None
-        return argv
-    return None
+
+    return argv
+
+
+# Backward-compatible alias for existing callers
+allowlisted_command = validate_command

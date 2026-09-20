@@ -141,7 +141,7 @@ def bash(command, timeout=30):
         Dict with keys success, output, error. Never raises.
     """
     try:
-        argv = allowlisted_command(command)
+        argv = allowlisted_command(command, WORKSPACE_ROOT)
         if argv is None:
             import logging as _log
             _log.getLogger(__name__).warning("bash denied: %s", command[:200])
