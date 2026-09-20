@@ -734,6 +734,10 @@ class ControlHandler(BaseHTTPRequestHandler):
         m = re.match(r"^/(?:api/)?bots/([^/]+)/resume$", path)
         if m:
             name = m.group(1)
+            # Validate bot name format before any subprocess calls (Constitution §2)
+            if not validate_bot_name(name):
+                self._json(400, {"error": "invalid bot name format"})
+                return
             if not any(c.name == name for c in BOT_REGISTRY):
                 self._json(404, {"error": "unknown bot"})
                 return
@@ -741,8 +745,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 p = STATE_DIR / f"{name}.paused"
                 if p.exists():
                     p.unlink()
-                # Use re.escape to prevent regex injection if orchestrator uses pkill internally
-                subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
+                # Apply defense-in-depth: regex validation + shlex.quote
+                quoted_name = shlex.quote(name)
+                subprocess.Popen(["python3", str(ORCH), "--start", quoted_name], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "resumed": name})
             except Exception as e:
                 self._json(500, {"error": str(e)})
