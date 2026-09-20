@@ -18,6 +18,8 @@ Invariants
 - No subprocess management here — only state inspection and mutation
 - Ticket transitions are atomic via TicketStore
 - Model rotation is deterministic and logged
+- Error exits (non-zero, non-3) return tickets to READY for retry, never REVIEWING
+- REVIEWING state is only reached on clean exits (exit code 0)
 """
 
 from __future__ import annotations
@@ -298,9 +300,19 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any]) -> None:
 
 
 def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int) -> None:
-    """Return ticket to READY when bot exits with error."""
+    """Return ticket to READY when bot exits with error (non-zero, non-3).
+    
+    Ensures that genuinely failed work is returned to the READY queue for retry,
+    rather than forwarding incomplete/buggy work to reviewers.
+    
+    Args:
+        bot: The bot that exited with an error
+        bots: Dict of all bots (unused but kept for API compatibility)
+        exit_code: The exit code from the bot process
+    """
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
     if not assigned_tid:
+        logger.debug(f"Bot '{bot.config.name}' exited with error {exit_code} but has no assigned ticket")
         return
     
     try:
@@ -308,18 +320,37 @@ def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int) -
         store_path = STATE_DIR / "tickets.json"
         if not store_path.exists():
             store_path = Path(".codebot/state/tickets.json")
-        if store_path.exists():
-            ts = TicketStore(store_path)
-            ticket = ts.get(assigned_tid)
-            if ticket and ticket.state == TicketState.IMPLEMENTING:
-                ts.transition(assigned_tid, TicketState.READY)
-                ts.flush()  # Ensure changes are written to disk immediately
-                logger.info(f"Bot '{bot.config.name}' errored (exit {exit_code}), returning ticket {assigned_tid} to READY for retry")
+        if not store_path.exists():
+            logger.warning(f"Ticket store not found, cannot transition ticket {assigned_tid}")
             bot._assigned_ticket_id = ''
+            return
+        
+        ts = TicketStore(store_path)
+        ticket = ts.get(assigned_tid)
+        if not ticket:
+            logger.warning(f"Ticket {assigned_tid} not found in store, clearing assignment")
+            bot._assigned_ticket_id = ''
+            return
+        
+        current_state = ticket.state
+        if current_state == TicketState.IMPLEMENTING:
+            ts.transition(assigned_tid, TicketState.READY)
+            ts.flush()  # Ensure changes are written to disk immediately
+            logger.info(f"Bot '{bot.config.name}' errored (exit {exit_code}), returning ticket {assigned_tid} to READY for retry")
+        else:
+            logger.warning(
+                f"Bot '{bot.config.name}' errored (exit {exit_code}) but ticket {assigned_tid} "
+                f"is in state {current_state.value}, not IMPLEMENTING. Skipping transition."
+            )
+        bot._assigned_ticket_id = ''
+    except ValueError as ve:
+        # Invalid transition - log but don't crash
+        logger.warning(f"Invalid ticket transition for {assigned_tid}: {ve}")
+        bot._assigned_ticket_id = ''
     except Exception as e:
         logger.warning(f"Failed to transition ticket {assigned_tid} on error exit: {e}")
     
-    # Clean up claims
+    # Clean up claims regardless of transition outcome
     claims_dir = STATE_DIR / "claims"
     if claims_dir.exists():
         for cf in claims_dir.glob(f"{assigned_tid}.*.json"):

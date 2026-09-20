@@ -467,6 +467,7 @@ class TicketStore:
             self._evidence_index = {}
             self._word_index = {}
             self._state_index = {}
+            self._state_counts = {}
         # Replay WAL entries written after last compaction
         self._replay_wal()
         self._build_approval_cache()
@@ -551,12 +552,15 @@ class TicketStore:
             self._evidence_index = {}
             self._word_index = {}
             self._state_index = {}
+            self._state_counts = {}
             for entry in data["tickets"]:
                 t = Ticket.from_dict(entry)
                 self._tickets[t.id] = t
                 self._evidence_index[t.evidence_hash()] = t.id
                 self._index_title(t)
                 self._state_index.setdefault(t.state, set()).add(t.id)
+            for state, ticket_ids in self._state_index.items():
+                self._state_counts[state.value] = len(ticket_ids)
             self._dirty_ids.clear()
             self._save()
             return True
@@ -924,15 +928,22 @@ class TicketStore:
                 # Rollback all mutations applied so far in this batch
                 for tid, orig_ticket in original_tickets.items():
                     self._tickets[tid] = orig_ticket
-                # Restore state index entries
+                # Restore state index entries and counts cache
                 for tid, orig_state in original_state_index_entries:
                     current_ticket = self._tickets.get(tid)
                     if current_ticket is not None:
                         # Remove from whatever state it was moved to
-                        for state_set in self._state_index.values():
-                            state_set.discard(tid)
+                        for state, state_set in list(self._state_index.items()):
+                            if tid in state_set:
+                                state_set.discard(tid)
+                                if not state_set:
+                                    del self._state_index[state]
+                                    self._state_counts.pop(state.value, None)
+                                else:
+                                    self._state_counts[state.value] = len(state_set)
                         # Re-add to original state
                         self._state_index.setdefault(orig_state, set()).add(tid)
+                        self._state_counts[orig_state.value] = len(self._state_index[orig_state])
                 # Remove rolled-back IDs from dirty tracking
                 self._dirty_ids -= set(original_tickets.keys())
                 raise
