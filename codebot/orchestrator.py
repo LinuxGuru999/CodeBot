@@ -849,7 +849,7 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     planning_instances = min(planning_instances, max(0, max_concurrent - len(non_impl) - 1))
 
     impl_budget = max_concurrent - len(non_impl) - planning_instances
-    impl_demand = impl_queue + plan_queue
+    impl_demand = impl_queue
     target = min(impl_demand, max(impl_budget, 0))
     if impl_demand > 0:
         target = max(target, min(len(base_impl), max(impl_budget, 0)))
