@@ -863,8 +863,22 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    addr = ("0.0.0.0", PORT)
-    print(f"control_server listening on {addr[0]}:{addr[1]}  bots={len(BOT_REGISTRY)}  drain={(STATE_DIR / '.drain').exists()}", flush=True)
+    # Bind to localhost only when CONTROL_TOKEN is unset (fail-closed per Constitution §2).
+    # This prevents unauthenticated network access in containerized/shared environments.
+    if not CONTROL_TOKEN:
+        bind_host = "127.0.0.1"
+        logger.warning(
+            "CONTROL_TOKEN is not set — binding to 127.0.0.1 only. "
+            "All authenticated endpoints will reject requests. "
+            "Set CONTROL_TOKEN env var to enable remote API access."
+        )
+    else:
+        bind_host = "0.0.0.0"
+
+    addr = (bind_host, PORT)
+    startup_msg = f"control_server listening on {addr[0]}:{addr[1]}  bots={len(BOT_REGISTRY)}  drain={(STATE_DIR / '.drain').exists()}"
+    print(startup_msg, flush=True)
+    logger.info(startup_msg)
     httpd = ThreadingHTTPServer(addr, Handler)
     try:
         httpd.serve_forever()
