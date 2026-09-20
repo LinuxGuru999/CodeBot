@@ -400,14 +400,6 @@ CONTROL_ROLES: list[AgentRole] = [
         incentive="Maximize valid ticket throughput. Reject incomplete or duplicate tickets early.",
     ),
     AgentRole(
-        name="quality_gate",
-        category=RoleCategory.CONTROL,
-        description="Evaluates quality gate policies, determines COMPLETE vs REWORK",
-        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root"),
-        incentive="Enforce standards. Never weaken gates to pass work.",
-    ),
-    AgentRole(
         name="conflict_resolver",
         category=RoleCategory.CONTROL,
         description="Detects and resolves merge conflicts between concurrent agents",
