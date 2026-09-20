@@ -343,6 +343,16 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 rotate_model_on_error(bot, bots)
                 bot.consecutive_errors = 0
                 logger.warning(f"Bot '{name}' failed 3x on {old_model} -> {bot.config.model}")
+            # Finish scratchpad with error info before transitioning ticket
+            assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+            if assigned_tid:
+                try:
+                    scratch = load_scratchpad(STATE_DIR, assigned_tid)
+                    scratch.mark_error(f"Bot exited with code {exit_code}")
+                    scratch.finish_agent(f"error: exit_code={exit_code}")
+                    save_scratchpad(STATE_DIR, scratch)
+                except Exception as e:
+                    logger.warning(f"Failed to finish scratchpad for ticket {assigned_tid}: {e}")
             transition_ticket_on_error(bot, bots, exit_code)
             bot.next_run_at = now + 5
             update_bot_state(bot, "waiting")
