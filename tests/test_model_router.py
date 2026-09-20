@@ -276,6 +276,80 @@ class TestFallbackChain:
         best = chain.select_cheapest("model-a")
         assert best is None
 
+    def test_select_cheapest_with_missing_pricing_uses_sentinel(self):
+        """Provider without pricing gets sentinel cost 999999.0, loses to one with pricing."""
+        p_no_price = ProviderConfig(
+            name="no_price",
+            api_url="https://np.com",
+            api_key_env="K1",
+            cost_per_1k_tokens={},  # No pricing for model-x
+        )
+        p_priced = ProviderConfig(
+            name="priced",
+            api_url="https://p.com",
+            api_key_env="K2",
+            cost_per_1k_tokens={"model-x": 0.01},
+        )
+        chain = FallbackChain([p_no_price, p_priced])
+        best = chain.select_cheapest("model-x")
+        assert best is not None
+        assert best.name == "priced"
+
+    def test_select_cheapest_all_missing_pricing_returns_first(self):
+        """When no provider has pricing data, sentinel costs are equal; first provider wins."""
+        p1 = ProviderConfig(
+            name="p1",
+            api_url="https://p1.com",
+            api_key_env="K1",
+            cost_per_1k_tokens={},  # No pricing
+        )
+        p2 = ProviderConfig(
+            name="p2",
+            api_url="https://p2.com",
+            api_key_env="K2",
+            cost_per_1k_tokens={},  # No pricing
+        )
+        chain = FallbackChain([p1, p2])
+        best = chain.select_cheapest("model-x")
+        assert best is not None
+        assert best.name == "p1"  # First provider with sentinel cost
+
+    def test_select_cheapest_uses_resolved_model_name_for_cost(self):
+        """select_cheapest resolves aliases before looking up cost."""
+        p1 = ProviderConfig(
+            name="openai",
+            api_url="https://api.openai.com",
+            api_key_env="K",
+            model_aliases={"xiaomi-mimo-2.5": "gpt-4o-mini"},
+            cost_per_1k_tokens={"gpt-4o-mini": 0.00015},
+        )
+        chain = FallbackChain([p1])
+        best = chain.select_cheapest("xiaomi-mimo-2.5")
+        assert best is not None
+        assert best.name == "openai"
+
+    def test_resolve_model_unknown_provider_returns_as_is(self):
+        """resolve_model with unknown provider returns model name unchanged."""
+        p1 = ProviderConfig(name="dialagram", api_url="https://dialagram.me", api_key_env="K")
+        chain = FallbackChain([p1])
+        resolved = chain.resolve_model("nonexistent_provider", "some-model")
+        assert resolved == "some-model"
+
+    def test_healthy_providers_empty_list(self):
+        """healthy_providers returns empty list when chain is empty."""
+        chain = FallbackChain([])
+        assert chain.healthy_providers() == []
+
+    def test_all_providers_unhealthy(self):
+        """healthy_providers returns empty when all are unhealthy."""
+        p1 = ProviderConfig(name="p1", api_url="https://p1.com", api_key_env="K1")
+        p2 = ProviderConfig(name="p2", api_url="https://p2.com", api_key_env="K2")
+        chain = FallbackChain([p1, p2])
+        for _ in range(3):
+            chain._health["p1"].record_failure()
+            chain._health["p2"].record_failure()
+        assert chain.healthy_providers() == []
+
 
 class TestModelRouter:
     def test_creation(self, tmp_path):
@@ -392,6 +466,141 @@ class TestModelRouter:
         aliases = router.get_model_aliases("dialagram")
         # Default dialagram config should have some aliases
         assert isinstance(aliases, dict)
+
+    def test_get_model_aliases_unknown_provider(self, tmp_path):
+        router = ModelRouter(state_dir=str(tmp_path))
+        aliases = router.get_model_aliases("nonexistent")
+        assert aliases == {}
+
+    def test_get_stats_unknown_provider(self, tmp_path):
+        router = ModelRouter(state_dir=str(tmp_path))
+        stats = router.get_stats("nonexistent")
+        assert stats["total_calls"] == 0
+        assert stats["failures"] == 0
+        assert stats["success_rate"] == 1.0
+
+    def test_get_api_key_empty_string_returns_none(self, tmp_path):
+        """API key that is empty or whitespace should return None."""
+        router = ModelRouter(state_dir=str(tmp_path))
+        with patch.dict("os.environ", {"DIALAGRAM_API_KEY": "   "}):
+            key = router.get_api_key("dialagram")
+            assert key is None
+
+    def test_get_api_key_unknown_provider_returns_none(self, tmp_path):
+        router = ModelRouter(state_dir=str(tmp_path))
+        key = router.get_api_key("nonexistent")
+        assert key is None
+
+    def test_get_api_url_no_providers_returns_none(self, tmp_path):
+        router = ModelRouter(providers=[], state_dir=str(tmp_path))
+        url = router.get_api_url("anything")
+        assert url is None
+
+    def test_is_openai_compatible_unknown_returns_true(self, tmp_path):
+        router = ModelRouter(state_dir=str(tmp_path))
+        assert router.is_openai_compatible("nonexistent") is True
+
+    def test_load_stats_with_corrupt_json(self, tmp_path):
+        """Corrupt stats file should not crash; router starts fresh."""
+        stats_file = tmp_path / "model_router_stats.json"
+        stats_file.write_text("NOT VALID JSON {{{", encoding="utf-8")
+        # Should not raise — _load_stats swallows exceptions
+        router = ModelRouter(state_dir=str(tmp_path))
+        stats = router.get_stats("dialagram")
+        assert stats["total_calls"] == 0
+
+    def test_load_stats_with_wrong_structure(self, tmp_path):
+        """Stats file with unexpected structure should not crash."""
+        stats_file = tmp_path / "model_router_stats.json"
+        stats_file.write_text(json.dumps({"random_key": "not a stats dict"}), encoding="utf-8")
+        router = ModelRouter(state_dir=str(tmp_path))
+        stats = router.get_stats("dialagram")
+        assert stats["total_calls"] == 0
+
+    def test_load_stats_partial_data(self, tmp_path):
+        """Stats file with only some providers should load those correctly."""
+        stats_file = tmp_path / "model_router_stats.json"
+        stats_file.write_text(json.dumps({
+            "dialagram": {"total_calls": 5, "failures": 2, "consecutive_failures": 1},
+        }), encoding="utf-8")
+        router = ModelRouter(state_dir=str(tmp_path))
+        stats = router.get_stats("dialagram")
+        assert stats["total_calls"] == 5
+        assert stats["failures"] == 2
+        assert stats["consecutive_failures"] == 1
+
+    def test_save_stats_atomic_write(self, tmp_path):
+        """_save_stats should write to a .tmp file then atomically replace."""
+        router = ModelRouter(state_dir=str(tmp_path))
+        router.record_success("dialagram", "model")
+        stats_file = tmp_path / "model_router_stats.json"
+        assert stats_file.exists()
+        data = json.loads(stats_file.read_text(encoding="utf-8"))
+        assert "dialagram" in data
+        assert data["dialagram"]["total_calls"] == 1
+        # Verify no .tmp file is left behind
+        tmp_file = tmp_path / "model_router_stats.tmp"
+        assert not tmp_file.exists()
+
+    def test_save_stats_creates_parent_directory(self, tmp_path):
+        """_save_stats creates state_dir if it doesn't exist."""
+        nested_dir = tmp_path / "deep" / "nested"
+        router = ModelRouter(state_dir=str(nested_dir))
+        router.record_success("dialagram", "model")
+        stats_file = nested_dir / "model_router_stats.json"
+        assert stats_file.exists()
+
+    def test_load_stats_missing_file(self, tmp_path):
+        """No stats file yet should not crash; starts fresh."""
+        router = ModelRouter(state_dir=str(tmp_path))
+        stats = router.get_stats("dialagram")
+        assert stats["total_calls"] == 0
+
+    def test_record_success_unknown_provider_no_crash(self, tmp_path):
+        """Recording success for unknown provider should not crash."""
+        router = ModelRouter(state_dir=str(tmp_path))
+        router.record_success("nonexistent", "model")
+        # No error, stats unchanged
+        stats = router.get_stats("nonexistent")
+        assert stats["total_calls"] == 0
+
+    def test_record_failure_unknown_provider_no_crash(self, tmp_path):
+        """Recording failure for unknown provider should not crash."""
+        router = ModelRouter(state_dir=str(tmp_path))
+        router.record_failure("nonexistent", "model")
+        stats = router.get_stats("nonexistent")
+        assert stats["total_calls"] == 0
+
+    def test_failover_all_unhealthy_returns_first(self, tmp_path):
+        """When all providers are unhealthy, get_active_provider returns first as last resort."""
+        p1 = ProviderConfig(name="p1", api_url="https://p1.com", api_key_env="K1")
+        p2 = ProviderConfig(name="p2", api_url="https://p2.com", api_key_env="K2")
+        router = ModelRouter(providers=[p1, p2], state_dir=str(tmp_path))
+        for _ in range(3):
+            router.record_failure("p1", "model")
+            router.record_failure("p2", "model")
+        provider = router.get_active_provider("p1")
+        assert provider is not None
+        assert provider.name == "p1"  # Last resort fallback
+
+    def test_select_cheapest_with_missing_pricing_sentinel(self, tmp_path):
+        """select_cheapest should prefer provider with explicit pricing over sentinel 999999.0."""
+        p_no_price = ProviderConfig(
+            name="no_price",
+            api_url="https://np.com",
+            api_key_env="K1",
+            cost_per_1k_tokens={},
+        )
+        p_cheap = ProviderConfig(
+            name="cheap",
+            api_url="https://c.com",
+            api_key_env="K2",
+            cost_per_1k_tokens={"model-x": 0.001},
+        )
+        router = ModelRouter(providers=[p_no_price, p_cheap], state_dir=str(tmp_path))
+        best = router.select_cheapest_provider("model-x")
+        assert best is not None
+        assert best.name == "cheap"
 
 
 class TestDefaultProviderChain:
