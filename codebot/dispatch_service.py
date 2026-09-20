@@ -106,7 +106,7 @@ def is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
     reviewing = pipeline.get("REVIEWING", 0)
     verifying = pipeline.get("VERIFYING", 0)
 
-    always_on = {"scheduler", "conflict_resolver"}
+    always_on: set[str] = set()
     if name in always_on:
         return True
     base_name = name.split("-")[0] if "-" in name else name
@@ -145,7 +145,7 @@ def apply_agent_availability(bots: dict[str, Any], stop_fn: Any = None, update_s
     implementing = pipeline.get("IMPLEMENTING", 0)
     reviewing = pipeline.get("REVIEWING", 0)
 
-    always_on = {"scheduler", "conflict_resolver"}
+    always_on: set[str] = set()
 
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name

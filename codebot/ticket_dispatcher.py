@@ -1135,6 +1135,9 @@ def process_rework_tickets(bots: dict[str, Any]) -> int:
             reject_fallbacks.append(tid)
         else:
             plan_file = plans_dir / f"{tid}.plan.json"
+            current_state = getattr(ticket, 'state', None)
+            if current_state == TicketState.PLANNING:
+                continue
             target_state = TicketState.PLANNING if plan_file.exists() else TicketState.DECOMPOSE
             transitions.append((tid, target_state, None))
 

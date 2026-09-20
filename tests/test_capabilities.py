@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from codebot.web_tools import web_search, web_fetch, _is_blocked_url, _extract_text_from_html
+from codebot.web_tools import web_search, web_fetch, is_blocked_url, extract_text_from_html
 from codebot.context_compactor import (
     estimate_tokens, estimate_messages_tokens, needs_compaction,
     compact_messages, build_compaction_checkpoint, SUMMARY_MARKER,

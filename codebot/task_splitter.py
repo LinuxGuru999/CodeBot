@@ -68,7 +68,7 @@ def split_ticket(
     if not should_split(parent_ticket, scratchpad, exit_reason):
         return []
 
-    chunks = _compute_chunks(parent_ticket, scratchpad)
+    chunks = compute_chunks(parent_ticket, scratchpad)
     if not chunks:
         return []
 
@@ -126,7 +126,7 @@ def split_ticket(
     return sub_ids
 
 
-def _compute_chunks(ticket: Any, scratchpad: Any | None) -> list[dict[str, Any]]:
+def compute_chunks(ticket: Any, scratchpad: Any | None) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
 
     if scratchpad and scratchpad.remaining_steps:

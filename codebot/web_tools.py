@@ -136,7 +136,7 @@ def _resolve_and_validate_host(host: str, port: int) -> tuple[str, int, int]:
     return (sockaddr[0], port, family)
 
 
-def _is_blocked_url(url: str) -> bool:
+def is_blocked_url(url: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url)
         host = (parsed.hostname or "").lower()
@@ -373,7 +373,7 @@ def web_search(query: str, max_results: int = MAX_RESULTS) -> dict[str, Any]:
     encoded = urllib.parse.quote_plus(query.strip()[:500])
     url = f"https://html.duckduckgo.com/html/?q={encoded}"
 
-    if _is_blocked_url(url):
+    if is_blocked_url(url):
         return {"success": False, "output": "", "error": "blocked URL"}
 
     req = urllib.request.Request(url, headers={
@@ -449,7 +449,7 @@ def web_fetch(url: str, max_bytes: int = MAX_FETCH_BYTES) -> dict[str, Any]:
     if not url.startswith(("http://", "https://")):
         return {"success": False, "output": "", "error": "only http/https URLs allowed"}
 
-    if _is_blocked_url(url):
+    if is_blocked_url(url):
         return {"success": False, "output": "", "error": "blocked URL (private/local address)"}
 
     req = urllib.request.Request(url, headers={
@@ -480,7 +480,7 @@ def web_fetch(url: str, max_bytes: int = MAX_FETCH_BYTES) -> dict[str, Any]:
     if "json" in content_type or url.endswith(".json"):
         text = raw_text[:MAX_OUTPUT_CHARS]
     elif "html" in content_type or url.endswith((".html", ".htm")):
-        text = _extract_text_from_html(raw_text)
+        text = extract_text_from_html(raw_text)
     else:
         text = raw_text[:MAX_OUTPUT_CHARS]
 
@@ -494,7 +494,7 @@ def web_fetch(url: str, max_bytes: int = MAX_FETCH_BYTES) -> dict[str, Any]:
     return {"success": True, "output": text, "error": None}
 
 
-def _extract_text_from_html(html: str) -> str:
+def extract_text_from_html(html: str) -> str:
     """Extract readable text from HTML.
 
     Attempts to use beautifulsoup4 (with lxml parser) or lxml directly for robust parsing
