@@ -849,8 +849,9 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
     planning_instances = min(planning_instances, max(0, max_concurrent - len(non_impl) - 1))
 
     impl_budget = max_concurrent - len(non_impl) - planning_instances
-    target = min(demand, max(impl_budget, 0))
-    target = max(target, min(len(base_impl), max(impl_budget, 0)))
+    target = min(impl_queue, max(impl_budget, 0))
+    if impl_queue > 0:
+        target = max(target, min(len(base_impl), max(impl_budget, 0)))
     role_map = {c.name: c for c in base_impl}
     ticket_classes = _peek_ticket_classes()
     out = list(non_impl)
