@@ -1490,7 +1490,7 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
         except OSError:
             return False
         bot._assigned_ticket_id = tid
-        ok = start_bot(bot, bots=bots)
+        ok = start_bot(bot, bots=bots, is_demand=True)
         if ok:
             nonlocal spawned
             spawned += 1
@@ -2387,7 +2387,7 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
     return True, "slot available"
 
 
-def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: str | None = None, bots: dict[str, BotState] | None = None, is_overture: bool = False) -> bool:
+def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: str | None = None, bots: dict[str, BotState] | None = None, is_overture: bool = False, is_demand: bool = False) -> bool:
     """Spawn a bot as a subprocess. Returns True on success."""
     if (STATE_DIR / f"{bot.config.name}.paused").exists():
         update_bot_state(bot, "paused")
@@ -2429,7 +2429,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
             return False
     due = bot.next_run_at
     is_queued = _is_queued(bot)
-    ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api", bot_model=bot.config.model, bot_name=bot.config.name, is_overture=is_overture)
+    ok, why = _spawn_gate(bots=bots, is_queued=is_queued, runner_mode="api", bot_model=bot.config.model, bot_name=bot.config.name, is_overture=is_overture or is_demand)
     if not ok:
         if due:
             bot.next_run_at = due
