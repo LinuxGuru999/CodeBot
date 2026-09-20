@@ -35,11 +35,8 @@ from typing import Any, Iterator, Optional
 
 import codebot.health_monitor as _hm
 from codebot.health_monitor import (
-    heartbeat_path as _hm_heartbeat_path,
-    write_heartbeat as _hm_write_heartbeat,
     read_heartbeat as _hm_read_heartbeat,
     batch_read_heartbeats as _hm_batch_read_heartbeats,
-    log_path as _hm_log_path,
     log_mtime, is_log_stalled, is_stuck, effective_heartbeat_timeout,
 )
 from codebot.model_manager import model_profile, ModelProfile, MODEL_PROFILES
