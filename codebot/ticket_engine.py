@@ -911,7 +911,11 @@ class TicketStore:
                         self._state_index[old_state].discard(ticket_id)
                         if not self._state_index[old_state]:
                             del self._state_index[old_state]
+                            self._state_counts.pop(old_state.value, None)
+                        else:
+                            self._state_counts[old_state.value] = len(self._state_index[old_state])
                     self._state_index.setdefault(new_state, set()).add(ticket_id)
+                    self._state_counts[new_state.value] = len(self._state_index[new_state])
 
                     # Track dirty for incremental save
                     self._dirty_ids.add(ticket_id)
