@@ -1,6 +1,10 @@
 # botop.py
 
-Provides direct bot management operations (status, logs, restart, pause, resume, drain) without requiring the full orchestrator loop. Equivalent to Monitor's botop.py but portable across any CodeBot-managed project.  Live mode `botop live` renders a live dashboard: agents, tickets, throughput, claims/leases, budget, diagnostics. `botop term` drops into an interactive terminal for iterative inspection.
+Standalone bot operations CLI for CodeBot (`python -m codebot.botop ...`).
+Direct bot management (status, logs, restart, pause, resume, drain) without
+requiring the full orchestrator loop. Live mode renders a dashboard (agents,
+tickets, throughput, claims/leases, budget, diagnostics); term mode is an
+interactive terminal for iterative inspection.
 
 ## Key Exports
 - `cmd_status()`: Function
@@ -8,6 +12,22 @@ Provides direct bot management operations (status, logs, restart, pause, resume,
 - `cmd_restart()`: Function
 - `cmd_pause()`: Function
 - `cmd_resume()`: Function
+- `cmd_drain()`: Function
+- `cmd_clear_drain()`: Function
+- `cmd_claims()`: Function
+- `cmd_tickets()`: Function
+- `cmd_throughput()`: Function
+- `cmd_metrics()`: Function
+- `cmd_budget()`: Function
+- `cmd_events()`: Function
+- `cmd_findings()`: Function
+- `cmd_leases()`: Function
+- `cmd_deadletters()`: Function
+- `cmd_gatekeeper()`: Function
+- `cmd_health()`: Function
+- `cmd_live()`: Function
+- `cmd_term()`: Function
+- `main()`: Function
 
 ## Invariants
 - stdlib-only

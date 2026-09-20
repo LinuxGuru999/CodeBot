@@ -17,3 +17,7 @@ Calculates pressure ratios for each pipeline stage (implementation, review, veri
 - Stdlib-only.
 - Pure functions with no side effects.
 - Deterministic bottleneck detection.
+
+## Key Exports
+- `compute_implementation_cap()`: Function
+- `estimate_downstream_demand()`: Function

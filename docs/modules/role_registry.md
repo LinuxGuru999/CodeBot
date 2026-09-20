@@ -3,6 +3,11 @@
 Replaces hardcoded bot names (issues-bot, worker-5, security_auditor) with a composable ROLE + TASK + MODEL_PROFILE + TOOL_POLICY abstraction. Each agent instance is assembled from these four dimensions rather than being a monolithic named entity.
 
 ## Key Exports
+- `AgentRole`: Class
+- `AgentTask`: Class
+- `LatencyClass`: Class
+- `ModelProfile`: Class
+- `ToolPolicy`: Class
 - `RoleCategory`: Class
 - `ReasoningLevel`: Class
 - `CodingLevel`: Class

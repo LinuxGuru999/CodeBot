@@ -6,6 +6,7 @@ locks, restart). Adapter injection via `set_project_adapter()` re-resolves
 paths without mutating globals.
 
 ## Key Exports
+- `set_adapter_instance()`: Function
 - `PathConfig`: Dataclass
 - `get_paths()`: Function
 - `set_project_adapter()`: Function

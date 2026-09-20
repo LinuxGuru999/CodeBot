@@ -20,6 +20,7 @@ The orchestrator needs structured exit data (exit code, duration, heartbeat age,
 - Log files: `logs/{bot_name}.log`
 
 ## Public API
+- `collect_reviewer_feedback_for_trigger()`: Function
 
 ### `set_dirs(state_dir: Path, logs_dir: Path) -> None`
 Configure directories for alignment event operations. Must be called before other functions if using non-default paths.

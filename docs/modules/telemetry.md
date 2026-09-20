@@ -17,3 +17,6 @@ Provides an HTTP ingestion endpoint for production telemetry signals (errors, pe
 - Bounded I/O (max 64KB request body).
 - Requires Bearer token authentication.
 - Tickets created in `DISCOVERED` state proceeding through normal autonomous pipeline.
+
+## Key Exports
+- `detect_anomalies()`: Function

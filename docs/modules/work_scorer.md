@@ -3,6 +3,9 @@
 Assigns a numeric utility score to every schedulable work item so the scheduler can rank and select the highest-value work for available slots. Scores incorporate priority, bottleneck relief, dependency unlock value, age-based fairness, risk penalties, conflict penalties, and cost estimates.
 
 ## Key Exports
+- `rank_work_items()`: Function
+- `score_ticket()`: Function
+- `score_work_item()`: Function
 - `ScoredWorkItem`: Class
 - `compute_aging_bonus()`: Function
 - `compute_dependency_unlock_value()`: Function

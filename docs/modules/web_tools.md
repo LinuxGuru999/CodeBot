@@ -3,6 +3,8 @@
 Provides stdlib-only internet research capabilities: web_search queries DuckDuckGo's HTML lite endpoint and parses structured results; web_fetch retrieves bounded page content from a URL. Both return the uniform {success, output, error} dict expected by api_runner's tool dispatch.
 
 ## Key Exports
+- `extract_text_from_html()`: Function
+- `is_blocked_url()`: Function
 - `web_search()`: Function
 - `web_fetch()`: Function
 - `handle_starttag()`: Function

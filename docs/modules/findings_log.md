@@ -3,6 +3,9 @@
 Append-only JSONL file where discovery agents record findings and control agents read them to inform prioritization.
 
 ## Key Exports
+- `get_adapter()`: Function
+- `get_default_findings_path()`: Function
+- `set_project_adapter()`: Function
 - `append_finding()`: Function
 - `read_findings()`: Function
 - `rotate_findings()`: Function

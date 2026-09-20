@@ -8,6 +8,10 @@ Provides synchronous, fail-open tools (read, write, edit, bash, grep, glob, a11y
 - `bash()`: Function
 - `grep()`: Function
 - `edit()`: Function
+- `glob()`: Function
+- `a11y_snapshot()`: Function
+- `batch_read()`: Function
+- `batch_grep()`: Function
 
 ## Invariants
 - stdlib-only: pathlib, subprocess, re, json, logging, tempfile, base64

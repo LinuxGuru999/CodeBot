@@ -3,6 +3,7 @@
 Provides path resolution and command parsing used by the API tool surface.
 
 ## Key Exports
+- `validate_command()`: Function
 - `resolve_workspace_path()`: Function
 - `allowlisted_command()`: Function
 

@@ -3,6 +3,7 @@
 When an agent hits SESSION_TIMEOUT, a fatal error, or a rate limit during a large ticket, the task splitter breaks the remaining work into smaller sub-tickets that can be claimed by different workers. Each sub-ticket references the parent and includes a scratchpad handoff note.
 
 ## Key Exports
+- `compute_chunks()`: Function
 - `should_split()`: Function
 - `split_ticket()`: Function
 

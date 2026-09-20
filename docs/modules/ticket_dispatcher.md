@@ -8,6 +8,8 @@ saved once per cycle.
 ## Key Exports
 - `get_ticket_store()`: Function — per-tick cached TicketStore
 - `clear_ticket_store_cache()`: Function
+- `register_claim()`: Function
+- `release_claim()`: Function
 - `spawn_demand_agents()`: Function
 - `dispatch_decompose_agents()`: Function
 - `dispatch_planning_agents()`: Function

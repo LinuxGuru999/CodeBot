@@ -9,10 +9,14 @@ and model profiles to `model_manager`.
 - `BotState`: Class — carries config, process, last_heartbeat, restart counters
 - `start_bot()`: Function
 - `stop_bot()`: Function
+- `stop_bot_by_pid()`: Function
 - `restart_bot()`: Function
+- `restart_bot_by_config()`: Function
 - `update_bot_state()`: Function
 - `read_checkpoint()`: Function
-- `batch_read_bot_statuses()`: Function
+- `checkpoint_path()`: Function
+- Re-exports from health_monitor: `read_heartbeat`, `write_heartbeat`,
+  `heartbeat_path`, `batch_read_heartbeats`, `log_path`
 
 ## Invariants
 - Single process (no multiprocessing)

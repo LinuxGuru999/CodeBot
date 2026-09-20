@@ -5,6 +5,7 @@ rate, escaped defects, coverage delta, cost/tokens per accepted ticket,
 commit survival, cross-ticket regression. Backs botop metrics views.
 
 ## Key Exports
+- `QualitySnapshot`: Class
 - `QualityMetricsTracker`: Class
 - `summary()`: Function — windowed aggregate (default 24h)
 

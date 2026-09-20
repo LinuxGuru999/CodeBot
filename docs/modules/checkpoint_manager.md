@@ -19,6 +19,9 @@ Bots are autonomous agents that can timeout, crash, or exceed limits. Checkpoint
 - State directory: `.codebot/state/`
 
 ## Public API
+- `is_manifest_error_disabled()`: Function
+- `is_manifest_restart_budget_exceeded()`: Function
+- `update_bot_state()`: Function
 
 ### `set_state_dir(state_dir: Path) -> None`
 Configure the state directory for checkpoint operations.

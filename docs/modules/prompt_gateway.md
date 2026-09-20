@@ -8,6 +8,11 @@ Compresses per-bot prompt files and assembles the final LLM message, and gates s
 - `compress_prompt()`: Function
 - `build_message()`: Function
 - `running_count()`: Function
+- `spawn_allowed()`: Function
+- `note_spawn()`: Function
+- `estimate_tokens()`: Function
+- `record_rate_limit()`: Function
+- `record_success()`: Function
 
 ## Invariants
 - stdlib-only, no imports from orchestrator (duck-types BotState).

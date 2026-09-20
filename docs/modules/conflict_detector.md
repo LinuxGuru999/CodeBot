@@ -3,6 +3,7 @@
 Detects when two tickets would modify overlapping files or modules, preventing the scheduler from assigning them to concurrent workers. Tracks worktree isolation so each implementation runs in its own branch (§22).
 
 ## Key Exports
+- `TaskOverlap`: Class
 - `ConflictEdge`: Class
 - `ConflictMatrix`: Class
 - `WorktreeRegistry`: Class

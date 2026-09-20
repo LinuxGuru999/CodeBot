@@ -474,7 +474,8 @@ Implementation agents write code. They follow TDD and the claim protocol.
 Required additional sections:
 - **Claim Protocol** (§7.8): Exact claim path and conflict resolution
 - **TDD Process**: RED → GREEN → REFACTOR with explicit pytest invocations
-- **Auto-commit**: `git add -A && git commit -m "[{ticket_id}] {type}: {desc}" && git push`
+- **Release claim**: delete claim file when done (agents do NOT commit;
+  `completion_commit` commits scoped files at COMPLETE)
 - **Tool examples**: At least 3 complete JSON tool calls (write, edit, bash)
 
 Forbidden:

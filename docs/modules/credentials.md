@@ -3,6 +3,8 @@
 Resolves SSH keys, GitHub tokens, and API credentials from environment variables, secret files, or adapter configuration. Never hardcodes secrets.
 
 ## Key Exports
+- `get_dry_run()`: Function
+- `setup_git_environment()`: Function
 - `get_github_token()`: Function
 - `get_control_token()`: Function
 - `get_ssh_key_path()`: Function

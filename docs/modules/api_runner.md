@@ -3,9 +3,12 @@
 Provides run_bot() — a minimal, stdlib-only bot executor that POSTs to the dialagram OpenAI-compatible endpoint, executes the four allowed tools via api_tools, and handles heartbeat / checkpoint / drain / retry semantics.
 
 ## Key Exports
+- `AgentResult`: Class
+- `ContextAssemblyTracer`: Class
 - `set_project_adapter()`: Function
 - `get_adapter()`: Function
 - `run_batch()`: Function
+- `run_agent_loop()`: Function
 - `run_bot()`: Function
 
 ## Invariants

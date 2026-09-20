@@ -3,6 +3,7 @@
 Provides a JSON-based scratchpad that agents use to persist intermediate state between tool calls, survive timeouts, and hand off work to other workers when they fail or hit rate limits.
 
 ## Key Exports
+- `AgentRecord`: Class
 - `ScratchpadState`: Class
 - `load_scratchpad()`: Function
 - `save_scratchpad()`: Function

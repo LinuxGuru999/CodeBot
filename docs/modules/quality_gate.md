@@ -5,16 +5,25 @@ Evaluates whether a ticket's implementation satisfies all required and condition
 ## Key Exports
 - `GateResult`: Class
 - `GateEvaluation`: Class
+- `Gate`: Class
 - `QualityGatePolicy`: Class
 - `load_policy()`: Function
+- `load_gates()`: Function
+- `load_gates_yaml()`: Function
+- `load_gates_from_dict()`: Function
 - `evaluate_gate()`: Function
+- `evaluate_browser_gate()`: Function
 - `run_quality_gates()`: Function
 - `run_quality_gates_with_cache()`: Function — file-hash pass cache; skips
   subprocesses on verified cache hit, records fresh entry on full pass
 - `check_gate_pass_cache()`: Function
 - `clear_gate_pass_cache()`: Function
 - `record_gate_results()`: Function
-- `to_dict()`: Function
+- `GateAlertConfig`: Class
+- `GateMetricsSummary`: Class
+- `compute_gate_metrics()`: Function
+- `check_gate_alerts()`: Function
+- `get_gate_metrics()`: Function
 
 ## Invariants
 - stdlib-only (json, subprocess, re, pathlib, time, enum, dataclasses)

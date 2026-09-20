@@ -3,6 +3,17 @@
 Shared kernel for the RL-based alignment loop. Provides reward normalization, per-agent bandit state (Q-values, epsilon, history), epsilon-greedy selection, Q-value updates, and event/score helpers. Consumed by the orchestrator's alignment pipeline (reward producer) and prompt evolution triggers (RL agent). Also exposes scoring helpers to turn exit events + log observables into 0..100 scores.
 
 ## Key Exports
+- `choose_pattern()`: Function
+- `decay_epsilon()`: Function
+- `ensure_bot()`: Function
+- `heartbeat_timeout_for()`: Function
+- `list_pending_events()`: Function
+- `mark_event_processed()`: Function
+- `record_event_reward()`: Function
+- `reward_from_score()`: Function
+- `score_event()`: Function
+- `update_q_value()`: Function
+- `write_trigger()`: Function
 - `set_project_adapter()`: Function
 - `get_adapter()`: Function
 - `is_self_target()`: Function

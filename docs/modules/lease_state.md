@@ -3,6 +3,7 @@
 Provides owner-checked lease acquisition, renewal, release, retry, and dead-letter operations for manifest-scheduled work.
 
 ## Key Exports
+- `retry_dead_letter()`: Function
 - `acquire()`: Function
 - `renew()`: Function
 - `release()`: Function

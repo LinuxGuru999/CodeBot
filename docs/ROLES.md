@@ -65,7 +65,9 @@ Implementation agents write code, tests, and documentation. They follow TDD (red
 1. **Claim**: Write `{STATE_DIR}/claims/{ticket_id}.{agent_name}.json` before starting work. Delete on completion or failure.
 2. **Heartbeat**: Write bare Unix timestamp to `{STATE_DIR}/{agent_name}.heartbeat` after every atomic task and at least every 60s.
 3. **Checkpoint**: Write JSON to `{STATE_DIR}/{agent_name}.checkpoint.json` after every atomic task. Format per ROLE_PROMPT_STANDARDS.md §7.5.
-4. **Auto-commit**: `git add -A → git commit -m "[{ticket_id}] {type}: {desc}" → git push`
+4. **Release claim**: Delete the claim file when done. Do NOT commit or push —
+   `completion_commit` commits the ticket's own files with `[CB-xxx]` at
+   COMPLETE (scoped, fail-open, SHA recorded on the ticket).
 5. **Noop cap**: Track consecutive empty scans. Exit cleanly at ≥ 20.
 
 Where `{STATE_DIR}` = `{PROJECT_ROOT}/.codebot/state`.
@@ -112,7 +114,7 @@ These have `.md` prompt files but are not yet registered as `AgentRole` entries:
 |------|-----------|---------|
 | `quality_gate` | `build` | Central gate evaluation, COMPLETE authority |
 | `github_mirror` | `github_bot` | Mirror issue files to GitHub Issues via `gh` CLI |
-| `git_sync` | (implicit gitsync) | Auto-commit, push, vendor sync |
+| `git_sync` | (implicit gitsync) | Batched push / vendor sync (commits come from completion_commit) |
 | `release_manager` | `release` | Staged rollout with gate-driven progression |
 | `alignment_scorer` | `alignment` | Exit event processing, reward computation |
 | `prompt_optimizer` | `prompt_opt` | Epsilon-greedy RSI with 11 Q-arms |

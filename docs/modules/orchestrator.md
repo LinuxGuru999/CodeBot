@@ -1,17 +1,31 @@
 # orchestrator.py
 
-Manages bot lifecycle: start, stop, restart, health monitoring. Detects stuck agents via heartbeat files and auto-restarts them.  The orchestrator does NO bot work itself. It is a pure process manager that spawns bot subprocesses and monitors their health.
+Process lifecycle coordinator: delegates to process_manager (subprocesses),
+ticket_dispatcher (routing), worker_scaler (registry/limits), state_manager
+(paths/drain), and dispatch_service (pipeline helpers). Runs the main event
+loop (`check_all_bots` per tick, `main` for CLI/serve).
+
+Health functions (`is_stuck`, `is_log_stalled`, `effective_heartbeat_timeout`,
+heartbeats, checkpoints, bot state) are re-exported from process_manager /
+health_monitor for backward compatibility — see those pages for semantics.
 
 ## Key Exports
-- `BotConfig`: Class
-- `ModelProfile`: Class
-- `BotState`: Class
-- `PathConfig`: Dataclass (re-exported from `state_manager`)
+- `is_error_disabled()`: Function
+- `is_manifest_error_disabled()`: Function
+- `is_manifest_restart_budget_exceeded()`: Function
+- `is_restart_budget_exceeded()`: Function
+- `check_all_bots()`: Function — one tick: heartbeats, exits, stuck, dispatch
+- `get_status()`: Function
+- `print_status()`: Function
+- `main()`: Function
 - `set_project_adapter()`: Function — updates `_paths` config object
-- `get_adapter()`: Function
 - `is_draining()`: Function
-- `worker_reserved_slots()`: Function
-- `rotating_slots()`: Function
+- `read_prompt_with_mtime()`: Function
+- Re-exports: `BotConfig`, `BotState`, `PathConfig`, `is_stuck`,
+  `is_log_stalled`, `effective_heartbeat_timeout`, `model_profile`,
+  `read_heartbeat`, `heartbeat_path`, `checkpoint_path`, `read_checkpoint`,
+  `update_bot_state`, `log_mtime`, `batch_read_heartbeats`,
+  `worker_reserved_slots`, `rotating_slots`
 
 ## Path Configuration
 Paths (`BOTS_DIR`, `STATE_DIR`, etc.) are encapsulated in a `PathConfig`

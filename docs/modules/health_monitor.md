@@ -9,6 +9,7 @@ field extraction degrades to safe defaults rather than raising. Internal
 orchestrator-level test patches.
 
 ## Key Exports
+- `log_path()`: Function
 - `is_stuck()`: Function — BotState + optional heartbeat_cache → bool
 - `is_log_stalled()`: Function — BotState or (name, model) → bool
 - `effective_heartbeat_timeout()`: Function — BotState or explicit fields → seconds

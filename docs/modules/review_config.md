@@ -6,6 +6,9 @@ BLOCKER/CRITICAL/MAJOR findings block COMPLETE. Changes to review or
 gatekeeper config files trigger elevated scrutiny (gate-tampering detection).
 
 ## Key Exports
+- `ReviewConfig`: Class
+- `load_review_config()`: Function
+- `reset_review_config()`: Function
 - `ReviewDecision`: Class (review_types)
 - `StructuredFinding`: Class (review_types)
 - `CompletionEvidence`: Class (review_types)

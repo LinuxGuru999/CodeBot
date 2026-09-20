@@ -3,6 +3,7 @@
 Groups ready bot manifests into tier-ordered batches for efficient dispatch. Enforces model caps and slot limits; consults token budget state before packing. All decisions are pure over in-memory manifest dicts.
 
 ## Key Exports
+- `apply_caps()`: Function
 - `extract_tier_from_tags()`: Function
 - `needs_approval()`: Function
 - `filter_approved()`: Function
