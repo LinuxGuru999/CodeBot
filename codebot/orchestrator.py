@@ -64,6 +64,12 @@ from codebot.worker_scaler import (
     is_manifest_error_disabled, is_manifest_restart_budget_exceeded,
     _read_state_file, CLAIM_TTL_SECONDS, MIN_ROTATING_SLOTS,
 )
+from codebot.orchestrator_services import (
+    _manifest_restart_budget_exceeded,
+    _manifest_error_disabled,
+    is_restart_budget_exceeded,
+    is_error_disabled,
+)
 
 # Module-level aliases for test patching compatibility
 DRAIN_FILE = get_paths().drain_file
@@ -86,6 +92,10 @@ __all__ = [
     "_write_json_atomic",
     "_get_code_mtimes",
     "write_alignment_event",
+    "_manifest_restart_budget_exceeded",
+    "_manifest_error_disabled",
+    "is_restart_budget_exceeded",
+    "is_error_disabled",
 ]
 
 logging.basicConfig(

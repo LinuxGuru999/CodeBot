@@ -45,7 +45,15 @@ def set_state_dir(state_dir: Path) -> None:
 
 
 def _get_metrics_path() -> Path:
-    """Return path to bot metrics snapshot file."""
+    """Return the filesystem path to the compacted bot metrics snapshot.
+
+    The snapshot (``bot_metrics.json``) holds aggregated per-bot stats
+    produced by periodic compaction of the append-only JSONL event log.
+    No I/O is performed; the file may not yet exist on first run.
+
+    Returns:
+        Path under ``_STATE_DIR`` for ``bot_metrics.json``.
+    """
     return _STATE_DIR / "bot_metrics.json"
 
 

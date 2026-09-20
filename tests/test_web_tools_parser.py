@@ -48,4 +48,3 @@ def test_only_tags():
     html = "<div><span></span></div>"
     text = _extract_text_from_html(html)
     assert text == ""
-"}}]}

@@ -527,6 +527,11 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
         available = available[:max_agents]
     dispatched = 0
 
+    # Phase 1: Collect transitions for completed decompositions and dispatch new ones
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
+    transition_tids: list[str] = []
+    transition_logs: list[str] = []
+
     for ticket in decomposing:
         tid = getattr(ticket, 'id', '')
         if not tid:
@@ -538,17 +543,10 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
                 artifact = json.loads(decomp_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 artifact = {}
-            try:
-                ts.transition(tid, TicketState.PLANNING)
-                logger.info(f"Decomposition complete: {tid} DECOMPOSE -> PLANNING (sub_tickets={len(artifact.get('sub_tickets', []))})")
-                dispatched += 1
-                for cf in claims_dir.glob(f"{tid}.*.json"):
-                    try:
-                        cf.unlink()
-                    except OSError:
-                        pass
-            except ValueError as e:
-                logger.debug(f"Failed to advance {tid} to PLANNING: {e}")
+            transitions.append((tid, TicketState.PLANNING, None))
+            transition_tids.append(tid)
+            sub_count = len(artifact.get('sub_tickets', []))
+            transition_logs.append(f"Decomposition complete: {tid} DECOMPOSE -> PLANNING (sub_tickets={sub_count})")
             continue
 
         if tid in active_claims:
@@ -583,6 +581,34 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
         else:
             if start_bot_fn:
                 start_bot_fn(bot, bots=bots)
+
+    # Phase 2: Apply all decomposition-complete transitions in a single batch
+    if transitions:
+        try:
+            results = ts.batch_transition(transitions)
+            dispatched += len(results)
+            for msg in transition_logs:
+                logger.info(msg)
+            for tid in transition_tids:
+                for cf in claims_dir.glob(f"{tid}.*.json"):
+                    try:
+                        cf.unlink()
+                    except OSError:
+                        pass
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Batch decompose transition failed ({e}), falling back to individual")
+            for i, (tid, target_state, fb) in enumerate(transitions):
+                try:
+                    ts.transition(tid, target_state, fb)
+                    logger.info(transition_logs[i])
+                    dispatched += 1
+                    for cf in claims_dir.glob(f"{tid}.*.json"):
+                        try:
+                            cf.unlink()
+                        except OSError:
+                            pass
+                except ValueError as ve:
+                    logger.debug(f"Failed to advance {tid} to PLANNING: {ve}")
 
     return dispatched
 
@@ -720,7 +746,11 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
 
 
 def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
-    """Transition REVIEWING tickets to VERIFYING or REWORK based on reviewer verdicts."""
+    """Transition REVIEWING tickets to VERIFYING or REWORK based on reviewer verdicts.
+
+    Uses batch_transition to apply all state changes in memory and save once,
+    avoiding O(K*N) serialization cost per dispatch cycle.
+    """
     try:
         from codebot.ticket_engine import TicketStore, TicketState
     except ImportError:
@@ -745,7 +775,10 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
     if not claims_dir.exists():
         return 0
 
-    advanced = 0
+    # Phase 1: Collect all transitions by analyzing reviewer verdicts
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
+    tickets_to_clean: list[tuple[str, list]] = []  # (tid, review_claims)
+
     for ticket in reviewing:
         tid = getattr(ticket, 'id', '')
         if not tid:
@@ -789,58 +822,80 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
         if not all_reviewers_done:
             continue
 
-        try:
-            if has_rework_flag:
-                try:
-                    from codebot.scratchpad import load_scratchpad, save_scratchpad
-                    scratch = load_scratchpad(STATE_DIR, tid)
-                    for claim_file in review_claims:
-                        bn = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
-                        tl = LOGS_DIR / f"{bn}.tasklog"
-                        if tl.exists():
-                            try:
-                                content = tl.read_text(encoding="utf-8", errors="ignore")
-                                if content.strip():
-                                    scratch.agent_history.append({
-                                        "agent": bn,
-                                        "stage": "REVIEWING",
-                                        "started_at": time.time(),
-                                        "finished_at": time.time(),
-                                        "completed_steps": [],
-                                        "files_changed": [],
-                                        "summary": "reviewer verdict: REWORK",
-                                        "error": content.strip()[-2000:],
-                                    })
-                            except OSError:
-                                pass
-                    save_scratchpad(STATE_DIR, scratch)
-                except Exception as se:
-                    logger.warning(f"Failed to write reviewer feedback to scratchpad for {tid}: {se}")
-                ts.transition(tid, TicketState.REWORK)
-                logger.info(f"Review verdict: {tid} -> REWORK")
-            else:
-                ts.transition(tid, TicketState.VERIFYING)
-                logger.info(f"Review verdict: {tid} -> VERIFYING")
+        target_state = TicketState.REWORK if has_rework_flag else TicketState.VERIFYING
+        reviewer_feedback = None
 
-            for claim_file in review_claims:
-                try:
-                    claim_file.unlink()
-                except OSError:
-                    pass
+        if has_rework_flag:
+            try:
+                from codebot.scratchpad import load_scratchpad, save_scratchpad
+                scratch = load_scratchpad(STATE_DIR, tid)
+                for claim_file in review_claims:
+                    bn = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
+                    tl = LOGS_DIR / f"{bn}.tasklog"
+                    if tl.exists():
+                        try:
+                            content = tl.read_text(encoding="utf-8", errors="ignore")
+                            if content.strip():
+                                scratch.agent_history.append({
+                                    "agent": bn,
+                                    "stage": "REVIEWING",
+                                    "started_at": time.time(),
+                                    "finished_at": time.time(),
+                                    "completed_steps": [],
+                                    "files_changed": [],
+                                    "summary": "reviewer verdict: REWORK",
+                                    "error": content.strip()[-2000:],
+                                })
+                        except OSError:
+                            pass
+                save_scratchpad(STATE_DIR, scratch)
+            except Exception as se:
+                logger.warning(f"Failed to write reviewer feedback to scratchpad for {tid}: {se}")
 
-            for name, bot in bots.items():
-                if getattr(bot, '_assigned_ticket_id', '') == tid:
-                    bot._assigned_ticket_id = ''
+        transitions.append((tid, target_state, reviewer_feedback))
+        tickets_to_clean.append((tid, review_claims))
 
-            advanced += 1
-        except ValueError as e:
-            logger.warning(f"Failed to advance {tid}: {e}")
+    if not transitions:
+        return 0
+
+    # Phase 2: Apply all transitions in a single batch save
+    advanced = 0
+    try:
+        results = ts.batch_transition(transitions)
+        advanced = len(results)
+        for i, (tid, target_state, _) in enumerate(transitions):
+            logger.info(f"Review verdict: {tid} -> {target_state.value}")
+    except (ValueError, KeyError) as e:
+        # Fallback: apply individually if batch fails
+        logger.warning(f"Batch advance failed ({e}), falling back to individual transitions")
+        for tid, target_state, fb in transitions:
+            try:
+                ts.transition(tid, target_state, fb)
+                logger.info(f"Review verdict: {tid} -> {target_state.value}")
+                advanced += 1
+            except ValueError as ve:
+                logger.warning(f"Failed to advance {tid}: {ve}")
+
+    # Phase 3: Clean up claims and assignments for successfully transitioned tickets
+    for tid, review_claims in tickets_to_clean:
+        for claim_file in review_claims:
+            try:
+                claim_file.unlink()
+            except OSError:
+                pass
+        for name, bot in bots.items():
+            if getattr(bot, '_assigned_ticket_id', '') == tid:
+                bot._assigned_ticket_id = ''
 
     return advanced
 
 
 def gatekeeper_verify_tickets() -> int:
-    """Advance VERIFYING tickets to COMPLETE via quality gate evaluation."""
+    """Advance VERIFYING tickets to COMPLETE via quality gate evaluation.
+
+    Uses batch_transition to apply all state changes in memory and save once,
+    avoiding O(K*N) serialization cost per dispatch cycle.
+    """
     try:
         from codebot.ticket_engine import TicketStore, TicketState
     except ImportError:
@@ -861,7 +916,11 @@ def gatekeeper_verify_tickets() -> int:
     if not verifying:
         return 0
 
-    advanced = 0
+    # Phase 1: Evaluate quality gates and collect transitions
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
+    completed_tids: list[str] = []
+    log_messages: list[tuple[str, str]] = []  # (level, message)
+
     for ticket in verifying:
         tid = getattr(ticket, 'id', '')
         if not tid:
@@ -883,9 +942,7 @@ def gatekeeper_verify_tickets() -> int:
             if passed:
                 changed_files = ticket.affected_modules if ticket.affected_modules else []
                 files_actually_modified = False
-                if not changed_files:
-                    files_actually_modified = False
-                else:
+                if changed_files:
                     for mod in changed_files[:5]:
                         try:
                             r = subprocess.run(
@@ -902,32 +959,61 @@ def gatekeeper_verify_tickets() -> int:
                 if not files_actually_modified:
                     rework_count = getattr(ticket, 'rework_count', 0)
                     if rework_count < 3:
-                        ts.transition(tid, TicketState.REWORK)
-                        logger.info(f"Gatekeeper: {tid} -> REWORK (gates passed but no files modified in git)")
+                        transitions.append((tid, TicketState.REWORK, None))
+                        log_messages.append(("info", f"Gatekeeper: {tid} -> REWORK (gates passed but no files modified in git)"))
                     else:
-                        ts.transition(tid, TicketState.REJECTED)
-                        logger.warning(f"Gatekeeper: {tid} -> REJECTED (no modifications after {rework_count} reworks)")
-                    advanced += 1
+                        transitions.append((tid, TicketState.REJECTED, None))
+                        log_messages.append(("warning", f"Gatekeeper: {tid} -> REJECTED (no modifications after {rework_count} reworks)"))
                     continue
-                ts.transition(tid, TicketState.COMPLETE)
-                logger.info(f"Gatekeeper: {tid} -> COMPLETE (all gates passed)")
-                try:
-                    from codebot.scratchpad import clear_scratchpad
-                    clear_scratchpad(STATE_DIR, tid)
-                except Exception:
-                    pass
-                advanced += 1
+                transitions.append((tid, TicketState.COMPLETE, None))
+                completed_tids.append(tid)
+                log_messages.append(("info", f"Gatekeeper: {tid} -> COMPLETE (all gates passed)"))
             else:
                 rework_count = getattr(ticket, 'rework_count', 0)
                 if rework_count < 3:
-                    ts.transition(tid, TicketState.REWORK)
-                    logger.info(f"Gatekeeper: {tid} -> REWORK (gates failed, attempt {rework_count + 1})")
+                    transitions.append((tid, TicketState.REWORK, None))
+                    log_messages.append(("info", f"Gatekeeper: {tid} -> REWORK (gates failed, attempt {rework_count + 1})"))
                 else:
-                    ts.transition(tid, TicketState.REJECTED)
-                    logger.warning(f"Gatekeeper: {tid} -> REJECTED (exceeded {rework_count} reworks)")
-                advanced += 1
+                    transitions.append((tid, TicketState.REJECTED, None))
+                    log_messages.append(("warning", f"Gatekeeper: {tid} -> REJECTED (exceeded {rework_count} reworks)"))
         except Exception as e:
             logger.warning(f"Gatekeeper verification failed for {tid}: {e}")
+
+    if not transitions:
+        return 0
+
+    # Phase 2: Apply all transitions in a single batch save
+    advanced = 0
+    try:
+        results = ts.batch_transition(transitions)
+        advanced = len(results)
+        for level, msg in log_messages:
+            if level == "warning":
+                logger.warning(msg)
+            else:
+                logger.info(msg)
+    except (ValueError, KeyError) as e:
+        # Fallback: apply individually if batch fails
+        logger.warning(f"Batch gatekeeper failed ({e}), falling back to individual transitions")
+        for i, (tid, target_state, fb) in enumerate(transitions):
+            try:
+                ts.transition(tid, target_state, fb)
+                level, msg = log_messages[i] if i < len(log_messages) else ("info", f"Gatekeeper: {tid} -> {target_state.value}")
+                if level == "warning":
+                    logger.warning(msg)
+                else:
+                    logger.info(msg)
+                advanced += 1
+            except ValueError as ve:
+                logger.warning(f"Failed to advance {tid}: {ve}")
+
+    # Phase 3: Clear scratchpads for completed tickets
+    for tid in completed_tids:
+        try:
+            from codebot.scratchpad import clear_scratchpad
+            clear_scratchpad(STATE_DIR, tid)
+        except Exception:
+            pass
 
     return advanced
 
@@ -1070,7 +1156,11 @@ def process_rework_tickets(bots: dict[str, Any]) -> int:
 
 
 def recover_deferred_tickets() -> int:
-    """Recover DEFERRED tickets back to READY or DECOMPOSE."""
+    """Recover DEFERRED tickets back to READY or DECOMPOSE.
+
+    Uses batch_transition to apply all state changes in memory and save once,
+    avoiding O(K*N) serialization cost per dispatch cycle.
+    """
     store_path = STATE_DIR / "tickets.json"
     if not store_path.exists():
         store_path = Path(".codebot/state/tickets.json")
@@ -1085,16 +1175,30 @@ def recover_deferred_tickets() -> int:
         return 0
     if not deferred:
         return 0
+
+    # Collect all transitions, then apply in a single batch
+    target_state = TicketState.DECOMPOSE if decompose_count == 0 else TicketState.READY
+    transitions: list[tuple[str, Any, list[dict] | None]] = [
+        (ticket.id, target_state, None) for ticket in deferred
+    ]
+
     recovered = 0
-    for ticket in deferred:
-        try:
-            if decompose_count == 0:
-                ts.transition(ticket.id, TicketState.DECOMPOSE)
-                logger.info(f"Recovered deferred ticket {ticket.id} -> DECOMPOSE (queue cleared)")
-            else:
-                ts.transition(ticket.id, TicketState.READY)
-                logger.info(f"Recovered deferred ticket {ticket.id} -> READY")
-            recovered += 1
-        except ValueError as e:
-            logger.warning(f"Deferred ticket {ticket.id} recovery failed: {e}")
+    try:
+        results = ts.batch_transition(transitions)
+        recovered = len(results)
+        reason = "(queue cleared)" if target_state == TicketState.DECOMPOSE else ""
+        for tid, _, _ in transitions:
+            logger.info(f"Recovered deferred ticket {tid} -> {target_state.value} {reason}".strip())
+    except (ValueError, KeyError) as e:
+        # Fallback: apply individually if batch fails
+        logger.warning(f"Batch deferred recovery failed ({e}), falling back to individual transitions")
+        for ticket in deferred:
+            try:
+                ts.transition(ticket.id, target_state)
+                reason = "(queue cleared)" if target_state == TicketState.DECOMPOSE else ""
+                logger.info(f"Recovered deferred ticket {ticket.id} -> {target_state.value} {reason}".strip())
+                recovered += 1
+            except ValueError as ve:
+                logger.warning(f"Deferred ticket {ticket.id} recovery failed: {ve}")
+
     return recovered

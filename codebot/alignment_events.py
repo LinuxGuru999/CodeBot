@@ -44,12 +44,33 @@ def set_dirs(state_dir: Path, logs_dir: Path) -> None:
 
 
 def _ensure_dirs() -> None:
-    """Ensure alignment events directory exists."""
+    """Ensure the alignment events directory exists.
+
+    Creates ``_ALIGNMENT_EVENTS_DIR`` (and parents) if missing. Idempotent —
+    safe to call on every write. Exists so ``write_alignment_event`` never
+    fails due to a missing directory after a fresh ``state_dir`` is configured
+    via ``set_dirs``.
+
+    Returns:
+        None
+    """
     _ALIGNMENT_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _started_at_for(bot_name: str) -> Optional[float]:
-    """Best-effort spawn time from state file; None if unavailable."""
+    """Best-effort lookup of a bot's spawn time from its state file.
+
+    Reads ``{bot_name}.state.json`` under ``_STATE_DIR`` and extracts the
+    ``started`` field. Used to compute ``run_duration`` when the caller does
+    not provide an explicit ``started_at``.
+
+    Args:
+        bot_name: Bot directory/name whose state file to inspect.
+
+    Returns:
+        Unix timestamp as float if present and positive, otherwise ``None``
+        (missing file, corrupt JSON, absent/non-numeric field) — never raises.
+    """
     p = _STATE_DIR / f"{bot_name}.state.json"
     try:
         if p.exists():
@@ -63,7 +84,19 @@ def _started_at_for(bot_name: str) -> Optional[float]:
 
 
 def _read_heartbeat(bot_name: str) -> float:
-    """Read bot's last heartbeat timestamp. Returns 0 if missing/stale/corrupt."""
+    """Read a bot's last heartbeat timestamp from ``{bot_name}.heartbeat``.
+
+    Supports two formats written by the heartbeat infrastructure: a bare
+    Unix-epoch float (``str(time.time())``) and an ISO-8601 string. Values
+    far in the future (>60 s) or older than 24 h are treated as stale.
+
+    Args:
+        bot_name: Bot whose heartbeat file to read.
+
+    Returns:
+        Unix timestamp as float if parseable and fresh, otherwise ``0.0``
+        when the file is missing, stale, or corrupt — never raises.
+    """
     hb = _STATE_DIR / f"{bot_name}.heartbeat"
     if not hb.exists():
         return 0.0
@@ -89,12 +122,31 @@ def _read_heartbeat(bot_name: str) -> float:
 
 
 def _log_path(bot_name: str) -> Path:
-    """Return path to bot's log file."""
+    """Return the filesystem path to a bot's log file.
+
+    Args:
+        bot_name: Bot directory/name.
+
+    Returns:
+        ``Path`` under ``_LOGS_DIR`` for ``{bot_name}.log``. No I/O is
+        performed; the file may not exist.
+    """
     return _LOGS_DIR / f"{bot_name}.log"
 
 
 def _log_bytes(bot_name: str) -> Optional[int]:
-    """Get log file size in bytes, or None if unavailable."""
+    """Get a bot's log file size in bytes.
+
+    Convenience wrapper around ``_log_path`` + ``Path.stat()``, used to
+    populate ``log_bytes_at_exit`` in the alignment event payload.
+
+    Args:
+        bot_name: Bot whose log size to measure.
+
+    Returns:
+        File size in bytes if the log exists and is stat-able, otherwise
+        ``None`` — never raises.
+    """
     lp = _log_path(bot_name)
     try:
         if lp.exists():

@@ -77,7 +77,10 @@ class TestTransitionTicketOnError:
     def test_error_exit_different_codes(self, tmp_path):
         """Various error exit codes should all transition to READY."""
         for exit_code in [1, 2, 4, 127, 255]:
-            store_path = tmp_path / f"tickets_{exit_code}.json"
+            store_path = tmp_path / "tickets.json"
+            # Remove previous file if exists from prior iteration
+            if store_path.exists():
+                store_path.unlink()
             store = TicketStore(store_path)
             
             t = create_ticket(
