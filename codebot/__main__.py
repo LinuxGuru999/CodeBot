@@ -6,6 +6,8 @@ Usage:
     python -m codebot drain --project /path/to/project
     python -m codebot clear-drain --project /path/to/project
     python -m codebot validate --project /path/to/project
+    python -m codebot stop-all --project /path/to/project
+    python -m codebot start --project /path/to/project [agents ...]
 """
 import argparse
 import sys
