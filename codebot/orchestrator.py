@@ -1206,7 +1206,7 @@ def _sweep_orphan_claims(bots: dict[str, BotState]) -> int:
     for p in claims_dir.glob("*.json"):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            worker = data.get("worker", "")
+            worker = data.get("worker", data.get("bot", ""))
             at = float(data.get("at", 0))
             age = now - at
             if worker not in alive_bots and age > CLAIM_TTL_SECONDS:
@@ -1428,8 +1428,20 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
     claims_dir = STATE_DIR / "claims"
     claims_dir.mkdir(parents=True, exist_ok=True)
     active_claims: set[str] = set()
+    alive_bots = {name for name, b in bots.items() if b.process is not None and b.process.poll() is None}
     for p in claims_dir.glob("*.json"):
-        active_claims.add(p.stem.rsplit(".", 1)[0])
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            worker = data.get("bot", data.get("worker", ""))
+            if worker in alive_bots:
+                active_claims.add(p.stem.rsplit(".", 1)[0])
+            else:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        except Exception:
+            pass
 
     spawned = 0
     model_idx = 0
@@ -1474,7 +1486,7 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
         if claim_file.exists():
             return False
         try:
-            claim_data = {"ticket_id": tid, "bot": bot.config.name, "at": time.time()}
+            claim_data = {"ticket_id": tid, "bot": bot.config.name, "worker": bot.config.name, "at": time.time()}
             tmp = claim_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(claim_data), encoding="utf-8")
             tmp.replace(claim_file)
@@ -3189,59 +3201,8 @@ def rotate_logs(max_bytes: int = 10_000_000, keep: int = 1) -> None:
 
 
 def _parse_queue_complexity(queue_path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    if not queue_path.exists():
-        return result
-    try:
-        content = queue_path.read_text(encoding="utf-8")
-    except OSError:
-        return result
-    in_table = False
-    for line in content.splitlines():
-        if not line.startswith("|"):
-            continue
-        if line.startswith("|---") or line.startswith("| -"):
-            continue
-        parts = [p.strip() for p in line.split("|")[1:-1]]
-        while parts and parts[-1] == "":
-            parts.pop()
-        if not in_table:
-            if len(parts) >= 7 and parts[0].lower() == "id" and parts[1].lower() == "source":
-                in_table = True
-            continue
-        if not parts or not parts[0].startswith("Q-"):
-            continue
-        item_id = parts[0]
-        known_status = {"confirmed", "approved", "implemented", "wontfix", "deferred", "queued", "in_progress", "blocked", "false-positive"}
-        status_idx = None
-        for idx, val in enumerate(parts):
-            if val.lower() in known_status:
-                status_idx = idx
-                break
-        if status_idx is None or status_idx == 0:
-            continue
-        status = parts[status_idx].lower()
-        if status not in ("confirmed", "approved"):
-            continue
-        comp_idx = status_idx - 1
-        if comp_idx < len(parts):
-            complexity = parts[comp_idx].lower()
-            if complexity == "":
-                complexity = "medium"
-            elif complexity in ("trivial", "small"):
-                pass
-            elif complexity == "low":
-                complexity = "small"
-            elif complexity == "medium":
-                complexity = "medium"
-            elif complexity == "high":
-                complexity = "high"
-            else:
-                complexity = "medium"
-        else:
-            complexity = "medium"
-        result[item_id] = complexity
-    return result
+    """No-op: QUEUE.md parsing removed. Returns empty dict."""
+    return {}
 
 
 def now_gate_logged(bot: BotState) -> bool:
@@ -4076,11 +4037,9 @@ def _manifest_resolve_file(rel_path: str) -> Path:
 
 
 def _manifest_load_queue_text() -> str:
-    """Load queue text for readiness checks, filtering unapproved T4+ items.
+    """Load queue text for readiness checks via TicketStore exclusively.
 
-    WIRE-02: When ticket_engine is available, loads tickets from the normalized
-    TicketStore instead of parsing QUEUE.md markdown. Falls back to QUEUE.md
-    parsing when ticket_engine is unavailable or no ticket store exists yet.
+    Returns empty string when ticket_engine is unavailable. No markdown fallback.
     """
     try:
         from codebot.ticket_engine import TicketStore, TicketState
@@ -4108,40 +4067,10 @@ def _manifest_load_queue_text() -> str:
                     lines.append("")
                 return "\n".join(lines)
     except ImportError:
-        pass
+        return ""
     except Exception:
-        pass
-
-    candidates = [
-        BOTS_DIR / "docs" / "triage" / "QUEUE.md",
-        BOTS_DIR / "QUEUE.md",
-        Path("docs/triage/QUEUE.md"),
-    ]
-    global _QUEUE_SNAPSHOT
-    raw = ""
-    for qp in candidates:
-        try:
-            if qp.exists():
-                mtime = qp.stat().st_mtime
-                if _QUEUE_SNAPSHOT and _QUEUE_SNAPSHOT[:2] == (qp, mtime):
-                    raw = _QUEUE_SNAPSHOT[2]
-                    break
-                raw = qp.read_text(encoding="utf-8")
-                _QUEUE_SNAPSHOT = (qp, mtime, raw)
-                break
-        except OSError:
-            continue
-    if not raw:
-        return raw
-    try:
-        from codebot.readiness import load_approved_ids, filter_unapproved_items
-    except ImportError:
-        try:
-            from codebot.readiness import load_approved_ids, filter_unapproved_items
-        except ImportError:
-            return raw
-    approved = load_approved_ids(str(STATE_DIR))
-    return filter_unapproved_items(raw, approved)
+        return ""
+    return ""
 
 
 def _manifest_read_noop_value(manifest: dict) -> int:
