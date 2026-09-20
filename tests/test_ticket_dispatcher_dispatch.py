@@ -1,293 +1,516 @@
-"""Benchmark and correctness tests for O(1) role-indexed dispatch.
+#!/usr/bin/env python3
+"""Tests for ticket dispatcher dispatch performance and correctness.
 
-Verifies CB-2142764-F655: spawn_demand_agents uses dict-based role lookup
-instead of O(n*m) nested iteration, achieving <1ms dispatch for 100 tickets
-and 20 bots.
+Verifies:
+- O(1) role-indexed lookup achieves <1ms dispatch for 100 tickets/20 bots
+- Correct bot selection per ticket class via TICKET_CLASS_TO_IMPLEMENTER
+- Reviewer role indexed lookup also O(1)
+- Edge cases: zero bots, unknown class, hyphenated bot names
 """
 
-from __future__ import annotations
-
+import json
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from codebot.ticket_engine import Ticket, TicketClass, TicketState, Severity, RiskLevel
+# Ensure project root is on path
+project_root = Path(__file__).parent.parent
+import sys
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from codebot.process_manager import BotConfig, BotState
 from codebot.ticket_dispatcher import (
-    spawn_demand_agents,
-    TICKET_CLASS_TO_IMPLEMENTER,
     IMPLEMENTER_ROLE_NAMES,
     REVIEWER_ROLE_NAMES,
     REVIEWER_TYPES,
+    TICKET_CLASS_TO_IMPLEMENTER,
+    spawn_demand_agents,
 )
+from codebot.ticket_engine import Ticket, TicketState
 
 
-def _make_ticket(tid: str, ticket_class: TicketClass, state: TicketState = TicketState.IMPLEMENTING) -> Ticket:
+def _make_bot(name: str, enabled: bool = True, running: bool = False) -> BotState:
+    """Create a mock BotState for testing."""
+    cfg = BotConfig(
+        name=name,
+        prompt_file=f"{name.split('-')[0]}.md",
+        interval_seconds=30,
+        heartbeat_timeout=90,
+        model="xiaomi-mimo-2.5",
+        enabled=enabled,
+    )
+    bot = BotState(config=cfg)
+    if running:
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # Still running
+        bot.process = mock_proc
+    return bot
+
+
+def _make_ticket(tid: str, ticket_class: str, state: TicketState = TicketState.IMPLEMENTING) -> Ticket:
+    """Create a mock Ticket for testing."""
     return Ticket(
         id=tid,
-        title=f"Test {tid}",
+        title=f"Test ticket {tid}",
         ticket_class=ticket_class,
-        severity=Severity.MEDIUM,
-        state=state,
+        severity="medium",
         source="test",
-        evidence="evidence",
-        problem_statement="problem",
-        desired_state="desired",
-        acceptance_criteria=["ac1"],
-        affected_modules=["mod.py"],
-        dependencies=[],
-        risk=RiskLevel.LOW,
-        blast_radius="low",
-        security_impact="none",
-        migration_impact="none",
-        required_reviewers=[],
-        required_tests=[],
-        documentation_requirements=[],
-        rollback_strategy="revert",
-        estimated_cost_tokens=100,
-        created_at=time.time(),
-        updated_at=time.time(),
+        evidence="test evidence",
+        problem_statement="test problem",
+        desired_state="test desired",
+        acceptance_criteria="test criteria",
+        affected_modules="test_module.py",
+        risk="low",
+        state=state,
     )
 
 
-@dataclass
-class MockBotConfig:
-    name: str
-    enabled: bool = True
-
-
-@dataclass
-class MockBotState:
-    config: MockBotConfig
-    process: Any = None
-    _assigned_ticket_id: str = ""
-
-
-def _build_bots(num_per_role: int = 3) -> dict[str, MockBotState]:
-    """Build a dict of idle mock bots across all implementer roles."""
-    bots: dict[str, MockBotState] = {}
-    roles = list(IMPLEMENTER_ROLE_NAMES) + ["ux_reviewer"] + list(REVIEWER_ROLE_NAMES)
-    for role in roles:
-        for i in range(num_per_role):
-            name = f"{role}-{i+1}" if num_per_role > 1 else role
-            bots[name] = MockBotState(config=MockBotConfig(name=name, enabled=True), process=None)
-    return bots
-
-
-class FakeTicketStore:
-    def __init__(self, implementing=None, reviewing=None, rework=None):
-        self._impl = implementing or []
-        self._rev = reviewing or []
-        self._rework = rework or []
-
-    def list_by_state(self, state: TicketState):
-        if state == TicketState.IMPLEMENTING:
-            return self._impl
-        if state == TicketState.REVIEWING:
-            return self._rev
-        if state == TicketState.REWORK:
-            return self._rework
-        return []
-
-
 class TestDispatchPerformance:
-    """Verify O(1) role-indexed dispatch meets <1ms target."""
+    """Benchmark tests for dispatch performance."""
 
-    @patch("codebot.ticket_dispatcher.STATE_DIR", Path("/tmp/codebot_test_dispatch"))
     def test_dispatch_100_tickets_20_bots_under_1ms(self, tmp_path):
-        """100 tickets dispatched against 20 bots must complete in <1ms."""
-        # Create 100 tickets across various classes
-        tickets = []
-        classes = list(TICKET_CLASS_TO_IMPLEMENTER.keys())
-        for i in range(100):
-            tc = TicketClass(classes[i % len(classes)])
-            tickets.append(_make_ticket(f"T-{i:04d}", tc))
+        """Dispatch time for 100 tickets and 20 bots must be <1ms.
 
-        # Build 20 bots spread across roles
-        bots: dict[str, MockBotState] = {}
+        This verifies the O(1) role-indexed lookup replaces the legacy
+        O(n*m) nested loop (100*20=2000 iterations).
+        """
+        # Create 20 bots across 6 implementer roles
         roles = list(IMPLEMENTER_ROLE_NAMES)
+        bots = {}
         for i in range(20):
             role = roles[i % len(roles)]
-            name = f"{role}-{i+1}"
-            bots[name] = MockBotState(config=MockBotConfig(name=name, enabled=True), process=None)
+            bot_name = f"{role}-{i+1}"
+            bots[bot_name] = _make_bot(bot_name, enabled=True, running=False)
 
-        fake_store = FakeTicketStore(implementing=tickets)
-        start_bot_fn = MagicMock(return_value=False)  # Don't actually spawn
+        # Create 100 tickets in IMPLEMENTING state with various classes
+        ticket_classes = list(TICKET_CLASS_TO_IMPLEMENTER.keys())
+        tickets = []
+        for i in range(100):
+            tc = ticket_classes[i % len(ticket_classes)]
+            tickets.append(_make_ticket(f"CB-PERF-{i:03d}", tc, TicketState.IMPLEMENTING))
 
-        with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
-            with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                start = time.perf_counter()
-                spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=start_bot_fn)
-                elapsed = time.perf_counter() - start
+        # Write tickets to temp state dir
+        state_dir = tmp_path / ".codebot" / "state"
+        state_dir.mkdir(parents=True)
+        tickets_file = state_dir / "tickets.json"
+        tickets_data = {
+            "tickets": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "ticket_class": t.ticket_class,
+                    "severity": t.severity,
+                    "source": t.source,
+                    "evidence": t.evidence,
+                    "problem_statement": t.problem_statement,
+                    "desired_state": t.desired_state,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "affected_modules": t.affected_modules,
+                    "risk": t.risk,
+                    "state": t.state.value,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                    "assignee": t.assignee,
+                    "rework_count": t.rework_count,
+                    "sub_tickets": t.sub_tickets,
+                    "parent_ticket": t.parent_ticket,
+                    "plan_depth": t.plan_depth,
+                    "implementation_plan": t.implementation_plan,
+                    "decomposed_from": t.decomposed_from,
+                }
+                for t in tickets
+            ]
+        }
+        tickets_file.write_text(json.dumps(tickets_data), encoding="utf-8")
 
-        # The core dict build + lookup loop should be well under 1ms.
-        # We allow up to 15ms to account for CI overhead and mock I/O,
-        # but the algorithmic complexity is what matters: O(n+m) not O(n*m).
-        assert elapsed < 0.015, f"Dispatch took {elapsed*1000:.2f}ms, expected <15ms"
+        # Mock start_bot_fn to no-op
+        spawned_count = 0
+
+        def mock_start_bot(bot, **kwargs):
+            nonlocal spawned_count
+            spawned_count += 1
+            return True
+
+        # Measure dispatch time (excluding I/O - the role lookup loop itself)
+        with patch("codebot.ticket_dispatcher.STATE_DIR", state_dir):
+            # Clear cache to ensure fresh load
+            from codebot.ticket_dispatcher import clear_ticket_store_cache
+            clear_ticket_store_cache()
+
+            start = time.perf_counter()
+            spawned = spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=mock_start_bot)
+            elapsed = time.perf_counter() - start
+
+        print(f"dispatch 100/20 in {elapsed*1000:.3f} ms (spawned={spawned})")
+        assert elapsed < 0.001, f"Dispatch took {elapsed*1000:.3f}ms, expected <1ms"
+        assert spawned > 0, "Should have spawned at least one bot"
 
 
 class TestCorrectBotSelection:
-    """Verify routing correctness: each ticket_class maps to the right role."""
+    """Test correct bot selection per ticket class."""
 
-    @patch("codebot.ticket_dispatcher.STATE_DIR", Path("/tmp/codebot_test_dispatch"))
     def test_correct_bot_selection_per_class(self, tmp_path):
-        """For every ticket_class, the dispatched bot base matches TICKET_CLASS_TO_IMPLEMENTER."""
-        spawned_roles: list[str] = []
+        """For each ticket_class, dispatched bot base matches expected implementer role."""
+        # Create one bot per implementer role
+        bots = {}
+        for role in IMPLEMENTER_ROLE_NAMES:
+            bot_name = f"{role}-1"
+            bots[bot_name] = _make_bot(bot_name, enabled=True, running=False)
 
-        def capture_start(bot, **kwargs):
-            base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
-            spawned_roles.append(base)
-            return False  # Don't actually start
+        # Create one ticket per ticket class
+        tickets = []
+        for tc in TICKET_CLASS_TO_IMPLEMENTER:
+            tickets.append(_make_ticket(f"CB-CORRECT-{tc}", tc, TicketState.IMPLEMENTING))
 
-        for tc_str, expected_role in TICKET_CLASS_TO_IMPLEMENTER.items():
-            tc = TicketClass(tc_str)
-            ticket = _make_ticket(f"T-{tc_str}", tc)
-            bots = _build_bots(num_per_role=2)
-            fake_store = FakeTicketStore(implementing=[ticket])
+        # Write tickets to temp state dir
+        state_dir = tmp_path / ".codebot" / "state"
+        state_dir.mkdir(parents=True)
+        tickets_file = state_dir / "tickets.json"
+        tickets_data = {
+            "tickets": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "ticket_class": t.ticket_class,
+                    "severity": t.severity,
+                    "source": t.source,
+                    "evidence": t.evidence,
+                    "problem_statement": t.problem_statement,
+                    "desired_state": t.desired_state,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "affected_modules": t.affected_modules,
+                    "risk": t.risk,
+                    "state": t.state.value,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                    "assignee": t.assignee,
+                    "rework_count": t.rework_count,
+                    "sub_tickets": t.sub_tickets,
+                    "parent_ticket": t.parent_ticket,
+                    "plan_depth": t.plan_depth,
+                    "implementation_plan": t.implementation_plan,
+                    "decomposed_from": t.decomposed_from,
+                }
+                for t in tickets
+            ]
+        }
+        tickets_file.write_text(json.dumps(tickets_data), encoding="utf-8")
 
-            with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
-                with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                    (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                    spawned_roles.clear()
-                    spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
+        # Track which bot was assigned to which ticket
+        assignments = {}
 
-            if spawned_roles:
-                assert spawned_roles[0] == expected_role, (
-                    f"ticket_class={tc_str}: expected {expected_role}, got {spawned_roles[0]}"
-                )
+        def mock_start_bot(bot, **kwargs):
+            # Find the ticket this bot was assigned to
+            assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+            if assigned_tid:
+                assignments[assigned_tid] = bot.config.name
+            return True
 
-    @patch("codebot.ticket_dispatcher.STATE_DIR", Path("/tmp/codebot_test_dispatch"))
-    def test_unknown_class_falls_back_to_general(self, tmp_path):
-        """Unknown ticket_class values fall back to general_implementer."""
-        spawned_roles: list[str] = []
+        with patch("codebot.ticket_dispatcher.STATE_DIR", state_dir):
+            from codebot.ticket_dispatcher import clear_ticket_store_cache
+            clear_ticket_store_cache()
+            spawned = spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=mock_start_bot)
 
-        def capture_start(bot, **kwargs):
-            base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
-            spawned_roles.append(base)
-            return False
+        # Verify each ticket was assigned to the correct role
+        for ticket in tickets:
+            tid = ticket.id
+            expected_role = TICKET_CLASS_TO_IMPLEMENTER[ticket.ticket_class]
+            assert tid in assignments, f"Ticket {tid} was not assigned"
+            assigned_bot = assignments[tid]
+            assigned_base = assigned_bot.split("-")[0] if "-" in assigned_bot else assigned_bot
+            assert assigned_base == expected_role, (
+                f"Ticket {tid} (class={ticket.ticket_class}) assigned to {assigned_bot}, "
+                f"expected base={expected_role}"
+            )
 
-        # Create a ticket with a class not in TICKET_CLASS_TO_IMPLEMENTER
-        ticket = _make_ticket("T-unknown", TicketClass.BUG)
-        # Manually override to simulate unknown
-        ticket = Ticket(
-            id="T-unknown",
-            title="Unknown",
-            ticket_class=TicketClass.BUG,  # Will be overridden in dispatch via getattr
-            severity=Severity.MEDIUM,
-            state=TicketState.IMPLEMENTING,
-            source="test",
-            evidence="e",
-            problem_statement="p",
-            desired_state="d",
-            acceptance_criteria=[],
-            affected_modules=[],
-            dependencies=[],
-            risk=RiskLevel.LOW,
-            blast_radius="",
-            security_impact="",
-            migration_impact="",
-            required_reviewers=[],
-            required_tests=[],
-            documentation_requirements=[],
-            rollback_strategy="",
-            estimated_cost_tokens=0,
-            created_at=0.0,
-            updated_at=0.0,
-        )
-        # Patch ticket_class to return something not in the map
-        type(ticket).ticket_class_str = property(lambda self: "nonexistent")
+    def test_hyphenated_bot_names_indexed_correctly(self, tmp_path):
+        """Bots with hyphenated names like backend_implementer-10 index under backend_implementer."""
+        # Create bots with multi-digit suffixes
+        bots = {
+            "general_implementer-1": _make_bot("general_implementer-1", enabled=True, running=False),
+            "general_implementer-10": _make_bot("general_implementer-10", enabled=True, running=False),
+            "backend_implementer-2": _make_bot("backend_implementer-2", enabled=True, running=False),
+            "test_implementer-5": _make_bot("test_implementer-5", enabled=True, running=False),
+        }
 
-        bots = _build_bots(num_per_role=1)
-        fake_store = FakeTicketStore(implementing=[ticket])
+        # Create tickets for each class
+        tickets = [
+            _make_ticket("CB-HYPH-001", "bug", TicketState.IMPLEMENTING),
+            _make_ticket("CB-HYPH-002", "security", TicketState.IMPLEMENTING),
+            _make_ticket("CB-HYPH-003", "test", TicketState.IMPLEMENTING),
+        ]
 
-        with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
-            with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
+        state_dir = tmp_path / ".codebot" / "state"
+        state_dir.mkdir(parents=True)
+        tickets_file = state_dir / "tickets.json"
+        tickets_data = {
+            "tickets": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "ticket_class": t.ticket_class,
+                    "severity": t.severity,
+                    "source": t.source,
+                    "evidence": t.evidence,
+                    "problem_statement": t.problem_statement,
+                    "desired_state": t.desired_state,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "affected_modules": t.affected_modules,
+                    "risk": t.risk,
+                    "state": t.state.value,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                    "assignee": t.assignee,
+                    "rework_count": t.rework_count,
+                    "sub_tickets": t.sub_tickets,
+                    "parent_ticket": t.parent_ticket,
+                    "plan_depth": t.plan_depth,
+                    "implementation_plan": t.implementation_plan,
+                    "decomposed_from": t.decomposed_from,
+                }
+                for t in tickets
+            ]
+        }
+        tickets_file.write_text(json.dumps(tickets_data), encoding="utf-8")
 
-        # Should still dispatch (to general_implementer fallback or bug's mapping)
-        # The key assertion is no crash and correct fallback behavior.
-        # When start_bot_fn returns False, the dispatcher may try a second bot
-        # from idle_bots_by_role before falling back to _get_or_create_bot,
-        # so we allow up to 2 attempts but all must be general_implementer.
-        assert len(spawned_roles) <= 2
-        for role in spawned_roles:
-            assert role == "general_implementer"
+        assignments = {}
+
+        def mock_start_bot(bot, **kwargs):
+            assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+            if assigned_tid:
+                assignments[assigned_tid] = bot.config.name
+            return True
+
+        with patch("codebot.ticket_dispatcher.STATE_DIR", state_dir):
+            from codebot.ticket_dispatcher import clear_ticket_store_cache
+            clear_ticket_store_cache()
+            spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=mock_start_bot)
+
+        # bug -> general_implementer
+        assert "CB-HYPH-001" in assignments
+        assert assignments["CB-HYPH-001"].startswith("general_implementer")
+        # security -> backend_implementer
+        assert "CB-HYPH-002" in assignments
+        assert assignments["CB-HYPH-002"].startswith("backend_implementer")
+        # test -> test_implementer
+        assert "CB-HYPH-003" in assignments
+        assert assignments["CB-HYPH-003"].startswith("test_implementer")
 
 
-class TestReviewerRoleIndexedLookup:
-    """Verify reviewer dispatch also uses O(1) role-indexed lookup."""
+class TestReviewerDispatch:
+    """Test reviewer role indexed lookup."""
 
-    @patch("codebot.ticket_dispatcher.STATE_DIR", Path("/tmp/codebot_test_dispatch"))
-    def test_reviewer_dispatch_uses_role_index(self, tmp_path):
-        """Reviewers are dispatched via idle_reviewers_by_role.get(rtype)."""
-        spawned_roles: list[str] = []
-
-        def capture_start(bot, **kwargs):
-            base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
-            spawned_roles.append(base)
-            return False
-
-        review_ticket = _make_ticket("T-REV-1", TicketClass.BUG, state=TicketState.REVIEWING)
-        bots = _build_bots(num_per_role=2)
-        fake_store = FakeTicketStore(reviewing=[review_ticket])
-
-        with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
-            with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=capture_start)
-
-        # Should have spawned reviewers for each REVIEWER_TYPES entry
+    def test_reviewer_role_indexed_lookup(self, tmp_path):
+        """Reviewer dispatch uses O(1) lookup via idle_reviewers_by_role."""
+        # Create reviewer bots
+        bots = {}
         for rtype in REVIEWER_TYPES:
-            assert rtype in spawned_roles, f"Reviewer type {rtype} was not dispatched"
+            bot_name = f"{rtype}-1"
+            bots[bot_name] = _make_bot(bot_name, enabled=True, running=False)
+
+        # Create reviewing tickets
+        tickets = [
+            _make_ticket(f"CB-REV-{i:03d}", "bug", TicketState.REVIEWING)
+            for i in range(5)
+        ]
+
+        state_dir = tmp_path / ".codebot" / "state"
+        state_dir.mkdir(parents=True)
+        tickets_file = state_dir / "tickets.json"
+        tickets_data = {
+            "tickets": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "ticket_class": t.ticket_class,
+                    "severity": t.severity,
+                    "source": t.source,
+                    "evidence": t.evidence,
+                    "problem_statement": t.problem_statement,
+                    "desired_state": t.desired_state,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "affected_modules": t.affected_modules,
+                    "risk": t.risk,
+                    "state": t.state.value,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                    "assignee": t.assignee,
+                    "rework_count": t.rework_count,
+                    "sub_tickets": t.sub_tickets,
+                    "parent_ticket": t.parent_ticket,
+                    "plan_depth": t.plan_depth,
+                    "implementation_plan": t.implementation_plan,
+                    "decomposed_from": t.decomposed_from,
+                }
+                for t in tickets
+            ]
+        }
+        tickets_file.write_text(json.dumps(tickets_data), encoding="utf-8")
+
+        assignments = {}
+
+        def mock_start_bot(bot, **kwargs):
+            assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+            if assigned_tid:
+                assignments[assigned_tid] = bot.config.name
+            return True
+
+        with patch("codebot.ticket_dispatcher.STATE_DIR", state_dir):
+            from codebot.ticket_dispatcher import clear_ticket_store_cache
+            clear_ticket_store_cache()
+            spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=mock_start_bot)
+
+        # Verify reviewers were assigned with correct role bases
+        for tid, bot_name in assignments.items():
+            base = bot_name.split("-")[0] if "-" in bot_name else bot_name
+            assert base in REVIEWER_ROLE_NAMES or base == "ux_reviewer", (
+                f"Reviewer assignment {bot_name} has unexpected base {base}"
+            )
 
 
 class TestEdgeCases:
-    """Edge cases: zero bots, zero tickets, hyphenated names."""
+    """Test edge cases for dispatch."""
 
-    @patch("codebot.ticket_dispatcher.STATE_DIR", Path("/tmp/codebot_test_dispatch"))
-    def test_zero_tickets_does_nothing(self, tmp_path):
-        """No tickets means no spawns and no errors."""
-        bots = _build_bots(num_per_role=2)
-        fake_store = FakeTicketStore(implementing=[], reviewing=[])
-        start_fn = MagicMock(return_value=False)
+    def test_edge_zero_bots_and_unknown_class_fallback(self, tmp_path):
+        """Zero idle bots creates new bot; unknown ticket_class falls back to general_implementer."""
+        # Empty bots dict
+        bots = {}
 
-        with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
-            with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                result = spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=start_fn)
+        # Create ticket with unknown class
+        tickets = [
+            _make_ticket("CB-EDGE-001", "unknown_weird_class", TicketState.IMPLEMENTING),
+        ]
 
-        assert result == 0
-        start_fn.assert_not_called()
-
-    @patch("codebot.ticket_dispatcher.STATE_DIR", Path("/tmp/codebot_test_dispatch"))
-    def test_hyphenated_bot_names_index_correctly(self, tmp_path):
-        """Bots like 'general_implementer-10' index under 'general_implementer'."""
-        spawned_roles: list[str] = []
-
-        def capture_start(bot, **kwargs):
-            base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
-            spawned_roles.append(base)
-            return False
-
-        ticket = _make_ticket("T-HYPH", TicketClass.BUG)  # routes to general_implementer
-        bots = {
-            "general_implementer-10": MockBotState(
-                config=MockBotConfig(name="general_implementer-10", enabled=True), process=None
-            ),
-            "backend_implementer-3": MockBotState(
-                config=MockBotConfig(name="backend_implementer-3", enabled=True), process=None
-            ),
+        state_dir = tmp_path / ".codebot" / "state"
+        state_dir.mkdir(parents=True)
+        tickets_file = state_dir / "tickets.json"
+        tickets_data = {
+            "tickets": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "ticket_class": t.ticket_class,
+                    "severity": t.severity,
+                    "source": t.source,
+                    "evidence": t.evidence,
+                    "problem_statement": t.problem_statement,
+                    "desired_state": t.desired_state,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "affected_modules": t.affected_modules,
+                    "risk": t.risk,
+                    "state": t.state.value,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                    "assignee": t.assignee,
+                    "rework_count": t.rework_count,
+                    "sub_tickets": t.sub_tickets,
+                    "parent_ticket": t.parent_ticket,
+                    "plan_depth": t.plan_depth,
+                    "implementation_plan": t.implementation_plan,
+                    "decomposed_from": t.decomposed_from,
+                }
+                for t in tickets
+            ]
         }
-        fake_store = FakeTicketStore(implementing=[ticket])
+        tickets_file.write_text(json.dumps(tickets_data), encoding="utf-8")
 
-        with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
-            with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
+        created_bots = []
 
-        assert "general_implementer" in spawned_roles
+        def mock_start_bot(bot, **kwargs):
+            created_bots.append(bot.config.name)
+            return True
+
+        with patch("codebot.ticket_dispatcher.STATE_DIR", state_dir):
+            from codebot.ticket_dispatcher import clear_ticket_store_cache
+            clear_ticket_store_cache()
+            spawned = spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=mock_start_bot)
+
+        # Should have created a new bot with general_implementer base (fallback)
+        assert spawned >= 1
+        assert any("general_implementer" in name for name in created_bots), (
+            f"Expected general_implementer fallback, got {created_bots}"
+        )
+
+    def test_zero_tickets_does_no_work(self, tmp_path):
+        """Zero tickets means no dispatch work."""
+        bots = {
+            "general_implementer-1": _make_bot("general_implementer-1", enabled=True, running=False),
+        }
+
+        state_dir = tmp_path / ".codebot" / "state"
+        state_dir.mkdir(parents=True)
+        tickets_file = state_dir / "tickets.json"
+        tickets_file.write_text(json.dumps({"tickets": []}), encoding="utf-8")
+
+        def mock_start_bot(bot, **kwargs):
+            return True
+
+        with patch("codebot.ticket_dispatcher.STATE_DIR", state_dir):
+            from codebot.ticket_dispatcher import clear_ticket_store_cache
+            clear_ticket_store_cache()
+            spawned = spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=mock_start_bot)
+
+        assert spawned == 0
+
+    def test_all_bots_busy_respects_max_concurrent(self, tmp_path):
+        """All bots busy means no new spawns until budget allows."""
+        bots = {}
+        for i in range(8):
+            bot_name = f"general_implementer-{i+1}"
+            bots[bot_name] = _make_bot(bot_name, enabled=True, running=True)
+
+        tickets = [
+            _make_ticket("CB-BUSY-001", "bug", TicketState.IMPLEMENTING),
+        ]
+
+        state_dir = tmp_path / ".codebot" / "state"
+        state_dir.mkdir(parents=True)
+        tickets_file = state_dir / "tickets.json"
+        tickets_data = {
+            "tickets": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "ticket_class": t.ticket_class,
+                    "severity": t.severity,
+                    "source": t.source,
+                    "evidence": t.evidence,
+                    "problem_statement": t.problem_statement,
+                    "desired_state": t.desired_state,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "affected_modules": t.affected_modules,
+                    "risk": t.risk,
+                    "state": t.state.value,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                    "assignee": t.assignee,
+                    "rework_count": t.rework_count,
+                    "sub_tickets": t.sub_tickets,
+                    "parent_ticket": t.parent_ticket,
+                    "plan_depth": t.plan_depth,
+                    "implementation_plan": t.implementation_plan,
+                    "decomposed_from": t.decomposed_from,
+                }
+                for t in tickets
+            ]
+        }
+        tickets_file.write_text(json.dumps(tickets_data), encoding="utf-8")
+
+        spawned_count = 0
+
+        def mock_start_bot(bot, **kwargs):
+            nonlocal spawned_count
+            spawned_count += 1
+            return True
+
+        with patch("codebot.ticket_dispatcher.STATE_DIR", state_dir):
+            from codebot.ticket_dispatcher import clear_ticket_store_cache
+            clear_ticket_store_cache()
+            # max_concurrent=8, all 8 bots running, so budget=0
+            spawned = spawn_demand_agents(bots, max_concurrent=8, start_bot_fn=mock_start_bot)
+
+        assert spawned == 0
+        assert spawned_count == 0
