@@ -3326,13 +3326,14 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
         ts = TicketStore(store_path)
         ready_count = len(ts.list_by_state(TicketState.READY))
         rework_count = len(ts.list_by_state(TicketState.REWORK))
+        implementing_count = len(ts.list_by_state(TicketState.IMPLEMENTING))
         reviewing_count = len(ts.list_by_state(TicketState.REVIEWING))
         verifying_count = len(ts.list_by_state(TicketState.VERIFYING))
         discovered_count = len(ts.list_by_state(TicketState.DISCOVERED))
     except Exception:
         return
 
-    actionable = ready_count + rework_count
+    actionable = ready_count + rework_count + implementing_count
     backlog_high = 80
 
     for name, bot in bots.items():
@@ -5594,7 +5595,6 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 "_recover_deferred_tickets": _recover_deferred_tickets,
             }
             dispatch_lifecycle(counts, handler_registry, bots)
-            _refresh_dependency_graph()
     except ImportError:
         pass
     except Exception as e:
