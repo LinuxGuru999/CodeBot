@@ -5492,10 +5492,6 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     except Exception as e:
         logger.warning(f"Auto-triage failed: {e}")
     try:
-        _auto_triage_backlog()
-    except Exception as e:
-        logger.warning(f"Auto-triage failed: {e}")
-    try:
         _autopush_to_master()
     except Exception as e:
         logger.warning(f"Auto-push failed: {e}")
