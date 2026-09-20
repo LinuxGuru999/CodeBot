@@ -1474,18 +1474,45 @@ def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
 
     claims_dir = STATE_DIR / "claims"
     claims_dir.mkdir(parents=True, exist_ok=True)
+
+    live_bots: dict[str, str] = {}
+    for name, bot in bots.items():
+        if bot.process is not None and bot.process.poll() is None:
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                live_bots[name] = assigned
+
+    now = time.time()
+    for p in claims_dir.glob("*.json"):
+        parts = p.stem.rsplit(".", 1)
+        if len(parts) != 2:
+            continue
+        claimed_tid, claimed_bot = parts
+        if claimed_bot not in live_bots or live_bots[claimed_bot] != claimed_tid:
+            try:
+                age = now - p.stat().st_mtime
+                if age < 120:
+                    continue
+                p.unlink()
+            except OSError:
+                pass
+
     active_claims: set[str] = set()
     for p in claims_dir.glob("*.json"):
         active_claims.add(p.stem.rsplit(".", 1)[0])
 
     idle_reviewers = []
     unassigned_running = []
+    busy_ticket_ids: set[str] = set()
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name
-            if base_name not in REVIEWER_ROLE_NAMES:
-                continue
+        if base_name not in REVIEWER_ROLE_NAMES and base_name != "ux_reviewer":
+            continue
         if bot.process is not None and bot.process.poll() is None:
-            if not getattr(bot, '_assigned_ticket_id', ''):
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                busy_ticket_ids.add(assigned)
+            else:
                 unassigned_running.append((name, bot))
         else:
             idle_reviewers.append((name, bot))
@@ -1498,7 +1525,7 @@ def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
             break
 
         tid = getattr(ticket, 'id', '')
-        if tid in active_claims:
+        if not tid or tid in active_claims or tid in busy_ticket_ids:
             continue
 
         tc = getattr(ticket, 'ticket_class', None)
@@ -1528,6 +1555,10 @@ def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
         idx, bot_name, bot = matched
         available.pop(idx)
 
+        existing_claim = claims_dir / f"{tid}.{bot_name}.json"
+        if existing_claim.exists():
+            continue
+
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
             claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": tc_val}
@@ -1541,8 +1572,27 @@ def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
         dispatched += 1
         logger.info(f"Dispatched review for ticket {tid} ({tc_val}) -> {bot_name}")
         if bot.process is not None and bot.process.poll() is None:
-            stop_bot(bot, f"restarting with review {tid}")
+            pass
+        else:
             start_bot(bot, bots=bots)
+
+    for bot_name, bot in bots.items():
+        base = bot_name.split("-")[0] if "-" in bot_name else bot_name
+        if base not in REVIEWER_ROLE_NAMES and base != "ux_reviewer":
+            continue
+        assigned = getattr(bot, '_assigned_ticket_id', '')
+        if assigned and bot.process is None:
+            alive = False
+            for p in claims_dir.glob(f"{assigned}.{bot_name}.json"):
+                try:
+                    age = time.time() - p.stat().st_mtime
+                    if age < 120:
+                        alive = True
+                        break
+                except OSError:
+                    pass
+            if alive:
+                start_bot(bot, bots=bots)
 
     return dispatched
 
