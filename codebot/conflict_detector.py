@@ -401,6 +401,7 @@ def _check_task_overlap(
     agent_tasks: list[tuple[str, str]],
     min_shared_keywords: int = 2,
     min_similarity: float = 0.1,
+    max_agents_per_keyword: int | None = None,
 ) -> list[TaskOverlap]:
     """Detect overlapping task descriptions among active agents.
 
@@ -408,6 +409,11 @@ def _check_task_overlap(
     of O(n²) pairwise comparison.  Agents are compared only if they share at
     least *min_shared_keywords* keywords, making the comparison cost O(k)
     where k = agents sharing significant keywords.
+
+    Keywords shared by more than *max_agents_per_keyword* agents are treated
+    as non-discriminating (similar to stop-words in information retrieval)
+    and skipped during pair accumulation.  When None, defaults to
+    max(10, len(agent_tasks) // 3) to adapt to the agent count.
 
     Algorithm:
       1. Build an inverted index: keyword → {agent_ids}          O(N·W)
@@ -421,6 +427,8 @@ def _check_task_overlap(
         agent_tasks: list of (agent_id, task_description) pairs
         min_shared_keywords: minimum number of shared keywords to report overlap
         min_similarity: minimum Jaccard similarity to report overlap
+        max_agents_per_keyword: keywords appearing in more agents than this
+            are skipped as non-discriminating.  None means auto-scale.
 
     Returns:
         List of TaskOverlap instances for agent pairs with significant overlap.
@@ -429,15 +437,22 @@ def _check_task_overlap(
     if len(agent_tasks) < 2:
         return []
 
+    # Auto-scale the keyword frequency cap to avoid quadratic blow-up
+    # when many agents share generic words like "fix" or "implement".
+    if max_agents_per_keyword is None:
+        max_agents_per_keyword = max(10, len(agent_tasks) // 3)
+
     # Step 1: Build keyword → agents inverted index
     keyword_index = _build_keyword_index(agent_tasks)
 
-    # Step 2: Accumulate co-occurrence counts per agent pair
-    #         Use a dict keyed by frozenset({a, b}) to ensure symmetry.
+    # Step 2: Accumulate co-occurrence counts per agent pair,
+    #         skipping keywords shared by too many agents.
     pair_shared: dict[frozenset[str], set[str]] = defaultdict(set)
 
     for keyword, agents_with_keyword in keyword_index.items():
         if len(agents_with_keyword) < 2:
+            continue
+        if len(agents_with_keyword) > max_agents_per_keyword:
             continue
         agent_list = sorted(agents_with_keyword)
         for i in range(len(agent_list)):

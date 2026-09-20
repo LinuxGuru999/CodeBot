@@ -414,6 +414,34 @@ def _log_scrutiny_decisions(flagged: list[str]) -> None:
         pass
 
 
+def parse_queue_ids_from_text(queue_text: str) -> set[str]:
+    """Extract all ticket IDs from QUEUE.md text in a single O(f) pass.
+
+    Parses the markdown text once using a compiled regex to find all ticket ID
+    patterns (Q-\\d+, QUEUE-DECOMP-\\d+, QUEUE-<word>-\\d+) and returns them
+    as a set for O(1) membership tests.
+
+    This replaces the O(n*f) pattern of checking each ticket ID against the
+    full file text via ``tid in raw``.  With *n* tickets and file size *f*,
+    complexity drops from O(n*f) to O(f + n) = O(f).
+
+    Args:
+        queue_text: Raw QUEUE.md markdown text.
+
+    Returns:
+        Set of all ticket ID strings found in the text.
+    """
+    if not queue_text:
+        return set()
+    # Single compiled regex matching all known ID formats in QUEUE.md
+    return set(_QUEUE_ID_RE.findall(queue_text))
+
+
+# Pre-compiled regex for all ticket ID formats used in QUEUE.md:
+#   Q-123, QUEUE-DECOMP-456, QUEUE-ARCH-789, etc.
+_QUEUE_ID_RE = _re.compile(r"(?:Q|QUEUE-[A-Z]+)-\d+")
+
+
 def load_approved_ids(state_dir: str | None = None) -> set[str]:
     if state_dir is None:
         state_dir = str(Path(__file__).parent / "state")

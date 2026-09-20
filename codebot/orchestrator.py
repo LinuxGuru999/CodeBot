@@ -51,6 +51,7 @@ from codebot.dispatch_service import (
     rotate_model_on_error, transition_ticket_on_success,
     transition_ticket_on_error, compute_rate_limit_backoff,
     retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
+    IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
 )
 from codebot.scratchpad import load_scratchpad, save_scratchpad
 from codebot.state_manager import (
@@ -240,14 +241,36 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 
     # Start eligible bots
     pipeline = get_pipeline_state()
+    max_impl = 8
+    max_review = 8
+    running_impl = sum(
+        1 for n, b in bots.items()
+        if b.process is not None and b.process.poll() is None
+        and (n.split("-")[0] if "-" in n else n) in IMPLEMENTER_ROLE_NAMES
+    )
+    running_review = sum(
+        1 for n, b in bots.items()
+        if b.process is not None and b.process.poll() is None
+        and ((n.split("-")[0] if "-" in n else n) in REVIEWER_ROLE_NAMES or n == "ux_reviewer")
+    )
     for name, bot in bots.items():
         if not bot.config.enabled or is_draining() or bot.process is not None:
             continue
         if bot.next_run_at and now < bot.next_run_at:
             continue
+        base = name.split("-")[0] if "-" in name else name
+        if base in IMPLEMENTER_ROLE_NAMES and running_impl >= max_impl:
+            continue
+        if (base in REVIEWER_ROLE_NAMES or name == "ux_reviewer") and running_review >= max_review:
+            continue
         if is_needed_bot(name, pipeline):
             has_ticket = bool(getattr(bot, "_assigned_ticket_id", ""))
-            start_bot(bot, bots=bots, is_demand=has_ticket)
+            ok = start_bot(bot, bots=bots, is_demand=has_ticket)
+            if ok:
+                if base in IMPLEMENTER_ROLE_NAMES:
+                    running_impl += 1
+                elif base in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
+                    running_review += 1
         else:
             bot.next_run_at = now + bot.config.interval_seconds
             update_bot_state(bot, "waiting")
