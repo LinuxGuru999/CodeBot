@@ -5476,8 +5476,12 @@ def main() -> None:
             [b for b in bots.values() if b.config.enabled],
             key=lambda b: (dynamic.get(b.config.name, TIER_PRIORITY.get(b.config.name, 2)), b.config.interval_seconds),
         )
+        demand_driven_roles = frozenset({"decomposer", "implementation_planner"})
         needed = []
         for bot in order:
+            base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
+            if base in demand_driven_roles:
+                continue
             if _is_needed_bot(bot.config.name, pipeline):
                 needed.append(bot)
         logger.info(f"Overture: {len(needed)}/{len(order)} bots needed, staggered start ({_SPAWN_STAGGER_SECONDS}s interval)")
