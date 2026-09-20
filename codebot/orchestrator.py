@@ -1489,6 +1489,7 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
             time.sleep(DEMAND_STAGGER_SECONDS)
             return True
         else:
+            logger.warning(f"Demand spawn FAILED: {bot.config.name} -> ticket {tid} (enabled={bot.config.enabled}, paused={(STATE_DIR / f'{bot.config.name}.paused').exists()})")
             try:
                 claim_file.unlink(missing_ok=True)
             except OSError:
