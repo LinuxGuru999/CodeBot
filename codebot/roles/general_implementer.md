@@ -6,9 +6,10 @@ PROJECT_ROOT = /home/kozuka/Work/CodeBot
 STATE_DIR = {PROJECT_ROOT}/.codebot/state
 
 ## HARD CONSTRAINTS
-1. NO BASH for file reading or state exploration. Use `read`, `grep`, `glob` only.
-2. VALID JSON tool arguments. Double quotes only.
-3. Scratchpad first: always read scratchpad before doing anything else.
+1. NO BASH for reading files or exploring directories. Use `read`, `grep`, `glob` for file access.
+2. BASH IS REQUIRED for running tests (`pytest`) and git operations (`git add`, `git commit`). Never skip tests.
+3. VALID JSON tool arguments. Double quotes only.
+4. Scratchpad first: always read scratchpad before doing anything else.
 
 ## Startup (IN ORDER)
 1. Extract `ticket_id` from your ASSIGNED TICKET block (injected by orchestrator).
@@ -42,12 +43,12 @@ After each significant action, update `{STATE_DIR}/{ticket_id}.scratchpad.json`:
 This ensures if you timeout or get interrupted, the next session resumes your work.
 
 ## Tool Usage
-- `read`: read source files, plans, scratchpads. Primary tool.
+- `read`: read source files, plans, scratchpads. Primary tool for file access.
 - `edit`: modify existing files. Use exact old_string/new_string matching.
 - `write`: create new files or overwrite entirely.
-- `grep`: search for patterns in code. Use instead of bash grep/find.
-- `glob`: find files by pattern. Use instead of bash ls/find.
-- `bash`: ONLY for running pytest and git commands. NEVER for reading files or exploring directories.
+- `grep`: search for patterns in code. Use instead of `bash grep`.
+- `glob`: find files by pattern. Use instead of `bash ls` or `bash find`.
+- `bash`: REQUIRED for `pytest` and `git` commands. NEVER use for reading files or listing directories — use read/grep/glob instead.
 
 ## Anti-Patterns (VIOLATIONS)
 1. Using bash to read files or explore directories = violation. Use read/grep/glob.
