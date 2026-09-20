@@ -830,7 +830,15 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         ))
         TIER_PRIORITY[name] = tier
 
-    for role_cfg in base_planning:
+    seen_planning_bases: set[str] = set()
+    unique_planning: list[Any] = []
+    for cfg in base_planning:
+        base = cfg.name.split("-")[0] if "-" in cfg.name else cfg.name
+        if base not in seen_planning_bases:
+            seen_planning_bases.add(base)
+            unique_planning.append(cfg)
+
+    for role_cfg in unique_planning:
         extra = decomp_demand if role_cfg.name == "decomposer" else plan_demand
         if extra <= 0:
             continue
