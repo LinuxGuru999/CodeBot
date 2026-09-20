@@ -17,23 +17,6 @@ from codebot.process_manager import (
     batch_read_heartbeats,
     read_heartbeat,
 )
-from codebot.state_manager import PathConfig
-
-
-def _make_paths_for(tmp_path: Path) -> PathConfig:
-    """Build a PathConfig rooted at tmp_path for tests."""
-    return PathConfig(
-        bots_dir=tmp_path,
-        state_dir=tmp_path,
-        logs_dir=tmp_path,
-        backup_dir=tmp_path / "backup",
-        alignment_events_dir=tmp_path / "alignment_events",
-        drain_file=tmp_path / ".drain",
-        update_lock=tmp_path / ".update_lock",
-        restart_file=tmp_path / ".restart",
-    )
-
-
 def test_count_api_runner_processes_matches_module_invocation():
     completed = MagicMock(returncode=0, stdout="101\n102\n")
 
