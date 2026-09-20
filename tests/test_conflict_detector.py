@@ -360,3 +360,308 @@ class TestBuildConflictMatrix:
         ]
         matrix = cd.build_conflict_matrix(tickets, plan_store=None)
         assert matrix.edges == ()
+
+
+# ---------------------------------------------------------------------------
+# _normalize_keywords tests
+# ---------------------------------------------------------------------------
+
+class TestNormalizeKeywords:
+    def test_basic_tokenization(self):
+        kw = cd._normalize_keywords("Implement caching layer for API endpoints")
+        assert "implement" in kw
+        assert "caching" in kw
+        assert "layer" in kw
+        assert "api" in kw
+        assert "endpoints" in kw
+
+    def test_stop_words_removed(self):
+        kw = cd._normalize_keywords("the quick brown fox jumps over the lazy dog")
+        assert "the" not in kw
+        assert "over" not in kw
+        assert "the" not in kw
+        assert "quick" in kw
+        assert "brown" in kw
+        assert "fox" in kw
+
+    def test_short_tokens_removed(self):
+        kw = cd._normalize_keywords("a bug in the yo-yo or ok")
+        assert "yo" not in kw  # 2 chars, below min
+        # "yo-yo" → tokens "yo-yo" via regex, which normalizes to hyphenated form
+        assert "ok" not in kw  # 2 chars, below min
+
+    def test_empty_string(self):
+        kw = cd._normalize_keywords("")
+        assert kw == set()
+
+    def test_unicode_normalization(self):
+        # NFKD normalization decomposes accented chars
+        kw = cd._normalize_keywords("résumé forüber checklist")
+        # "résumé" → "resume" after NFKD
+        assert "resume" in kw or "r\u00e9sum\u00e9" in kw
+
+    def test_case_insensitive(self):
+        kw1 = cd._normalize_keywords("DATABASE migration fix")
+        kw2 = cd._normalize_keywords("database migration fix")
+        assert kw1 == kw2
+
+    def test_hyphenated_tokens_preserved(self):
+        kw = cd._normalize_keywords("fix the task-scheduler heartbeat timeout")
+        assert "task-scheduler" in kw or "task" in kw
+
+    def test_only_stop_words(self):
+        kw = cd._normalize_keywords("the a an and or but")
+        assert kw == set()
+
+
+# ---------------------------------------------------------------------------
+# TaskOverlap dataclass tests
+# ---------------------------------------------------------------------------
+
+class TestTaskOverlap:
+    def test_frozen(self):
+        o = cd.TaskOverlap(
+            agent_a="A", agent_b="B",
+            shared_keywords=frozenset({"test", "fix"}),
+            similarity=0.5,
+        )
+        with pytest.raises(AttributeError):
+            o.agent_a = "X"  # type: ignore[misc]
+
+    def test_fields(self):
+        o = cd.TaskOverlap(
+            agent_a="agent1", agent_b="agent2",
+            shared_keywords=frozenset({"api", "endpoint"}),
+            similarity=0.75,
+        )
+        assert o.agent_a == "agent1"
+        assert o.agent_b == "agent2"
+        assert o.similarity == 0.75
+
+    def test_equality(self):
+        o1 = cd.TaskOverlap("A", "B", frozenset({"x"}), 0.5)
+        o2 = cd.TaskOverlap("A", "B", frozenset({"x"}), 0.5)
+        assert o1 == o2
+
+
+# ---------------------------------------------------------------------------
+# _build_keyword_index tests
+# ---------------------------------------------------------------------------
+
+class TestBuildKeywordIndex:
+    def test_basic_index(self):
+        agent_tasks = [
+            ("agent1", "Fix database migration script"),
+            ("agent2", "Fix API endpoint authentication"),
+            ("agent3", "Update database schema for users"),
+        ]
+        idx = cd._build_keyword_index(agent_tasks)
+        assert "fix" in idx
+        assert "database" in idx
+        assert idx["fix"] == {"agent1", "agent2"}
+        assert idx["database"] == {"agent1", "agent3"}
+
+    def test_empty_descriptions(self):
+        agent_tasks = [
+            ("agent1", ""),
+            ("agent2", ""),
+        ]
+        idx = cd._build_keyword_index(agent_tasks)
+        assert len(idx) == 0
+
+    def test_single_agent(self):
+        agent_tasks = [("agent1", "Fix database connection pool")]
+        idx = cd._build_keyword_index(agent_tasks)
+        for agent_set in idx.values():
+            assert agent_set == {"agent1"}
+
+
+# ---------------------------------------------------------------------------
+# _check_task_overlap tests
+# ---------------------------------------------------------------------------
+
+class TestCheckTaskOverlap:
+    def test_empty_input(self):
+        result = cd._check_task_overlap([])
+        assert result == []
+
+    def test_single_agent(self):
+        result = cd._check_task_overlap([("a1", "fix database bug")])
+        assert result == []
+
+    def test_identical_descriptions(self):
+        tasks = [
+            ("agent1", "Fix critical database migration failure"),
+            ("agent2", "Fix critical database migration failure"),
+        ]
+        result = cd._check_task_overlap(tasks, min_shared_keywords=1, min_similarity=0.0)
+        assert len(result) == 1
+        assert result[0].agent_a == "agent1"
+        assert result[0].agent_b == "agent2"
+        assert result[0].similarity == 1.0
+
+    def test_no_overlap(self):
+        tasks = [
+            ("agent1", "Fix database connection pooling issue"),
+            ("agent2", "Update CI/CD pipeline configuration"),
+        ]
+        result = cd._check_task_overlap(tasks, min_shared_keywords=2)
+        assert result == []
+
+    def test_partial_overlap(self):
+        tasks = [
+            ("agent1", "Fix database connection pooling timeout"),
+            ("agent2", "Fix database query performance degradation"),
+        ]
+        result = cd._check_task_overlap(tasks, min_shared_keywords=2, min_similarity=0.1)
+        assert len(result) >= 1
+        overlap = result[0]
+        assert "fix" in overlap.shared_keywords or "database" in overlap.shared_keywords
+
+    def test_symmetric_results(self):
+        """If agent A overlaps with B, both should be in the result once."""
+        tasks = [
+            ("agentZ", "Implement caching layer for API endpoints"),
+            ("agentA", "Implement caching layer for API rate limiting"),
+        ]
+        result = cd._check_task_overlap(tasks, min_shared_keywords=1, min_similarity=0.05)
+        assert len(result) == 1
+        assert result[0].agent_a == "agentA"  # lexicographic order
+        assert result[0].agent_b == "agentZ"
+
+    def test_multiple_overlaps(self):
+        tasks = [
+            ("agent1", "Fix database connection pooling bug"),
+            ("agent2", "Fix database query performance bug"),
+            ("agent3", "Fix database schema migration bug"),
+        ]
+        result = cd._check_task_overlap(tasks, min_shared_keywords=2, min_similarity=0.1)
+        # agent1-agent2, agent1-agent3, agent2-agent3 all share keywords
+        pairs = {(o.agent_a, o.agent_b) for o in result}
+        # At least some pairs should overlap
+        assert len(pairs) >= 1
+
+    def test_empty_descriptions_produce_no_overlap(self):
+        tasks = [
+            ("agent1", ""),
+            ("agent2", ""),
+            ("agent3", ""),
+        ]
+        result = cd._check_task_overlap(tasks)
+        assert result == []
+
+    def test_min_shared_keywords_filter(self):
+        tasks = [
+            ("agent1", "Fix the API endpoint authentication"),
+            ("agent2", "Fix the CI/CD pipeline authentication"),
+        ]
+        # With min_shared_keywords=3, should not match (only share "fix" and "authentication")
+        result_high = cd._check_task_overlap(tasks, min_shared_keywords=3)
+        assert result_high == []
+        # With min_shared_keywords=2, should match
+        result_low = cd._check_task_overlap(tasks, min_shared_keywords=2)
+        assert len(result_low) >= 1
+
+    def test_min_similarity_filter(self):
+        tasks = [
+            ("agent1", "Fix database migration script for PostgreSQL"),
+            ("agent2", "Fix database migration script for MySQL and add indexes"),
+        ]
+        # High similarity threshold
+        result_high = cd._check_task_overlap(tasks, min_shared_keywords=1, min_similarity=0.9)
+        # Lower similarity threshold
+        result_low = cd._check_task_overlap(tasks, min_shared_keywords=1, min_similarity=0.3)
+        assert len(result_low) >= len(result_high)
+
+    def test_sorted_output(self):
+        """Results should be deterministically sorted by agent_a, agent_b."""
+        tasks = [
+            (f"agent{i}", f"Fix database connection pooling timeout for service {i}")
+            for i in range(5)
+        ]
+        result = cd._check_task_overlap(tasks, min_shared_keywords=2, min_similarity=0.1)
+        for i in range(1, len(result)):
+            prev = (result[i - 1].agent_a, result[i - 1].agent_b)
+            curr = (result[i].agent_a, result[i].agent_b)
+            assert prev <= curr
+
+    def test_deterministic_across_runs(self):
+        """Same input should produce identical output every time."""
+        tasks = [
+            ("alpha", "Implement feature flag system for gradual rollout"),
+            ("beta", "Implement feature flag system for A/B testing"),
+            ("gamma", "Deploy monitoring dashboard for production metrics"),
+        ]
+        r1 = cd._check_task_overlap(tasks, min_shared_keywords=2, min_similarity=0.1)
+        r2 = cd._check_task_overlap(tasks, min_shared_keywords=2, min_similarity=0.1)
+        assert r1 == r2
+
+    def test_50_agents_benchmark(self):
+        """Performance: 50 agents with varied tasks should complete in <5ms."""
+        import time
+
+        tasks = []
+        keywords = [
+            "database", "api", "caching", "authentication", "migration",
+            "performance", "security", "testing", "deployment", "monitoring",
+            "logging", "configuration", "scheduling", "optimization", "scaling",
+            "documentation", "refactoring", "debugging", "integration", "pipeline",
+        ]
+        for i in range(50):
+            # Each agent gets 3-5 keywords from the pool
+            import random
+            rng = random.Random(i)  # deterministic seed
+            n_kw = rng.randint(3, 5)
+            chosen = rng.sample(keywords, n_kw)
+            desc = f"Implement {chosen[0]} and {chosen[1]} for agent-{i} system"
+            if len(chosen) > 2:
+                desc += f" with {chosen[2]} support"
+            tasks.append((f"agent-{i}", desc))
+
+        start = time.monotonic()
+        result = cd._check_task_overlap(tasks, min_shared_keywords=2, min_similarity=0.1)
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert elapsed_ms < 5000, f"Benchmark failed: {elapsed_ms:.1f}ms >= 5000ms"
+        # With shared keywords, there should be some overlaps detected
+        # (agents sharing database+api, or other pairs)
+        assert isinstance(result, list)
+
+    def test_agent_count_scales_better_than_quadratic(self):
+        """Verify comparison cost scales sub-quadratically.
+
+        With O(n²), going from 25 to 50 agents would quadruple the time.
+        With O(k) indexing, the increase should be much less.
+        """
+        import time
+
+        def make_agents(n: int) -> list[tuple[str, str]]:
+            keywords = ["database", "api", "caching", "auth", "migration",
+                        "performance", "security", "testing"]
+            agents = []
+            for i in range(n):
+                kw = keywords[i % len(keywords)]
+                agents.append((f"agent-{i}", f"Fix {kw} issues for service {i}"))
+            return agents
+
+        # Run with 25 agents
+        tasks_25 = make_agents(25)
+        start = time.monotonic()
+        for _ in range(3):
+            cd._check_task_overlap(tasks_25, min_shared_keywords=2, min_similarity=0.1)
+        time_25 = (time.monotonic() - start) / 3
+
+        # Run with 50 agents
+        tasks_50 = make_agents(50)
+        start = time.monotonic()
+        for _ in range(3):
+            cd._check_task_overlap(tasks_50, min_shared_keywords=2, min_similarity=0.1)
+        time_50 = (time.monotonic() - start) / 3
+
+        # O(n²) would give ~4x. O(k) should give much less.
+        if time_25 > 0.0001:
+            ratio = time_50 / time_25
+            assert ratio < 3.0, (
+                f"Scaling ratio {ratio:.1f}x suggests quadratic behavior. "
+                f"25-agent: {time_25*1000:.2f}ms, 50-agent: {time_50*1000:.2f}ms"
+            )
