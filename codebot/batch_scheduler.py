@@ -273,9 +273,11 @@ def pack_batches(
                 batches.append(model_manifests[start : start + batch_size])
                 continue
             # Batch limit reached — drop every remaining manifest in this
-            # model group and all subsequent groups without slicing.
+            # model group and all subsequent groups.  Use range() for O(1)
+            # index access instead of list-slicing (avoids a temporary copy).
             limit_reached = True
-            for manifest in model_manifests[start:]:
+            for drop_idx in range(start, len(model_manifests)):
+                manifest = model_manifests[drop_idx]
                 dropped.append({"name": manifest.get("name", "?"), "manifest": manifest, "reason": "batch-capacity"})
             break
 
