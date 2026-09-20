@@ -1368,6 +1368,29 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
         except Exception:
             pass
 
+    # Phase 4: Commit each newly-COMPLETE ticket's own files (fail-open)
+    if completed_tids:
+        try:
+            from codebot.completion_commit import commit_ticket_files
+            workspace = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
+            for tid in completed_tids:
+                try:
+                    ticket = ts.get(tid)
+                    if ticket is None or getattr(ticket, "commit_sha", ""):
+                        continue
+                    files = list(getattr(ticket, "affected_modules", None) or [])
+                    if not files:
+                        continue
+                    ok, sha = commit_ticket_files(
+                        workspace, tid, getattr(ticket, "title", ""), files,
+                    )
+                    if ok and sha:
+                        ts.record_commit(tid, sha)
+                except Exception as e:
+                    logger.warning(f"ticket {tid}: completion commit failed (fail-open): {e}")
+        except Exception as e:
+            logger.warning(f"completion commit phase failed (fail-open): {e}")
+
     return advanced
 
 

@@ -199,8 +199,8 @@ def _prune_snapshot_size(data: dict) -> dict:
     if len(serialized.encode("utf-8")) <= _MAX_METRICS_FILE_BYTES:
         return data
 
-    # Binary-search-style pruning: start with current max, halve until fits
     max_runs = _MAX_RUNS_PER_BOT
+    prev_max_runs = None
     while max_runs >= 1:
         for bot_key in data:
             runs_list = data[bot_key].get("runs", [])
@@ -209,6 +209,9 @@ def _prune_snapshot_size(data: dict) -> dict:
         serialized = json.dumps(data, indent=2)
         if len(serialized.encode("utf-8")) <= _MAX_METRICS_FILE_BYTES:
             break
+        if max_runs == prev_max_runs:
+            break
+        prev_max_runs = max_runs
         max_runs = max(1, max_runs // 2)
 
     return data

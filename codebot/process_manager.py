@@ -184,43 +184,59 @@ def log_path(bot_name: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Cross-platform file locking
+# Cross-platform file locking — single source of truth is codebot.locks.
 # ---------------------------------------------------------------------------
-
-def _get_flock_function():
-    """Return a flock-like function compatible with the current platform."""
-    try:
-        import fcntl
-        def _unix_flock(fd, operation):
-            fcntl.flock(fd, operation)
-        return _unix_flock
-    except ImportError:
-        pass
-
-    try:
-        import msvcrt
-        def _windows_flock(fd, operation):
-            if operation == 2:  # LOCK_EX
-                msvcrt.locking(fd, 1, 1)  # LK_LOCK = 1
-            elif operation == 8:  # LOCK_UN
-                msvcrt.locking(fd, 2, 1)  # LK_UNLCK = 2
-        return _windows_flock
-    except ImportError:
-        pass
-
-    def _noop_flock(fd, operation):
-        pass
-    return _noop_flock
-
-_flock = _get_flock_function()
+# WHY (CB-5603529-75D5): private fcntl/msvcrt/no-op duplicates drifted from
+# the canonical primitive (byte-range vs whole-file on Windows, missing
+# LOCK_SH/LOCK_NB handling). Import the shared flock so every caller gets
+# identical semantics; keep module-level LOCK_EX/LOCK_UN aliases plus a
+# private _flock alias so existing tests/patches keep working.
 
 try:
-    import fcntl
-    LOCK_EX = fcntl.LOCK_EX
-    LOCK_UN = fcntl.LOCK_UN
-except ImportError:
-    LOCK_EX = 2
-    LOCK_UN = 8
+    from codebot.locks import LOCK_EX as _LOCK_EX_SHARED
+    from codebot.locks import LOCK_UN as _LOCK_UN_SHARED
+    from codebot.locks import flock as _shared_flock
+    LOCK_EX = _LOCK_EX_SHARED
+    LOCK_UN = _LOCK_UN_SHARED
+
+    def _flock(fd: int, operation: int) -> None:
+        """Delegate to the shared cross-platform flock (see codebot.locks)."""
+        _shared_flock(fd, operation)
+except ImportError:  # pragma: no cover - locks module must exist
+    def _get_flock_function():  # type: ignore[no-redef]
+        """Return a flock-like function compatible with the current platform."""
+        try:
+            import fcntl
+            def _unix_flock(fd, operation):
+                fcntl.flock(fd, operation)
+            return _unix_flock
+        except ImportError:
+            pass
+
+        try:
+            import msvcrt
+            def _windows_flock(fd, operation):
+                if operation == 2:  # LOCK_EX
+                    msvcrt.locking(fd, 1, 1)  # LK_LOCK = 1
+                elif operation == 8:  # LOCK_UN
+                    msvcrt.locking(fd, 2, 1)  # LK_UNLCK = 2
+            return _windows_flock
+        except ImportError:
+            pass
+
+        def _noop_flock(fd, operation):
+            pass
+        return _noop_flock
+
+    _flock = _get_flock_function()
+
+    try:
+        import fcntl
+        LOCK_EX = fcntl.LOCK_EX
+        LOCK_UN = fcntl.LOCK_UN
+    except ImportError:
+        LOCK_EX = 2
+        LOCK_UN = 8
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -285,9 +301,24 @@ GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "25"))
 _last_spawn_time: float = 0.0
 _SPAWN_STAGGER_SECONDS: float = 5.0
 
+# Process count cache with TTL to avoid repeated pgrep calls
+_PROCESS_COUNT_TTL: float = 5.0
+_cached_process_count: int | None = None
+_cached_process_count_at: float = 0.0
+
+
+def _clear_process_count_cache() -> None:
+    """Reset the process count cache (useful for testing)."""
+    global _cached_process_count, _cached_process_count_at
+    _cached_process_count = None
+    _cached_process_count_at = 0.0
+
 
 def _count_api_runner_processes() -> int:
     """Count running module-invoked api runner processes using pgrep.
+
+    Results are cached for ``_PROCESS_COUNT_TTL`` seconds to avoid spawning
+    an external process on every health tick.
 
     FAIL-CLOSED: On any error (timeout, missing pgrep, OS error) we return
     a large number instead of 0.  Returning 0 would make the spawn gate
@@ -295,6 +326,15 @@ def _count_api_runner_processes() -> int:
     exhaust system resources.  Returning a large number blocks new spawns
     until the next successful check — the safe direction.
     """
+    global _cached_process_count, _cached_process_count_at
+
+    now = time.monotonic()
+    if (
+        _cached_process_count is not None
+        and (now - _cached_process_count_at) < _PROCESS_COUNT_TTL
+    ):
+        return _cached_process_count
+
     _FAIL_CLOSED = 9999
     try:
         result = subprocess.run(
@@ -302,12 +342,17 @@ def _count_api_runner_processes() -> int:
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return len([line for line in result.stdout.strip().split("\n") if line.strip()])
-        # pgrep returns 1 when no processes match — that's a real 0, not an error
-        return 0
+            count = len([line for line in result.stdout.strip().split("\n") if line.strip()])
+        else:
+            # pgrep returns 1 when no processes match — that's a real 0, not an error
+            count = 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         logger.warning("_count_api_runner_processes failed (%s) — returning fail-closed count", type(exc).__name__)
-        return _FAIL_CLOSED
+        count = _FAIL_CLOSED
+
+    _cached_process_count = count
+    _cached_process_count_at = now
+    return count
 
 
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False,

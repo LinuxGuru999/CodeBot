@@ -14,10 +14,12 @@ from codebot.process_manager import (
     _prepare_prompt_with_context,
     _prompt_read_lock,
     _count_api_runner_processes,
+    _clear_process_count_cache,
     batch_read_heartbeats,
     read_heartbeat,
 )
 def test_count_api_runner_processes_matches_module_invocation():
+    _clear_process_count_cache()
     completed = MagicMock(returncode=0, stdout="101\n102\n")
 
     with patch("codebot.process_manager.subprocess.run", return_value=completed) as run:
@@ -29,6 +31,42 @@ def test_count_api_runner_processes_matches_module_invocation():
         text=True,
         timeout=5,
     )
+    _clear_process_count_cache()
+
+
+def test_count_api_runner_processes_cached_within_ttl():
+    """Second call within TTL returns cached value without invoking subprocess.run again."""
+    _clear_process_count_cache()
+    completed = MagicMock(returncode=0, stdout="101\n102\n")
+
+    with patch("codebot.process_manager.subprocess.run", return_value=completed) as run:
+        with patch("codebot.process_manager.time.monotonic", side_effect=[0.0, 1.0]):
+            first = _count_api_runner_processes()
+            second = _count_api_runner_processes()
+
+    assert first == 2
+    assert second == 2
+    # subprocess.run should only be called once due to caching
+    assert run.call_count == 1
+    _clear_process_count_cache()
+
+
+def test_count_api_runner_processes_cache_invalidates_after_ttl():
+    """Call after TTL expiry re-invokes pgrep and returns fresh count."""
+    _clear_process_count_cache()
+    completed1 = MagicMock(returncode=0, stdout="101\n102\n")
+    completed2 = MagicMock(returncode=0, stdout="201\n202\n203\n")
+
+    with patch("codebot.process_manager.subprocess.run", side_effect=[completed1, completed2]) as run:
+        with patch("codebot.process_manager.time.monotonic", side_effect=[0.0, 6.0]):
+            first = _count_api_runner_processes()
+            second = _count_api_runner_processes()
+
+    assert first == 2
+    assert second == 3
+    # subprocess.run should be called twice because cache expired
+    assert run.call_count == 2
+    _clear_process_count_cache()
 
 
 def test_prompt_read_lock_basic(tmp_path):

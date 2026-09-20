@@ -339,6 +339,7 @@ class Gatekeeper:
                 if ticket.state == TicketState.VERIFYING:
                     store.transition(ticket_id, TicketState.COMPLETE)
                     logger.info("ticket %s transitioned to COMPLETE", ticket_id)
+                    self._commit_completed_ticket(ticket_id)
                 else:
                     logger.info(
                         "ticket %s in state %s — skipping COMPLETE transition",
@@ -356,6 +357,30 @@ class Gatekeeper:
                     )
         except Exception as e:
             logger.error("failed to transition ticket %s: %s", ticket_id, e)
+
+    def _commit_completed_ticket(self, ticket_id: str) -> None:
+        """Commit the ticket's own files and record the SHA. Fail-open."""
+        try:
+            from codebot.ticket_dispatcher import get_ticket_store
+            from codebot.completion_commit import commit_ticket_files
+
+            store = get_ticket_store()
+            if store is None:
+                return
+            ticket = store.get(ticket_id)
+            if ticket is None or getattr(ticket, "commit_sha", ""):
+                return
+            files = list(getattr(ticket, "affected_modules", None) or [])
+            if not files:
+                return
+            ok, sha = commit_ticket_files(
+                self._workspace, ticket_id,
+                getattr(ticket, "title", ""), files,
+            )
+            if ok and sha:
+                store.record_commit(ticket_id, sha)
+        except Exception as e:
+            logger.warning("ticket %s: completion commit failed (fail-open): %s", ticket_id, e)
 
     def _collect_reviewer_feedback(self, ticket_id: str, failed_gates: list[str] | None = None) -> list[dict]:
         """Collect structured feedback from reviewer verdict files.

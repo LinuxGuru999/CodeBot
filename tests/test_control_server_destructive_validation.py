@@ -310,6 +310,8 @@ class TestDryRunPreview(unittest.TestCase):
         else:
             handler.rfile = BytesIO(b"")
             handler.headers["Content-Length"] = "0"
+        # Bind real _get_destructive_preview so dry_run returns actual preview data
+        handler._get_destructive_preview = ControlHandler._get_destructive_preview.__get__(handler, ControlHandler)
         return handler
 
     def test_stop_dry_run_returns_preview(self):
@@ -405,8 +407,8 @@ class TestDryRunPreview(unittest.TestCase):
         self.assertEqual(preview.get("affected_bots"), "all")
         self.assertIn("warning", preview)
 
-    def test_dry_run_without_force_still_rejected(self):
-        """dry_run:true without force/confirm should still be rejected (must confirm intent first)."""
+    def test_dry_run_without_force_succeeds(self):
+        """dry_run:true without force/confirm should succeed (dry-run is read-only, no force needed)."""
         from codebot.control_server import ControlHandler
 
         handler = self._make_handler("POST", "/bots/stop", body={
@@ -421,7 +423,8 @@ class TestDryRunPreview(unittest.TestCase):
 
         self.assertTrue(len(responses) > 0)
         status_code, body = responses[0]
-        self.assertEqual(status_code, 400)
+        self.assertEqual(status_code, 200)
+        self.assertTrue(body.get("dry_run"))
 
     def test_get_destructive_preview_stop_with_bots(self):
         """_get_destructive_preview returns correct preview for stop with specific bots."""

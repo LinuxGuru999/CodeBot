@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -89,8 +90,23 @@ def _print_result(j: dict | str) -> None:
         print(j)
 
 
+def _is_loopback_host(hostname: str | None) -> bool:
+    """Return True if hostname is a loopback address."""
+    if not hostname:
+        return False
+    h = hostname.lower().strip("[]")
+    return h in ("localhost", "127.0.0.1", "::1")
+
+
 def req(method: str, path: str, body: dict | None = None) -> tuple[int, dict | str]:
     url = f"{URL}{path}"
+    if TOKEN:
+        parsed = urllib.parse.urlparse(URL)
+        if parsed.scheme.lower() == "http" and not _is_loopback_host(parsed.hostname):
+            raise RuntimeError(
+                f"Refusing to send Bearer token over plaintext http:// to "
+                f"non-loopback host '{parsed.hostname}'; use https://"
+            )
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json"}
     if TOKEN:

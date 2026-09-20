@@ -254,21 +254,23 @@ class TestCommandInjectionPrevention(unittest.TestCase):
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
             with patch("codebot.control_server.subprocess.run") as mock_run:
-                handler = self._make_handler("POST", "/bots/valid-bot/restart")
-                responses = []
-                handler._json = lambda code, data, r=responses: r.append((code, data))
-                handler._auth = lambda: True
-                handler._read_json_body = lambda: (None, None, None)
+                with patch("codebot.control_server.subprocess.Popen"):
+                    with patch("codebot.control_server.time"):
+                        handler = self._make_handler("POST", "/bots/valid-bot/restart")
+                        responses = []
+                        handler._json = lambda code, data, r=responses: r.append((code, data))
+                        handler._auth = lambda: True
+                        handler._read_json_body = lambda: ({"force": True}, None, None)
 
-                ControlHandler.do_POST(handler)
+                        ControlHandler.do_POST(handler)
 
-                # Verify pkill was called with quoted name
-                mock_run.assert_called()
-                call_args = mock_run.call_args
-                cmd = call_args[0][0]  # First positional arg is the command list
-                # The pattern should contain the quoted bot name
-                expected_pattern = f"api_runner\\.py {shlex.quote('valid-bot')}"
-                self.assertIn(expected_pattern, cmd)
+                        # Verify pkill was called with quoted name
+                        mock_run.assert_called()
+                        call_args = mock_run.call_args
+                        cmd = call_args[0][0]  # First positional arg is the command list
+                        # The pattern should contain the quoted bot name
+                        expected_pattern = f"api_runner\\.py {shlex.quote('valid-bot')}"
+                        self.assertIn(expected_pattern, cmd)
 
     def test_pause_applies_shlex_quote(self):
         """Pause must apply shlex.quote to bot names before subprocess call."""
@@ -285,7 +287,7 @@ class TestCommandInjectionPrevention(unittest.TestCase):
                     responses = []
                     handler._json = lambda code, data, r=responses: r.append((code, data))
                     handler._auth = lambda: True
-                    handler._read_json_body = lambda: (None, None, None)
+                    handler._read_json_body = lambda: ({"force": True}, None, None)
 
                     mock_paused_file = MagicMock()
                     mock_state.__truediv__ = MagicMock(return_value=mock_paused_file)
@@ -313,7 +315,7 @@ class TestCommandInjectionPrevention(unittest.TestCase):
                     responses = []
                     handler._json = lambda code, data, r=responses: r.append((code, data))
                     handler._auth = lambda: True
-                    handler._read_json_body = lambda: (None, None, None)
+                    handler._read_json_body = lambda: ({"force": True}, None, None)
 
                     mock_paused_file = MagicMock()
                     mock_paused_file.exists.return_value = False

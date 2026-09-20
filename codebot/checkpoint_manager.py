@@ -29,16 +29,20 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 try:
-    import fcntl
-    LOCK_EX = fcntl.LOCK_EX
-    LOCK_UN = fcntl.LOCK_UN
-except ImportError:
-    LOCK_EX = 2  # fcntl.LOCK_EX value on Linux; used for exclusive state-file locking
-    LOCK_UN = 8  # fcntl.LOCK_UN value on Linux; used to release the flock
-    def _noop_flock(fd, operation):
-        """No-op flock on platforms without fcntl (e.g. Windows)."""
-        pass
-    fcntl = type('fcntl', (), {'flock': _noop_flock})()
+    from codebot.locks import LOCK_EX, LOCK_UN, flock as _shared_flock
+    fcntl = type("fcntl", (), {"flock": staticmethod(_shared_flock)})()
+except ImportError:  # pragma: no cover - locks module must exist
+    try:
+        import fcntl  # type: ignore[no-redef]
+        LOCK_EX = fcntl.LOCK_EX
+        LOCK_UN = fcntl.LOCK_UN
+    except ImportError:
+        LOCK_EX = 2  # fcntl.LOCK_EX value on Linux; used for exclusive state-file locking
+        LOCK_UN = 8  # fcntl.LOCK_UN value on Linux; used to release the flock
+        def _noop_flock(fd: int, operation: int) -> None:
+            """No-op flock on platforms without fcntl (e.g. Windows)."""
+            pass
+        fcntl = type('fcntl', (), {'flock': _noop_flock})()  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +107,10 @@ def _state_write_lock(bot_name: str) -> Iterator[None]:
         None — the critical section runs inside the ``with`` block.
 
     Invariants:
-        - Uses ``fcntl.flock`` on Unix; no-ops on unsupported platforms.
+        - Routes through ``codebot.locks.flock`` (Unix fcntl / Windows msvcrt /
+          documented no-op). See codebot.locks docstring for platform limits:
+          byte-range (not whole-file) locks on Windows, LOCK_SH treated as
+          LOCK_EX there, fail-open no-op with RuntimeWarning elsewhere.
         - Lock file is created with ``a+`` so it persists across calls.
     """
     _STATE_DIR.mkdir(parents=True, exist_ok=True)

@@ -130,7 +130,7 @@ class TestPauseResumeBotValidation(unittest.TestCase):
                     responses = []
                     handler._json = lambda code, data: responses.append((code, data))
                     handler._auth = lambda: True
-                    handler._read_json_body = lambda: (None, None, None)
+                    handler._read_json_body = lambda: ({"force": True}, None, None)
 
                     mock_paused_file = MagicMock()
                     mock_state.__truediv__ = MagicMock(return_value=mock_paused_file)

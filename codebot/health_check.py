@@ -163,12 +163,54 @@ def run_dispatchers(bots: Dict[str, Any], ts: Any) -> None:
 
 
 def start_eligible_bots(bots: Dict[str, Any], now: float, ts: Any) -> None:
-    """Start eligible bots, skipping implementers/reviewers handled by dispatchers."""
+    """Start eligible bots, skipping implementers/reviewers handled by dispatchers.
+
+    O(1) early exit when no work available; O(B_role) iteration only over
+    relevant bot roles instead of O(B) full scan. Uses pipeline state to
+    determine which roles are needed before iterating.
+    """
     from codebot.dispatch_service import get_pipeline_state, is_needed_bot
     from codebot.state_manager import is_draining
     from codebot.process_manager import start_bot, update_bot_state
-    from codebot.dispatch_service import IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES
+    from codebot.dispatch_service import (
+        IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
+        DECOMPOSER_ROLE_NAMES, PLANNING_ROLE_NAMES, DISCOVERY_ROLE_NAMES,
+    )
+
     pipeline = get_pipeline_state(store=ts)
+
+    # O(1) early exit: no work in any queue
+    has_decompose_work = pipeline.get("DECOMPOSE", 0) > 0 or pipeline.get("READY", 0) > 0
+    has_planning_work = pipeline.get("PLANNING", 0) > 0
+    has_verifying_work = pipeline.get("VERIFYING", 0) > 0
+    has_discovery_work = (
+        pipeline.get("DISCOVERED", 0) + pipeline.get("VALIDATING", 0) +
+        pipeline.get("TRIAGED", 0)
+    ) > 0
+
+    if not (has_decompose_work or has_planning_work or has_verifying_work or has_discovery_work):
+        # No work available - set all non-implementer/reviewer bots to waiting
+        for name, bot in bots.items():
+            base = name.split("-")[0] if "-" in name else name
+            if base in IMPLEMENTER_ROLE_NAMES or base in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
+                continue
+            if bot.config.enabled and bot.process is None:
+                bot.next_run_at = now + bot.config.interval_seconds
+                update_bot_state(bot, "waiting")
+        return
+
+    # Build set of roles that are actually needed this tick
+    needed_roles: set[str] = set()
+    if has_decompose_work:
+        needed_roles.update(DECOMPOSER_ROLE_NAMES)
+    if has_planning_work:
+        needed_roles.update(PLANNING_ROLE_NAMES)
+    if has_verifying_work:
+        needed_roles.add("quality_gate")
+    if has_discovery_work:
+        needed_roles.update(DISCOVERY_ROLE_NAMES)
+
+    # O(B_role) iteration: only check bots whose role is actually needed
     for name, bot in bots.items():
         if not bot.config.enabled or is_draining() or bot.process is not None:
             continue
@@ -177,6 +219,12 @@ def start_eligible_bots(bots: Dict[str, Any], now: float, ts: Any) -> None:
         base = name.split("-")[0] if "-" in name else name
         if base in IMPLEMENTER_ROLE_NAMES or base in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
             continue
+        # O(1) role membership check instead of calling is_needed_bot()
+        if base not in needed_roles and name != "quality_gate":
+            bot.next_run_at = now + bot.config.interval_seconds
+            update_bot_state(bot, "waiting")
+            continue
+        # Double-check with is_needed_bot for edge cases (e.g., unknown roles)
         if is_needed_bot(name, pipeline):
             has_ticket = bool(getattr(bot, "_assigned_ticket_id", ""))
             start_bot(bot, bots=bots, is_demand=has_ticket)

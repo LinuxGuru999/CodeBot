@@ -467,5 +467,108 @@ class TestMainCLI(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+class TestPlaintextTokenGuard(unittest.TestCase):
+    """Test that req() refuses to send Bearer token over plaintext HTTP to non-loopback."""
+
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+
+    def tearDown(self):
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_refuses_token_over_plaintext_non_loopback(self, mock_urlopen):
+        """Test req() raises RuntimeError when TOKEN set and URL is http:// non-loopback."""
+        os.environ["CONTROL_URL"] = "http://192.168.1.10:8081"
+        os.environ["CONTROL_TOKEN"] = "secret-token"
+        importlib.reload(control_client)
+
+        with self.assertRaises(RuntimeError) as cm:
+            control_client.req("GET", "/bots")
+
+        self.assertIn("Refusing to send Bearer token over plaintext", str(cm.exception))
+        self.assertIn("192.168.1.10", str(cm.exception))
+        self.assertIn("https://", str(cm.exception))
+        # Token must NOT appear in error message
+        self.assertNotIn("secret-token", str(cm.exception))
+        # urlopen must never have been called
+        mock_urlopen.assert_not_called()
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_allows_token_over_https_remote(self, mock_urlopen):
+        """Test req() allows token over https:// even to non-loopback host."""
+        os.environ["CONTROL_URL"] = "https://example.com"
+        os.environ["CONTROL_TOKEN"] = "secret-token"
+        importlib.reload(control_client)
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
+        mock_response.status = 200
+        mock_response.__enter__ = lambda self: self
+        mock_response.__exit__ = lambda self, *args: None
+        mock_urlopen.return_value = mock_response
+
+        status, body = control_client.req("GET", "/bots")
+
+        mock_urlopen.assert_called_once()
+        call_args = mock_urlopen.call_args
+        request_obj = call_args[0][0]
+        headers_str = str(request_obj.headers)
+        self.assertIn("Bearer", headers_str)
+        self.assertEqual(status, 200)
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_allows_token_on_loopback_variants(self, mock_urlopen):
+        """Test req() allows token over http:// to loopback addresses."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
+        mock_response.status = 200
+        mock_response.__enter__ = lambda self: self
+        mock_response.__exit__ = lambda self, *args: None
+        mock_urlopen.return_value = mock_response
+
+        for loopback_url in ["http://127.0.0.1:8081", "http://localhost:8081", "http://[::1]:8081"]:
+            mock_urlopen.reset_mock()
+            os.environ["CONTROL_URL"] = loopback_url
+            os.environ["CONTROL_TOKEN"] = "secret-token"
+            importlib.reload(control_client)
+
+            status, body = control_client.req("GET", "/health")
+
+            mock_urlopen.assert_called_once()
+            call_args = mock_urlopen.call_args
+            request_obj = call_args[0][0]
+            headers_str = str(request_obj.headers)
+            self.assertIn("Bearer", headers_str, f"Token not sent for loopback URL: {loopback_url}")
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_allows_no_token_over_plaintext_non_loopback(self, mock_urlopen):
+        """Test req() allows http:// non-loopback when no token is set (nothing to leak)."""
+        os.environ["CONTROL_URL"] = "http://192.168.1.10:8081"
+        os.environ["CONTROL_TOKEN"] = ""
+        importlib.reload(control_client)
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
+        mock_response.status = 200
+        mock_response.__enter__ = lambda self: self
+        mock_response.__exit__ = lambda self, *args: None
+        mock_urlopen.return_value = mock_response
+
+        status, body = control_client.req("GET", "/health")
+
+        mock_urlopen.assert_called_once()
+        self.assertEqual(status, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

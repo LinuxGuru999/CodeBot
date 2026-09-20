@@ -11,12 +11,30 @@ The fcntl module is Unix-only. CodeBot aims to be portable (Goal 1),
 so hard imports of fcntl break on Windows. This module abstracts the
 platform differences behind a simple API.
 
-Invariants
-----------
-- stdlib-only (fcntl on Unix, msvcrt on Windows)
-- Fail-open on unsupported platforms: locking becomes a no-op with warning
-- Lock semantics match fcntl.flock where possible
-- Thread-safe within a single process
+Platform Limitations (CB-5603529-75D5)
+-----------------------------------
+File locking is advisory and its semantics differ by platform. Callers must
+not assume identical behaviour across operating systems:
+
+- Linux/Unix (fcntl.flock): whole-file advisory locks. LOCK_SH allows
+  multiple concurrent readers; LOCK_EX is exclusive; LOCK_NB makes either
+  non-blocking (raises BlockingIOError/OSError on contention). Locks are
+  associated with the open file description and released on close.
+- Windows (msvcrt.locking): mandatory byte-range locks. Only the first byte
+  (``LK_LOCK``/``LK_UNLCK`` over 1 byte) is locked as a proxy for the whole
+  file, so a non-cooperating reader that ignores locking can still read.
+  LOCK_SH is NOT natively supported and is treated as LOCK_EX (exclusive).
+  LOCK_NB maps to a non-blocking attempt that raises OSError on contention.
+  Lock/unlock regions must match exactly or unlock silently fails.
+- Other platforms (no fcntl, no msvcrt): fail-open no-op with a one-time
+  RuntimeWarning. Concurrent read-modify-write cycles are NOT serialized;
+  callers relying on mutual exclusion must use the atomic tmp+replace write
+  path (os.replace) which remains safe without locks.
+
+Zero-downtime note: old code holding a private fcntl/msvcrt/no-op fallback
+coexists with this module because lock constants keep their standard values
+(LOCK_SH=1, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8) and every consumer now routes
+through this single primitive.
 """
 
 from __future__ import annotations

@@ -361,17 +361,32 @@ def is_draining():
     return _sm_is_draining()
 
 
-from codebot.alignment_service import run_alignment_pipeline_for_all
+from codebot.alignment_coordinator import write_alignment_event
+from codebot.alignment_service import (
+    run_alignment_pipeline, run_alignment_pipeline_for_all,
+)
 from codebot.ticket_dispatcher import (
+    spawn_demand_agents, dispatch_decompose_agents,
+    dispatch_planning_agents, advance_reviewed_tickets,
+    gatekeeper_verify_tickets, route_ready_tickets,
+    process_rework_tickets, recover_deferred_tickets,
+    _sweep_orphan_claims,
     TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER,
 )
 from codebot.dispatch_service import (
+    get_pipeline_state, is_needed_bot, apply_agent_availability,
+    rotate_model_on_error, transition_ticket_on_success,
+    transition_ticket_on_error, compute_rate_limit_backoff,
+    retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
     IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
+    batch_read_bot_statuses,
 )
+from codebot.scratchpad import load_scratchpad, save_scratchpad
 from codebot.state_manager import (
     PathConfig, get_paths, set_drain, clear_drain,
-    drain_status, backup_botnet, restore_botnet,
+    drain_status, backup_botnet, restore_botnet, check_self_restart,
     safe_stop_all, set_project_adapter as _sm_set_project_adapter,
+    get_adapter_instance,
 )
 from codebot.worker_scaler import (
     load_bot_registry, build_bots,
@@ -439,7 +454,9 @@ def _build_worker_pool() -> frozenset:
 WORKER_POOL = _build_worker_pool()
 
 # Adapter instance for queue depth and ticket class queries.
-# Set during bootstrap via _bootstrap_adapter(); None until then.
+# The adapter is registered via state_manager.set_adapter_instance() during
+# bootstrap and queried via get_adapter_instance() at tick boundaries.
+# The module-level _adapter variable is kept for backward-compatible test patches.
 _adapter: Any = None
 
 
@@ -573,17 +590,24 @@ def print_status(bots: dict[str, BotState]) -> None:
 # ---------------------------------------------------------------------------
 
 def _init_tick() -> None:
-    """Initialize per-tick cache state.
+    """Initialize per-tick cache state via QueueManager adapter.
 
-    Clears the TicketStore cache so each dispatcher call within this tick
-    shares a single fresh read.  Queue depth logging is delegated to the
-    injected project adapter — the orchestrator never directly touches
-    TicketStore instances.
+    Uses QueueManager to clear cache and query queue depth, decoupling
+    the orchestrator from direct TicketStore dependency. Queue depth
+    is provided via the injected project adapter interface.
     """
-    clear_ticket_store_cache()
-    if _adapter is not None:
+    from codebot.ticket_engine import QueueManager
+    from codebot.state_manager import get_paths
+
+    # Use QueueManager for cache management instead of direct imports
+    qm = QueueManager.from_state_dir(get_paths().state_dir)
+    qm.clear_cache()
+
+    # Log queue depth via adapter (orchestrator doesn't touch TicketStore directly)
+    adapter = get_adapter_instance()
+    if adapter is not None:
         try:
-            qd = _adapter.queue_depth()
+            qd = adapter.queue_depth()
             logger.debug("Adapter queue depth: %d", qd)
         except Exception:
             logger.debug("Adapter queue depth unavailable")
@@ -600,11 +624,13 @@ def _retry_disabled_and_stuck(bots: dict[str, BotState], hb_cache: dict) -> None
                 logger.info(f"Retrying '{name}' stuck in starting")
 
 
-def _handle_exited_bots(bots: dict[str, BotState], now: float) -> set[str]:
+def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any = None) -> set[str]:
     """Handle bots that have exited, running alignment and transitioning tickets.
 
-    Dispatchers resolve their own TicketStore via get_ticket_store() — the
-    orchestrator never holds or passes a store instance.
+    Args:
+        bots: Dict of bot states.
+        now: Current timestamp.
+        ts: Optional TicketStore (unused, kept for backward-compatible call sites).
 
     Returns a set of ticket IDs that were returned to READY due to error exits,
     so dispatchers can skip re-routing them in the same tick.
@@ -710,9 +736,9 @@ def _run_dispatchers(bots: dict[str, BotState], skip_route_tids: set[str] | None
             logger.warning(f"{label} failed: {e}")
 
 
-def _start_eligible_bots(bots: dict[str, BotState], now: float, ts: Any) -> None:
+def _start_eligible_bots(bots: dict[str, BotState], now: float) -> None:
     """Start eligible bots, skipping implementers/reviewers handled by dispatchers."""
-    pipeline = get_pipeline_state(store=ts)
+    pipeline = get_pipeline_state()
     for name, bot in bots.items():
         if not bot.config.enabled or is_draining() or bot.process is not None:
             continue
@@ -735,7 +761,6 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         return
 
     _init_tick()
-    ts = get_ticket_store()
     now = time.time()
 
     # Batch-read all heartbeats and statuses once per tick
@@ -749,8 +774,8 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     error_recovered_tids = _handle_exited_bots(bots, now)
     _handle_stuck_bots(bots, now, heartbeat_cache)
     log_bot_statuses(bots, preloaded_statuses=status_cache)
-    _run_dispatchers(bots, ts, skip_route_tids=error_recovered_tids)
-    _start_eligible_bots(bots, now, ts)
+    _run_dispatchers(bots, skip_route_tids=error_recovered_tids)
+    _start_eligible_bots(bots, now)
 
 
 # ---------------------------------------------------------------------------

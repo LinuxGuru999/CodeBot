@@ -306,8 +306,7 @@ class TestMigrate:
 
         store = TicketStore(temp_state_dir / "codebot_tickets.json")
         for ticket in store._tickets.values():
-            last_state = ticket.state_history[-1]["to"]
-            assert last_state == TicketState.READY.value
+            assert ticket.state == TicketState.READY
 
     def test_migrate_empty_queue(self, temp_state_dir, tmp_path):
         """Test migration with empty queue."""

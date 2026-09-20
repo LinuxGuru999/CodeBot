@@ -342,8 +342,10 @@ class ContextAssemblyTracer:
     _RE_EMAIL = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
     _RE_IP4 = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
     _RE_PHONE = re.compile(r'\+?\d[\d\s().-]{7,}\d')
+    # Match common API key patterns: sk-xxx, dgr-xxx, api_key=xxx, token:xxx, etc.
     _RE_API_KEY = re.compile(
-        r'(?:sk|dgr|ak|pk|token|api[_-]?key|secret|password|bearer)[_-]?[A-Za-z0-9]{4,}',
+        r'\b(?:sk|dgr|ak|pk)[_-][A-Za-z0-9]{8,}\b|'
+        r'\b(?:api[_-]?key|secret|password|bearer|token)[_:=\s]+[A-Za-z0-9]{8,}\b',
         re.IGNORECASE,
     )
 
@@ -388,11 +390,15 @@ class ContextAssemblyTracer:
         # Append to JSONL file (fail-open)
         try:
             line = json.dumps(event, ensure_ascii=False, default=str) + '\n'
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            # Ensure parent directory exists
+            try:
+                self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
             with open(self._log_path, 'a', encoding='utf-8') as fh:
                 fh.write(self.sanitize_for_log(line))
         except Exception:
-            pass
+            pass  # Fail-open: tracing must never break execution
         return event
 
     # -- public trace points ------------------------------------------------
@@ -2466,9 +2472,6 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
         if exit_reason == "completed":
             _log(f"{bot_name}: model returned content, completing ({tool_iterations} tool iterations)")
             _write_heartbeat(heartbeat_file)
-            if _is_implementation_bot(bot_name):
-                ticket_id = _ticket_id_from_claim(state_dir, bot_name)
-                _auto_commit(bot_name, files_touched, ticket_id=ticket_id)
             _write_checkpoint(ckpt_file, bot_name, "completed")
             sys.exit(0)
         elif exit_reason == "iteration_limit":
@@ -2491,6 +2494,11 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     finally:
         _stop_heartbeat_thread(hb_thread)
         _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reason)
+        # CB-3548779-D85C: Flush context-assembly trace summary
+        try:
+            _tracer.flush()
+        except Exception:
+            pass
         discovery_roles = frozenset({
             "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
             "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",

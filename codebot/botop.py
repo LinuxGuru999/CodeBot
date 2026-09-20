@@ -911,19 +911,37 @@ def _age_str(age: float | None, enabled: bool = False) -> str:
 
 def _bucket_color(bucket: str, enabled: bool) -> str:
     cols = {"RUNNING": "green", "STALE": "yellow", "WAITING": "cyan", "PAUSED": "cyan", "DEAD": "red", "UNKNOWN": "gray"}
-    return _c(bucket, cols.get(bucket, "gray"), enabled)
+    symbols = {"RUNNING": "\u25b6", "STALE": "\u26a0", "WAITING": "\u23f3", "PAUSED": "\u23f8", "DEAD": "\u2716", "UNKNOWN": "\u2753"}
+    sym = symbols.get(bucket, "")
+    text = f"{sym} {bucket}" if sym else bucket
+    return _c(text, cols.get(bucket, "gray"), enabled)
 
 def _severity_color(sev: str, enabled: bool) -> str:
     m = {"critical": "red", "high": "yellow", "medium": "cyan", "low": "gray"}
-    return _c(sev, m.get(sev.lower(), "gray"), enabled)
+    symbols = {"critical": "\U0001f534", "high": "\u26a0\ufe0f", "medium": "\u26a1", "low": "\u25cb"}
+    sym = symbols.get(sev.lower(), "")
+    text = f"{sym} {sev}" if sym else sev
+    return _c(text, m.get(sev.lower(), "gray"), enabled)
 
 def _state_color(st: str, enabled: bool) -> str:
     cols = {
         "IMPLEMENTING": "yellow", "REVIEWING": "cyan", "VERIFYING": "blue",
         "COMPLETE": "green", "READY": "green", "PLANNING": "magenta",
         "REWORK": "red", "BLOCKED": "red", "DISCOVERED": "gray",
+        "TRIAGED": "cyan", "VALIDATING": "yellow", "DEFERRED": "gray",
+        "REJECTED": "red", "DUPLICATE": "gray",
     }
-    return _c(st, cols.get(st.upper(), "gray"), enabled)
+    symbols = {
+        "IMPLEMENTING": "\u2699", "REVIEWING": "\U0001f441", "VERIFYING": "\U0001f50d",
+        "COMPLETE": "\u2713", "READY": "\u2713", "PLANNING": "\U0001f4dd",
+        "REWORK": "\u21bb", "BLOCKED": "\u26d4", "DISCOVERED": "\U0001f50e",
+        "TRIAGED": "\U0001f4cb", "VALIDATING": "\u2705", "DEFERRED": "\u23f2",
+        "REJECTED": "\u2717", "DUPLICATE": "\u267b",
+    }
+    upper = st.upper()
+    sym = symbols.get(upper, "")
+    text = f"{sym} {st}" if sym else st
+    return _c(text, cols.get(upper, "gray"), enabled)
 
 
 # ---------------------------------------------------------------------------

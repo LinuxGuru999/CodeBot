@@ -227,6 +227,8 @@ class Ticket:
     reviewer_feedback: list[dict] = field(default_factory=list)
     last_gate_result: dict[str, Any] = field(default_factory=dict)
     gate_history: list[dict[str, Any]] = field(default_factory=list)
+    commit_sha: str = ""
+    committed_at: float = 0.0
 
     def evidence_hash(self) -> str:
         canonical = f"{self.ticket_class}:{self.problem_statement}:{self.evidence}"
@@ -859,6 +861,21 @@ class TicketStore:
             self._queue_save()
         return ticket
 
+    def record_commit(self, ticket_id: str, sha: str) -> Ticket | None:
+        """Record the git SHA for a COMPLETE ticket. Returns updated ticket or None."""
+        import time as _time
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None:
+                return None
+            if ticket.commit_sha == sha and sha:
+                return ticket
+            updated = Ticket(**{**asdict(ticket), "commit_sha": sha, "committed_at": _time.time()})
+            self._tickets[ticket_id] = updated
+            self._dirty_ids.add(ticket_id)
+            self._queue_save()
+            return updated
+
     def get(self, ticket_id: str) -> Ticket | None:
         """Alias for get_by_id for backward compatibility."""
         return self.get_by_id(ticket_id)
@@ -1131,3 +1148,147 @@ class TicketStore:
         """
         with self._lock:
             return dict(self._state_counts)
+
+
+# ---------------------------------------------------------------------------
+# QueueManager — Adapter interface for queue depth and ticket class queries
+# ---------------------------------------------------------------------------
+
+class QueueManager:
+    """Adapter providing queue metrics without exposing TicketStore internals.
+
+    Purpose
+    -------
+    Decouples orchestrator from direct TicketStore dependency. Provides
+    queue depth, ticket classes, and state summary via an adapter interface.
+    The orchestrator injects a QueueManager instead of importing TicketStore
+    functions directly.
+
+    Why
+    ---
+    CB-5190476-CBC6 requires that queue depth be provided via adapter,
+    not through direct TicketStore imports in orchestrator.py.
+
+    Invariants
+    ----------
+    - Wraps TicketStore internally; callers don't know about storage format
+    - Provides actionable_queue_depth() for worker scaling decisions
+    - Provides ticket_classes() for model-tier routing
+    - Provides summary() for pipeline state checks
+    - get_store() available for backward-compat with dispatch functions
+    """
+
+    def __init__(self, store: TicketStore | None = None):
+        """Initialize with optional TicketStore instance.
+
+        If store is None, will lazily load from disk on first access.
+        """
+        self._store: TicketStore | None = store
+        self._store_path: Path | None = None
+        if store is not None:
+            # Infer store path from the TicketStore instance
+            try:
+                self._store_path = getattr(store, '_path', None)
+            except Exception:
+                pass
+
+    def _ensure_store(self) -> TicketStore | None:
+        """Lazy-load TicketStore if not already loaded."""
+        if self._store is not None:
+            return self._store
+        if self._store_path is None:
+            # Default to standard location
+            try:
+                from codebot.state_manager import get_paths
+                self._store_path = get_paths().state_dir / "tickets.json"
+            except Exception:
+                return None
+        try:
+            self._store = TicketStore(self._store_path)
+            return self._store
+        except Exception:
+            return None
+
+    def clear_cache(self) -> None:
+        """Clear the internal TicketStore cache for fresh read on next tick."""
+        if self._store is not None:
+            # Force reload by clearing reference; next access will re-read
+            self._store = None
+
+    def actionable_queue_depth(self) -> int:
+        """Return count of actionable items (READY + DECOMPOSE + REWORK).
+
+        Used by worker scaler to determine how many implementers to spawn.
+        Returns 0 if TicketStore is unavailable.
+        """
+        store = self._ensure_store()
+        if store is None:
+            return 0
+        try:
+            with store._lock:
+                ready_count = len(store._state_index.get(TicketState.READY, set()))
+                decompose_count = len(store._state_index.get(TicketState.DECOMPOSE, set()))
+                rework_count = len(store._state_index.get(TicketState.REWORK, set()))
+                return ready_count + decompose_count + rework_count
+        except Exception:
+            return 0
+
+    def ticket_classes(self) -> list[str]:
+        """Return list of ticket classes for READY tickets.
+
+        Used by worker scaler to route tickets to specialized implementers.
+        Returns empty list if TicketStore is unavailable.
+        """
+        store = self._ensure_store()
+        if store is None:
+            return []
+        try:
+            ready_tickets = store.list_ready_raw()
+            classes = []
+            for t in ready_tickets:
+                tc = getattr(t, 'ticket_class', None)
+                if tc is not None:
+                    classes.append(tc.value if hasattr(tc, 'value') else str(tc))
+                else:
+                    classes.append("feature")
+            return classes
+        except Exception:
+            return []
+
+    def summary(self) -> dict[str, int]:
+        """Return count of tickets per state.
+
+        O(1) via cached _state_counts. Returns empty dict if unavailable.
+        """
+        store = self._ensure_store()
+        if store is None:
+            return {}
+        try:
+            return store.summary()
+        except Exception:
+            return {}
+
+    def get_store(self) -> TicketStore | None:
+        """Return underlying TicketStore for backward-compat with dispatchers.
+
+        Dispatch functions that need full TicketStore access can call this.
+        New code should prefer actionable_queue_depth(), ticket_classes(), summary().
+        """
+        return self._ensure_store()
+
+    @classmethod
+    def from_state_dir(cls, state_dir: Path) -> "QueueManager":
+        """Create QueueManager from state directory path.
+
+        Returns a QueueManager with no underlying store if tickets.json
+        is missing or unreadable. Callers should check get_store() for None.
+        """
+        store_path = state_dir / "tickets.json"
+        if not store_path.exists():
+            # Return QueueManager with no store; get_store() will return None
+            return cls(None)
+        try:
+            store = TicketStore(store_path)
+            return cls(store)
+        except Exception:
+            return cls(None)
