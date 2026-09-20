@@ -237,3 +237,75 @@ class TestSaveLoad:
         sc.record_call("gpt-4", "code", True, 0.01, 10, 5)
         tmp_file = tmp_path / "model_stats.tmp"
         assert not tmp_file.exists()
+
+    def test_save_oSError_does_not_crash(self, tmp_path):
+        """_save catches OSError and fails open — data loss acceptable,
+        crash is not."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("gpt-4", "code", True, 0.05, 100, 50)
+        # Make the stats file a directory so replace() will fail with OSError
+        stats_file = tmp_path / "model_stats.json"
+        stats_file.unlink(missing_ok=True)
+        stats_file.mkdir()
+        # Should not raise
+        sc._save()
+        # Cache remains intact in memory
+        assert sc._cache["gpt-4:code"]["total_calls"] == 1
+
+    def test_empty_file_on_load(self, tmp_path):
+        """Empty file → JSONDecodeError → cache stays empty."""
+        stats_file = tmp_path / "model_stats.json"
+        stats_file.write_text("", encoding="utf-8")
+        sc = StatsCollector(state_dir=str(tmp_path))
+        assert sc._cache == {}
+
+    def test_load_oserror_on_read(self, tmp_path):
+        """File exists but is unreadable (permissions) → cache stays empty."""
+        stats_file = tmp_path / "model_stats.json"
+        stats_file.write_text(json.dumps({"a:b": {"total_calls": 1}}), encoding="utf-8")
+        # Make file unreadable
+        stats_file.chmod(0o000)
+        try:
+            sc = StatsCollector(state_dir=str(tmp_path))
+            # Depending on OS/user, this may or may not raise;
+            # if it doesn't raise, the cache should be empty due to OSError
+            assert sc._cache == {}
+        finally:
+            # Restore permissions for cleanup
+            stats_file.chmod(0o644)
+
+    def test_record_call_negative_cost(self, tmp_path):
+        """Negative cost is unusual but should still accumulate."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("gpt-4", "code", True, -0.05, 100, 50)
+        key = "gpt-4:code"
+        assert sc._cache[key]["total_cost"] == pytest.approx(-0.05)
+
+    def test_large_dataset_round_trip(self, tmp_path):
+        """Many records survive load/save cycle."""
+        sc1 = StatsCollector(state_dir=str(tmp_path))
+        models = [f"model-{i}" for i in range(20)]
+        tasks = ["code", "chat", "summarize", "translate"]
+        for m in models:
+            for t in tasks:
+                for _ in range(5):
+                    sc1.record_call(m, t, True, 0.01, 100, 50)
+        sc2 = StatsCollector(state_dir=str(tmp_path))
+        assert len(sc2._cache) == len(sc1._cache)
+        for key in sc1._cache:
+            assert sc2._cache[key]["total_calls"] == sc1._cache[key]["total_calls"]
+            assert sc2._cache[key]["total_cost"] == pytest.approx(sc1._cache[key]["total_cost"])
+
+    def test_get_stats_filter_empty_model_name(self, tmp_path):
+        """Filter by empty string model_name should not match 'model:task'."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("gpt-4", "code", True, 0.01, 10, 5)
+        result = sc.get_stats(model_name="")
+        assert result == {}
+
+    def test_get_stats_filter_empty_task_type(self, tmp_path):
+        """Filter by empty string task_type should not match 'model:task'."""
+        sc = StatsCollector(state_dir=str(tmp_path))
+        sc.record_call("gpt-4", "code", True, 0.01, 10, 5)
+        result = sc.get_stats(task_type="")
+        assert result == {}

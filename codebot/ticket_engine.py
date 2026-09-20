@@ -138,6 +138,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     TicketState.IMPLEMENTING: frozenset({
         TicketState.REVIEWING,
         TicketState.BLOCKED,
+        TicketState.REWORK,
     }),
     TicketState.REVIEWING: frozenset({
         TicketState.VERIFYING,
