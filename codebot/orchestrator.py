@@ -4944,12 +4944,40 @@ def _evaluate_budget() -> str:
     return status
 
 
+_QUALITY_TRACKER = None
+
+
+def _record_quality_metrics() -> None:
+    global _QUALITY_TRACKER
+    if _QUALITY_TRACKER is None:
+        try:
+            from codebot.quality_metrics import QualityMetricsTracker
+            _QUALITY_TRACKER = QualityMetricsTracker(
+                state_dir=STATE_DIR,
+                project_root=Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd())),
+            )
+        except ImportError:
+            return
+    try:
+        snapshot = _QUALITY_TRACKER.maybe_record()
+        if snapshot:
+            logger.info(
+                f"Quality metrics: complete={snapshot.complete_tickets}/{snapshot.total_tickets} "
+                f"rework_rate={snapshot.rework_rate} completion_rate={snapshot.completion_rate} "
+                f"escaped={snapshot.escaped_defects} throughput_hr={snapshot.completions_last_hour}/hr "
+                f"median_lifecycle={snapshot.median_lifecycle_minutes}min"
+            )
+    except Exception as e:
+        logger.warning(f"Quality metrics recording failed: {e}")
+
+
 def check_all_bots(bots: dict[str, BotState]) -> None:
     if _check_self_restart(bots):
         return
     if USE_MANIFEST_SCHEDULER:
         return _check_all_bots_manifest(bots)
     _evaluate_budget()
+    _record_quality_metrics()
     _apply_agent_availability(bots)
     _sweep_orphan_claims(bots)
     rotate_logs()
