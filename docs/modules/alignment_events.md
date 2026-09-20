@@ -1,46 +1,43 @@
 # Module: alignment_events
 
 ## Summary
-Tracks and records bot exit events for reinforcement learning (RL) scoring and prompt optimization.
+Tracks and records bot exit events for RL (Reinforcement Learning) scoring and prompt optimization.
 
 ## Why
-The orchestrator needs structured data about bot lifecycles (exit codes, duration, heartbeat age, log size) to evaluate alignment and trigger prompt evolution. This module provides a fail-open mechanism to record these events atomically.
+The orchestrator needs structured exit data (exit code, duration, heartbeat age, log size) so the alignment pipeline can evaluate bot behavior and produce RL rewards for prompt evolution. This enables automated detection of misaligned or failing bots.
 
 ## Invariants
-- Events are written atomically via tmp+replace to prevent corruption.
-- Never raises exceptions; logs warnings on I/O errors to keep the health loop running.
-- Events include all necessary context for the RL engine to score runs.
+- Events are written atomically via tmp+replace to prevent corruption
+- Events include all data needed for downstream scoring
+- Never raises exceptions — logs at WARNING on I/O error (fail-open design)
+- Events are marked `processed=False` until consumed by the alignment scorer
 
 ## Dependencies
 - `json`, `logging`, `os`, `time`, `pathlib`
-- Relies on bot state files (`.codebot/state/{bot}.state.json`) and heartbeat files (`.codebot/state/{bot}.heartbeat`) for context.
+- State directory structure: `.codebot/state/alignment_events/`
+- Bot state files: `.codebot/state/{bot_name}.state.json`
+- Heartbeat files: `.codebot/state/{bot_name}.heartbeat`
+- Log files: `logs/{bot_name}.log`
 
-## Exports
-- `set_dirs(state_dir, logs_dir)`: Configure directories for event operations.
-- `write_alignment_event(bot_name, exit_code, exit_reason, started_at=None)`: Record a bot exit event.
-- `list_pending_events()`: List unprocessed alignment events.
-- `mark_event_processed(event_file, event, score, reward, verdict)`: Mark an event as processed with scoring results.
-- `collect_reviewer_feedback_for_trigger(bot_name)`: Collect reviewer feedback for tickets assigned to a bot. Used when triggering prompt evolution after consecutive failures (rework_count >= 3). Returns list of feedback dicts with ticket_id, reviewer, file, description, recommendation.
+## Public API
 
-## Event Schema
+### `set_dirs(state_dir: Path, logs_dir: Path) -> None`
+Configure directories for alignment event operations. Must be called before other functions if using non-default paths.
 
-Each exit event includes:
-- `bot`: Bot name
+**Args:**
+- `state_dir`: Path to the state directory
+- `logs_dir`: Path to the logs directory
+
+### `write_alignment_event(bot_name: str, exit_code: Optional[int], exit_reason: str, started_at: Optional[float] = None) -> None`
+Write a bot exit event atomically. Called immediately after detecting a bot exit.
+
+**Args:**
+- `bot_name`: Name of the bot
 - `exit_code`: Exit code (0=success, non-zero=error, None=stuck/killed)
-- `exit_reason`: Human-readable reason ('clean', 'error', 'stuck')
-- `exit_time`: Unix timestamp of exit
-- `exit_time_human`: ISO format timestamp
-- `run_duration`: Duration in seconds (if started_at available)
-- `started_at`: Unix timestamp when bot started
-- `log_path`, `stream_path`, `checkpoint_path`: Paths to related files
-- `heartbeat_age_at_exit`: Seconds since last heartbeat
-- `log_bytes_at_exit`: Log file size in bytes
-- `processed`: Boolean flag for scoring pipeline
-- `processed_at`: Timestamp when scored (None until processed)
-- `version`: Schema version (currently 1)
+- `exit_reason`: Human-readable reason (e.g., 'clean', 'error', 'stuck')
+- `started_at`: Unix timestamp when bot started (optional; auto-detected from state file if omitted)
 
-## Usage Example
-
+**Example:**
 ```python
 from codebot.alignment_events import write_alignment_event
 
@@ -49,14 +46,59 @@ write_alignment_event(
     bot_name="bug_hunter-1",
     exit_code=0,
     exit_reason="clean",
-    started_at=1726800000.0
+    started_at=1726848000.0
 )
 
-# Record a failed bot exit
+# Record a stuck bot (no exit code)
 write_alignment_event(
-    bot_name="security_auditor-2",
-    exit_code=1,
-    exit_reason="error",
-    started_at=1726800000.0
+    bot_name="security_auditor-3",
+    exit_code=None,
+    exit_reason="stuck"
 )
+```
+
+### `list_pending_events() -> List[tuple]`
+List all unprocessed alignment events.
+
+**Returns:**
+List of `(event_path, event_data)` tuples for events with `processed=False`.
+
+**Example:**
+```python
+from codebot.alignment_events import list_pending_events
+
+pending = list_pending_events()
+for path, event in pending:
+    print(f"{event['bot']}: exit_code={event['exit_code']}, reason={event['exit_reason']}")
+```
+
+### `mark_event_processed(event_file: Path, event: Dict[str, Any], score: float, reward: float, verdict: str) -> None`
+Mark an alignment event as processed with scoring results.
+
+**Args:**
+- `event_file`: Path to the event file
+- `event`: Event data dict
+- `score`: Numerical alignment score
+- `reward`: RL reward value
+- `verdict`: Human-readable verdict (e.g., 'aligned', 'misaligned', 'inconclusive')
+
+## Event Payload Structure
+```json
+{
+  "bot": "bug_hunter-1",
+  "exit_code": 0,
+  "exit_reason": "clean",
+  "exit_time": 1726848000.123,
+  "exit_time_human": "2024-09-20T12:00:00Z",
+  "run_duration": 300.5,
+  "started_at": 1726847700.0,
+  "log_path": "logs/bug_hunter-1.log",
+  "stream_path": "logs/bug_hunter-1.stream.json",
+  "checkpoint_path": "state/bug_hunter-1.checkpoint.json",
+  "heartbeat_age_at_exit": 5.2,
+  "log_bytes_at_exit": 15234,
+  "processed": false,
+  "processed_at": null,
+  "version": 1
+}
 ```
