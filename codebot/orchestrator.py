@@ -790,7 +790,20 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         base = name.split("-")[0] if "-" in name else name
         return base in ("decomposer", "implementation_planner")
 
-    depths = _get_pipeline_state()
+    def _read_depths() -> dict[str, int]:
+        try:
+            from codebot.ticket_engine import TicketStore, TicketState
+            store_path = STATE_DIR / "tickets.json"
+            if not store_path.exists():
+                store_path = Path(".codebot/state/tickets.json")
+            if store_path.exists():
+                ts = TicketStore(store_path)
+                return ts.summary()
+        except Exception:
+            pass
+        return {}
+
+    depths = _read_depths()
     always_on_names = {"scheduler", "conflict_resolver", "budget_controller"}
 
     def _role_has_demand(name: str) -> bool:
@@ -863,7 +876,6 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
         ))
         TIER_PRIORITY[name] = tier
 
-    depths = _get_pipeline_state()
     decomp_queue = depths.get("DECOMPOSE", 0)
     plan_queue = depths.get("PLANNING", 0)
     planning_name_counts: dict[str, int] = {}
