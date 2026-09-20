@@ -3692,7 +3692,7 @@ def _process_rework_tickets(bots: dict[str, BotState]) -> int:
                     pass
             continue
         plan_file = plans_dir / f"{tid}.plan.json"
-        target_state = TicketState.IMPLEMENTING if plan_file.exists() else TicketState.PLANNING
+        target_state = TicketState.PLANNING if plan_file.exists() else TicketState.DECOMPOSE
         try:
             ts.transition(tid, target_state)
             logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rework_count})")
