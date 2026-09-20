@@ -443,7 +443,8 @@ def print_status(bots: dict[str, BotState]) -> None:
         if not info["enabled"]:
             state = "DISABLED"
         hb = f"{info['heartbeat_age_seconds']}s" if info['heartbeat_age_seconds'] else "-"
-        nxt = f"{info['next_run_in']:.0f}s" if info['next_run_in"] and info['next_run_in"] > 0 else "-"
+        nxt_val = info.get('next_run_in')
+        nxt = f'{nxt_val:.0f}s' if nxt_val and nxt_val > 0 else '-'
         pid = str(info['pid']) if info['pid'] else "-"
         print(f"  {name:15s} {state:9s} PID={pid:6s} HB={hb:7s} NEXT={nxt:6s} eff={info['eff_timeout']:4.0f}s risk={info['risk']:11s} {info['model']}")
     print("=" * 90 + "\n")

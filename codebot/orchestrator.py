@@ -47,7 +47,6 @@ from codebot.process_manager import (
     STATE_DIR,
     LOGS_DIR,
     BOTS_DIR,
-    BACKUP_DIR,
     GATEWAY_MAX_CONCURRENT,
     GATEWAY_MIN_SPAWN_GAP,
     ALWAYS_RESPAWN,
@@ -55,6 +54,9 @@ from codebot.process_manager import (
     heartbeat_path,
     _write_json_atomic,
 )
+
+# BACKUP_DIR is not in process_manager, define locally
+BACKUP_DIR = STATE_DIR / "backup"
 
 from codebot.ticket_dispatcher import (
     spawn_demand_agents,
@@ -398,139 +400,75 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 def main() -> None:
     """Run orchestrator. Pure controller — no bot work here."""
     import argparse
-    parser = argparse.ArgumentParser(description="Bot Orchestrator")
-    parser.add_argument("--status", action="store_true", help="Print status and exit")
-    parser.add_argument("--stop-all", action="store_true", help="Stop all bots and exit")
-    parser.add_argument("--safe-stop", action="store_true", help="Graceful drain")
-    parser.add_argument("--drain", action="store_true", help="Alias for --safe-stop")
-    parser.add_argument("--clear-drain", action="store_true", help="Clear drain flag")
-    parser.add_argument("--drain-status", action="store_true", help="Show drain status")
-    parser.add_argument("--start", nargs="*", help="Start specific bots")
-    parser.add_argument("--check-interval", type=int, default=30, help="Health check interval (seconds)")
-    args = parser.parse_args()
-
-    # Build bots dict
-    bots: dict[str, BotState] = {}
-    for config in BOT_REGISTRY:
-        bot = BotState(config=config)
-        state_file = STATE_DIR / f"{config.name}.state.json"
-        if state_file.exists():
-            try:
-                sdata = json.loads(state_file.read_text())
-                if isinstance(sdata, dict):
-                    bot.consecutive_errors = sdata.get("consecutive_errors", 0)
-                    bot.next_run_at = sdata.get("next_run_at", 0.0)
-                    bot.restart_count = sdata.get("restart_count", 0)
-            except Exception:
-                pass
-        bots[config.name] = bot
+    p = argparse.ArgumentParser(description="Bot Orchestrator")
+    p.add_argument("--status", action="store_true")
+    p.add_argument("--stop-all", action="store_true")
+    p.add_argument("--safe-stop", action="store_true")
+    p.add_argument("--drain", action="store_true")
+    p.add_argument("--clear-drain", action="store_true")
+    p.add_argument("--drain-status", action="store_true")
+    p.add_argument("--start", nargs="*")
+    p.add_argument("--check-interval", type=int, default=30)
+    args = p.parse_args()
+    bots = _build_bots(BOT_REGISTRY)
 
     if args.status:
         print_status(bots)
-        if is_draining():
-            print(f"DRAIN ACTIVE: {drain_status()}")
+        if is_draining(): print(f"DRAIN ACTIVE: {drain_status()}")
         return
-
     if args.drain_status:
-        import pprint as _pp
-        _pp.pprint(drain_status())
-        print_status(bots)
-        return
-
+        import pprint; pprint.pprint(drain_status()); print_status(bots); return
     if args.clear_drain:
-        clear_drain()
-        print("Drain cleared — respawn re-enabled.")
-        return
-
+        clear_drain(); print("Drain cleared."); return
     if args.safe_stop or args.drain:
-        safe_stop_all(bots)
-        print("Safe stop complete.")
-        print_status(bots)
-        return
-
+        safe_stop_all(bots); print("Safe stop complete."); print_status(bots); return
     if args.stop_all:
-        for bot in bots.values():
-            stop_bot(bot, "stop-all")
-        logger.info("All bots stopped")
+        for b in bots.values(): stop_bot(b, "stop-all")
+        logger.info("All bots stopped"); return
+    if args.start is not None:
+        if is_draining(): print("Refusing --start while draining", file=sys.stderr); sys.exit(4)
+        for n in (args.start or [c.name for c in BOT_REGISTRY]):
+            if n in bots and bots[n].config.enabled: start_bot(bots[n])
+        if args.start: time.sleep(2); print_status(bots)
         return
 
-    if args.start is not None:
-        if is_draining():
-            print(f"Refusing --start while drain active", file=sys.stderr)
-            sys.exit(4)
-        targets = args.start if args.start else [c.name for c in BOT_REGISTRY]
-        for name in targets:
-            if name in bots and bots[name].config.enabled:
-                start_bot(bots[name])
-        if args.start:
-            time.sleep(2)
-            print_status(bots)
-            return
-
-    # Bootstrap adapter if available
-    _codebot_adapter = None
     try:
-        from codebot.codebot_bootstrap import bootstrap as _cb_bootstrap
-        _codebot_adapter = _cb_bootstrap(BOTS_DIR)
-        if _codebot_adapter:
-            logger.info("CodeBot core bootstrapped: project=%s", _codebot_adapter.project_name())
-    except ImportError:
-        pass
-    except Exception as _cb_err:
-        logger.warning("CodeBot bootstrap failed (continuing with legacy): %s", _cb_err)
+        from codebot.codebot_bootstrap import bootstrap as _cb
+        adapter = _cb(BOTS_DIR)
+        if adapter: logger.info("Bootstrapped: %s", adapter.project_name())
+    except ImportError: adapter = None
+    except Exception as e: logger.warning("Bootstrap failed: %s", e); adapter = None
 
-    # Reload registry if adapter was loaded
-    if _codebot_adapter:
-        global BOT_REGISTRY
-        from codebot.orchestrator_services import set_adapter_instance
-        set_adapter_instance(_codebot_adapter)
-        BOT_REGISTRY = load_bot_registry()
-        bots = {}
-        for config in BOT_REGISTRY:
-            bot = BotState(config=config)
-            state_file = STATE_DIR / f"{config.name}.state.json"
-            if state_file.exists():
-                try:
-                    sdata = json.loads(state_file.read_text())
-                    if isinstance(sdata, dict):
-                        bot.consecutive_errors = sdata.get("consecutive_errors", 0)
-                        bot.next_run_at = sdata.get("next_run_at", 0.0)
-                        bot.restart_count = sdata.get("restart_count", 0)
-                except Exception:
-                    pass
-            bots[config.name] = bot
+    if adapter:
+        import codebot.orchestrator as _self
+        _self.BOT_REGISTRY = _load_bot_registry()
+        bots = _build_bots(_self.BOT_REGISTRY)
 
     def shutdown_handler(signum, frame):
         logger.info("Shutdown signal received")
-        for bot in bots.values():
-            stop_bot(bot, "shutdown")
-        logger.info("Orchestrator stopped")
+        for b in bots.values(): stop_bot(b, "shutdown")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
 
-    if is_draining():
-        logger.warning(f"Starting with drain active")
+    if not is_draining():
+        for b in bots.values(): b._assigned_ticket_id = ''
+        apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state)
+        logger.info(f"Overture: pipeline {get_pipeline_state()}")
     else:
-        for bot in bots.values():
-            bot._assigned_ticket_id = ''
-        apply_agent_availability(bots)
-        pipeline = get_pipeline_state()
-        logger.info(f"Overture: pipeline {pipeline}")
+        logger.warning("Starting with drain active")
 
-    logger.info("Orchestrator starting")
-    logger.info(f"Health check every {args.check_interval}s")
-    last_alignment_run = time.time()
-    alignment_interval = 1800  # 30 minutes
+    logger.info("Orchestrator starting, health check every %ds", args.check_interval)
+    last_align = time.time()
 
     while True:
         try:
             check_all_bots(bots)
             time.sleep(args.check_interval)
-            if time.time() - last_alignment_run >= alignment_interval:
+            if time.time() - last_align >= 1800:
                 run_alignment_pipeline_for_all()
-                last_alignment_run = time.time()
+                last_align = time.time()
         except KeyboardInterrupt:
             shutdown_handler(None, None)
         except Exception as e:
