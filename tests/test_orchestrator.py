@@ -708,3 +708,100 @@ class TestAlignmentServiceRefactoring:
                 # Should not raise, should return False
                 result = service.run_alignment_pipeline("test-bot")
                 assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Error-exit integration (CB-327673-4518)
+# ---------------------------------------------------------------------------
+
+class TestErrorExitIntegration:
+    """Integration test verifying orchestrator error-exit path finishes scratchpad
+    and transitions ticket back to READY (not REVIEWING)."""
+
+    def test_error_exit_finishes_scratchpad_and_transitions_to_ready(self, tmp_path):
+        """When bot exits with error code, scratchpad must be finished with error info
+        and ticket must transition to READY, not REVIEWING."""
+        from codebot.ticket_engine import TicketStore, TicketState, TicketClass, Severity, RiskLevel, create_ticket
+        from codebot.scratchpad import ScratchpadState, save_scratchpad, load_scratchpad
+        import codebot.dispatch_service as ds
+        import codebot.state_manager as sm
+
+        # Setup state dir
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        claims_dir = state_dir / "claims"
+        claims_dir.mkdir()
+
+        # Create ticket in IMPLEMENTING
+        store_path = state_dir / "tickets.json"
+        store = TicketStore(store_path)
+        t = create_ticket(
+            title="Error exit test",
+            ticket_class=TicketClass.BUG,
+            severity=Severity.MEDIUM,
+            source="test",
+            evidence="evidence",
+            problem_statement="problem",
+            desired_state="desired",
+            acceptance_criteria=["ac"],
+            risk=RiskLevel.LOW,
+        )
+        store.add(t)
+        store.transition(t.id, TicketState.VALIDATING)
+        store.transition(t.id, TicketState.TRIAGED)
+        store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.IMPLEMENTING)
+        store.flush()
+        store.close()
+
+        # Create scratchpad
+        sp = ScratchpadState(ticket_id=t.id)
+        sp.start_agent("general_implementer", "IMPLEMENTING")
+        save_scratchpad(state_dir, sp)
+
+        # Create bot
+        config = _make_config(name="general_implementer")
+        bot = _make_bot(config=config)
+        bot._assigned_ticket_id = t.id
+        bot.process = MagicMock()
+        bot.process.poll.return_value = 1  # exited
+        bot.process.returncode = 1
+        bot.started_at = time.time() - 10
+        bots = {"general_implementer": bot}
+
+        # Patch paths
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.logs_dir = tmp_path / "logs"
+        mock_paths.logs_dir.mkdir(exist_ok=True)
+        mock_paths.drain_file = state_dir / ".drain"
+        mock_paths.backup_dir = state_dir / "backup"
+        mock_paths.alignment_events_dir = state_dir / "alignment_events"
+
+        with patch.object(sm, 'get_paths', return_value=mock_paths), \
+             patch.object(ds, 'STATE_DIR', state_dir), \
+             patch('codebot.orchestrator.get_paths', return_value=mock_paths), \
+             patch('codebot.orchestrator.is_draining', return_value=False), \
+             patch('codebot.orchestrator.check_self_restart', return_value=False), \
+             patch('codebot.orchestrator.log_bot_statuses'), \
+             patch('codebot.orchestrator.write_alignment_event'), \
+             patch('codebot.orchestrator.run_alignment_pipeline'):
+            orch.check_all_bots(bots)
+
+        # Verify ticket is READY (not REVIEWING)
+        store2 = TicketStore(store_path)
+        updated = store2.get(t.id)
+        assert updated.state == TicketState.READY, f"Expected READY, got {updated.state}"
+        store2.close()
+
+        # Verify scratchpad was finished with error info
+        sp2 = load_scratchpad(state_dir, t.id)
+        assert sp2.phase == "idle", f"Scratchpad phase should be idle after finish, got {sp2.phase}"
+        assert len(sp2.agent_history) > 0, "Scratchpad should have agent history entry"
+        last_record = sp2.agent_history[-1]
+        assert "error" in last_record.get("summary", "").lower() or last_record.get("error", ""), \
+            "Scratchpad finish record should contain error info"
+
+        # Verify claim was cleaned up
+        claim_files = list(claims_dir.glob(f"{t.id}.*.json"))
+        assert len(claim_files) == 0, f"Claim files should be cleaned up, found: {claim_files}"
