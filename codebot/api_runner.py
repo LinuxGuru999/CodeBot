@@ -729,6 +729,13 @@ def _create_ticket_tool(
     rk = risk_map.get(risk.lower(), RiskLevel.MEDIUM)
     ac_list = [c.strip() for c in acceptance_criteria.split(";") if c.strip()] if acceptance_criteria else [title]
     modules = [m.strip() for m in affected_modules.split(",") if m.strip()] if affected_modules else []
+    raw_deps = kwargs.get("dependencies", "")
+    if isinstance(raw_deps, list):
+        deps = [str(d).strip() for d in raw_deps if str(d).strip()]
+    elif isinstance(raw_deps, str) and raw_deps.strip():
+        deps = [d.strip() for d in raw_deps.split(",") if d.strip()]
+    else:
+        deps = []
     if not problem_statement:
         problem_statement = title
     if not desired_state:
@@ -745,6 +752,7 @@ def _create_ticket_tool(
             acceptance_criteria=ac_list,
             risk=rk,
             affected_modules=modules,
+            dependencies=deps if deps else None,
         )
     except ValueError as ve:
         return {"success": False, "output": "", "error": str(ve)}

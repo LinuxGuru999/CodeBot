@@ -163,27 +163,16 @@ def build_message(
     logs_dir: str,
     prompt_name: str,
 ) -> str:
-    """Assemble the final spawn message with compressed mission core."""
-    core, removed = compress_prompt(prompt_text)
-    contract = _common_contract(bot, heartbeat_file, ckpt_file, state_dir)
-    parts = [
-        f"Sisyphus — delegated task: '{bot}' workflow (model {model}).",
-        "Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.",
-        contract,
-        f"- State dir: {state_dir}  Log dir: {logs_dir}  Prompt: {prompt_name}",
-    ]
+    """Return the role prompt as-is with optional checkpoint handoff appended.
+
+    The shared infra contract (drain, heartbeat, alignment, scratchpad) is
+    handled by the orchestrator and api_runner background threads, not by
+    prompt injection. Stripping sections or prepending boilerplate doubles
+    prompt size and dilutes role-specific constraints.
+    """
     if ckpt_block:
-        parts.append(ckpt_block)
-    parts.append(
-        f"--- Mission Spec ({prompt_name}) — compressed by gateway, shared boilerplate removed ---\n{core}"
-    )
-    message = "\n".join(parts)
-    orig_tok, new_tok = len(prompt_text) // 4, len(message) // 4
-    logger.info(
-        f"Gateway '{bot}': stripped {len(removed)} sections, "
-        f"prompt {len(prompt_text)}→{len(message)} chars (~{orig_tok}→~{new_tok} tok)"
-    )
-    return message
+        return f"{prompt_text}\n\n{ckpt_block}"
+    return prompt_text
 
 
 def running_count(bots: dict) -> int:
