@@ -231,7 +231,6 @@ REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
     "documentation_reviewer",
 })
 PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
-    "decomposer",
     "implementation_planner",
 })
 
@@ -1179,6 +1178,18 @@ def _load_ticket_context(ticket_id: str) -> str:
 
 
 _ADAPTIVE_SCHEDULER = None
+_FREEZE_DETECTOR = None
+
+
+def _get_freeze_detector():
+    global _FREEZE_DETECTOR
+    if _FREEZE_DETECTOR is None:
+        try:
+            from codebot.freeze_detector import FreezeDetector
+            _FREEZE_DETECTOR = FreezeDetector(state_dir=STATE_DIR)
+        except ImportError:
+            pass
+    return _FREEZE_DETECTOR
 
 
 def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
@@ -3554,21 +3565,14 @@ def _is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
         return True
     if name == "decomposer" or name.startswith("decomposer-"):
         return decompose > 0 or ready > 0
-    if name in {"implementation_planner", "implementation_planner-2",
-                "implementation_planner-3", "implementation_planner-4"}:
+    if name == "implementation_planner" or name.startswith("implementation_planner-"):
         return planning > 0
-    if name in {"general_implementer", "general_implementer-2",
-                "general_implementer-3", "general_implementer-4",
-                "backend_implementer", "backend_implementer-2",
-                "frontend_implementer", "test_implementer",
-                "migration_implementer", "documentation_implementer"}:
+    base_name = name.split("-")[0] if "-" in name else name
+    if base_name in IMPLEMENTER_ROLE_NAMES:
         return implementing > 0
-    if name in {"correctness_reviewer", "security_reviewer",
-                "architecture_reviewer", "test_reviewer",
-                "performance_reviewer", "simplicity_reviewer",
-                "documentation_reviewer", "ux_reviewer"}:
+    if base_name in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
         return reviewing > 0
-    if name in {"quality_gate"}:
+    if name == "quality_gate":
         return verifying > 0
     if name == "ticket_triager":
         discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("VALIDATING", 0) + pipeline.get("TRIAGED", 0)
@@ -3583,46 +3587,30 @@ def _apply_agent_availability(bots: dict[str, BotState]) -> None:
     planning = pipeline.get("PLANNING", 0)
     implementing = pipeline.get("IMPLEMENTING", 0)
     reviewing = pipeline.get("REVIEWING", 0)
-    verifying = pipeline.get("VERIFYING", 0)
 
-    planner_names = {"implementation_planner", "implementation_planner-2",
-                     "implementation_planner-3", "implementation_planner-4"}
-    implementer_names = {"general_implementer", "general_implementer-2",
-                         "general_implementer-3", "general_implementer-4",
-                         "backend_implementer", "backend_implementer-2",
-                         "frontend_implementer", "test_implementer",
-                         "migration_implementer", "documentation_implementer"}
-    reviewer_names = {"correctness_reviewer", "security_reviewer",
-                      "architecture_reviewer", "test_reviewer",
-                      "performance_reviewer", "simplicity_reviewer",
-                      "documentation_reviewer", "ux_reviewer"}
-    discovery_names = {"bug_hunter", "security_auditor", "architecture_auditor",
-                       "performance_auditor", "test_gap_auditor",
-                       "documentation_auditor", "dependency_auditor",
-                       "ux_auditor", "feature_hunter"}
     always_on = {"scheduler", "conflict_resolver", "budget_controller"}
 
     for name, bot in bots.items():
-        if not bot.config.enabled:
+        base_name = name.split("-")[0] if "-" in name else name
+
+        if base_name in always_on:
             continue
 
-        if name in always_on:
-            continue
-
-        should_enable = True
-
-        if name == "decomposer" or name.startswith("decomposer-"):
+        if base_name == "decomposer":
             should_enable = decompose > 0 or ready > 0
-        elif name in planner_names:
+        elif base_name == "implementation_planner":
             should_enable = planning > 0
-        elif name in implementer_names:
+        elif base_name in IMPLEMENTER_ROLE_NAMES:
             should_enable = implementing > 0
-        elif name in reviewer_names:
+        elif base_name in REVIEWER_ROLE_NAMES or base_name == "ux_reviewer":
             should_enable = reviewing > 0
-        elif name in discovery_names:
+        elif base_name in DISCOVERY_ROLE_NAMES:
             should_enable = False
+        else:
+            continue
 
-        if not should_enable and bot.process is not None and bot.process.poll() is None:
+        if not should_enable and bot.config.enabled:
+            if bot.process is not None and bot.process.poll() is None:
             try:
                 bot.process.terminate()
                 bot.process.wait(timeout=5)
