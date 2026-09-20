@@ -671,6 +671,24 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok", "time": time.time()})
             return
 
+        # Gate metrics — read-only observability endpoint
+        if path in ("/gates/metrics", "/api/gates/metrics"):
+            try:
+                try:
+                    from codebot.quality_gate import get_gate_metrics
+                except ImportError:
+                    from bots.quality_gate import get_gate_metrics
+                payload = get_gate_metrics(STATE_DIR)
+                self._json(200, payload)
+            except Exception:
+                self._json(200, {
+                    "version": 1,
+                    "metrics": [],
+                    "alerts": [],
+                    "generated_at": time.time(),
+                })
+            return
+
         self._json(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802

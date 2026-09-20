@@ -251,9 +251,6 @@ def _find_agent_pid(agent_name: str) -> int | None:
     # fallback ps scan
     try:
         out = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, timeout=5)
-        needle1 = f"api_runner.py {agent_name} "
-        needle2 = f"api_runner {agent_name}"
-        needle3 = f"codebot.api_runner {agent_name}"
         for line in out.splitlines():
             s = line.strip()
             if not s:
@@ -262,11 +259,14 @@ def _find_agent_pid(agent_name: str) -> int | None:
             if len(parts) < 2:
                 continue
             pid_s, args = parts
-            if needle1 in args or needle2 in args or needle3 in args or f" {agent_name} " in args and "api_runner" in args:
-                try:
-                    return int(pid_s)
-                except ValueError:
-                    continue
+            if "api_runner" not in args:
+                continue
+            if agent_name not in args.split():
+                continue
+            try:
+                return int(pid_s)
+            except ValueError:
+                continue
     except Exception:
         pass
     return None
@@ -277,9 +277,15 @@ def _find_all_api_pids() -> dict[str, int]:
     try:
         ps = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, timeout=5)
         for line in ps.splitlines():
-            m = re.search(r"api_runner(?:\.py)?\s+([A-Za-z0-9_\-]+)", line)
+            if "api_runner" not in line:
+                continue
+            m = re.search(r"--bot\s+([A-Za-z0-9_\-]+)", line)
+            if m is None:
+                m = re.search(r"api_runner(?:\.py)?\s+([A-Za-z0-9_\-]+)", line)
             if m:
                 ag = m.group(1)
+                if ag.startswith("-"):
+                    continue
                 pid_s = line.strip().split(None, 1)[0]
                 try:
                     out[ag] = int(pid_s)

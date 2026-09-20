@@ -27,6 +27,8 @@ Invariants
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import re
 import shlex
@@ -389,3 +391,384 @@ def record_gate_results(
         os.write(fd, line.encode("utf-8"))
     finally:
         os.close(fd)
+    # Best-effort refresh of cached gate_metrics.json (fail-open, never raise)
+    try:
+        _refresh_gate_metrics_cache(state_dir)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Observability — metrics collection and alerting
+# ---------------------------------------------------------------------------
+
+_logger = logging.getLogger("quality_gate")
+
+_MAX_JSONL_LINES = 5000
+_METRICS_CACHE = "gate_metrics.json"
+_METRICS_CACHE_TMP = "gate_metrics.json.tmp"
+
+
+@dataclass
+class GateAlertConfig:
+    """Configurable alerting thresholds for gate performance.
+
+    All thresholds use default sentinel of ``None`` to mean "disabled".
+    Values are validated at construction time.
+    """
+
+    max_failure_rate: float | None = None
+    max_error_rate: float | None = None
+    max_avg_duration_ms: float | None = None
+    min_samples: int = 5
+    streak_window: int = 5
+
+    # -- construction helpers -------------------------------------------------
+
+    @classmethod
+    def default(cls) -> GateAlertConfig:
+        return cls()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GateAlertConfig:
+        """Create from a flat dict; unknown keys are silently ignored."""
+        if not isinstance(data, dict):
+            return cls()
+        kw: dict[str, Any] = {}
+        for key in ("max_failure_rate", "max_error_rate", "max_avg_duration_ms"):
+            val = data.get(key)
+            if val is not None:
+                fval = float(val)
+                if math.isnan(fval) or math.isinf(fval):
+                    raise ValueError(f"{key} must not be NaN or Inf")
+                if fval < 0:
+                    raise ValueError(f"{key} must be non-negative")
+                kw[key] = fval
+        if "min_samples" in data:
+            kw["min_samples"] = max(1, int(data["min_samples"]))
+        if "streak_window" in data:
+            kw["streak_window"] = max(1, int(data["streak_window"]))
+        return cls(**kw)
+
+    @classmethod
+    def from_env(cls) -> GateAlertConfig:
+        """Load thresholds from environment variables.
+
+        Supported env vars:
+          CODEBOT_GATE_MAX_FAILURE_RATE
+          CODEBOT_GATE_MAX_ERROR_RATE
+          CODEBOT_GATE_MAX_AVG_MS
+        """
+        kw: dict[str, Any] = {}
+        env_map = {
+            "CODEBOT_GATE_MAX_FAILURE_RATE": "max_failure_rate",
+            "CODEBOT_GATE_MAX_ERROR_RATE": "max_error_rate",
+            "CODEBOT_GATE_MAX_AVG_MS": "max_avg_duration_ms",
+        }
+        for env_key, attr in env_map.items():
+            raw = os.environ.get(env_key)
+            if raw is not None:
+                fval = float(raw)
+                if math.isnan(fval) or math.isinf(fval) or fval < 0:
+                    raise ValueError(f"{env_key} has invalid value: {raw}")
+                kw[attr] = fval
+        return cls(**kw)
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> GateAlertConfig:
+        """Load from YAML file, falling back to env then defaults."""
+        if path is None:
+            alt = Path(".codebot") / "gate_alerts.yaml"
+            if alt.exists():
+                path = alt
+        if path and path.exists():
+            try:
+                text = path.read_text(encoding="utf-8")
+                parsed = _parse_simple_yaml(text)
+                return cls.from_dict(parsed)
+            except Exception:
+                pass
+        return cls.from_env()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_failure_rate": self.max_failure_rate,
+            "max_error_rate": self.max_error_rate,
+            "max_avg_duration_ms": self.max_avg_duration_ms,
+            "min_samples": self.min_samples,
+            "streak_window": self.streak_window,
+        }
+
+
+@dataclass
+class GateMetricsSummary:
+    """Per-gate aggregated metrics snapshot."""
+
+    gate_name: str
+    total: int = 0
+    passes: int = 0
+    fails: int = 0
+    errors: int = 0
+    skips: int = 0
+    failure_rate: float = 0.0
+    error_rate: float = 0.0
+    avg_ms: float = 0.0
+    p95_ms: float = 0.0
+    last_result: str = ""
+    last_timestamp: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "gate_name": self.gate_name,
+            "total": self.total,
+            "passes": self.passes,
+            "fails": self.fails,
+            "errors": self.errors,
+            "skips": self.skips,
+            "failure_rate": round(self.failure_rate, 4),
+            "error_rate": round(self.error_rate, 4),
+            "avg_ms": round(self.avg_ms, 2),
+            "p95_ms": round(self.p95_ms, 2),
+            "last_result": self.last_result,
+            "last_timestamp": self.last_timestamp,
+        }
+
+
+def _percentile(sorted_values: list[float], pct: float) -> float:
+    """Compute percentile from an already-sorted list."""
+    if not sorted_values:
+        return 0.0
+    k = (len(sorted_values) - 1) * pct
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = k - lo
+    return sorted_values[lo] + frac * (sorted_values[hi] - sorted_values[lo])
+
+
+def compute_gate_metrics(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate gate_results.jsonl records into per-gate metrics.
+
+    Each record has keys: ticket_id, passed, timestamp, gates (list of gate dicts).
+    Returns a list of dicts suitable for GateMetricsSummary.
+    """
+    # Accumulate per-gate
+    gate_data: dict[str, dict[str, Any]] = {}
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        ts = record.get("timestamp", 0.0)
+        for g in record.get("gates", []):
+            if not isinstance(g, dict):
+                continue
+            name = str(g.get("gate_name", "unknown"))[:128]
+            result = g.get("result", "unknown")
+            duration = g.get("duration_ms", 0.0)
+            try:
+                duration = float(duration)
+            except (TypeError, ValueError):
+                duration = 0.0
+
+            if name not in gate_data:
+                gate_data[name] = {
+                    "gate_name": name,
+                    "total": 0,
+                    "passes": 0,
+                    "fails": 0,
+                    "errors": 0,
+                    "skips": 0,
+                    "durations": [],
+                    "last_result": "",
+                    "last_timestamp": 0.0,
+                }
+            gd = gate_data[name]
+            gd["total"] += 1
+            if result == "pass":
+                gd["passes"] += 1
+            elif result == "fail":
+                gd["fails"] += 1
+            elif result == "error":
+                gd["errors"] += 1
+            elif result == "skip":
+                gd["skips"] += 1
+            gd["durations"].append(duration)
+            if ts >= gd["last_timestamp"]:
+                gd["last_result"] = result
+                gd["last_timestamp"] = ts
+
+    # Build summaries
+    summaries: list[dict[str, Any]] = []
+    for gd in gate_data.values():
+        total = gd["total"]
+        fails = gd["fails"]
+        errors = gd["errors"]
+        durations = sorted(gd["durations"])
+        summary = GateMetricsSummary(
+            gate_name=gd["gate_name"],
+            total=total,
+            passes=gd["passes"],
+            fails=fails,
+            errors=errors,
+            skips=gd["skips"],
+            failure_rate=fails / total if total > 0 else 0.0,
+            error_rate=errors / total if total > 0 else 0.0,
+            avg_ms=sum(durations) / len(durations) if durations else 0.0,
+            p95_ms=_percentile(durations, 0.95),
+            last_result=gd["last_result"],
+            last_timestamp=gd["last_timestamp"],
+        )
+        summaries.append(summary.to_dict())
+
+    return summaries
+
+
+def check_gate_alerts(
+    metrics: list[dict[str, Any]],
+    config: GateAlertConfig | None = None,
+) -> list[dict[str, Any]]:
+    """Evaluate alert thresholds against per-gate metrics.
+
+    Returns a list of alert descriptors:
+        {gate, rule, observed, threshold, severity}
+    """
+    if config is None:
+        config = GateAlertConfig.default()
+
+    alerts: list[dict[str, Any]] = []
+
+    for m in metrics:
+        total = m.get("total", 0)
+        if total < config.min_samples:
+            continue
+
+        gate_name = m.get("gate_name", "unknown")
+
+        if config.max_failure_rate is not None:
+            rate = m.get("failure_rate", 0.0)
+            if rate > config.max_failure_rate:
+                alerts.append({
+                    "gate": gate_name,
+                    "rule": "failure_rate",
+                    "observed": rate,
+                    "threshold": config.max_failure_rate,
+                    "severity": "warning",
+                })
+                _logger.warning(
+                    "gate_alert gate=%s rule=failure_rate observed=%.4f threshold=%.4f",
+                    gate_name, rate, config.max_failure_rate,
+                )
+
+        if config.max_error_rate is not None:
+            rate = m.get("error_rate", 0.0)
+            if rate > config.max_error_rate:
+                alerts.append({
+                    "gate": gate_name,
+                    "rule": "error_rate",
+                    "observed": rate,
+                    "threshold": config.max_error_rate,
+                    "severity": "warning",
+                })
+                _logger.warning(
+                    "gate_alert gate=%s rule=error_rate observed=%.4f threshold=%.4f",
+                    gate_name, rate, config.max_error_rate,
+                )
+
+        if config.max_avg_duration_ms is not None:
+            avg = m.get("avg_ms", 0.0)
+            if avg > config.max_avg_duration_ms:
+                alerts.append({
+                    "gate": gate_name,
+                    "rule": "avg_duration",
+                    "observed": avg,
+                    "threshold": config.max_avg_duration_ms,
+                    "severity": "warning",
+                })
+                _logger.warning(
+                    "gate_alert gate=%s rule=avg_duration observed=%.2f threshold=%.2f",
+                    gate_name, avg, config.max_avg_duration_ms,
+                )
+
+    return alerts
+
+
+def _load_jsonl_records(state_dir: Path) -> list[dict[str, Any]]:
+    """Read gate_results.jsonl fail-open per line, bounded to _MAX_JSONL_LINES."""
+    path = state_dir / "gate_results.jsonl"
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+        lines = text.strip().split("\n")
+        # Use only the last _MAX_JSONL_LINES for bounded reads
+        tail = lines[-_MAX_JSONL_LINES:] if len(lines) > _MAX_JSONL_LINES else lines
+        for line in tail:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # skip corrupt lines
+    except OSError:
+        pass
+    return records
+
+
+def _refresh_gate_metrics_cache(state_dir: Path) -> None:
+    """Atomically recompute and write gate_metrics.json from gate_results.jsonl."""
+    records = _load_jsonl_records(state_dir)
+    summaries = compute_gate_metrics(records)
+    config = GateAlertConfig.load()
+    alerts = check_gate_alerts(summaries, config)
+
+    payload = {
+        "version": 1,
+        "metrics": summaries,
+        "alerts": alerts,
+        "generated_at": time.time(),
+    }
+
+    tmp_path = state_dir / _METRICS_CACHE_TMP
+    final_path = state_dir / _METRICS_CACHE
+    tmp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(str(tmp_path), str(final_path))
+
+
+def get_gate_metrics(
+    state_dir: Path,
+    config: GateAlertConfig | None = None,
+) -> dict[str, Any]:
+    """Return the current gate metrics snapshot.
+
+    Reads cached gate_metrics.json if available, otherwise computes live
+    from gate_results.jsonl.  Always returns a dict with version, metrics,
+    alerts, generated_at keys.
+    """
+    cache_path = state_dir / _METRICS_CACHE
+
+    # Try reading cache first
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("version") == 1:
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Fall back to live computation
+    records = _load_jsonl_records(state_dir)
+    summaries = compute_gate_metrics(records)
+    if config is None:
+        try:
+            config = GateAlertConfig.load()
+        except Exception:
+            config = GateAlertConfig.default()
+    alerts = check_gate_alerts(summaries, config)
+
+    return {
+        "version": 1,
+        "metrics": summaries,
+        "alerts": alerts,
+        "generated_at": time.time(),
+    }

@@ -73,33 +73,110 @@ Execute in order. Do NOT revisit steps.
 - Security headers configured
 - CORS properly configured
 
+## Mandatory Review Checklist
+
+Evaluate EVERY item. Mark each PASS, FAIL, NOT_APPLICABLE, or UNKNOWN. UNKNOWN is never PASS.
+
+- requirement_satisfied
+- acceptance_criteria_satisfied
+- existing_behavior_preserved
+- relevant_tests_pass
+- new_behavior_has_tests
+- error_paths_tested
+- boundary_conditions_considered
+- security_implications_considered
+- performance_implications_considered
+- concurrency_implications_considered
+- architecture_consistent
+- no_unnecessary_scope_expansion
+- no_dead_code_introduced
+- logging_error_handling_appropriate
+- documentation_updated_when_needed
+- dependency_changes_justified
+- no_obvious_regressions
+
+## Finding Severity Levels
+
+Every finding MUST have a severity:
+
+- **BLOCKER**: Exploitable vulnerability, auth bypass, data corruption, RCE
+- **CRITICAL**: High probability of security breach, privilege escalation, data leak
+- **MAJOR**: Material security weakness, injection risk, missing validation
+- **MINOR**: Security concern that should be corrected but not immediately exploitable
+- **NIT**: Security style improvement
+- **INFO**: Security observation only
+
+A single valid BLOCKER or CRITICAL finding blocks completion regardless of approvals.
+
+## Finding Format
+
+Every finding MUST contain ALL of these fields:
+
+```json
+{
+  "severity": "CRITICAL",
+  "category": "injection",
+  "finding": "SQL injection via user input in search query",
+  "file": "codebot/search.py",
+  "location": "search_tickets() line 45",
+  "evidence": "User-supplied query parameter directly interpolated into SQL string",
+  "reproduction": "Send search request with payload: ' OR 1=1 --",
+  "expected": "Parameterized query rejects injection attempts",
+  "actual": "Raw SQL concatenation allows arbitrary query modification",
+  "recommended_fix": "Use parameterized queries with cursor.execute(sql, params)"
+}
+```
+
 ## Verdict Output Format
 
 Write your verdict to `{STATE_DIR}/security_review.json`:
 ```json
 {
-  "verdict": "APPROVE",
+  "verdict": "REWORK",
+  "phase": "INDEPENDENT_REVIEW",
   "ticket_id": "CB-xxx",
-  "findings": [
-    {
-      "file": "path/to/file.py:line",
-      "severity": "critical",
-      "category": "injection",
-      "description": "Specific vulnerability found",
-      "recommendation": "How to fix it",
-      "cwe": "CWE-xxx"
-    }
-  ],
-  "summary": "One-line summary",
   "reviewer": "security_reviewer",
-  "review_completed_at": "ISO-8601"
+  "findings": [],
+  "checklist": {
+    "items": {
+      "requirement_satisfied": "PASS",
+      "acceptance_criteria_satisfied": "PASS",
+      "existing_behavior_preserved": "PASS",
+      "relevant_tests_pass": "PASS",
+      "new_behavior_has_tests": "UNKNOWN",
+      "error_paths_tested": "FAIL",
+      "boundary_conditions_considered": "FAIL",
+      "security_implications_considered": "FAIL",
+      "performance_implications_considered": "NOT_APPLICABLE",
+      "concurrency_implications_considered": "NOT_APPLICABLE",
+      "architecture_consistent": "PASS",
+      "no_unnecessary_scope_expansion": "PASS",
+      "no_dead_code_introduced": "PASS",
+      "logging_error_handling_appropriate": "PASS",
+      "documentation_updated_when_needed": "UNKNOWN",
+      "dependency_changes_justified": "NOT_APPLICABLE",
+      "no_obvious_regressions": "UNKNOWN"
+    },
+    "notes": {}
+  },
+  "summary": "Security findings requiring rework",
+  "completed_at": 1234567890.0
 }
 ```
 
 Verdict values:
-- **APPROVE**: No exploitable findings → transition to VERIFYING
-- **REWORK**: Vulnerability found → document attack scenario, transition to REWORK
-- **BLOCK**: Critical vulnerability → immediate REWORK
+- **APPROVE**: No blocking security findings, checklist complete
+- **REWORK**: Blocking findings or checklist failures
+- **ESCALATE**: Exploitable vulnerability requiring immediate attention
+
+## Completion Blocking Rules
+
+Your APPROVE verdict will be overridden to REWORK by the gatekeeper if:
+- Any finding has severity BLOCKER, CRITICAL, or MAJOR
+- Any mandatory checklist item is FAIL
+- Critical security checklist items remain UNKNOWN
+
+Do not APPROVE if any of these conditions exist.
 
 ## Escalation Protocol
 
@@ -136,6 +213,9 @@ All tool arguments MUST be valid JSON. `api_runner.py` uses `json.loads()` — Y
 7. **Using bash to read state files** = violation — use `read`/`grep`
 8. **JSON-wrapped heartbeat** = violation — bare float only
 9. **Writing `"reason": "completed"` to checkpoint** = violation — kills agent
+10. **APPROVE with unresolved BLOCKER/CRITICAL/MAJOR findings** = violation
+11. **APPROVE with UNKNOWN on critical security checklist items** = violation
+12. **Vague findings without evidence/location/reproduction** = violation
 
 ## Noop Rules
 
