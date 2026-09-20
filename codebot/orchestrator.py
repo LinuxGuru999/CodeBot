@@ -40,80 +40,6 @@ from codebot.process_manager import (
 )
 BACKUP_DIR = STATE_DIR / "backup"
 
-def is_restart_budget_exceeded(bot_name: str) -> bool:
-    """Check if restart budget is exceeded for a bot."""
-    return _manifest_restart_budget_exceeded(bot_name)
-
-def rotating_slots(max_concurrent: int = 26) -> int:
-    """Return number of rotating slots available."""
-    try:
-        from codebot.process_manager import _count_api_runner_processes
-        running = _count_api_runner_processes()
-        return max(0, max_concurrent - running)
-    except Exception:
-        return 0
-
-def worker_reserved_slots() -> int:
-    """Return number of slots reserved for workers."""
-    return 2
-
-def _get_available_memory_mb() -> float:
-    """Return available system memory in MB."""
-    try:
-        meminfo = Path("/proc/meminfo").read_text()
-        for line in meminfo.splitlines():
-            if line.startswith("MemAvailable:"):
-                parts = line.split()
-                return float(parts[1]) / 1024  # kB to MB
-    except Exception:
-        pass
-    return 0.0
-
-def _model_tier_for_complexity(model: str, complexity: str, queue_has_tier_work: bool = False) -> bool:
-    """Check if model is appropriate for given complexity tier."""
-    cheap_models = frozenset({"xiaomi-mimo-2.5"})
-    expensive_models = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
-    
-    if complexity in ("trivial", "small", "medium"):
-        return True
-    if complexity == "high":
-        return model in expensive_models or model not in cheap_models
-    if complexity == "critical":
-        return model in expensive_models
-    return True
-
-# Additional constants for backward compatibility
-CLAIM_TTL_SECONDS = 300
-MIN_ROTATING_SLOTS = 4
-
-def is_manifest_error_disabled(bot_name: str) -> bool:
-    """Alias for is_error_disabled for backward compatibility."""
-    return is_error_disabled(bot_name)
-
-def is_manifest_restart_budget_exceeded(bot_name: str) -> bool:
-    """Alias for is_restart_budget_exceeded for backward compatibility."""
-    return is_restart_budget_exceeded(bot_name)
-
-def _read_state_file(bot_name: str) -> dict:
-    """Read bot state file for testing purposes."""
-    state_file = STATE_DIR / f"{bot_name}.state.json"
-    try:
-        if state_file.exists():
-            return json.loads(state_file.read_text())
-    except Exception:
-        pass
-    return {}
-
-# Re-export for backward compatibility
-__all__.extend([
-    "ModelProfile", "MODEL_PROFILES", "is_log_stalled",
-    "is_error_disabled", "is_restart_budget_exceeded",
-    "rotating_slots", "worker_reserved_slots",
-    "_get_available_memory_mb", "_model_tier_for_complexity",
-    "is_manifest_error_disabled", "is_manifest_restart_budget_exceeded",
-    "CLAIM_TTL_SECONDS", "MIN_ROTATING_SLOTS",
-    "_read_state_file",
-])
 from codebot.ticket_dispatcher import (
     spawn_demand_agents, dispatch_decompose_agents,
     dispatch_planning_agents, advance_reviewed_tickets,
@@ -140,6 +66,7 @@ __all__ = [
     "write_heartbeat", "heartbeat_path", "_write_json_atomic",
     "is_draining", "set_drain", "clear_drain", "get_status", "print_status",
     "safe_stop_all", "backup_botnet", "restore_botnet", "drain_status",
+    "PathConfig", "set_project_adapter",
 ]
 
 _project_root = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
@@ -161,7 +88,7 @@ class PathConfig:
     update_lock: Path
     restart_file: Path
 
-_PathsCompat = PathConfig  # backward compat alias
+_PathsCompat = PathConfig
 
 _paths = PathConfig(
     bots_dir=BOTS_DIR,
@@ -204,7 +131,6 @@ def set_project_adapter(adapter: Any) -> None:
     except Exception as e:
         logger.warning("Failed to update paths from adapter: %s", e)
 
-# Backward compatibility: allow module-level attribute access for paths
 _COMPAT_PATHS = {"STATE_DIR": "state_dir", "LOGS_DIR": "logs_dir", "BOTS_DIR": "bots_dir",
                  "BACKUP_DIR": "backup_dir", "ALIGNMENT_EVENTS_DIR": "alignment_events_dir"}
 
@@ -241,13 +167,13 @@ def _load_bot_registry() -> list[BotConfig]:
 BOT_REGISTRY = _load_bot_registry()
 
 def is_draining() -> bool:
-    return _paths_drain_file.exists()
+    return _paths.drain_file.exists()
 
 def _check_self_restart(bots: dict[str, BotState]) -> bool:
-    if not _paths_restart_file.exists():
+    if not _paths.restart_file.exists():
         return False
     try:
-        reason = _paths_restart_file.read_text(encoding="utf-8").strip() or "manual"
+        reason = _paths.restart_file.read_text(encoding="utf-8").strip() or "manual"
     except OSError:
         reason = "manual"
     logger.info(f"Self-restart signal detected (reason: {reason})")
@@ -255,7 +181,7 @@ def _check_self_restart(bots: dict[str, BotState]) -> bool:
         if bot.process is not None and bot.process.poll() is None:
             stop_bot(bot, "self-restart")
     try:
-        _paths_restart_file.unlink(missing_ok=True)
+        _paths.restart_file.unlink(missing_ok=True)
     except OSError:
         pass
     os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -389,11 +315,11 @@ def print_status(bots: dict[str, BotState]) -> None:
     print("=" * 90 + "\n")
 
 def set_drain(reason: str = "") -> None:
-    _paths_drain_file.write_text(f"{time.time()}\n{reason}\n")
+    _paths.drain_file.write_text(f"{time.time()}\n{reason}\n")
     logger.info(f"Drain set: {reason}")
 
 def clear_drain() -> None:
-    for f in (_paths_drain_file, _paths_update_lock):
+    for f in (_paths.drain_file, _paths.update_lock):
         try:
             f.unlink()
         except FileNotFoundError:
@@ -401,9 +327,9 @@ def clear_drain() -> None:
     logger.info("Drain cleared")
 
 def drain_status() -> dict:
-    return {"draining": is_draining(), "drain_file": str(_paths_drain_file) if _paths_drain_file.exists() else None,
-            "update_lock": str(_paths_update_lock) if _paths_update_lock.exists() else None,
-            "drain_reason": _paths_drain_file.read_text().strip() if _paths_drain_file.exists() else None}
+    return {"draining": is_draining(), "drain_file": str(_paths.drain_file) if _paths.drain_file.exists() else None,
+            "update_lock": str(_paths.update_lock) if _paths.update_lock.exists() else None,
+            "drain_reason": _paths.drain_file.read_text().strip() if _paths.drain_file.exists() else None}
 
 def safe_stop_all(bots: dict[str, BotState]) -> dict:
     set_drain("safe-stop")
@@ -419,7 +345,7 @@ def safe_stop_all(bots: dict[str, BotState]) -> dict:
     return res
 
 def backup_botnet(tag: str | None = None) -> Path:
-    d = _paths_backup_dir / f"botnet-{tag + '-' if tag else ''}{time.strftime('%Y%m%d-%H%M%S')}"
+    d = _paths.backup_dir / f"botnet-{tag + '-' if tag else ''}{time.strftime('%Y%m%d-%H%M%S')}"
     d.mkdir(parents=True, exist_ok=True)
     for p in BOTS_DIR.glob("*.md"):
         (d / p.name).write_bytes(p.read_bytes())
