@@ -3256,6 +3256,25 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
 
     claims_dir = STATE_DIR / "claims"
     claims_dir.mkdir(parents=True, exist_ok=True)
+
+    live_bots: dict[str, str] = {}
+    for name, bot in bots.items():
+        if bot.process is not None and bot.process.poll() is None:
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                live_bots[name] = assigned
+
+    for p in claims_dir.glob("*.json"):
+        parts = p.stem.rsplit(".", 1)
+        if len(parts) != 2:
+            continue
+        claimed_tid, claimed_bot = parts
+        if claimed_bot not in live_bots or live_bots[claimed_bot] != claimed_tid:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
     active_claims: set[str] = set()
     for p in claims_dir.glob("*.json"):
         active_claims.add(p.stem.rsplit(".", 1)[0])
@@ -3362,6 +3381,25 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
 
     claims_dir = STATE_DIR / "claims"
     claims_dir.mkdir(parents=True, exist_ok=True)
+
+    live_bots: dict[str, str] = {}
+    for name, bot in bots.items():
+        if bot.process is not None and bot.process.poll() is None:
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                live_bots[name] = assigned
+
+    for p in claims_dir.glob("*.json"):
+        parts = p.stem.rsplit(".", 1)
+        if len(parts) != 2:
+            continue
+        claimed_tid, claimed_bot = parts
+        if claimed_bot not in live_bots or live_bots[claimed_bot] != claimed_tid:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
     active_claims: set[str] = set()
     for p in claims_dir.glob("*.json"):
         active_claims.add(p.stem.rsplit(".", 1)[0])
