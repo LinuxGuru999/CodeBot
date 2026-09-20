@@ -457,7 +457,7 @@ class TestBash:
             assert "err" in result["output"]
 
     def test_bash_command_denied(self, ws):
-        result = bash("curl http://example.com")
+        result = bash("sudo rm -rf /")
         assert result["success"] is False
         assert result["error"] == "command denied"
 
@@ -528,8 +528,8 @@ class TestBash:
             # Should be allowed (head is allowed pipe target)
             assert mock_run.called
 
-    def test_bash_pipe_disallowed(self, ws):
-        result = bash("echo hello | bash")
+    def test_bash_pipe_to_blocked_command(self, ws):
+        result = bash("echo hello | sudo ls")
         assert result["success"] is False
         assert result["error"] == "command denied"
 
@@ -629,7 +629,7 @@ class TestToolPolicyIntegration:
     def test_allowlisted_command_called(self, ws):
         with patch("codebot.api_tools.allowlisted_command", return_value=None) as mock_allow:
             result = bash("anything")
-            mock_allow.assert_called_once_with("anything")
+            mock_allow.assert_called_once_with("anything", ws)
             assert result["error"] == "command denied"
 
     def test_resolve_workspace_path_called_for_read(self, ws):

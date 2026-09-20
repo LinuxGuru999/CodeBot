@@ -83,9 +83,15 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
 
     base_cmd = argv[0]
 
-    # Block dangerous commands
-    if base_cmd in BLOCKED_COMMANDS:
-        return None
+    # Block dangerous commands (check all pipe-separated segments)
+    if "|" in argv:
+        pipe_idx = argv.index("|")
+        segments = [argv[:pipe_idx], argv[pipe_idx + 1:]]
+    else:
+        segments = [argv]
+    for seg in segments:
+        if seg and seg[0] in BLOCKED_COMMANDS:
+            return None
 
     # Block dangerous git args
     if base_cmd == "git":
