@@ -5037,7 +5037,9 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                                 pass
 
             # Immediate alignment pipeline attempted above; periodic sweep remains as idempotent backstop
-            if exit_code == 0 and bot.config.clean_exit_wait:
+            base_role = name.split("-")[0] if "-" in name else name
+            is_demand_driven = base_role in DECOMPOSER_ROLE_NAMES or base_role in PLANNING_ROLE_NAMES
+            if exit_code == 0 and bot.config.clean_exit_wait and not is_demand_driven:
                 pipeline = _get_pipeline_state()
                 if _is_needed_bot(name, pipeline):
                     bot.next_run_at = now + bot.config.interval_seconds
