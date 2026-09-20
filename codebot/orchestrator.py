@@ -5387,6 +5387,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 "_recover_deferred_tickets": _recover_deferred_tickets,
             }
             dispatch_lifecycle(counts, handler_registry, bots)
+            _refresh_dependency_graph()
     except ImportError:
         pass
     except Exception as e:
