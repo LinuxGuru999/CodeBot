@@ -30,11 +30,113 @@ Invariants
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 from pathlib import Path
 
 logger = logging.getLogger("completion_commit")
+
+
+def _push_enabled() -> bool:
+    """Push only when GITHUB_DRY_RUN is explicitly off. Default: no push."""
+    try:
+        from codebot.credentials import get_dry_run
+        return not get_dry_run()
+    except Exception:
+        return os.environ.get("GITHUB_DRY_RUN", "1").lower() not in ("1", "true", "yes", "on")
+
+
+def push_current_branch(
+    repo: Path,
+    timeout: int = 120,
+    env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Push HEAD to origin (fail-open). Returns (ok, output).
+
+    Never force-pushes. Uses credentials.setup_git_environment for SSH
+    known_hosts/key wiring when no explicit env is given.
+    """
+    if not _push_enabled():
+        return False, "push disabled: GITHUB_DRY_RUN is on"
+    if env is None:
+        try:
+            from codebot.credentials import setup_git_environment
+            env = setup_git_environment()
+        except Exception as e:
+            return False, f"git env setup failed: {e}"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "push", "origin", "HEAD"],
+            capture_output=True, text=True, timeout=timeout, env=env,
+        )
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if proc.returncode == 0:
+            logger.info("pushed %s to origin", repo)
+            return True, out
+        logger.warning("git push failed in %s: %s", repo, out[:300])
+        return False, out
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, str(e)
+
+
+def sync_ticket_issue(
+    ticket_id: str,
+    title: str,
+    sha: str,
+    state: str = "COMPLETE",
+    timeout: int = 30,
+) -> tuple[bool, str]:
+    """Mirror a completed ticket to GitHub Issues via gh CLI (fail-open).
+
+    COMPLETE closes the matching `[ticket_id]` issue (or creates it closed).
+    Any other state ensures an open issue exists for visibility.
+    Requires gh auth; degrades to (False, reason) without it.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return False, "gh not authenticated"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, f"gh unavailable: {e}"
+
+    def _gh(*args: str) -> tuple[bool, str]:
+        try:
+            p = subprocess.run(
+                ["gh", *args], capture_output=True, text=True, timeout=timeout,
+            )
+            out = ((p.stdout or "") + (p.stderr or "")).strip()
+            return p.returncode == 0, out
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            return False, str(e)
+
+    ok, listing = _gh("issue", "list", "--search", f"[{ticket_id}]", "--state", "all",
+                      "--limit", "5", "--json", "number,state")
+    number = ""
+    if ok and listing:
+        try:
+            import json as _json
+            items = _json.loads(listing)
+            if items:
+                number = str(items[0].get("number", ""))
+        except Exception:
+            number = ""
+    body = f"Ticket {ticket_id} {state}.\n\nCommit: {sha}\nTitle: {title[:200]}"
+    if state == "COMPLETE":
+        if number:
+            _gh("issue", "comment", number, "--body", f"Completed in {sha}\n\n{title[:200]}")
+            ok, out = _gh("issue", "close", number)
+            return ok, number if ok else out
+        ok, out = _gh("issue", "create", "--title", f"[{ticket_id}] {title[:120]}",
+                      "--body", body, "--label", "codebot")
+        return ok, out
+    if number:
+        return True, number
+    return _gh("issue", "create", "--title", f"[{ticket_id}] {title[:120]}",
+               "--body", body, "--label", "codebot")
 
 
 def _run_git(repo: Path, *args: str, timeout: int = 30) -> tuple[bool, str]:
@@ -77,8 +179,7 @@ def commit_ticket_files(
       `[<ticket_id>] <title>`, returns the new HEAD SHA.
     - "Nothing to commit" (files already committed/clean) is success with
       the current HEAD SHA — the work is already in the tree.
-    - Any failure returns (False, "") and logs at WARNING. No push:
-      push stays batched/periodic, commit is per-ticket synchronous.
+    - Any failure returns (False, "") and logs at WARNING.
     """
     workspace = Path(workspace)
     if not ticket_id or not files:

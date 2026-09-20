@@ -45,6 +45,11 @@ IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
     "test_implementer", "migration_implementer", "documentation_implementer",
 })
 
+CONTROL_ROLE_NAMES: frozenset[str] = frozenset({
+    "scheduler", "ticket_triager", "conflict_resolver", "budget_controller",
+    "git_sync", "github_mirror",
+})
+
 DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
     "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
     "test_gap_auditor", "documentation_auditor", "dependency_auditor", "ux_auditor",
@@ -109,7 +114,7 @@ def is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
     reviewing = pipeline.get("REVIEWING", 0)
     verifying = pipeline.get("VERIFYING", 0)
 
-    always_on: set[str] = set()
+    always_on: set[str] = {"git_sync", "github_mirror"}
     if name in always_on:
         return True
     base_name = name.split("-")[0] if "-" in name else name
@@ -149,7 +154,7 @@ def apply_agent_availability(bots: dict[str, Any], stop_fn: Any = None, update_s
     implementing = pipeline.get("IMPLEMENTING", 0)
     reviewing = pipeline.get("REVIEWING", 0)
 
-    always_on: set[str] = set()
+    always_on: set[str] = {"git_sync", "github_mirror"}
 
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name

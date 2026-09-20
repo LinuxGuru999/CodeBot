@@ -362,7 +362,9 @@ class Gatekeeper:
         """Commit the ticket's own files and record the SHA. Fail-open."""
         try:
             from codebot.ticket_dispatcher import get_ticket_store
-            from codebot.completion_commit import commit_ticket_files
+            from codebot.completion_commit import (
+                commit_ticket_files, push_current_branch, sync_ticket_issue,
+            )
 
             store = get_ticket_store()
             if store is None:
@@ -373,12 +375,14 @@ class Gatekeeper:
             files = list(getattr(ticket, "affected_modules", None) or [])
             if not files:
                 return
+            title = getattr(ticket, "title", "")
             ok, sha = commit_ticket_files(
-                self._workspace, ticket_id,
-                getattr(ticket, "title", ""), files,
+                self._workspace, ticket_id, title, files,
             )
             if ok and sha:
                 store.record_commit(ticket_id, sha)
+                push_current_branch(self._workspace)
+                sync_ticket_issue(ticket_id, title, sha, "COMPLETE")
         except Exception as e:
             logger.warning("ticket %s: completion commit failed (fail-open): %s", ticket_id, e)
 

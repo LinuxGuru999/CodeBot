@@ -79,7 +79,58 @@ class TestCommitTicketFiles:
         assert ok is False and sha == ""
 
 
-class TestRecordCommit:
+class TestPushGating:
+    def test_push_disabled_by_default(self, tmp_path, monkeypatch):
+        from codebot.completion_commit import push_current_branch
+        monkeypatch.delenv("GITHUB_DRY_RUN", raising=False)
+        ok, out = push_current_branch(tmp_path)
+        assert ok is False and "DRY_RUN" in out
+
+    def test_push_disabled_when_dry_run_on(self, tmp_path, monkeypatch):
+        from codebot.completion_commit import push_current_branch
+        monkeypatch.setenv("GITHUB_DRY_RUN", "1")
+        ok, out = push_current_branch(tmp_path)
+        assert ok is False
+
+    def test_push_attempts_when_dry_run_off(self, tmp_path, monkeypatch):
+        import subprocess as _sp
+        from codebot.completion_commit import push_current_branch
+        monkeypatch.setenv("GITHUB_DRY_RUN", "0")
+        calls = []
+        real_run = _sp.run
+        def fake_run(*a, **k):
+            calls.append(a[0])
+            class R: returncode = 0; stdout = "ok"; stderr = ""
+            return R()
+        monkeypatch.setattr(_sp, "run", fake_run)
+        ok, _ = push_current_branch(tmp_path, env={})
+        assert ok is True
+        assert calls and calls[0][:4] == ["git", "-C", str(tmp_path), "push"]
+        assert "--force" not in " ".join(calls[0])
+
+    def test_sync_issue_needs_gh_auth(self, tmp_path, monkeypatch):
+        import subprocess as _sp
+        from codebot.completion_commit import sync_ticket_issue
+        class R: returncode = 1; stdout = ""; stderr = "auth?"
+        monkeypatch.setattr(_sp, "run", lambda *a, **k: R())
+        ok, reason = sync_ticket_issue("CB-1", "t", "abc")
+        assert ok is False and "auth" in reason.lower()
+
+
+class TestSyncRolesRegistered:
+    def test_git_sync_registered(self):
+        from codebot.role_registry import get_role, RoleCategory
+        r = get_role("git_sync")
+        assert r is not None and r.category == RoleCategory.CONTROL
+
+    def test_github_mirror_registered(self):
+        from codebot.role_registry import get_role, RoleCategory
+        r = get_role("github_mirror")
+        assert r is not None and r.category == RoleCategory.CONTROL
+
+    def test_role_count_bumped(self):
+        from codebot.role_registry import ALL_ROLES
+        assert len(ALL_ROLES) == 31
     def test_record_commit_persists_sha(self, tmp_path):
         from codebot.ticket_engine import TicketStore, create_ticket, TicketClass, Severity, RiskLevel
         store = TicketStore(tmp_path / "t.json")

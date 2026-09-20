@@ -1371,7 +1371,9 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
     # Phase 4: Commit each newly-COMPLETE ticket's own files (fail-open)
     if completed_tids:
         try:
-            from codebot.completion_commit import commit_ticket_files
+            from codebot.completion_commit import (
+                commit_ticket_files, push_current_branch, sync_ticket_issue,
+            )
             workspace = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
             for tid in completed_tids:
                 try:
@@ -1386,6 +1388,8 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
                     )
                     if ok and sha:
                         ts.record_commit(tid, sha)
+                        push_current_branch(workspace)
+                        sync_ticket_issue(tid, getattr(ticket, "title", ""), sha, "COMPLETE")
                 except Exception as e:
                     logger.warning(f"ticket {tid}: completion commit failed (fail-open): {e}")
         except Exception as e:

@@ -13,6 +13,10 @@ matched hardcoded Monitor repo names (always empty on CodeBot), and used
 ## Key Exports
 - `commit_ticket_files()`: Function — stage + commit scoped files, return (ok, sha)
 - `build_commit_message()`: Function — format `[ticket_id] title` message
+- `push_current_branch()`: Function — push HEAD to origin, gated by
+  GITHUB_DRY_RUN off, SSH env via credentials, never force-push (fail-open)
+- `sync_ticket_issue()`: Function — mirror COMPLETE to GitHub Issues via
+  gh CLI: comment SHA + close match, or create closed (fail-open)
 
 ## Invariants
 - stdlib-only (subprocess, pathlib)

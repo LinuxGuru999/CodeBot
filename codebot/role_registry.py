@@ -23,7 +23,7 @@ Invariants
 - Tool policies reference allowlists, not blocklists (fail-closed)
 - Model profiles specify capability requirements, not provider names
 
-Role Count: 29 (9 discovery + 6 implementation + 8 review + 4 control + 2 planning)
+Role Count: 31 (9 discovery + 6 implementation + 8 review + 6 control + 2 planning)
 """
 
 from __future__ import annotations
@@ -418,6 +418,22 @@ CONTROL_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.INTERACTIVE),
         tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "state_dir"),
         incentive="Minimize cost per accepted ticket. Pause runaway agents.",
+    ),
+    AgentRole(
+        name="git_sync",
+        category=RoleCategory.CONTROL,
+        description="Pushes committed ticket branches to origin and syncs GitHub Issues for completed tickets",
+        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "project_root"),
+        incentive="Zero lost work: every local commit reaches origin, every COMPLETE ticket is mirrored on GitHub.",
+    ),
+    AgentRole(
+        name="github_mirror",
+        category=RoleCategory.CONTROL,
+        description="Mirrors ticket lifecycle to GitHub Issues: opens issues for active work, closes on COMPLETE",
+        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "project_root", network_access=True),
+        incentive="Full visibility: no completed ticket without a linked GitHub issue state.",
     ),
 ]
 

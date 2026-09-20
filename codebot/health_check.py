@@ -175,11 +175,14 @@ def start_eligible_bots(bots: Dict[str, Any], now: float, ts: Any) -> None:
     from codebot.dispatch_service import (
         IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
         DECOMPOSER_ROLE_NAMES, PLANNING_ROLE_NAMES, DISCOVERY_ROLE_NAMES,
+        CONTROL_ROLE_NAMES,
     )
 
     pipeline = get_pipeline_state(store=ts)
 
-    # O(1) early exit: no work in any queue
+    # O(1) early exit: no work in any queue (control sync roles exempt —
+    # git_sync/github_mirror run on unpushed commits / unmirrored tickets,
+    # not on pipeline counts)
     has_decompose_work = pipeline.get("DECOMPOSE", 0) > 0 or pipeline.get("READY", 0) > 0
     has_planning_work = pipeline.get("PLANNING", 0) > 0
     has_verifying_work = pipeline.get("VERIFYING", 0) > 0
@@ -190,9 +193,12 @@ def start_eligible_bots(bots: Dict[str, Any], now: float, ts: Any) -> None:
 
     if not (has_decompose_work or has_planning_work or has_verifying_work or has_discovery_work):
         # No work available - set all non-implementer/reviewer bots to waiting
+        # (control sync roles still evaluated below)
         for name, bot in bots.items():
             base = name.split("-")[0] if "-" in name else name
             if base in IMPLEMENTER_ROLE_NAMES or base in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
+                continue
+            if base in CONTROL_ROLE_NAMES:
                 continue
             if bot.config.enabled and bot.process is None:
                 bot.next_run_at = now + bot.config.interval_seconds
