@@ -662,8 +662,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             # ask orchestrator via pkill + let interval-aware respawn handle, or direct start
             try:
-                # kill existing if running
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {name}"], timeout=5)
+                # kill existing if running; use re.escape to prevent regex injection
+                escaped_name = re.escape(name)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
                 time.sleep(1)
                 # orchestrator will respawn on next health check if waiting; force start via orchestrator CLI
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
@@ -696,6 +697,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 p = STATE_DIR / f"{name}.paused"
                 if p.exists():
                     p.unlink()
+                # Use re.escape to prevent regex injection if orchestrator uses pkill internally
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "resumed": name})
             except Exception as e:
