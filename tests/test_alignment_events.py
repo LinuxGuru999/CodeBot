@@ -428,4 +428,3 @@ class TestWriteAlignmentEvent:
         assert len(caplog.records) >= 1
         warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any("Failed to write alignment event" in msg for msg in warning_messages)
-"}}]}

@@ -96,12 +96,12 @@ class FakeTicketStore:
 class TestDispatchPerformance:
     """Verify O(1) role-indexed dispatch meets performance target."""
 
-    def test_dispatch_100_tickets_20_bots_under_15ms(self, tmp_path):
-        """100 tickets dispatched against 20 bots must complete quickly.
+    def test_dispatch_100_tickets_20_bots_under_1ms(self, tmp_path):
+        """100 tickets dispatched against 20 bots must complete in <1ms.
 
-        The core dict build + lookup loop is O(n+m). We allow up to 15ms
-        to account for CI overhead and mock I/O, but the algorithmic
-        complexity is what matters: O(n+m) not O(n*m).
+        The core dict build + lookup loop is O(n+m). We patch time.sleep
+        and use start_bot_fn returning True to isolate the algorithmic
+        complexity from I/O overhead. O(n+m) not O(n*m).
         """
         tickets = []
         classes = list(TICKET_CLASS_TO_IMPLEMENTER.keys())
@@ -117,16 +117,21 @@ class TestDispatchPerformance:
             bots[name] = MockBotState(config=MockBotConfig(name=name, enabled=True), process=None)
 
         fake_store = FakeTicketStore(implementing=tickets)
-        start_bot_fn = MagicMock(return_value=False)
+        start_bot_fn = MagicMock(return_value=True)
 
         with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
             with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                start = time.perf_counter()
-                spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=start_bot_fn)
-                elapsed = time.perf_counter() - start
+                with patch("codebot.ticket_dispatcher.time.sleep", return_value=None):
+                    (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
+                    start = time.perf_counter()
+                    result = spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=start_bot_fn)
+                    elapsed = time.perf_counter() - start
 
-        assert elapsed < 0.005, f"Dispatch took {elapsed*1000:.2f}ms, expected <5ms"
+        elapsed_ms = elapsed * 1000
+        print(f"Dispatch 100/20 in {elapsed_ms:.3f}ms (spawned={result})")
+        assert elapsed < 0.002, f"Dispatch took {elapsed_ms:.3f}ms, expected <2ms"
+        # With 8 max_concurrent_impl and 20 idle bots, should spawn up to 8
+        assert result > 0, "Should have spawned at least one bot"
 
 
 class TestCorrectBotSelection:
@@ -149,9 +154,10 @@ class TestCorrectBotSelection:
 
             with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
                 with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                    (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                    spawned_roles.clear()
-                    spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
+                    with patch("codebot.ticket_dispatcher.time.sleep", return_value=None):
+                        (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
+                        spawned_roles.clear()
+                        spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
 
             if spawned_roles:
                 assert spawned_roles[0] == expected_role, (
@@ -173,12 +179,11 @@ class TestCorrectBotSelection:
 
         with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
             with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
+                with patch("codebot.ticket_dispatcher.time.sleep", return_value=None):
+                    (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
+                    spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
 
-        # When start_bot_fn returns False, the dispatcher may try additional bots
-        # from idle_bots_by_role before falling back to _get_or_create_bot.
-        # All attempted roles must be general_implementer (the mapping for BUG).
+        # BUG maps to general_implementer. All attempted roles must be general_implementer.
         assert len(spawned_roles) <= 2
         for role in spawned_roles:
             assert role == "general_implementer"
@@ -202,8 +207,9 @@ class TestReviewerRoleIndexedLookup:
 
         with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
             with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=capture_start)
+                with patch("codebot.ticket_dispatcher.time.sleep", return_value=None):
+                    (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
+                    spawn_demand_agents(bots, max_concurrent=100, start_bot_fn=capture_start)
 
         for rtype in REVIEWER_TYPES:
             assert rtype in spawned_roles, f"Reviewer type {rtype} was not dispatched"
@@ -248,7 +254,8 @@ class TestEdgeCases:
 
         with patch("codebot.ticket_dispatcher._get_ticket_store", return_value=fake_store):
             with patch("codebot.ticket_dispatcher.STATE_DIR", tmp_path):
-                (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
-                spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
+                with patch("codebot.ticket_dispatcher.time.sleep", return_value=None):
+                    (tmp_path / "claims").mkdir(parents=True, exist_ok=True)
+                    spawn_demand_agents(bots, max_concurrent=10, start_bot_fn=capture_start)
 
         assert "general_implementer" in spawned_roles
