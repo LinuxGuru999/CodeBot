@@ -260,9 +260,25 @@ class TestTicketStore:
         store1 = TicketStore(path)
         t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e", "p", "d", ["a"])
         store1.add(t)
+        store1.flush()
         store2 = TicketStore(path)
         assert store2.count() == 1
         assert store2.get(t.id) is not None
+        store1.close()
+        store2.close()
+
+    def test_persistence_via_wal(self, tmp_path):
+        """Verify WAL-only persistence: add ticket without triggering compaction."""
+        path = tmp_path / "tickets.json"
+        store1 = TicketStore(path)
+        t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e", "p", "d", ["a"])
+        store1.add(t)
+        store1.flush()
+        store2 = TicketStore(path)
+        assert store2.count() == 1
+        assert store2.get(t.id) is not None
+        store1.close()
+        store2.close()
 
     def test_dedup_blocks_duplicate(self, tmp_path):
         store = TicketStore(tmp_path / "tickets.json")
@@ -384,6 +400,7 @@ class TestTicketStore:
         assert s.get("READY", 0) == 50
 
         # Verify correctness after persistence reload
+        store.flush()
         store2 = TicketStore(tmp_path / "tickets.json")
         assert store2.summary().get("DISCOVERED", 0) == 100
         assert store2.summary().get("VALIDATING", 0) == 50
@@ -826,12 +843,15 @@ class TestApprovalCache:
         store1 = TicketStore(path)
         t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e", "p", "d", ["a"])
         store1.add(t)
+        store1.flush()
         store1.record_gate_result(t.id, True, gates=[])
 
         # Create a new store instance pointing to the same path (simulates restart)
         store2 = TicketStore(path)
         # Cache should have been rebuilt from gate_results.jsonl
         assert store2._has_gate_approval(t.id) is True
+        store1.close()
+        store2.close()
 
     def test_concurrent_access_does_not_corrupt_cache(self, tmp_path):
         """Multiple threads recording gate results should not corrupt the cache."""
@@ -871,3 +891,223 @@ class TestApprovalCache:
         for t in tickets:
             result = store._has_gate_approval(t.id)
             assert isinstance(result, bool)
+
+
+class TestSavePerformance:
+    """Performance tests for CB-9292374-E811: O(N) serialization fix.
+
+    Validates that WAL-based incremental saves keep I/O cost constant
+    for single mutations and that batch additions stay under 1 second.
+    """
+
+    def test_add_100_tickets_io_under_1s(self, tmp_path):
+        """Adding 100 tickets sequentially takes <1s total for I/O.
+
+        Acceptance criterion: adding 100 tickets sequentially takes
+        <1 second total for I/O.
+        """
+        path = tmp_path / "tickets.json"
+        store = TicketStore(path)
+
+        start = time.perf_counter()
+        for i in range(100):
+            t = create_ticket(
+                f"perf-ticket-{i}",
+                TicketClass.BUG,
+                Severity.LOW,
+                "test",
+                f"evidence-perf-{i}",
+                "problem",
+                "desired",
+                ["crit"],
+                risk=RiskLevel.LOW,
+            )
+            store.add(t)
+        store.flush()
+        elapsed = time.perf_counter() - start
+
+        assert store.count() == 100
+        assert elapsed < 1.0, (
+            f"Adding 100 tickets + flush took {elapsed:.3f}s, expected <1s"
+        )
+        store.close()
+
+    def test_single_mutation_constant_cost(self, tmp_path):
+        """Single-mutation I/O cost does not scale with total ticket count.
+
+        Acceptance criterion: serialization cost does not scale linearly
+        with ticket count for single mutations.  We pre-populate with 500
+        tickets, then add 1 more and measure the flush cost.
+        """
+        path = tmp_path / "tickets.json"
+        store = TicketStore(path)
+
+        # Pre-populate with 500 tickets
+        for i in range(500):
+            t = create_ticket(
+                f"prepop-{i}",
+                TicketClass.BUG,
+                Severity.LOW,
+                "test",
+                f"evidence-prepop-{i}",
+                "problem",
+                "desired",
+                ["crit"],
+                risk=RiskLevel.LOW,
+            )
+            store.add(t)
+        store.flush()
+
+        # Force a compaction so the baseline is a clean JSON file
+        store._save_count = store._FULL_SAVE_INTERVAL - 1  # next save compacts
+        t_marker = create_ticket(
+            "prepop-marker",
+            TicketClass.BUG,
+            Severity.LOW,
+            "test",
+            "evidence-marker",
+            "problem",
+            "desired",
+            ["crit"],
+            risk=RiskLevel.LOW,
+        )
+        store.add(t_marker)
+        store.flush()  # This triggers compaction
+
+        # Now measure a single-mutation flush (WAL append, not compaction)
+        t_new = create_ticket(
+            "single-mutation-ticket",
+            TicketClass.BUG,
+            Severity.LOW,
+            "test",
+            "evidence-single",
+            "problem",
+            "desired",
+            ["crit"],
+            risk=RiskLevel.LOW,
+        )
+        start = time.perf_counter()
+        store.add(t_new)
+        store.flush()
+        elapsed = time.perf_counter() - start
+
+        # WAL append for a single ticket should be very fast (< 50ms)
+        assert elapsed < 0.05, (
+            f"Single-mutation flush with 500+ tickets took {elapsed:.3f}s, "
+            f"expected <0.05s (WAL append should be O(1))"
+        )
+        assert store.count() == 502
+        store.close()
+
+    def test_wal_replay_preserves_data_after_crash(self, tmp_path):
+        """WAL replay must restore data written after last compaction.
+
+        Simulates a crash by creating a store, adding tickets, flushing
+        (writes WAL entries), and verifying a fresh store replays them.
+        """
+        path = tmp_path / "tickets.json"
+        store1 = TicketStore(path)
+        ids = []
+        for i in range(20):
+            t = create_ticket(
+                f"crash-test-{i}",
+                TicketClass.BUG,
+                Severity.LOW,
+                "test",
+                f"evidence-crash-{i}",
+                "problem",
+                "desired",
+                ["crit"],
+                risk=RiskLevel.LOW,
+            )
+            store1.add(t)
+            ids.append(t.id)
+        store1.flush()
+        store1.close()
+
+        # Verify all tickets survive a "restart"
+        store2 = TicketStore(path)
+        assert store2.count() == 20
+        for tid in ids:
+            assert store2.get(tid) is not None, f"Ticket {tid} not found after WAL replay"
+        store2.close()
+
+    def test_background_worker_clean_shutdown(self, tmp_path):
+        """close() must flush pending mutations and stop the worker thread."""
+        path = tmp_path / "tickets.json"
+        store = TicketStore(path)
+
+        # Verify worker is alive
+        assert store._save_worker.is_alive()
+
+        # Add tickets but don't flush — let the background worker handle it
+        for i in range(10):
+            t = create_ticket(
+                f"shutdown-test-{i}",
+                TicketClass.BUG,
+                Severity.LOW,
+                "test",
+                f"evidence-shutdown-{i}",
+                "problem",
+                "desired",
+                ["crit"],
+                risk=RiskLevel.LOW,
+            )
+            store.add(t)
+
+        # Close should flush and stop the worker
+        store.close()
+        assert not store._save_worker.is_alive()
+
+        # Verify data persisted
+        store2 = TicketStore(path)
+        assert store2.count() == 10
+        store2.close()
+
+    def test_debounce_batches_rapid_mutations(self, tmp_path):
+        """Rapid-fire mutations should be batched into fewer saves.
+
+        With SAVE_DEBOUNCE_SECONDS = 0.5, 50 rapid adds should produce
+        at most 1-2 saves, not 50 individual I/O operations.
+        """
+        path = tmp_path / "tickets.json"
+        store = TicketStore(path)
+
+        # Count how many times _save is called
+        original_save = store._save
+        save_count = [0]
+
+        def counting_save():
+            save_count[0] += 1
+            original_save()
+
+        store._save = counting_save
+
+        # Rapid-fire 50 adds
+        for i in range(50):
+            t = create_ticket(
+                f"debounce-test-{i}",
+                TicketClass.BUG,
+                Severity.LOW,
+                "test",
+                f"evidence-debounce-{i}",
+                "problem",
+                "desired",
+                ["crit"],
+                risk=RiskLevel.LOW,
+            )
+            store.add(t)
+
+        # Wait for debounce to settle
+        time.sleep(1.5)
+
+        # Should be ≤2 saves (one debounce batch, maybe one more)
+        assert save_count[0] <= 2, (
+            f"Expected ≤2 saves after debounced 50-add burst, got {save_count[0]}"
+        )
+
+        store.flush()
+        store.close()
+        store2 = TicketStore(path)
+        assert store2.count() == 50
+        store2.close()

@@ -398,15 +398,33 @@ class TicketStore:
     def flush(self) -> None:
         """Force an immediate save of all dirty tickets.
 
-        Blocks until the background worker has persisted pending changes.
+        Blocks until pending changes are persisted to disk.
         Use this when durability is required (e.g., before shutdown or
         in tests that verify persistence).
         """
+        # Drain any pending debounce signals so the worker doesn't also
+        # attempt a redundant save of the same dirty IDs.
         with self._save_condition:
-            if self._save_queue:
-                self._save_queue.clear()
-                self._save_condition.notify()
+            self._save_queue.clear()
         self._save()
+
+    def close(self) -> None:
+        """Shut down the background save worker and flush pending changes.
+
+        After calling close(), no further mutations should be queued.
+        This ensures all dirty tickets are persisted before the store
+        is discarded (e.g., at process exit or test teardown).
+        """
+        self._shutdown = True
+        with self._save_condition:
+            self._save_condition.notify_all()
+        if self._save_worker.is_alive():
+            self._save_worker.join(timeout=5.0)
+        # Final flush of any remaining dirty tickets
+        try:
+            self._save()
+        except Exception:
+            pass
 
     def _load(self) -> None:
         if not self._path.exists():
