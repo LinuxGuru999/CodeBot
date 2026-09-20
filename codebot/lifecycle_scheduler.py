@@ -108,7 +108,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         handler_name="_dispatch_tickets_to_implementers",
         requires_bots=True,
         description="Dispatch IMPLEMENTING tickets to role-matched implementers",
-        tickets_per_agent=2,
+        tickets_per_agent=1,
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.REVIEW,
@@ -121,7 +121,7 @@ LIFECYCLE_DISPATCH_TABLE: tuple[LifecycleDispatchEntry, ...] = (
         handler_name="_dispatch_tickets_to_reviewers",
         requires_bots=True,
         description="Dispatch REVIEWING tickets to role-matched reviewers",
-        tickets_per_agent=2,
+        tickets_per_agent=1,
     ),
     LifecycleDispatchEntry(
         phase=LifecyclePhase.VERIFICATION,
