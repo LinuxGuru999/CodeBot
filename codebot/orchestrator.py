@@ -337,11 +337,11 @@ def set_project_adapter(adapter: Any) -> PathConfig:
     """Inject a ProjectAdapter instance and return PathConfig.
 
     The adapter's paths() method returns an object with repository_root,
-    state_dir, logs_dir, etc. This function returns a PathConfig instance
-    based on the adapter-provided values. It does NOT mutate global state.
-    Callers should use the returned PathConfig or pass it to components.
+    state_dir, logs_dir, etc. This function stores the resulting PathConfig
+    in _active_path_config so get_active_paths() returns it. It does NOT
+    mutate the default _paths global.
     """
-    global _adapter_instance
+    global _adapter_instance, _active_path_config
     _adapter_instance = adapter
     try:
         ap = adapter.paths()
@@ -350,7 +350,7 @@ def set_project_adapter(adapter: Any) -> PathConfig:
         logs = getattr(ap, "logs_dir", root / ".codebot" / "logs")
         backup = getattr(ap, "backup_dir", state / "backup")
         alignment = getattr(ap, "alignment_events_dir", state / "alignment_events")
-        return PathConfig(
+        config = PathConfig(
             bots_dir=root,
             state_dir=state,
             logs_dir=logs,
@@ -360,6 +360,8 @@ def set_project_adapter(adapter: Any) -> PathConfig:
             update_lock=state / ".update_lock",
             restart_file=state / ".restart",
         )
+        _active_path_config = config
+        return config
     except Exception:
         # Return default config if adapter fails
         return _default_path_config(_project_root)
@@ -371,7 +373,7 @@ def get_adapter() -> Any:
 
 # Module-level __getattr__ for backward-compatible dynamic path access
 def __getattr__(name: str) -> Any:
-    """Provide backward-compatible access to path constants via _paths."""
+    """Provide backward-compatible access to path constants via get_active_paths()."""
     _path_map = {
         "BOTS_DIR": "bots_dir",
         "STATE_DIR": "state_dir",
@@ -383,7 +385,7 @@ def __getattr__(name: str) -> Any:
         "RESTART_FILE": "restart_file",
     }
     if name in _path_map:
-        return getattr(_paths, _path_map[name])
+        return getattr(get_active_paths(), _path_map[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -1805,12 +1807,21 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
 
 
 def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
-    return 0
+    """Delegate to TicketDispatcher service (thin router, fat service)."""
+    try:
+        from codebot.ticket_dispatcher import dispatch_tickets_to_implementers
+        return dispatch_tickets_to_implementers(bots)
+    except ImportError:
+        return 0
 
 
 def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
-    """Superseded by _spawn_demand_agents."""
-    return 0
+    """Delegate to TicketDispatcher service (thin router, fat service)."""
+    try:
+        from codebot.ticket_dispatcher import dispatch_tickets_to_reviewers
+        return dispatch_tickets_to_reviewers(bots)
+    except ImportError:
+        return 0
 
 def _advance_reviewed_tickets(bots: dict[str, BotState]) -> int:
     """Transition REVIEWING tickets to VERIFYING or REWORK based on reviewer verdicts.
@@ -2129,42 +2140,13 @@ MIN_READY_BACKLOG = 5
 
 
 def _auto_triage_backlog() -> int:
+    """Delegate to TicketDispatcher service (thin router, fat service)."""
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
+        from codebot.ticket_dispatcher import auto_triage_backlog
+        return auto_triage_backlog(STATE_DIR)
     except ImportError:
+        logger.warning("ticket_dispatcher not available, skipping auto-triage")
         return 0
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
-        return 0
-    ready_count = len(ts.list_ready_raw())
-    discovered = ts.list_by_state(TicketState.DISCOVERED)
-    validating = ts.list_by_state(TicketState.VALIDATING)
-    triaged = ts.list_by_state(TicketState.TRIAGED)
-    backlog_depth = len(discovered) + len(validating) + len(triaged)
-    max_advance_per_tick = max(5, min(backlog_depth, 20))
-    advanced = 0
-    for state in (TicketState.DISCOVERED, TicketState.VALIDATING, TicketState.TRIAGED):
-        if advanced >= max_advance_per_tick:
-            break
-        for ticket in ts.list_by_state(state):
-            if advanced >= max_advance_per_tick:
-                break
-            target = TicketState.VALIDATING if state == TicketState.DISCOVERED else (
-                TicketState.TRIAGED if state == TicketState.VALIDATING else TicketState.READY
-            )
-            try:
-                ts.transition(ticket.id, target)
-                advanced += 1
-                logger.info(f"Auto-triaged {ticket.id}: {state.value} -> {target.value}")
-            except ValueError:
-                pass
-    return advanced
 
 
 _AUTOPUSH_COOLDOWN_SECONDS = 300
@@ -3316,49 +3298,15 @@ def _collect_reviewer_feedback_for_trigger(bot_name: str) -> list[dict]:
 
 
 def _run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
-    """Run alignment scoring + prompt optimization synchronously for a bot.
-
-    Delegates to alignment_service to maintain architectural boundaries.
-    """
-    try:
-        from codebot.alignment_service import run_alignment_pipeline as _rap
-    except ImportError:
-        try:
-            from alignment_service import run_alignment_pipeline as _rap
-        except ImportError:
-            logger.warning("alignment_service not available, skipping alignment pipeline")
-            return False
-
-    return _rap(bot_name, timeout=timeout)
+    """Delegate to AlignmentService via injected service protocol."""
+    svc = get_alignment_service()
+    return svc.run_alignment_pipeline(bot_name, timeout)
 
 
 def _run_alignment_pipeline_for_all() -> None:
-    """Run alignment scoring for all pending events (called every 30 minutes).
-    
-    Delegates to alignment_service to maintain architectural boundaries.
-    """
-    try:
-        from codebot.alignment_service import run_alignment_pipeline_for_all as _rapfa
-    except ImportError:
-        try:
-            from alignment_service import run_alignment_pipeline_for_all as _rapfa
-        except ImportError:
-            logger.warning("alignment_service not available, skipping alignment sweep")
-            return
-
-    _rapfa()
-    
-    # Collect metrics after alignment sweep
-    try:
-        import subprocess
-        subprocess.run(
-            ["python3", str(BOTS_DIR / "scripts" / "collect_metrics.py")],
-            timeout=30,
-            capture_output=True
-        )
-        logger.info("Metrics collected after alignment sweep")
-    except Exception as e:
-        logger.warning(f"Metrics collection failed: {e}")
+    """Delegate to AlignmentService via injected service protocol."""
+    svc = get_alignment_service()
+    svc.run_alignment_pipeline_for_all()
 
 
 TOOL_FAILURE_ROTATION_THRESHOLD = 5
