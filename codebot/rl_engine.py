@@ -529,29 +529,56 @@ def score_event(event: dict[str, Any], bots_dir: Path | None = None) -> dict[str
 
     if stream_path.exists():
         try:
-            raw = stream_path.read_text(encoding="utf-8", errors="ignore")
-            if len(raw) > 500_000:
-                raw = raw[:500_000]
-            stream_data = json.loads(raw)
-            stream_iterations = stream_data.get("tool_iterations", 0)
-            for m in stream_data.get("messages", []):
-                role = m.get("role", "")
-                content = m.get("content", "")
-                if not isinstance(content, str):
-                    content = json.dumps(content, ensure_ascii=False) if content else ""
-                if role == "assistant":
-                    if _REBELLION_RE.search(content) and not _EXCLUDE_RE.search(content):
-                        rebellion_count += 1
-                elif role == "tool":
-                    try:
-                        result = json.loads(content) if content else {}
-                    except Exception:
-                        result = {}
-                    if isinstance(result, dict) and not result.get("success", True):
-                        tool_failures += 1
-                        err_msg = str(result.get("error", ""))
-                        if _REBELLION_RE.search(err_msg) and not _EXCLUDE_RE.search(err_msg):
+            # Bounded read: max 50KB to satisfy memory constraint <50KB.
+            # For large files, scan raw text for patterns instead of full JSON parse.
+            file_size = stream_path.stat().st_size
+            stream_iterations = 0
+            
+            if file_size <= 50_000:
+                # Small file: safe to parse fully
+                raw = stream_path.read_text(encoding="utf-8", errors="ignore")
+                stream_data = json.loads(raw)
+                stream_iterations = stream_data.get("tool_iterations", 0)
+                for m in stream_data.get("messages", []):
+                    role = m.get("role", "")
+                    content = m.get("content", "")
+                    if not isinstance(content, str):
+                        content = json.dumps(content, ensure_ascii=False) if content else ""
+                    if role == "assistant":
+                        if _REBELLION_RE.search(content) and not _EXCLUDE_RE.search(content):
                             rebellion_count += 1
+                    elif role == "tool":
+                        try:
+                            result = json.loads(content) if content else {}
+                        except Exception:
+                            result = {}
+                        if isinstance(result, dict) and not result.get("success", True):
+                            tool_failures += 1
+                            err_msg = str(result.get("error", ""))
+                            if _REBELLION_RE.search(err_msg) and not _EXCLUDE_RE.search(err_msg):
+                                rebellion_count += 1
+            else:
+                # Large file: scan tail (last 50KB) for patterns to avoid OOM and slow parse.
+                # Most relevant errors/rebellions occur near the end of long runs.
+                with stream_path.open("rb") as f:
+                    f.seek(-50_000, 2)  # Seek 50KB from end
+                    raw_tail = f.read().decode("utf-8", errors="ignore")
+                
+                # Extract tool_iterations from the beginning of the file (usually small offset)
+                try:
+                    with stream_path.open("rb") as f:
+                        head = f.read(2048).decode("utf-8", errors="ignore")
+                        # Crude extraction of tool_iterations if present near start
+                        match = re.search(r'"tool_iterations"\s*:\s*(\d+)', head)
+                        if match:
+                            stream_iterations = int(match.group(1))
+                except Exception:
+                    pass
+                
+                # Scan raw text for rebellion patterns (defense-in-depth, avoids JSON parse)
+                rebellion_count += len(_REBELLION_RE.findall(raw_tail))
+                # Count tool failures by looking for '"success": false' patterns in tail
+                tool_failures += len(re.findall(r'"success"\s*:\s*false', raw_tail, re.I))
         except Exception:
             pass
 

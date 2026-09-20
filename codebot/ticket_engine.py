@@ -352,6 +352,11 @@ class TicketStore:
         self._state_index: dict[TicketState, set[str]] = {}
         # In-memory cache for gate approvals: ticket_id -> bool (latest passed status)
         self._approval_cache: dict[str, bool] = {}
+        # Dirty ticket tracking: IDs modified since last save (for incremental saves)
+        self._dirty_ids: set[str] = set()
+        # Full-save counter: trigger full save every _FULL_SAVE_INTERVAL saves
+        self._save_count: int = 0
+        self._FULL_SAVE_INTERVAL: int = 50
         # Debounced save mechanism
         self._save_pending = False
         self._save_lock = threading.Lock()
