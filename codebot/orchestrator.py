@@ -3774,11 +3774,16 @@ def _process_rework_tickets(bots: dict[str, BotState]) -> int:
         rework_count = getattr(ticket, 'rework_count', 0)
         if rework_count >= 3:
             try:
-                ts.transition(tid, TicketState.REJECTED)
-                logger.warning(f"Rework ticket {tid} -> REJECTED (exceeded {rework_count} reworks without progress)")
+                ts.transition(tid, TicketState.DECOMPOSE)
+                logger.warning(f"Rework ticket {tid} -> DECOMPOSE (failed {rework_count} implementations, needs fresh decomposition)")
                 advanced += 1
             except ValueError as e:
-                logger.warning(f"Rework ticket {tid} rejection failed: {e}")
+                try:
+                    ts.transition(tid, TicketState.REJECTED)
+                    logger.warning(f"Rework ticket {tid} -> REJECTED (decompose transition failed: {e})")
+                    advanced += 1
+                except ValueError:
+                    pass
             continue
         plan_file = plans_dir / f"{tid}.plan.json"
         target_state = TicketState.IMPLEMENTING if plan_file.exists() else TicketState.PLANNING
