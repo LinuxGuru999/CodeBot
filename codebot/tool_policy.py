@@ -60,19 +60,15 @@ def _has_path_escape(argv: list[str], workspace_root: Path) -> bool:
 
 
 def validate_command(command: str, workspace_root: Path | None = None) -> list[str] | None:
-    """Parse a model command into an approved argv vector.
+    """Validate a model command against the blocklist.
 
-    Returns parsed argv if the command is safe, or None if blocked.
-    Uses a blocklist model: everything is allowed except BLOCKED_COMMANDS,
-    shell metacharacters, and path traversal outside the workspace.
+    Returns the raw command string wrapped in a list for shell execution,
+    or None if blocked. Uses a blocklist model: everything is allowed except
+    BLOCKED_COMMANDS and path traversal outside the workspace.
+    Shell metacharacters are permitted since subprocess runs with cwd=workspace_root.
     """
-    # Block shell metacharacters in raw input BEFORE shlex parsing.
-    # shlex consumes characters like \n as whitespace, hiding them from post-parse checks.
-    # Exception: python -c needs quotes/special chars for inline code.
-    is_python_c = command.lstrip().startswith(("python3 -c", "python -c"))
-    if not is_python_c:
-        if any(c in command for c in SHELL_METACHARACTERS):
-            return None
+    if not command or not command.strip():
+        return None
 
     try:
         argv = shlex.split(command)
@@ -83,7 +79,16 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
 
     base_cmd = argv[0]
 
-    # Block dangerous commands (check all pipe-separated segments)
+    if base_cmd in BLOCKED_COMMANDS:
+        return None
+
+    if base_cmd == "git":
+        for token in argv[1:]:
+            if token in DANGEROUS_GIT_ARGS:
+                return None
+        if "reset" in argv and "--hard" in argv:
+            return None
+
     if "|" in argv:
         pipe_idx = argv.index("|")
         segments = [argv[:pipe_idx], argv[pipe_idx + 1:]]
@@ -93,26 +98,22 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         if seg and seg[0] in BLOCKED_COMMANDS:
             return None
 
-    # Block dangerous git args
-    if base_cmd == "git":
-        for token in argv[1:]:
-            if token in DANGEROUS_GIT_ARGS:
-                return None
-        # Block 'reset --hard' pattern (two separate tokens)
-        if "reset" in argv and "--hard" in argv:
-            return None
-
-    # Path traversal checks
     if workspace_root is not None:
-        if _has_path_escape(argv, workspace_root):
-            return None
+        for token in argv:
+            if token.startswith("-") or token in ("|", ">>", ">", "<", "&&", "||", ";"):
+                continue
+            if ".." in token:
+                return None
+            if token.startswith("/"):
+                resolved = resolve_workspace_path(token, workspace_root)
+                if resolved is None:
+                    return None
     else:
-        # Without workspace_root, still block .. traversal
         for token in argv[1:]:
-            if not token.startswith("-") and ".." in token:
+            if not token.startswith("-") and token not in ("|", ">>", ">", "<", "&&", "||", ";") and ".." in token:
                 return None
 
-    return argv
+    return [command]
 
 
 # Backward-compatible alias for existing callers

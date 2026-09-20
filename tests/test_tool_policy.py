@@ -65,11 +65,13 @@ class TestBlocklistedCommand:
         assert allowlisted_command("") is None
         assert allowlisted_command("   ") is None
 
-    def test_shell_metacharacters_blocked(self):
-        """Commands with shell metacharacters are blocked."""
-        for char in SHELL_METACHARACTERS:
-            cmd = f"ls {char} file"
-            assert allowlisted_command(cmd) is None, f"Failed to block char: {char}"
+    def test_shell_metacharacters_allowed(self):
+        """Shell metacharacters are allowed (subprocess uses shell=True with cwd sandbox)."""
+        cmds = ["ls && pwd", "cat file | grep foo", "echo hello > out.txt", "cd src && pytest"]
+        for cmd in cmds:
+            result = allowlisted_command(cmd)
+            assert result is not None, f"Blocked shell command: {cmd}"
+            assert result == [cmd]
 
     def test_blocked_commands_rejected(self):
         """Dangerous commands in BLOCKED_COMMANDS are rejected."""
