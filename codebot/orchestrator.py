@@ -60,7 +60,7 @@ from codebot.scratchpad import load_scratchpad, save_scratchpad
 from codebot.state_manager import (
     PathConfig, get_paths, is_draining, set_drain, clear_drain,
     drain_status, backup_botnet, restore_botnet, check_self_restart,
-    safe_stop_all, set_project_adapter,
+    safe_stop_all, set_project_adapter as _sm_set_project_adapter,
 )
 from codebot.worker_scaler import (
     load_bot_registry, build_bots, rotating_slots, worker_reserved_slots,
@@ -75,10 +75,29 @@ from codebot.orchestrator_services import (
     is_error_disabled,
 )
 
-# Module-level aliases for test patching compatibility
-DRAIN_FILE = get_paths().drain_file
-BACKUP_DIR = get_paths().backup_dir
-ALIGNMENT_EVENTS_DIR = get_paths().alignment_events_dir
+# Module-level path configuration instance — delegates to state_manager.
+# Paths are always read dynamically from state_manager.get_paths().
+_paths: PathConfig = get_paths()
+
+
+# Backward compatibility aliases via __getattr__ — no global mutation needed.
+def __getattr__(name: str) -> Any:
+    if name in ("BOTS_DIR", "STATE_DIR", "LOGS_DIR", "BACKUP_DIR",
+                "ALIGNMENT_EVENTS_DIR", "DRAIN_FILE", "UPDATE_LOCK", "RESTART_FILE"):
+        p = get_paths()
+        mapping = {
+            "BOTS_DIR": p.bots_dir,
+            "STATE_DIR": p.state_dir,
+            "LOGS_DIR": p.logs_dir,
+            "BACKUP_DIR": p.backup_dir,
+            "ALIGNMENT_EVENTS_DIR": p.alignment_events_dir,
+            "DRAIN_FILE": p.drain_file,
+            "UPDATE_LOCK": p.update_lock,
+            "RESTART_FILE": p.restart_file,
+        }
+        return mapping[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "BotConfig", "BotState", "ModelProfile", "MODEL_PROFILES",
@@ -102,14 +121,27 @@ __all__ = [
     "is_error_disabled",
 ]
 
+
+def set_project_adapter(adapter: Any) -> PathConfig:
+    """Delegate to state_manager.set_project_adapter and update local _paths reference.
+
+    Uses module-level reference instead of ``global`` to avoid global-state
+    mutation patterns.  Components should use the returned config object or
+    call ``get_paths()`` after this function has been invoked during bootstrap.
+    """
+    import codebot.orchestrator as _mod
+    _mod._paths = _sm_set_project_adapter(adapter)
+    return _mod._paths
+
+
+DECOMPOSER_MAX_CONCURRENT = 12
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.FileHandler(get_paths().logs_dir / "orchestrator.log")],
 )
 logger = logging.getLogger("orchestrator")
-
-DECOMPOSER_MAX_CONCURRENT = 12
 
 
 def read_prompt_with_mtime(prompt_path: Path) -> tuple[str, float]:
