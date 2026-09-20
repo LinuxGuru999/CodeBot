@@ -410,6 +410,7 @@ class TicketStore:
 
     def _load(self) -> None:
         if not self._path.exists():
+            self._replay_wal()
             self._build_approval_cache()
             return
         try:
@@ -433,7 +434,32 @@ class TicketStore:
             self._evidence_index = {}
             self._word_index = {}
             self._state_index = {}
+        # Replay WAL entries written after last compaction
+        self._replay_wal()
         self._build_approval_cache()
+
+    def _replay_wal(self) -> None:
+        """Replay append-only WAL to restore mutations made after last compaction."""
+        wal_path = self._path.with_suffix(".wal.jsonl")
+        if not wal_path.exists():
+            return
+        try:
+            with open(wal_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        t = Ticket.from_dict(entry)
+                        self._tickets[t.id] = t
+                        self._evidence_index[t.evidence_hash()] = t.id
+                        self._index_title(t)
+                        self._state_index.setdefault(t.state, set()).add(t.id)
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+        except OSError:
+            pass
 
     def _index_title(self, ticket: Ticket) -> None:
         """Add ticket title words to the inverted index."""
@@ -517,59 +543,77 @@ class TicketStore:
             self._save_condition.notify()
 
     def _save(self) -> None:
-        """Atomically save ticket store, preferring incremental saves.
+        """Atomically save ticket store using append-only WAL + periodic compaction.
 
-        When a small subset of tickets has changed (dirty tracking), loads the
-        existing file and patches only those entries — avoiding O(N) full-store
-        serialization. Falls back to full serialization periodically or when
-        the dirty set is large relative to the total store size.
+        Instead of serializing the entire store on every mutation (O(N)), this
+        method appends only dirty tickets to a Write-Ahead Log (O(K) where K is
+        the number of changed tickets). A full JSON snapshot is written only
+        during periodic compaction, keeping single-mutation I/O constant.
 
         Retries lock acquisition up to 3 times with exponential backoff.
         """
-        # Snapshot dirty IDs and clear them atomically
         with self._lock:
             dirty_ids = self._dirty_ids.copy()
             self._dirty_ids.clear()
 
-        # Decide: incremental vs full save
+        if not dirty_ids:
+            return
+
         total = len(self._tickets)
         self._save_count += 1
-        use_incremental = (
-            dirty_ids
-            and self._path.exists()
-            and len(dirty_ids) < max(total * 0.3, 50)
-            and self._save_count % self._FULL_SAVE_INTERVAL != 0
-        )
 
-        if use_incremental:
-            payload = self._build_incremental_payload(dirty_ids)
-        else:
-            payload = self._build_full_payload()
+        needs_compaction = (
+            not self._path.exists()
+            or len(dirty_ids) >= max(total * 0.3, 50)
+            or self._save_count % self._FULL_SAVE_INTERVAL == 0
+        )
 
         lock_path = self._path.with_suffix(".lock")
         max_retries = 3
-        base_delay = 0.1  # seconds
+        base_delay = 0.1
 
         for attempt in range(max_retries):
             try:
                 with open(lock_path, "a+") as lock_fd:
                     flock(lock_fd, LOCK_EX)
                     try:
-                        self._backup()
-                        tmp = self._path.with_suffix(".tmp")
-                        tmp.write_text(
-                            json.dumps(payload, indent=2 if self._pretty else None),
-                            encoding="utf-8",
-                        )
-                        tmp.replace(self._path)
+                        if needs_compaction:
+                            self._backup()
+                            payload = self._build_full_payload()
+                            tmp = self._path.with_suffix(".tmp")
+                            tmp.write_text(
+                                json.dumps(payload, indent=2 if self._pretty else None),
+                                encoding="utf-8",
+                            )
+                            tmp.replace(self._path)
+                            # Clear WAL after successful compaction
+                            wal_path = self._path.with_suffix(".wal.jsonl")
+                            try:
+                                wal_path.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                        else:
+                            # Append-only WAL write: O(K) serialization
+                            wal_path = self._path.with_suffix(".wal.jsonl")
+                            lines = []
+                            for tid in dirty_ids:
+                                ticket = self._tickets.get(tid)
+                                if ticket is not None:
+                                    lines.append(json.dumps(ticket.to_dict()))
+                            if lines:
+                                with open(wal_path, "a", encoding="utf-8") as wf:
+                                    wf.write("\n".join(lines) + "\n")
                     finally:
                         flock(lock_fd, LOCK_UN)
-                return  # Success
+                return
             except OSError as e:
                 if attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
                     time.sleep(delay)
                 else:
+                    # Restore dirty IDs so they are not lost
+                    with self._lock:
+                        self._dirty_ids.update(dirty_ids)
                     raise RuntimeError(
                         f"TicketStore._save failed after {max_retries} lock retries: {e}. "
                         f"Data may be at risk if concurrent writes occurred."
