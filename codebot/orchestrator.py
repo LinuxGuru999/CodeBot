@@ -30,24 +30,15 @@ from pathlib import Path
 from typing import Any
 
 from codebot.process_manager import (
-    BotConfig, BotState, ModelProfile, MODEL_PROFILES,
-    start_bot, stop_bot, restart_bot,
-    is_stuck, is_log_stalled, effective_heartbeat_timeout, model_profile,
+    BotConfig, BotState, start_bot, stop_bot, restart_bot,
+    is_stuck, effective_heartbeat_timeout, model_profile,
     read_heartbeat, log_mtime, update_bot_state,
     checkpoint_path, read_checkpoint, STATE_DIR, LOGS_DIR,
     BOTS_DIR, GATEWAY_MAX_CONCURRENT,
     GATEWAY_MIN_SPAWN_GAP, ALWAYS_RESPAWN, write_heartbeat,
     heartbeat_path, _write_json_atomic,
-    _manifest_restart_budget_exceeded, _manifest_error_disabled,
 )
-
-# BACKUP_DIR is not in process_manager, define locally
 BACKUP_DIR = STATE_DIR / "backup"
-
-# Backward compatibility stubs for functions removed from orchestrator
-def is_error_disabled(bot_name: str) -> bool:
-    """Check if a bot is disabled due to errors."""
-    return _manifest_error_disabled(bot_name)
 
 def is_restart_budget_exceeded(bot_name: str) -> bool:
     """Check if restart budget is exceeded for a bot."""
@@ -91,12 +82,37 @@ def _model_tier_for_complexity(model: str, complexity: str, queue_has_tier_work:
         return model in expensive_models
     return True
 
+# Additional constants for backward compatibility
+CLAIM_TTL_SECONDS = 300
+MIN_ROTATING_SLOTS = 4
+
+def is_manifest_error_disabled(bot_name: str) -> bool:
+    """Alias for is_error_disabled for backward compatibility."""
+    return is_error_disabled(bot_name)
+
+def is_manifest_restart_budget_exceeded(bot_name: str) -> bool:
+    """Alias for is_restart_budget_exceeded for backward compatibility."""
+    return is_restart_budget_exceeded(bot_name)
+
+def _read_state_file(bot_name: str) -> dict:
+    """Read bot state file for testing purposes."""
+    state_file = STATE_DIR / f"{bot_name}.state.json"
+    try:
+        if state_file.exists():
+            return json.loads(state_file.read_text())
+    except Exception:
+        pass
+    return {}
+
 # Re-export for backward compatibility
 __all__.extend([
     "ModelProfile", "MODEL_PROFILES", "is_log_stalled",
     "is_error_disabled", "is_restart_budget_exceeded",
     "rotating_slots", "worker_reserved_slots",
     "_get_available_memory_mb", "_model_tier_for_complexity",
+    "is_manifest_error_disabled", "is_manifest_restart_budget_exceeded",
+    "CLAIM_TTL_SECONDS", "MIN_ROTATING_SLOTS",
+    "_read_state_file",
 ])
 from codebot.ticket_dispatcher import (
     spawn_demand_agents, dispatch_decompose_agents,
