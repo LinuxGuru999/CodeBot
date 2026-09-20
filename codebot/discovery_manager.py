@@ -203,6 +203,8 @@ class DiscoveryManager:
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Only save the last 500 cooldowns, but rebuild index for those saved
+        recent_cooldowns = self._cooldowns[-500:]
         data = {
             "cooldowns": [
                 {
@@ -213,7 +215,7 @@ class DiscoveryManager:
                     "findings_count": c.findings_count,
                     "duplicate_count": c.duplicate_count,
                 }
-                for c in self._cooldowns[-500:]  # bound memory
+                for c in recent_cooldowns
             ],
             "yields": {r: s.to_dict() for r, s in self._yields.items()},
         }
@@ -232,22 +234,36 @@ class DiscoveryManager:
         cost_tokens: int,
         now: float | None = None,
     ) -> None:
-        """Record a completed discovery scan (§10, §11)."""
+        """Record a completed discovery scan (§10, §11).
+        
+        Updates the O(1) cooldown index immediately after appending to ensure
+        new cooldowns are visible to is_on_cooldown without delay.
+        """
         now = now or time.time()
-        self._cooldowns.append(DiscoveryCooldown(
+        idx = len(self._cooldowns)
+        cd = DiscoveryCooldown(
             role=role,
             scope=scope,
             commit_sha=commit_sha,
             completed_at=now,
             findings_count=findings,
             duplicate_count=duplicates,
-        ))
+        )
+        self._cooldowns.append(cd)
+        # Update index: this is now the latest entry for (role, scope)
+        self._cooldown_index[(role, scope)] = idx
         if role not in self._yields:
             self._yields[role] = RoleYieldStats(role=role)
         self._yields[role].record_scan(findings, duplicates, rejected, cost_tokens, now)
-        # Prune old cooldowns (keep last 30 days)
+        # Prune old cooldowns (keep last 30 days) - must rebuild index after pruning
         cutoff = now - 30 * 86400
-        self._cooldowns = [c for c in self._cooldowns if c.completed_at > cutoff]
+        old_cooldowns = self._cooldowns
+        self._cooldowns = []
+        self._cooldown_index.clear()
+        for i, c in enumerate(old_cooldowns):
+            if c.completed_at > cutoff:
+                self._cooldowns.append(c)
+                self._cooldown_index[(c.role, c.scope)] = i
 
     def is_on_cooldown(
         self,
@@ -261,16 +277,19 @@ class DiscoveryManager:
 
         Returns True if the same scope was scanned recently AND the
         commit hasn't changed since then.
+        
+        Uses O(1) index lookup for the latest (role, scope) entry.
         """
         now = now or time.time()
-        for cd in reversed(self._cooldowns):
-            if cd.role == role and cd.scope == scope:
-                if cd.is_stale_commit(current_commit_sha):
-                    return False  # Code changed, rescan allowed
-                if not cd.is_expired(now, cooldown_seconds):
-                    return True  # Still on cooldown
-                return False  # Expired
-        return False  # Never scanned
+        idx = self._cooldown_index.get((role, scope))
+        if idx is None:
+            return False  # Never scanned
+        cd = self._cooldowns[idx]
+        if cd.is_stale_commit(current_commit_sha):
+            return False  # Code changed, rescan allowed
+        if not cd.is_expired(now, cooldown_seconds):
+            return True  # Still on cooldown
+        return False  # Expired
 
     def get_yield_stats(self, role: str) -> RoleYieldStats:
         if role not in self._yields:
