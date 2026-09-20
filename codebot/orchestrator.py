@@ -3391,6 +3391,18 @@ def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
         if has_active_claim:
             continue
 
+        scratchpad_path = STATE_DIR / f"{tid}.scratchpad.json"
+        if scratchpad_path.exists():
+            try:
+                sp_data = json.loads(scratchpad_path.read_text(encoding="utf-8"))
+                history = sp_data.get("agent_history", [])
+                updated_at = sp_data.get("updated_at", 0)
+                age = time.time() - updated_at if updated_at else 0
+                if history and age < 300:
+                    continue
+            except Exception:
+                pass
+
         try:
             ts.transition(tid, TicketState.REWORK)
             logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> REWORK (worker exited without completing)")
