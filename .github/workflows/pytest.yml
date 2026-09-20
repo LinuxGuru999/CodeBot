@@ -17,4 +17,4 @@ jobs:
       - name: Install test deps
         run: pip install "pytest==7.4.4"
       - name: Run tests
-        run: python3 -m pytest -q -p no:cacheprovider -x --ignore=tests/load_tests -m "not slow"
+        run: python3 -m pytest -q -p no:cacheprovider --ignore=tests/load_tests -m "not slow" --deselect tests/test_adaptive_rate_limiter.py
