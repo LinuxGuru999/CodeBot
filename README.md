@@ -15,67 +15,78 @@ CodeBot discovers, plans, implements, reviews, and verifies software changes acr
 codebot/                   # CodeBot core (portable, no project knowledge)
 ── __init__.py
 ├── __main__.py
-├── adaptive_rate_limiter.py
-├── adaptive_scheduler.py
-├── alignment_events.py
-├── alignment_service.py
-├── anomaly_alerts.py
-├── api_runner.py
-├── api_tools.py           # read/write/edit/bash/grep/glob
-├── auto_revert.py         # Rollback on failure
-├── batch_scheduler.py     # Queue scheduling
-── bot_metrics.py
-├── botop.py
-├── checkpoint_manager.py
-├── codebot_adapter.py
-├── codebot_bootstrap.py   # Adapter injection entry point
-├── conflict_detector.py
-├── context_compactor.py
-── control_client.py
-├── control_server.py
-├── cost_tracker.py        # Per-ticket token economics
-├── coverage_bridge.py
-├── coverage_runner.py
-├── credentials.py
-├── dependency_graph.py    # DAG ordering + cycle detection
-├── discovery_manager.py
-├── event_log.py           # Event persistence
-├── file_lock.py
-├── findings_log.py        # Findings persistence
-├── gatekeeper.py          # Central completion authority
-├── implementation_planner.py  # Depth-scaled plan generation
-├── integration_queue.py
-├── lease_state.py         # Distributed coordination
-├── manifest_schema.py     # Schema validation
-├── metrics_collector.py   # Per-agent telemetry
-├── migrate_queue.py
-├── model_router.py
-├── monitor_adapter.py
-├── orchestrator.py
-├── pipeline_state.py
-├── pricing_table.py
-├── project_adapter.py     # Abstract interface (ABC)
-├── prompt_gateway.py      # Prompt compression + spawn gating
-── prompt_optimizer.py
-├── quality_gate.py        # YAML-driven verification engine
-├── queue_pressure.py
-├── readiness.py           # Readiness checks
-├── risk_classifier.py     # Deterministic risk scoring → autonomy levels
-├── rl_engine.py           # Epsilon-greedy bandit optimization
-├── role_prompt.py
-├── role_registry.py       # ROLE + TASK + MODEL + TOOL_POLICY abstraction
-├── scheduler_config.py
-├── scheduler_metrics.py
-├── scratchpad.py
-├── stale_branch_detector.py
-├── stats_collector.py
-├── task_splitter.py
-├── telemetry.py
-├── ticket_engine.py       # Normalized ticket schema + state machine
-├── token_budget.py        # Fleet-wide budget ledger
-├── tool_policy.py         # Sandbox boundary enforcement
-├── web_tools.py
-└── work_scorer.py
+├── adaptive_rate_limiter.py   # Adaptive rate limiting based on API provider feedback
+├── adaptive_scheduler.py      # Core 30-slot adaptive concurrency scheduler control loop
+├── alignment_coordinator.py   # Coordinates alignment pipeline across agents
+├── alignment_events.py        # Alignment event bus for reward scoring and prompt evolution
+├── alignment_service.py       # Decoupled alignment pipeline for reward scoring
+├── anomaly_alerts.py          # Anomaly detection on metrics
+├── api_runner.py              # LLM execution loop: prompt assembly, tool dispatch, claim, auto-commit
+├── api_tools.py               # read/write/edit/bash/grep/glob tool implementations
+├── auto_revert.py             # Automatic rollback on build gate failure
+├── batch_scheduler.py         # Tier-based batch ordering, concurrency packing
+├── bot_metrics.py             # Per-bot performance metrics collection and reporting
+├── botop.py                   # Standalone CLI for agent operations (status, logs, restart, drain)
+├── checkpoint_manager.py      # Agent checkpoint save/restore for crash recovery
+├── codebot_adapter.py         # Self-hosting adapter: CodeBot manages its own repo
+├── codebot_bootstrap.py       # Adapter discovery, injection into core modules
+├── config_reloader.py         # Hot-reloading for prompts, source code, and bot registry config
+├── conflict_detector.py       # File/module overlap detection between concurrent tickets
+├── context_compactor.py       # Sliding window message summarization
+├── control_client.py          # Stdlib HTTP client for control server
+├── control_server.py          # HTTP control plane: agent status, logs, restart, drain
+├── cost_tracker.py            # Per-ticket cost attribution and fleet summaries
+├── coverage_bridge.py         # Generates tickets from coverage gaps
+├── coverage_runner.py         # Runs pytest-cov, parses per-module coverage reports
+├── credentials.py             # SSH/GitHub/API credential resolution from env or secret files
+├── dependency_graph.py        # DAG construction, cycle detection, topological sort
+├── discovery_manager.py       # Discovery cooldown, yield stats, diversity allocation
+├── dispatch_service.py        # Ticket dispatch orchestration service
+├── event_log.py               # Append-only event persistence
+├── file_lock.py               # Cross-process file locking primitives
+├── findings_log.py            # Findings persistence
+├── freeze_detector.py         # Detects and handles process freeze conditions
+├── gatekeeper.py              # Central completion authority, max 3 rework cap
+├── implementation_planner.py  # Depth-scaled plan generation (summary/standard/full)
+├── integration_queue.py       # Integration queue with dependency-aware merge ordering
+├── lease_state.py             # Distributed coordination via file-based leases
+├── lifecycle_scheduler.py     # Process lifecycle management and scheduling
+├── manifest_schema.py         # Manifest loading and validation
+├── metrics_collector.py       # Per-agent telemetry: execution, alignment, progress, quality
+├── migrate_queue.py           # One-time QUEUE.md → TicketStore migration script
+├── model_router.py            # Multi-provider model routing with fallback
+├── monitor_adapter.py         # Concrete Monitor Platform adapter implementation
+├── orchestrator.py            # Process lifecycle: start, stop, health, heartbeat, drain
+├── orchestrator_services.py   # Supporting services for the orchestrator
+├── pipeline_state.py          # Frozen dataclass snapshot of entire engineering pipeline
+├── pricing_table.py           # Model pricing table for monetary cost calculation
+├── process_manager.py         # OS process spawning, monitoring, and cleanup
+├── project_adapter.py         # Abstract base class defining the 13-method adapter interface
+├── prompt_gateway.py          # Prompt compression, shared contract injection, spawn gating
+├── prompt_optimizer.py        # Consumes RL alignment triggers to evolve agent prompts
+├── quality_gate.py            # YAML-driven gate engine, subprocess evaluation
+├── quality_metrics.py         # Quality-specific metrics tracking and reporting
+├── queue_pressure.py          # Queue pressure ratios and bottleneck detection
+├── readiness.py               # Readiness checks, noop detection, queue complexity parsing
+├── risk_classifier.py         # Deterministic risk scoring (0-100), autonomy decisions
+├── rl_engine.py               # Epsilon-greedy bandit optimization, Q-value updates
+├── role_prompt.py             # Role template loading, project context injection
+├── role_registry.py           # ROLE + TASK + MODEL + TOOL_POLICY abstraction (30 roles)
+├── scheduler_config.py        # Centralized configuration for adaptive scheduler
+├── scheduler_metrics.py       # Throughput metrics: utilization, cycle time, cost per ticket
+├── scratchpad.py              # Ticket-scoped cross-agent context handoff
+├── stale_branch_detector.py   # Stale branch detection and cleanup
+├── state_manager.py           # Centralized state management for runtime data
+├── stats_collector.py         # Per-model API call statistics tracking
+├── task_splitter.py           # Decomposes oversized tickets into ≤10 sub-tasks
+├── telemetry.py               # HTTP ingestion endpoint for production telemetry signals
+├── ticket_dispatcher.py       # Dispatches tickets to appropriate agent roles
+├── ticket_engine.py           # Normalized ticket schema v2, 14-state machine, SHA-256 dedup
+├── token_budget.py            # Fleet-wide token ledger, UTC-day accounting
+├── tool_policy.py             # Sandbox boundary: path resolution, command allowlisting
+├── web_tools.py               # SSRF-safe internet research (web_search, web_fetch)
+├── worker_scaler.py           # Dynamic worker count scaling based on queue pressure
+└── work_scorer.py             # Utility scoring: priority + bottleneck + dependency + aging
 ```
 
 ## Quick Start
