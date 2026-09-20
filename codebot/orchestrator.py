@@ -3295,100 +3295,7 @@ def _dynamic_scale_bots(bots: dict[str, BotState]) -> None:
 
 
 def _recover_stuck_implementing_tickets(bots: dict[str, BotState]) -> int:
-    """Sweep IMPLEMENTING tickets whose workers have exited and advance them.
-
-    Catches tickets stuck in IMPLEMENTING because the worker exited with a
-    non-zero code (rate limit, error) before the completion handler could
-    transition them. Also releases stale claims blocking dispatch.
-    """
-    try:
-        from codebot.ticket_engine import TicketStore, TicketState
-    except ImportError:
-        return 0
-
-    store_path = STATE_DIR / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return 0
-
-    try:
-        ts = TicketStore(store_path)
-    except Exception:
-        return 0
-
-    implementing = ts.list_by_state(TicketState.IMPLEMENTING)
-    if not implementing:
-        return 0
-
-    active_ticket_ids = set()
-    for name, bot in bots.items():
-        base_role = name.split("-")[0] if "-" in name else name
-        if base_role in IMPLEMENTER_ROLE_NAMES:
-            if bot.process is not None and bot.process.poll() is None:
-                tid = getattr(bot, '_assigned_ticket_id', '')
-                if tid:
-                    active_ticket_ids.add(tid)
-
-    claims_dir = STATE_DIR / "claims"
-    recovered = 0
-    for ticket in implementing:
-        tid = getattr(ticket, 'id', '')
-        if not tid or tid in active_ticket_ids:
-            continue
-
-        has_active_claim = False
-        if claims_dir.exists():
-            for cf in claims_dir.glob(f"{tid}.*.json"):
-                try:
-                    data = json.loads(cf.read_text(encoding="utf-8"))
-                    worker = data.get("bot", "")
-                    bot = bots.get(worker)
-                    if bot and bot.process is not None and bot.process.poll() is None:
-                        has_active_claim = True
-                        break
-                except Exception:
-                    pass
-
-        if has_active_claim:
-            continue
-
-        scratchpad_path = STATE_DIR / f"{tid}.scratchpad.json"
-        if scratchpad_path.exists():
-            try:
-                sp_data = json.loads(scratchpad_path.read_text(encoding="utf-8"))
-                history = sp_data.get("agent_history", [])
-                updated_at = sp_data.get("updated_at", 0)
-                age = time.time() - updated_at if updated_at else 0
-                if history and age < 300:
-                    continue
-            except Exception:
-                pass
-
-        try:
-            ts.transition(tid, TicketState.REWORK)
-            logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> REWORK (worker exited without completing)")
-            recovered += 1
-        except ValueError:
-            try:
-                ts.transition(tid, TicketState.READY)
-                logger.info(f"Recovered stuck ticket {tid}: IMPLEMENTING -> READY (transition to REWORK failed)")
-                recovered += 1
-            except ValueError as e:
-                logger.warning(f"Cannot recover ticket {tid}: {e}")
-
-        if claims_dir.exists():
-            for cf in claims_dir.glob(f"{tid}.*.json"):
-                try:
-                    cf.unlink()
-                except OSError:
-                    pass
-
-        for name, bot in bots.items():
-            if getattr(bot, '_assigned_ticket_id', '') == tid:
-                bot._assigned_ticket_id = ''
-
-    return recovered
+    return 0
 
 
 def _route_ready_tickets() -> int:
@@ -4708,6 +4615,28 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                         save_scratchpad(STATE_DIR, scratch)
                     except Exception:
                         pass
+                    # Transition ticket back to READY for retry, not REVIEWING
+                    try:
+                        from codebot.ticket_engine import TicketStore, TicketState
+                        store_path = STATE_DIR / "tickets.json"
+                        if not store_path.exists():
+                            store_path = Path(".codebot/state/tickets.json")
+                        if store_path.exists():
+                            ts = TicketStore(store_path)
+                            ticket = ts.get(assigned_tid)
+                            if ticket and ticket.state == TicketState.IMPLEMENTING:
+                                ts.transition(assigned_tid, TicketState.READY)
+                                logger.info(f"Bot '{name}' errored (exit {exit_code}), returning ticket {assigned_tid} to READY for retry")
+                            bot._assigned_ticket_id = ''
+                    except Exception as e:
+                        logger.warning(f"Failed to transition ticket {assigned_tid} on error exit: {e}")
+                    claims_dir = STATE_DIR / "claims"
+                    if claims_dir.exists():
+                        for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
+                            try:
+                                cf.unlink()
+                            except OSError:
+                                pass
                     bot.next_run_at = now + 5
                     update_bot_state(bot, "waiting")
                     continue
@@ -5402,6 +5331,16 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                     logger.warning(f"Bot '{name}' failed 3 times on {old_model} — rotated to {bot.config.model}")
                 assigned_tid = getattr(bot, '_assigned_ticket_id', '')
                 if assigned_tid:
+                    # Finish scratchpad with error info before transitioning
+                    try:
+                        from codebot.scratchpad import load_scratchpad, save_scratchpad
+                        scratch = load_scratchpad(STATE_DIR, assigned_tid)
+                        scratch.mark_error(f"exited with code {exit_code}, attempt {bot.consecutive_errors}")
+                        scratch.finish_agent(f"error: exit_code={exit_code}")
+                        save_scratchpad(STATE_DIR, scratch)
+                    except Exception:
+                        pass
+                    # Transition ticket back to READY for retry, not REVIEWING
                     try:
                         from codebot.ticket_engine import TicketStore, TicketState
                         store_path = STATE_DIR / "tickets.json"
@@ -5410,9 +5349,12 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                         if store_path.exists():
                             ts = TicketStore(store_path)
                             ticket = ts.get(assigned_tid)
+                            # Only transition to READY if currently IMPLEMENTING; if already in another state, skip
                             if ticket and ticket.state == TicketState.IMPLEMENTING:
-                                ts.transition(assigned_tid, TicketState.REVIEWING)
-                                logger.info(f"Bot '{name}' errored but completed ticket {assigned_tid} -> REVIEWING")
+                                ts.transition(assigned_tid, TicketState.READY)
+                                logger.info(f"Bot '{name}' errored (exit {exit_code}), returning ticket {assigned_tid} to READY for retry")
+                            elif ticket:
+                                logger.info(f"Bot '{name}' errored (exit {exit_code}), ticket {assigned_tid} is in {ticket.state.value}, skipping transition to READY")
                             bot._assigned_ticket_id = ''
                     except Exception as e:
                         logger.warning(f"Failed to transition ticket {assigned_tid} on error exit: {e}")

@@ -32,6 +32,7 @@ import json
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
@@ -135,7 +136,6 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     }),
     TicketState.IMPLEMENTING: frozenset({
         TicketState.REVIEWING,
-        TicketState.REWORK,
         TicketState.BLOCKED,
     }),
     TicketState.REVIEWING: frozenset({
@@ -257,15 +257,15 @@ class Ticket:
         return cls.from_dict(json.loads(raw))
 
 
-_ticket_counter = 0
-
-
 def generate_ticket_id(prefix: str = "CB") -> str:
-    global _ticket_counter
-    _ticket_counter += 1
-    ts = int(time.time() * 1000) % 10_000_000
-    rand = hashlib.sha256(f"{time.time_ns()}-{_ticket_counter}".encode()).hexdigest()[:4].upper()
-    return f"{prefix}-{ts}-{rand}"
+    """Generate a globally unique ticket ID using uuid4.
+
+    Uses uuid4 to guarantee uniqueness across process restarts, module reimports,
+    and rapid-fire creation bursts. No timestamp modulo is used to avoid any
+    collision window. Format: CB-{12-char-uuid-hex-upper} provides 48 bits of
+    cryptographic randomness per ID.
+    """
+    return f"{prefix}-{uuid.uuid4().hex[:12].upper()}"
 
 
 def create_ticket(
