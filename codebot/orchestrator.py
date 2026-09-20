@@ -1449,11 +1449,17 @@ def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
     def _get_or_create_bot(base_name: str, suffix: str = "") -> BotState | None:
         bot_name = f"{base_name}-{suffix}" if suffix else base_name
         if bot_name in bots:
-            return bots[bot_name]
-        prompt_file = f"{base_name}.md"
+            bot = bots[bot_name]
+            if not bot.config.enabled:
+                bot.config.enabled = True
+            return bot
+        prompt_file = f"codebot/roles/{base_name}.md"
         prompt_path = BOTS_DIR / prompt_file
         if not prompt_path.exists():
-            return None
+            prompt_file = f"{base_name}.md"
+            prompt_path = BOTS_DIR / prompt_file
+            if not prompt_path.exists():
+                return None
         nonlocal model_idx
         idx = model_idx % len(WORKER_MODEL_CYCLE)
         model = WORKER_MODEL_CYCLE[idx]
