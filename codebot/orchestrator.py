@@ -141,6 +141,107 @@ def __getattr__(name: str) -> Any:
         return getattr(_paths, _COMPAT_PATHS[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+# ---------------------------------------------------------------------------
+# Backward Compatibility Stubs
+# ---------------------------------------------------------------------------
+
+def _manifest_error_disabled(bot_name: str) -> bool:
+    """Check if a bot manifest indicates disabled status."""
+    state_file = STATE_DIR / f"{bot_name}.state.json"
+    try:
+        if state_file.exists():
+            data = json.loads(state_file.read_text())
+            return data.get("status") == "disabled"
+    except Exception:
+        pass
+    return False
+
+def is_error_disabled(bot_name: str) -> bool:
+    """Check if a bot is disabled due to errors."""
+    return _manifest_error_disabled(bot_name)
+
+def _manifest_restart_budget_exceeded(bot_name: str) -> bool:
+    """Check if restart budget is exceeded based on state file."""
+    state_file = STATE_DIR / f"{bot_name}.state.json"
+    try:
+        if state_file.exists():
+            data = json.loads(state_file.read_text())
+            restart_count = data.get("restart_count", 0)
+            max_restarts = 5
+            return restart_count >= max_restarts
+    except Exception:
+        pass
+    return False
+
+def is_restart_budget_exceeded(bot_name: str) -> bool:
+    """Check if restart budget is exceeded for a bot."""
+    return _manifest_restart_budget_exceeded(bot_name)
+
+def rotating_slots(max_concurrent: int = 26) -> int:
+    """Return number of rotating slots available."""
+    try:
+        from codebot.process_manager import _count_api_runner_processes
+        running = _count_api_runner_processes()
+        return max(0, max_concurrent - running)
+    except Exception:
+        return 0
+
+def worker_reserved_slots() -> int:
+    """Return number of slots reserved for workers."""
+    return 2
+
+def _get_available_memory_mb() -> float:
+    """Return available system memory in MB."""
+    try:
+        meminfo = Path("/proc/meminfo").read_text()
+        for line in meminfo.splitlines():
+            if line.startswith("MemAvailable:"):
+                parts = line.split()
+                return float(parts[1]) / 1024
+    except Exception:
+        pass
+    return 0.0
+
+def _model_tier_for_complexity(model: str, complexity: str, queue_has_tier_work: bool = False) -> bool:
+    """Check if model is appropriate for given complexity tier."""
+    cheap_models = frozenset({"xiaomi-mimo-2.5"})
+    expensive_models = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
+    if complexity in ("trivial", "small", "medium"):
+        return True
+    if complexity == "high":
+        return model in expensive_models or model not in cheap_models
+    if complexity == "critical":
+        return model in expensive_models
+    return True
+
+CLAIM_TTL_SECONDS = 300
+MIN_ROTATING_SLOTS = 4
+
+def is_manifest_error_disabled(bot_name: str) -> bool:
+    return is_error_disabled(bot_name)
+
+def is_manifest_restart_budget_exceeded(bot_name: str) -> bool:
+    return is_restart_budget_exceeded(bot_name)
+
+def _read_state_file(bot_name: str) -> dict:
+    state_file = STATE_DIR / f"{bot_name}.state.json"
+    try:
+        if state_file.exists():
+            return json.loads(state_file.read_text())
+    except Exception:
+        pass
+    return {}
+
+__all__.extend([
+    "ModelProfile", "MODEL_PROFILES", "is_log_stalled",
+    "is_error_disabled", "is_restart_budget_exceeded",
+    "rotating_slots", "worker_reserved_slots",
+    "_get_available_memory_mb", "_model_tier_for_complexity",
+    "is_manifest_error_disabled", "is_manifest_restart_budget_exceeded",
+    "CLAIM_TTL_SECONDS", "MIN_ROTATING_SLOTS",
+    "_read_state_file",
+])
+
 def _load_bot_registry() -> list[BotConfig]:
     if _adapter_instance is not None:
         try:
