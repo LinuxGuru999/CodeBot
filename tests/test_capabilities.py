@@ -14,33 +14,33 @@ from codebot.scratchpad import (
     ScratchpadState, load_scratchpad, save_scratchpad, clear_scratchpad,
     create_handoff_note, MAX_SCRATCHPAD_BYTES,
 )
-from codebot.task_splitter import should_split, split_ticket, _compute_chunks
+from codebot.task_splitter import should_split, split_ticket, compute_chunks
 
 
 class TestIsBlockedUrl:
     def test_blocks_localhost(self):
-        assert _is_blocked_url("http://localhost/admin") is True
+        assert is_blocked_url("http://localhost/admin") is True
 
     def test_blocks_127(self):
-        assert _is_blocked_url("http://127.0.0.1:8080") is True
+        assert is_blocked_url("http://127.0.0.1:8080") is True
 
     def test_blocks_private_10(self):
-        assert _is_blocked_url("http://10.0.0.1/internal") is True
+        assert is_blocked_url("http://10.0.0.1/internal") is True
 
     def test_blocks_private_192(self):
-        assert _is_blocked_url("http://192.168.1.1/admin") is True
+        assert is_blocked_url("http://192.168.1.1/admin") is True
 
     def test_blocks_link_local(self):
-        assert _is_blocked_url("http://169.254.169.254/metadata") is True
+        assert is_blocked_url("http://169.254.169.254/metadata") is True
 
     def test_allows_public(self):
-        assert _is_blocked_url("https://example.com/page") is False
+        assert is_blocked_url("https://example.com/page") is False
 
     def test_allows_duckduckgo(self):
-        assert _is_blocked_url("https://html.duckduckgo.com/html/?q=test") is False
+        assert is_blocked_url("https://html.duckduckgo.com/html/?q=test") is False
 
     def test_blocks_empty(self):
-        assert _is_blocked_url("") is True
+        assert is_blocked_url("") is True
 
 
 class TestExtractTextFromHtml:

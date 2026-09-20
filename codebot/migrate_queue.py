@@ -168,6 +168,8 @@ def migrate(queue_path: Path, state_dir: Path, dry_run: bool = False) -> int:
     if not dry_run:
         print(f"Ticket store: {state_dir / 'codebot_tickets.json'}")
         print(f"Total in store: {store.count()}")
+        store.flush()
+        store.close()
     return 0
 
 
