@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import socket
 import subprocess
 import threading
@@ -135,6 +136,9 @@ MAX_LOG_LINES = 2_000
 MAX_REQUEST_BYTES = 65_536
 REQUEST_TIMEOUT_SECONDS = 15
 
+# Bot name validation pattern: alphanumeric, hyphens, underscores only
+BOT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
 # Telemetry token from environment; empty means reject all telemetry requests
 TELEMETRY_TOKEN = os.environ.get("CODEBOT_TELEMETRY_TOKEN", "").strip()
 
@@ -160,6 +164,20 @@ except Exception:
     MODEL_PROFILES = {}
     def eff_timeout(cfg):  # type: ignore[no-untyped-def]
         return getattr(cfg, "heartbeat_timeout", 600)
+
+
+def validate_bot_name(name: str) -> bool:
+    """Validate bot name against safe pattern to prevent command injection.
+
+    Args:
+        name: The bot name to validate
+
+    Returns:
+        True if the name matches ^[a-zA-Z0-9_-]+$, False otherwise
+    """
+    if not isinstance(name, str):
+        return False
+    return bool(BOT_NAME_PATTERN.match(name))
 
 
 def heartbeat_age(name: str) -> float | None:
@@ -673,14 +691,18 @@ class ControlHandler(BaseHTTPRequestHandler):
         m = re.match(r"^/(?:api/)?bots/([^/]+)/restart$", path)
         if m:
             name = m.group(1)
+            # Validate bot name format before any subprocess calls (Constitution §2)
+            if not validate_bot_name(name):
+                self._json(400, {"error": "invalid bot name format"})
+                return
             if not any(c.name == name for c in BOT_REGISTRY):
                 self._json(404, {"error": "unknown bot"})
                 return
             # ask orchestrator via pkill + let interval-aware respawn handle, or direct start
             try:
-                # kill existing if running; use re.escape to prevent regex injection
-                escaped_name = re.escape(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
+                # kill existing if running; apply defense-in-depth: regex validation + shlex.quote
+                quoted_name = shlex.quote(name)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
                 time.sleep(1)
                 # orchestrator will respawn on next health check if waiting; force start via orchestrator CLI
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
@@ -692,14 +714,18 @@ class ControlHandler(BaseHTTPRequestHandler):
         m = re.match(r"^/(?:api/)?bots/([^/]+)/pause$", path)
         if m:
             name = m.group(1)
+            # Validate bot name format before any subprocess calls (Constitution §2)
+            if not validate_bot_name(name):
+                self._json(400, {"error": "invalid bot name format"})
+                return
             if not any(c.name == name for c in BOT_REGISTRY):
                 self._json(404, {"error": "unknown bot"})
                 return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
-                # Use re.escape to prevent regex injection in pkill pattern
-                escaped_name = re.escape(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
+                # Apply defense-in-depth: regex validation + shlex.quote
+                quoted_name = shlex.quote(name)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
                 self._json(200, {"ok": True, "paused": name})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -738,20 +764,25 @@ class ControlHandler(BaseHTTPRequestHandler):
                     if not isinstance(bots, list):
                         self._json(400, {"error": "bots must be an array"})
                         return
-                    # Validate each bot name against BOT_REGISTRY (Constitution §2)
-                    # Reject unknown bots with 404 to prevent arbitrary process targeting
-                    valid_bot_names = {c.name for c in BOT_REGISTRY}
+                    # Validate each bot name format before subprocess calls (Constitution §2)
                     for n in bots:
                         if not isinstance(n, str):
                             self._json(400, {"error": "bot names must be strings"})
                             return
+                        if not validate_bot_name(n):
+                            self._json(400, {"error": "invalid bot name format"})
+                            return
+                    # Validate each bot name against BOT_REGISTRY (Constitution §2)
+                    # Reject unknown bots with 404 to prevent arbitrary process targeting
+                    valid_bot_names = {c.name for c in BOT_REGISTRY}
+                    for n in bots:
                         if n not in valid_bot_names:
                             self._json(404, {"error": f"unknown bot: {n}"})
                             return
-                    # Use re.escape to prevent regex injection in pkill patterns
+                    # Apply defense-in-depth: regex validation + shlex.quote
                     for n in bots:
-                        escaped_name = re.escape(n)
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
+                        quoted_name = shlex.quote(n)
+                        subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)

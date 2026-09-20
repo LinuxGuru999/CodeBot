@@ -262,13 +262,15 @@ def pack_batches(
     batches: list[list[dict[str, Any]]] = []
     limit_reached = False
     for model_manifests in grouped_by_model.values():
-        for index in range(0, len(model_manifests), batch_size):
-            candidate = model_manifests[index:index + batch_size]
+        for batch_idx, start in enumerate(range(0, len(model_manifests), batch_size)):
+            candidate = model_manifests[start:start + batch_size]
             if not limit_reached and len(batches) < batch_limit:
                 batches.append(candidate)
                 continue
             # Once batch limit is reached, all remaining manifests are dropped.
             # Track via flag to avoid re-checking len() each iteration.
+            # Using enumerate-based tracking (batch_idx) ensures O(1) index access
+            # instead of the previous O(n) filtered.index(m) lookup.
             limit_reached = True
             for manifest in candidate:
                 dropped.append({"name": manifest.get("name", "?"), "manifest": manifest, "reason": "batch-capacity"})
