@@ -852,47 +852,75 @@ class TicketStore:
 
         results: list[Ticket] = []
         with self._lock:
-            for ticket_id, new_state, reviewer_feedback in transitions:
-                ticket = self._tickets.get(ticket_id)
-                if ticket is None:
-                    raise KeyError(f"ticket not found: {ticket_id}")
+            # Snapshot state for rollback on failure to guarantee atomicity.
+            # We capture only the tickets that will be mutated so the cost is
+            # O(K) rather than O(N).
+            original_tickets: dict[str, Ticket] = {}
+            original_state_index_entries: list[tuple[str, TicketState]] = []
 
-                # Enforce gatekeeper approval before VERIFYING -> COMPLETE (GAP-2)
-                if (ticket.state == TicketState.VERIFYING and
-                    new_state == TicketState.COMPLETE):
-                    if not self._has_gate_approval(ticket_id):
-                        raise ValueError(
-                            f"ticket {ticket_id} cannot transition to COMPLETE: "
-                            f"gatekeeper approval required but not found"
-                        )
+            try:
+                for ticket_id, new_state, reviewer_feedback in transitions:
+                    ticket = self._tickets.get(ticket_id)
+                    if ticket is None:
+                        raise KeyError(f"ticket not found: {ticket_id}")
 
-                # Enforce planning prerequisite before READY -> IMPLEMENTING
-                if (ticket.state == TicketState.READY and
-                    new_state == TicketState.IMPLEMENTING):
-                    ticket_risk_order = _RISK_ORDER.get(ticket.risk.value, 0)
-                    threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
-                    if ticket_risk_order >= threshold_order:
-                        if not self._has_plan(ticket_id):
+                    # Save original state for potential rollback
+                    if ticket_id not in original_tickets:
+                        original_tickets[ticket_id] = ticket
+                        original_state_index_entries.append((ticket_id, ticket.state))
+
+                    # Enforce gatekeeper approval before VERIFYING -> COMPLETE (GAP-2)
+                    if (ticket.state == TicketState.VERIFYING and
+                        new_state == TicketState.COMPLETE):
+                        if not self._has_gate_approval(ticket_id):
                             raise ValueError(
-                                f"ticket {ticket_id} risk={ticket.risk.value} "
-                                f"requires an implementation plan before IMPLEMENTING; "
-                                f"create plan in PLANNING state"
+                                f"ticket {ticket_id} cannot transition to COMPLETE: "
+                                f"gatekeeper approval required but not found"
                             )
 
-                updated = ticket.transition(new_state, reviewer_feedback)
-                self._tickets[ticket_id] = updated
+                    # Enforce planning prerequisite before READY -> IMPLEMENTING
+                    if (ticket.state == TicketState.READY and
+                        new_state == TicketState.IMPLEMENTING):
+                        ticket_risk_order = _RISK_ORDER.get(ticket.risk.value, 0)
+                        threshold_order = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
+                        if ticket_risk_order >= threshold_order:
+                            if not self._has_plan(ticket_id):
+                                raise ValueError(
+                                    f"ticket {ticket_id} risk={ticket.risk.value} "
+                                    f"requires an implementation plan before IMPLEMENTING; "
+                                    f"create plan in PLANNING state"
+                                )
 
-                # Maintain per-state index: remove from old state, add to new
-                old_state = ticket.state
-                if old_state in self._state_index:
-                    self._state_index[old_state].discard(ticket_id)
-                    if not self._state_index[old_state]:
-                        del self._state_index[old_state]
-                self._state_index.setdefault(new_state, set()).add(ticket_id)
+                    updated = ticket.transition(new_state, reviewer_feedback)
+                    self._tickets[ticket_id] = updated
 
-                # Track dirty for incremental save
-                self._dirty_ids.add(ticket_id)
-                results.append(updated)
+                    # Maintain per-state index: remove from old state, add to new
+                    old_state = ticket.state
+                    if old_state in self._state_index:
+                        self._state_index[old_state].discard(ticket_id)
+                        if not self._state_index[old_state]:
+                            del self._state_index[old_state]
+                    self._state_index.setdefault(new_state, set()).add(ticket_id)
+
+                    # Track dirty for incremental save
+                    self._dirty_ids.add(ticket_id)
+                    results.append(updated)
+            except (ValueError, KeyError):
+                # Rollback all mutations applied so far in this batch
+                for tid, orig_ticket in original_tickets.items():
+                    self._tickets[tid] = orig_ticket
+                # Restore state index entries
+                for tid, orig_state in original_state_index_entries:
+                    current_ticket = self._tickets.get(tid)
+                    if current_ticket is not None:
+                        # Remove from whatever state it was moved to
+                        for state_set in self._state_index.values():
+                            state_set.discard(tid)
+                        # Re-add to original state
+                        self._state_index.setdefault(orig_state, set()).add(tid)
+                # Remove rolled-back IDs from dirty tracking
+                self._dirty_ids -= set(original_tickets.keys())
+                raise
 
         # Queue a single save for all dirty tickets
         self._queue_save()
