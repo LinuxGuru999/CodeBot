@@ -45,6 +45,8 @@ Stdlib-only, single file, no deps beyond orchestrator.py model profiles.
 """
 from __future__ import annotations
 
+import email.utils
+import hashlib
 import hmac
 import json
 import logging
@@ -254,7 +256,7 @@ def bot_status(name: str) -> dict:
             nxt = 0
     except Exception:
         nxt = None
-    return {
+    status_data = {
         "name": name,
         "model": cfg.model if cfg else None,
         "interval_seconds": cfg.interval_seconds if cfg else None,
@@ -268,6 +270,16 @@ def bot_status(name: str) -> dict:
         "restart_count": state.get("restart_count"),
         "orchestrator_running": orch_running,
     }
+    computed_at = time.time()
+    # Stable ETag: hash of serialized status data for conditional requests
+    try:
+        etag_source = json.dumps(status_data, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        etag_source = name
+    etag = hashlib.sha256(etag_source.encode()).hexdigest()[:32]
+    status_data["computed_at"] = computed_at
+    status_data["etag"] = etag
+    return status_data
 
 
 def scheduler_status() -> dict:
@@ -504,12 +516,37 @@ class ControlHandler(BaseHTTPRequestHandler):
             logger.warning("Authentication failed for %s", client_ip)
         return result
 
+    def _json_304(self, etag: str) -> None:
+        """Send 304 Not Modified response with ETag."""
+        self.send_response(304)
+        self.send_header("ETag", f'"{etag}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+
     def _json(self, code: int, obj: dict | list) -> None:
         """Send JSON response with security headers (Constitution §2)."""
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        # Security headers per Constitution §2
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json_with_cache_headers(self, code: int, obj: dict | list, etag: str, last_modified_ts: float) -> None:
+        """Send JSON response with ETag/Last-Modified cache headers."""
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("ETag", f'"{etag}"')
+        self.send_header("Last-Modified", email.utils.formatdate(timeval=last_modified_ts, localtime=False, usegmt=True))
+        self.send_header("Cache-Control", "no-cache")
         # Security headers per Constitution §2
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
@@ -698,7 +735,35 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not any(c.name == name for c in BOT_REGISTRY):
                 self._json(404, {"error": "unknown bot"})
                 return
-            self._json(200, bot_status(name))
+            status = bot_status(name)
+            etag = status.get("etag", "")
+            computed_at = status.get("computed_at", time.time())
+
+            # Conditional request: If-None-Match (ETag comparison)
+            if_none_match = self.headers.get("If-None-Match", "")
+            if if_none_match:
+                # Strip quotes from ETag header value for comparison
+                client_etag = if_none_match.strip().strip('"')
+                if client_etag == etag:
+                    self._json_304(etag)
+                    return
+
+            # Conditional request: If-Modified-Since
+            if_modified_since = self.headers.get("If-Modified-Since", "")
+            if if_modified_since and not if_none_match:
+                try:
+                    client_time = email.utils.parsedate_to_datetime(if_modified_since)
+                    server_time = email.utils.formatdate(timeval=computed_at, localtime=False, usegmt=True)
+                    server_dt = email.utils.parsedate_to_datetime(server_time)
+                    if client_time >= server_dt:
+                        self._json_304(etag)
+                        return
+                except (TypeError, ValueError, IndexError):
+                    pass
+
+            # Strip internal metadata from response to clients
+            response = {k: v for k, v in status.items() if k not in ("computed_at", "etag")}
+            self._json_with_cache_headers(200, response, etag, computed_at)
             return
 
         # Delegate telemetry health check to TelemetryHandler logic
@@ -739,6 +804,9 @@ class ControlHandler(BaseHTTPRequestHandler):
         if error_code is not None:
             self._json(error_code, {"error": error})
             return
+        # Ensure body is always a dict (robust against edge cases)
+        if body is None:
+            body = {}
 
         # Destructive endpoint validation: require explicit confirmation or dry-run
         DESTRUCTIVE_PATHS = {

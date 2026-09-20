@@ -148,6 +148,219 @@ class TestRateLimiterThreadSafety:
         assert allowed is False
 
 
+class TestBotStatusETag:
+    """Tests for bot_status() ETag and computed_at fields (CB-2810035-8159)."""
+
+    def test_bot_status_includes_computed_at(self):
+        """bot_status() should include computed_at timestamp."""
+        from codebot.control_server import bot_status
+
+        # bot_status will fail gracefully for unknown bot (no matching registry entry)
+        result = bot_status("nonexistent-test-bot")
+        assert "computed_at" in result
+        assert isinstance(result["computed_at"], float)
+        # Should be a recent timestamp
+        assert abs(result["computed_at"] - time.time()) < 5
+
+    def test_bot_status_includes_etag(self):
+        """bot_status() should include a stable ETag hash."""
+        from codebot.control_server import bot_status
+
+        result1 = bot_status("nonexistent-test-bot")
+        result2 = bot_status("nonexistent-test-bot")
+        assert "etag" in result1
+        assert isinstance(result1["etag"], str)
+        assert len(result1["etag"]) == 32  # sha256[:32] hex chars
+        # Same input should produce same ETag
+        assert result1["etag"] == result2["etag"]
+
+
+class TestConditionalRequests:
+    """Tests for ETag/Last-Modified conditional request support (CB-2810035-8159)."""
+
+    def _make_handler(self, method: str, path: str, headers: dict | None = None, token: str = "test-token"):
+        """Create a mock ControlHandler for testing."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = headers or {}
+        handler.headers["Authorization"] = f"Bearer {token}"
+        handler._json = MagicMock()
+        handler._json_304 = MagicMock()
+        handler._json_with_cache_headers = MagicMock()
+        handler.wfile = io.BytesIO()
+        # Bind real methods to the mock
+        handler._auth = ControlHandler._auth.__get__(handler, ControlHandler)
+        handler.path = path
+        return handler
+
+    def test_304_returned_on_matching_etag(self):
+        """304 returned when If-None-Match matches the current ETag."""
+        from codebot.control_server import ControlHandler
+        from codebot.control_server import BOT_REGISTRY
+
+        # Create a mock config entry
+        mock_cfg = MagicMock()
+        mock_cfg.name = "test-bot-etag"
+        mock_cfg.model = "test-model"
+        mock_cfg.interval_seconds = 60
+        mock_cfg.heartbeat_timeout = 300
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
+             patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
+             patch("codebot.control_server.heartbeat_age", return_value=10.0), \
+             patch("codebot.control_server.eff_timeout", return_value=300), \
+             patch("codebot.control_server.MODEL_PROFILES", {}), \
+             patch("codebot.control_server.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(stdout="", returncode=1)
+
+            # First, get the ETag by calling bot_status
+            from codebot.control_server import bot_status
+            status = bot_status("test-bot-etag")
+            etag = status["etag"]
+
+            # Now test with matching If-None-Match
+            handler = self._make_handler("GET", "/bots/test-bot-etag", headers={"If-None-Match": f'"{etag}"'})
+
+            ControlHandler.do_GET(handler)
+
+            # Should have called _json_304, not _json or _json_with_cache_headers
+            handler._json_304.assert_called_once_with(etag)
+            handler._json_with_cache_headers.assert_not_called()
+
+    def test_200_returned_on_mismatched_etag(self):
+        """200 with cache headers returned when If-None-Match doesn't match."""
+        from codebot.control_server import ControlHandler
+
+        mock_cfg = MagicMock()
+        mock_cfg.name = "test-bot-no-match"
+        mock_cfg.model = "test-model"
+        mock_cfg.interval_seconds = 60
+        mock_cfg.heartbeat_timeout = 300
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
+             patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
+             patch("codebot.control_server.heartbeat_age", return_value=10.0), \
+             patch("codebot.control_server.eff_timeout", return_value=300), \
+             patch("codebot.control_server.MODEL_PROFILES", {}), \
+             patch("codebot.control_server.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(stdout="", returncode=1)
+
+            handler = self._make_handler("GET", "/bots/test-bot-no-match", headers={"If-None-Match": "\"stale-etag-value\""})
+
+            ControlHandler.do_GET(handler)
+
+            # Should have called _json_with_cache_headers (200 with ETag/Last-Modified)
+            handler._json_with_cache_headers.assert_called_once()
+            handler._json_304.assert_not_called()
+            # First arg should be 200
+            call_args = handler._json_with_cache_headers.call_args
+            assert call_args[0][0] == 200
+
+    def test_200_without_cache_headers_when_no_if_none_match(self):
+        """200 with cache headers returned when no conditional headers are present."""
+        from codebot.control_server import ControlHandler
+
+        mock_cfg = MagicMock()
+        mock_cfg.name = "test-bot-no-headers"
+        mock_cfg.model = "test-model"
+        mock_cfg.interval_seconds = 60
+        mock_cfg.heartbeat_timeout = 300
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
+             patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
+             patch("codebot.control_server.heartbeat_age", return_value=10.0), \
+             patch("codebot.control_server.eff_timeout", return_value=300), \
+             patch("codebot.control_server.MODEL_PROFILES", {}), \
+             patch("codebot.control_server.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(stdout="", returncode=1)
+
+            handler = self._make_handler("GET", "/bots/test-bot-no-headers", headers={})
+
+            ControlHandler.do_GET(handler)
+
+            # Should return 200 with cache headers
+            handler._json_with_cache_headers.assert_called_once()
+            handler._json_304.assert_not_called()
+            call_args = handler._json_with_cache_headers.call_args
+            assert call_args[0][0] == 200
+
+    def test_etag_stripped_from_response_body(self):
+        """Internal metadata (etag, computed_at) should not be exposed to clients."""
+        from codebot.control_server import ControlHandler
+
+        mock_cfg = MagicMock()
+        mock_cfg.name = "test-bot-stripped"
+        mock_cfg.model = "test-model"
+        mock_cfg.interval_seconds = 60
+        mock_cfg.heartbeat_timeout = 300
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
+             patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
+             patch("codebot.control_server.heartbeat_age", return_value=10.0), \
+             patch("codebot.control_server.eff_timeout", return_value=300), \
+             patch("codebot.control_server.MODEL_PROFILES", {}), \
+             patch("codebot.control_server.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(stdout="", returncode=1)
+
+            handler = self._make_handler("GET", "/bots/test-bot-stripped", headers={})
+
+            ControlHandler.do_GET(handler)
+
+            call_args = handler._json_with_cache_headers.call_args
+            response_body = call_args[0][1]  # second positional arg is the dict
+            assert "computed_at" not in response_body
+            assert "etag" not in response_body
+            # But normal fields should be present
+            assert "name" in response_body
+            assert response_body["name"] == "test-bot-stripped"
+
+    def test_json_304_sends_etag_header(self):
+        """_json_304 should send 304 status and ETag header."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.wfile = io.BytesIO()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        ControlHandler._json_304(handler, "abc123def456")
+
+        handler.send_response.assert_called_once_with(304)
+        handler.send_header.assert_any_call("ETag", '"abc123def456"')
+        handler.end_headers.assert_called_once()
+
+    def test_json_with_cache_headers_sends_etag_and_last_modified(self):
+        """_json_with_cache_headers should send ETag and Last-Modified headers."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.wfile = io.BytesIO()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        ts = time.time()
+        ControlHandler._json_with_cache_headers(handler, 200, {"status": "ok"}, "etag123", ts)
+
+        handler.send_response.assert_called_once_with(200)
+        handler.send_header.assert_any_call("ETag", '"etag123"')
+        # Last-Modified should be an HTTP date string
+        last_mod_calls = [c for c in handler.send_header.call_args_list if c[0][0] == "Last-Modified"]
+        assert len(last_mod_calls) == 1
+        last_mod_value = last_mod_calls[0][0][1]
+        # Should be parseable as HTTP date
+        import email.utils
+        parsed = email.utils.parsedate(last_mod_value)
+        assert parsed is not None, f"Last-Modified header not a valid HTTP date: {last_mod_value}"
+
+
 class TestFailClosedSecurity:
     """Tests for fail-closed behavior when CONTROL_TOKEN is unset (CB-6048497-D3F1)."""
 
