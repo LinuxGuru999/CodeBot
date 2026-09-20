@@ -573,3 +573,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+__all__.extend([
+    "ModelProfile", "MODEL_PROFILES", "is_log_stalled",
+    "is_error_disabled", "is_restart_budget_exceeded",
+    "rotating_slots", "worker_reserved_slots",
+    "_get_available_memory_mb", "_model_tier_for_complexity",
+    "is_manifest_error_disabled", "is_manifest_restart_budget_exceeded",
+    "CLAIM_TTL_SECONDS", "MIN_ROTATING_SLOTS",
+    "_read_state_file",
+])
