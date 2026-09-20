@@ -101,7 +101,7 @@ python3 -m codebot.codebot_bootstrap --project-root /path/to/your/project
 
 4. **Quality Gates**: YAML-defined verification policies enforce build, test, security, and documentation gates. Only the central gatekeeper may transition tickets to COMPLETE.
 
-5. **Role-Based Agents**: 27 predefined roles across discovery/planning/implementation/review/control categories. Each role specifies required model capabilities, tool permissions, and adversarial relationships.
+5. **Role-Based Agents**: 29 registered roles across discovery/planning/implementation/review/control categories, with 40 prompt files. Each role specifies required model capabilities, tool permissions, and adversarial relationships.
 
 6. **Risk-Driven Autonomy**: Deterministic risk scoring (0-100) drives autonomy decisions. Constitution-protected categories always score 100 (human required). Low-risk documentation/test changes proceed autonomously.
 

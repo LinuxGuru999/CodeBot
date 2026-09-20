@@ -21,7 +21,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 │       │                                   ↓               │
 │  ┌──────────┐  ┌──────────────┐  ┌────────────────────┐   │
 │  │ Bootstrap │  │Role Registry │  │  Quality Gate      │   │
-│  │(adapter  │  │(37 roles,    │  │  (YAML policy,     │   │
+│  │(adapter  │  │(29 roles,    │  │  (YAML policy,     │   │
 │  │ injection)│  │ legacy map)  │  │  gatekeeper)       │   │
 │  └──────────┘  └──────────────┘  └────────────────────┘   │
 │       ↑                                   │               │
@@ -66,7 +66,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `implementation_planner.py` | ~170 | Risk-scaled plan generation (summary/standard/full depth) |
 | `quality_gate.py` | ~250 | YAML-driven gate engine, subprocess evaluation, conditional triggers |
 | `gatekeeper.py` | ~120 | Central completion authority, max 3 rework cap, REWORK escalation |
-| `role_registry.py` | ~400 | 25 role definitions with model profiles, tool policies, adversarial mappings |
+| `role_registry.py` | ~460 | 29 role definitions with model profiles, tool policies, adversarial mappings |
 | `role_prompt.py` | ~210 | Role template loading, project context injection, legacy name mapping |
 | `prompt_gateway.py` | ~190 | Prompt compression, shared contract injection, spawn gating |
 | `rl_engine.py` | ~880 | Epsilon-greedy bandit optimization, Q-value updates, reward shaping |
@@ -80,7 +80,7 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `project_adapter.py` | ~130 | Abstract base class defining the 13-method adapter interface |
 | `monitor_adapter.py` | ~180 | Concrete Monitor Platform adapter implementation |
 | `migrate_queue.py` | ~230 | One-time QUEUE.md → TicketStore migration script |
-| `codebot_adapter.py` | ~220 | Self-hosting adapter: CodeBot manages its own repo via 26-role registry |
+| `codebot_adapter.py` | ~220 | Self-hosting adapter: CodeBot manages its own repo via 29-role registry |
 | `model_router.py` | ~300 | Multi-provider model routing with automatic fallback and capability matching |
 | `pricing_table.py` | ~170 | Model pricing table for monetary cost calculation (tokens to USD conversion) |
 | `alignment_service.py` | ~250 | Decoupled alignment pipeline for reward scoring and prompt evolution |
@@ -122,6 +122,16 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
 | `anomaly_alerts.py` | Anomaly detection on metrics |
 | `auto_revert.py` | Automatic rollback on build gate failure |
 | `module.py` | Example module demonstrating proper exception handling patterns |
+| `alignment_coordinator.py` | Coordinates alignment pipeline across agents |
+| `dispatch_service.py` | Ticket dispatch orchestration service |
+| `freeze_detector.py` | Detects and handles process freeze conditions |
+| `lifecycle_scheduler.py` | Process lifecycle management and scheduling |
+| `orchestrator_services.py` | Supporting services for the orchestrator |
+| `process_manager.py` | OS process spawning, monitoring, and cleanup |
+| `quality_metrics.py` | Quality-specific metrics tracking and reporting |
+| `state_manager.py` | Centralized state management for runtime data |
+| `ticket_dispatcher.py` | Dispatches tickets to appropriate agent roles |
+| `worker_scaler.py` | Dynamic worker count scaling based on queue pressure |
 
 ## Data Flow
 

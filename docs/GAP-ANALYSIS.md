@@ -14,7 +14,7 @@ Source: CODEBOT-ROADMAP.md §2.A through §27 vs current implementation
 | §2.E | Automatic Ticket Discovery | 🟡 Partial | Roles defined, not scheduled autonomously |
 | §2.F | Deduplication & Validation | ✅ Implemented | SHA-256 evidence hashing in ticket_engine |
 | §2.G | Planning Pipeline | 🟡 Partial | Plans generated but not enforced as prerequisites |
-| §2.H | Specialized Agent Roles | ✅ Implemented | 37 roles, 26 in registry, legacy map |
+| §2.H | Specialized Agent Roles | ✅ Implemented | 29 registered roles, 40 prompt files, legacy map |
 | §3 | Model Independence | 🟡 Partial | Profile matching exists, single provider only |
 | §4 | Deterministic Verification | ✅ Implemented | quality_gate.py + gatekeeper.py |
 | §5 | Central Quality Gate | 🟡 Partial | Gate exists, not blocking orchestrator flow |
@@ -128,7 +128,7 @@ Source: CODEBOT-ROADMAP.md §2.A through §27 vs current implementation
 
 1. **Portability** (§18-19): Fully extracted, validated on 2 projects, zero cross-contamination
 2. **Ticket schema** (§2.D-F): 14-state machine, dedup, serialization all solid
-3. **Role abstraction** (§2.H): 37 roles with adversarial mappings, tool policies, model profiles
+3. **Role abstraction** (§2.H): 29 registered roles with adversarial mappings, tool policies, model profiles, 40 prompt files
 4. **Security** (§12): SSRF guard, shell=False, bounded I/O, tool allowlisting
 5. **Self-improvement safeguards** (§17): Constitution §10 protects critical components
 6. **Context compaction**: Sliding window prevents OOM on long sessions

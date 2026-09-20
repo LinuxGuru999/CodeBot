@@ -377,7 +377,7 @@ BOT NAME + FIXED PROMPT + FIXED MODEL
 **Exit Criteria:**
 
 - [x] Dynamic role assembly via role_registry.py
-- [x] 28 roles defined with model requirements and tool policies
+- [x] 29 roles defined with model requirements and tool policies (40 prompt files)
 - [x] PLANNING_ROLES category added
 - [ ] All roles tested with role_prompt.py generation
 

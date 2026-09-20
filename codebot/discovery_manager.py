@@ -26,6 +26,7 @@ Invariants
 
 from __future__ import annotations
 
+import html as html_module
 import json
 import time
 from dataclasses import dataclass, field
@@ -457,3 +458,120 @@ class DiscoveryManager:
             total_slots=sum(allocations.values()),
             reason=f"weighted distribution across {len(allocations)} roles",
         )
+
+    def render_yield_table_html(self, sort_by: str = "role") -> str:
+        """Render yield statistics as an accessible HTML table.
+
+        Uses <th> elements with scope='col' for column headers and
+        scope='row' for role cells. Includes sortable column controls
+        via focusable <button> elements with aria-sort attributes.
+
+        Args:
+            sort_by: Column to sort by ('role', 'total_scans', 'validated_tickets',
+                     'yield_rate', 'duplicate_rate', 'cost_per_ticket')
+
+        Returns:
+            HTML string containing the accessible table
+        """
+        # Determine sort direction based on current sort key
+        sort_keys = {
+            "role": lambda s: s.role,
+            "total_scans": lambda s: s.total_scans,
+            "validated_tickets": lambda s: s.validated_tickets,
+            "yield_rate": lambda s: s.yield_rate,
+            "duplicate_rate": lambda s: s.duplicate_rate,
+            "cost_per_ticket": lambda s: s.cost_per_ticket if s.cost_per_ticket != float("inf") else float("-inf"),
+        }
+
+        stats_list = list(self._yields.values())
+        if not stats_list:
+            return '<table><caption>Yield Statistics</caption><tbody><tr><td>No data available</td></tr></tbody></table>'
+
+        sort_key_func = sort_keys.get(sort_by, sort_keys["role"])
+        sorted_stats = sorted(stats_list, key=sort_key_func, reverse=(sort_by in ("yield_rate",)))
+
+        columns = [
+            ("role", "Role"),
+            ("total_scans", "Total Scans"),
+            ("validated_tickets", "Validated Tickets"),
+            ("yield_rate", "Yield Rate"),
+            ("duplicate_rate", "Duplicate Rate"),
+            ("cost_per_ticket", "Cost/Ticket"),
+        ]
+
+        rows_html = []
+        for stats in sorted_stats:
+            cost_val = f"{stats.cost_per_ticket:.1f}" if stats.cost_per_ticket != float("inf") else "N/A"
+            row = (
+                f"<tr>"
+                f"<th scope=\"row\">{html_module.escape(stats.role)}</th>"
+                f"<td>{stats.total_scans}</td>"
+                f"<td>{stats.validated_tickets}</td>"
+                f"<td>{stats.yield_rate:.4f}</td>"
+                f"<td>{stats.duplicate_rate:.4f}</td>"
+                f"<td>{cost_val}</td>"
+                f"</tr>"
+            )
+            rows_html.append(row)
+
+        # Build header with sort controls
+        headers_html = []
+        for col_key, col_label in columns:
+            is_current_sort = col_key == sort_by
+            aria_sort = "ascending" if is_current_sort else "none"
+            button_html = (
+                f'<button type="button" tabindex="0" aria-sort="{aria_sort}" '
+                f'data-sort-key="{col_key}">{html_module.escape(col_label)}</button>'
+            )
+            headers_html.append(f'<th scope="col">{button_html}</th>')
+
+        table_html = (
+            '<table>\n'
+            f'<caption>Discovery Yield Statistics</caption>\n'
+            '<thead>\n<tr>\n' + '\n'.join(headers_html) + '\n</tr>\n</thead>\n'
+            '<tbody>\n' + '\n'.join(rows_html) + '\n</tbody>\n'
+            '</table>'
+        )
+        return table_html
+
+    def render_yield_chart_html(self) -> str:
+        """Render yield chart container with accessible aria-label.
+
+        Provides a textual description of yield trends for screen readers,
+        including highest and lowest yielding roles.
+
+        Returns:
+            HTML string containing chart container with aria-label
+        """
+        if not self._yields:
+            return '<div role="img" aria-label="No yield data available"></div>'
+
+        stats_list = list(self._yields.values())
+        
+        # Find highest and lowest yield rates (only for roles with scans)
+        roles_with_scans = [s for s in stats_list if s.total_scans > 0]
+        
+        if not roles_with_scans:
+            return '<div role="img" aria-label="No scan data available for trend analysis"></div>'
+
+        highest = max(roles_with_scans, key=lambda s: s.yield_rate)
+        lowest = min(roles_with_scans, key=lambda s: s.yield_rate)
+
+        total_scans = sum(s.total_scans for s in stats_list)
+        total_validated = sum(s.validated_tickets for s in stats_list)
+        overall_yield = total_validated / total_scans if total_scans > 0 else 0
+
+        insight = (
+            f"Yield trend: Overall yield rate is {overall_yield:.2%}. "
+            f"Highest yielding role is {highest.role} at {highest.yield_rate:.2%} yield rate "
+            f"with {highest.validated_tickets} validated tickets from {highest.total_scans} scans. "
+            f"Lowest yielding role is {lowest.role} at {lowest.yield_rate:.2%} yield rate. "
+            f"Total scans across all roles: {total_scans}."
+        )
+
+        chart_html = (
+            f'<div role="img" aria-label="{html_module.escape(insight)}">'
+            f'<p>Chart visualization placeholder - see aria-label for data summary</p>'
+            f'</div>'
+        )
+        return chart_html

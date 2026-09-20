@@ -23,7 +23,7 @@ Invariants
 - Tool policies reference allowlists, not blocklists (fail-closed)
 - Model profiles specify capability requirements, not provider names
 
-Role Count: 30 (9 discovery + 6 implementation + 8 review + 6 control + 1 planning)
+Role Count: 29 (9 discovery + 6 implementation + 8 review + 4 control + 2 planning)
 """
 
 from __future__ import annotations

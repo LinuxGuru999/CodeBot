@@ -1,8 +1,10 @@
 # CodeBot Roles Reference
 
-Last updated: 2026-09-19
+Last updated: 2026-09-20
 
-CodeBot defines 38 role prompts across 5 categories. Each role specifies identity, incentives, tool constraints, operational protocols, and safety rules. Roles are loaded from `codebot/roles/*.md` and assembled with project context from the `ProjectAdapter` at runtime.
+CodeBot defines **29 registered roles** across 5 categories in `role_registry.py`, with **40 prompt files** in `codebot/roles/*.md`. Each role specifies identity, incentives, tool constraints, operational protocols, and safety rules. Roles are loaded from `codebot/roles/*.md` and assembled with project context from the `ProjectAdapter` at runtime.
+
+Some prompt files exist for roles not yet formally registered in `role_registry.py`. These are documented below with a note. They can be loaded by name but lack the full `AgentRole` definition (model profile, tool policy, adversarial mappings).
 
 All prompts follow the hardened authoring standard in `docs/ROLE_PROMPT_STANDARDS.md`. Reference implementations per category: `bug_hunter.md` (discovery), `general_implementer.md` (implementation), `correctness_reviewer.md` (review), `scheduler.md` (control), `feature_decomposer.md` (planning).
 
@@ -24,17 +26,25 @@ Discovery agents scan source code for issues. All are READ-ONLY — they never m
 | `ux_auditor` | `ui_improve` | Find usability and accessibility issues | — |
 | `feature_hunter` | — | Convert roadmap deliverables into tickets | — |
 
-## Planning Roles (6)
+## Planning Roles (2 registered + 3 prompt-only)
 
 Planning agents analyze, decompose, and order work items. They produce tickets and plans but never modify source code.
 
+### Registered in `role_registry.py` (2)
+
 | Role | Legacy Bot | Incentive |
 |------|-----------|-----------|
-| `ticket_triager` | `bug_triage` | Accurately validate, classify, prioritize findings |
-| `dependency_planner` | — | Ensure tickets execute in correct order |
+| `decomposer` | `feature_decomposer` | Break tickets into atomic, implementable pieces |
 | `implementation_planner` | — | Produce complete actionable plans preventing rework |
+
+### Prompt files only (not in registry) (3)
+
+These have `.md` prompt files but are not yet registered as `AgentRole` entries:
+
+| Role | Legacy Bot | Incentive |
+|------|-----------|-----------|
+| `dependency_planner` | — | Ensure tickets execute in correct order |
 | `architecture_planner` | — | Ensure changes align with architectural vision |
-| `feature_decomposer` | `feature_decomposer` | Break epics into atomic implementable items |
 | `goal_steering` | `goal_steering` | Direct effort toward strategic priorities |
 
 ## Implementation Roles (6)
@@ -60,21 +70,20 @@ Implementation agents write code, tests, and documentation. They follow TDD (red
 
 Where `{STATE_DIR}` = `{PROJECT_ROOT}/.codebot/state`.
 
-## Review Roles (7 + 1 registered without prompt)
+## Review Roles (8)
 
 Review agents evaluate implementations. All are READ-ONLY. Their incentives intentionally conflict with implementers.
 
 | Role | Incentive | Adversarial To |
 |------|-----------|----------------|
-| `correctness_reviewer` | Find behavior tests missed | general/backend_implementer |
-| `security_reviewer` | Find a way to exploit the change | general/backend/frontend_implementer |
+| `correctness_reviewer` | Find behavior tests missed | general/backend/migration_implementer |
+| `security_reviewer` | Find a way to exploit the change | general/backend/frontend/migration_implementer |
 | `architecture_reviewer` | Find coupling/boundary violations | general/backend_implementer |
 | `test_reviewer` | Find behavior tests failed to cover | test_implementer |
 | `performance_reviewer` | Find scalability regressions | general/backend_implementer |
 | `simplicity_reviewer` | Find unnecessary complexity | general/backend/architecture_auditor |
 | `documentation_reviewer` | Find claims no longer true | documentation_implementer |
-
-Note: `ux_reviewer` is registered in `role_registry.py` but has no `.md` prompt file. Tests assert this absence (`test_agent_review_roles.py::TestUxReviewerSpecific`). Do not create it without updating the test.
+| `ux_reviewer` | Find usability issues, accessibility violations, visual regressions | frontend/general_implementer |
 
 ### Verdicts
 
@@ -82,22 +91,32 @@ Note: `ux_reviewer` is registered in `role_registry.py` but has no `.md` prompt 
 - **REWORK** → document findings, transition to REWORK
 - **ESCALATE/BLOCK** → transition to REWORK
 
-## Control Roles (10)
+## Control Roles (4 registered + 7 prompt-only)
 
 Control agents manage infrastructure, scheduling, economics, and learning.
+
+### Registered in `role_registry.py` (4)
 
 | Role | Legacy Bot | Purpose |
 |------|-----------|---------|
 | `scheduler` | (orchestrator) | Agent scheduling, concurrency limits, model selection |
-| `quality_gate` | `build` | Central gate evaluation, COMPLETE authority |
+| `ticket_triager` | `bug_triage` | Validates incoming tickets: completeness, dedup, severity, routing |
 | `budget_controller` | `prompt_opt` | Token spend tracking, budget enforcement |
 | `conflict_resolver` | — | Merge conflict detection and resolution |
-| `ticket_decomposer` | — | Break complex rework tickets into atomic sub-tickets |
+
+### Prompt files only (not in registry) (7)
+
+These have `.md` prompt files but are not yet registered as `AgentRole` entries:
+
+| Role | Legacy Bot | Purpose |
+|------|-----------|---------|
+| `quality_gate` | `build` | Central gate evaluation, COMPLETE authority |
 | `github_mirror` | `github_bot` | Mirror issue files to GitHub Issues via `gh` CLI |
 | `git_sync` | (implicit gitsync) | Auto-commit, push, vendor sync |
 | `release_manager` | `release` | Staged rollout with gate-driven progression |
 | `alignment_scorer` | `alignment` | Exit event processing, reward computation |
 | `prompt_optimizer` | `prompt_opt` | Epsilon-greedy RSI with 11 Q-arms |
+| `ticket_decomposer` | — | Break complex rework tickets into atomic sub-tickets |
 
 ## Role Resolution
 

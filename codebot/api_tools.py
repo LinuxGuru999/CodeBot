@@ -297,8 +297,31 @@ def glob(pattern, path="."):
             return {"success": False, "output": "", "error": "path denied"}
         if not base.exists():
             return {"success": False, "output": "", "error": f"path not found: {path}"}
+        search_base = base
+        search_pattern = pattern
+        if pattern.startswith("/"):
+            pat_path = Path(pattern)
+            try:
+                rel = pat_path.relative_to(base)
+                search_pattern = str(rel)
+            except ValueError:
+                resolved = resolve_workspace_path(pattern, WORKSPACE_ROOT)
+                if resolved is None:
+                    return {"success": False, "output": "", "error": "path denied"}
+                parent = resolved.parent
+                if parent.exists() and str(parent).startswith(str(base)):
+                    search_base = parent
+                    search_pattern = resolved.name
+                else:
+                    search_pattern = str(resolved.relative_to(base)) if str(resolved).startswith(str(base)) else resolved.name
+        elif "/" in pattern and not pattern.startswith("**"):
+            parts = pattern.rsplit("/", 1)
+            sub_dir = base / parts[0]
+            if sub_dir.exists():
+                search_base = sub_dir
+                search_pattern = parts[1]
         matches = sorted(
-            str(p) for p in base.rglob(pattern)
+            str(p) for p in search_base.rglob(search_pattern)
             if p.is_file() and resolve_workspace_path(str(p), WORKSPACE_ROOT) is not None
         )
         # Cap output at 10KB to prevent huge listings

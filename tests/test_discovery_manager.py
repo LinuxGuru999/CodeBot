@@ -466,3 +466,45 @@ class TestDiscoveryManagerPersistence:
         # Should initialize with empty state
         assert len(mgr._cooldowns) == 0
         assert len(mgr._yields) == 0
+
+
+# ---------------------------------------------------------------------------
+# Accessibility tests for yield statistics rendering
+# ---------------------------------------------------------------------------
+
+class TestYieldAccessibility:
+    def test_yield_table_uses_scope_attributes(self, tmp_path):
+        """Table uses th elements with scope='col'/'row'."""
+        mgr = dm.DiscoveryManager(state_dir=tmp_path)
+        mgr.record_completion(
+            role="bug_hunter", scope="proj", commit_sha="abc",
+            findings=3, duplicates=1, rejected=0, cost_tokens=100, now=1000.0,
+        )
+        html_output = mgr.render_yield_table_html()
+        assert '<th scope="col"' in html_output
+        assert '<th scope="row"' in html_output
+
+    def test_chart_has_aria_label_insight(self, tmp_path):
+        """Chart container has aria-label describing insight."""
+        mgr = dm.DiscoveryManager(state_dir=tmp_path)
+        mgr.record_completion(
+            role="bug_hunter", scope="proj", commit_sha="abc",
+            findings=3, duplicates=1, rejected=0, cost_tokens=100, now=1000.0,
+        )
+        chart_html = mgr.render_yield_chart_html()
+        assert 'role="img"' in chart_html
+        assert 'aria-label=' in chart_html
+        assert 'Yield trend' in chart_html
+
+    def test_sort_controls_focusable_announce_state(self, tmp_path):
+        """Sort controls are focusable and announce state changes (button + aria-sort)."""
+        mgr = dm.DiscoveryManager(state_dir=tmp_path)
+        mgr.record_completion(
+            role="bug_hunter", scope="proj", commit_sha="abc",
+            findings=3, duplicates=1, rejected=0, cost_tokens=100, now=1000.0,
+        )
+        html_output = mgr.render_yield_table_html()
+        # Check for button elements with tabindex and aria-sort
+        assert '<button' in html_output
+        assert 'tabindex="0"' in html_output
+        assert 'aria-sort=' in html_output

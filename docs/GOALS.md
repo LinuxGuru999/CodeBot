@@ -128,8 +128,8 @@ Non-trivial tickets receive depth-scaled implementation plans before coding begi
 ### Goal 4: Specialized Agent Roles (§2.H)
 Replace hardcoded bot names with composable ROLE + TASK + MODEL_PROFILE + TOOL_POLICY abstraction.
 
-**Current state**: 37 role prompts across 5 categories. `role_registry.py` defines 26 roles with tool policies and adversarial mappings. `LEGACY_ROLE_MAP` bridges old bot names.
-**Gap**: Orchestrator still uses `BOT_REGISTRY` from adapter rather than dynamically assembling agents from role definitions. Role-to-model routing is defined but not enforced.
+**Current state**: 29 registered roles across 5 categories in `role_registry.py`, with 40 prompt files in `codebot/roles/*.md`. `LEGACY_ROLE_MAP` bridges old bot names. Model profiles, tool policies, and adversarial mappings defined per role.
+**Gap**: Orchestrator still uses `BOT_REGISTRY` from adapter rather than dynamically assembling agents from role definitions. Role-to-model routing is defined but not enforced. Some prompt files exist for roles not yet formally registered.
 
 ### Goal 5: Deterministic Verification (§4, §5)
 AI opinion never serves as primary proof. Central quality gate is sole authority for COMPLETE transitions.
@@ -368,7 +368,7 @@ Quality gates must support conditional, change-type-aware verification for web a
 ### Goal 44: Specialized Agent Roles for Web Applications (ROADMAP §81)
 New roles required: product_analyst, ux_architect, ui_designer, design_system_engineer, database_engineer, api_architect, e2e_test_engineer, integration_engineer, devops_engineer, sre_reviewer, auth_reviewer, tenant_isolation_reviewer, accessibility_reviewer, performance_engineer.
 
-**Current state**: 28 roles defined covering discovery, implementation, review, control, planning.
+**Current state**: 29 registered roles covering discovery, implementation, review, control, planning. 40 prompt files total.
 **Gap**: 14 new roles needed for complete web application lifecycle coverage. Each must have tool policy, model profile, and adversarial mappings.
 
 ### Goal 45: Application Acceptance and Production Readiness (ROADMAP §82)
