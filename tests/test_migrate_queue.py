@@ -281,6 +281,57 @@ class TestMigrate:
         # Store file should not exist or be empty
         assert not store_path.exists()
 
+    def test_migrate_dry_run_no_side_effects_on_state_dir(self, temp_dirs):
+        """Test dry_run=True writes zero files anywhere in the state directory.
+
+        Snapshots the entire state directory before and after migrate() to
+        catch any file creation (ticket store, WAL, lock files, backups, etc.).
+        No mocking is used so the real code path is exercised end-to-end.
+        """
+        temp_dirs["queue_file"].write_text(VALID_QUEUE_MD)
+        state_dir = temp_dirs["state_dir"]
+
+        # Snapshot every file/dir in the state tree before migration
+        before = sorted(p.relative_to(state_dir).as_posix() for p in state_dir.rglob("*"))
+
+        result = migrate(
+            queue_path=temp_dirs["queue_file"],
+            state_dir=state_dir,
+            dry_run=True,
+        )
+
+        assert result == 0
+
+        # Snapshot after migration — must be identical
+        after = sorted(p.relative_to(state_dir).as_posix() for p in state_dir.rglob("*"))
+        assert after == before, (
+            f"dry_run created/modified files in state dir: "
+            f"added={set(after) - set(before)}, removed={set(before) - set(after)}"
+        )
+
+        # Explicitly verify the ticket store file was never written
+        assert not (state_dir / "codebot_tickets.json").exists()
+
+    def test_migrate_dry_run_empty_state_dir_stays_empty(self, temp_dirs):
+        """Test dry_run=True leaves an empty state directory completely empty."""
+        temp_dirs["queue_file"].write_text(VALID_QUEUE_MD)
+        state_dir = temp_dirs["state_dir"]
+
+        # Precondition: state dir is empty
+        assert list(state_dir.iterdir()) == []
+
+        result = migrate(
+            queue_path=temp_dirs["queue_file"],
+            state_dir=state_dir,
+            dry_run=True,
+        )
+
+        assert result == 0
+        # State dir must still be completely empty
+        assert list(state_dir.iterdir()) == [], (
+            f"dry_run left files in empty state dir: {list(state_dir.iterdir())}"
+        )
+
     def test_migrate_creates_tickets(self, temp_dirs):
         """Test real migration creates tickets in the store."""
         temp_dirs["queue_file"].write_text(VALID_QUEUE_MD)
