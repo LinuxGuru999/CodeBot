@@ -2264,8 +2264,12 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
     if running >= cap:
         return False, f"cap {running}/{cap} running"
 
+    has_assignment = bot_name and any(
+        b.config.name == bot_name and getattr(b, '_assigned_ticket_id', '')
+        for b in (bots.values() if bots else [])
+    )
     since_last = now - _last_spawn_time
-    if since_last < _SPAWN_STAGGER_SECONDS:
+    if since_last < _SPAWN_STAGGER_SECONDS and not has_assignment and not is_overture:
         return False, f"stagger {since_last:.1f}s < {_SPAWN_STAGGER_SECONDS}s"
 
     if runner_mode == "api":
@@ -2319,10 +2323,11 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True, checkpoint_reason: 
     if prompt_path.exists() and prompt_path.stat().st_mtime > last_run_mtime:
         inputs_changed = True
     if not inputs_changed and last_run_mtime > 0 and bot.config.name not in WORKER_POOL and bot.config.name not in ALWAYS_RESPAWN:
+        base = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
         depths = _get_pipeline_state()
         has_demand = (
-            bot.config.name in DECOMPOSER_ROLE_NAMES and depths.get("DECOMPOSE", 0) > 0
-            or bot.config.name in PLANNING_ROLE_NAMES and depths.get("PLANNING", 0) > 0
+            _is_decomposer_role(bot.config.name) and depths.get("DECOMPOSE", 0) > 0
+            or base in PLANNING_ROLE_NAMES and depths.get("PLANNING", 0) > 0
         )
         if not has_demand:
             logger.info(f"Bot '{bot.config.name}' skipped — no input changes since last run")
