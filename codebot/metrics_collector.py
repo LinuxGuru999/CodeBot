@@ -197,8 +197,15 @@ def _collect_alignment(bot: str) -> dict[str, Any]:
     return out
 
 
-def _collect_progress(bot: str, now: float) -> dict[str, Any]:
-    """Tasklog/scratchpad/checkpoint recency + findings output."""
+def _collect_progress(bot: str, now: float, docs_findings_cache: dict[str, int] | None = None) -> dict[str, Any]:
+    """Tasklog/scratchpad/checkpoint recency + findings output.
+    
+    Args:
+        bot: Bot name
+        now: Current timestamp
+        docs_findings_cache: Optional pre-computed cache of output file counts per bot.
+                            If None, performs expensive glob (for backward compatibility).
+    """
     tasklog_lines = 0
     tasklog_last = ""
     tasklog_age_s: float | None = None
@@ -226,16 +233,18 @@ def _collect_progress(bot: str, now: float) -> dict[str, Any]:
             ckpt_age_s = round(now - cp.stat().st_mtime, 1)
     except Exception:
         pass
-    findings = 0
-    for cand in (STATE_DIR / "docs", BOTS_DIR / "docs"):
-        pass
-    for pattern in (f"{bot}*.md", f"*{bot}*.md"):
-        try:
-            for f in (BOTS_DIR / "docs").rglob(pattern):
-                if f.is_file():
-                    findings += 1
-        except Exception:
-            pass
+    # Use cached findings if available, otherwise compute (backward compat)
+    if docs_findings_cache is not None:
+        findings = docs_findings_cache.get(bot, 0)
+    else:
+        findings = 0
+        for pattern in (f"{bot}*.md", f"*{bot}*.md"):
+            try:
+                for f in (BOTS_DIR / "docs").rglob(pattern):
+                    if f.is_file():
+                        findings += 1
+            except Exception:
+                pass
     return {
         "tasklog_lines": tasklog_lines,
         "tasklog_last": tasklog_last,
@@ -372,27 +381,45 @@ def _collect_bot_tokens(bot: str) -> dict[str, Any]:
     return out
 
 
-def _collect_throughput(bot: str) -> dict[str, Any]:
-    """Items claimed vs completed, stale age, reopen rate proxy."""
+def _collect_throughput(bot: str, queue_cache: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
+    """Items claimed vs completed, stale age, reopen rate proxy.
+    
+    Args:
+        bot: Bot name
+        queue_cache: Optional pre-parsed list of (queue_id, assignee, status) tuples.
+                    If None, performs expensive file read and regex parse (backward compat).
+    """
     claimed = completed = 0
     stale_age_s: float | None = None
-    try:
-        for cand in (BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md",
-                     BOTS_DIR / "docs" / "triage" / "QUEUE.md"):
-            if not cand.exists():
-                continue
-            text = cand.read_text(encoding="utf-8")
-            import re as _re
-            for m in _re.finditer(r"\|\s*(Q-\d+|QUEUE-[A-Z]+-\d+)\s*\|[^|]*\|[^|]*\|[^|]*\|([^|]*)\|([^|]*)\|", text):
-                status = (m.group(3) or "").strip().lower()
-                assignee = (m.group(2) or "").strip().lower()
-                if bot.replace("_", "") in assignee or bot in assignee:
-                    claimed += 1
-                    if status in ("implemented", "done", "completed", "shipped"):
-                        completed += 1
-            break
-    except Exception:
-        pass
+    
+    # Use cached queue data if available, otherwise read and parse (backward compat)
+    if queue_cache is not None:
+        queue_entries = queue_cache
+    else:
+        queue_entries = []
+        try:
+            for cand in (BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md",
+                         BOTS_DIR / "docs" / "triage" / "QUEUE.md"):
+                if not cand.exists():
+                    continue
+                text = cand.read_text(encoding="utf-8")
+                import re as _re
+                for m in _re.finditer(r"\|\s*(Q-\d+|QUEUE-[A-Z]+-\d+)\s*\|[^|]*\|[^|]*\|[^|]*\|([^|]*)\|([^|]*)\|", text):
+                    queue_id = m.group(1)
+                    assignee = (m.group(2) or "").strip().lower()
+                    status = (m.group(3) or "").strip().lower()
+                    queue_entries.append((queue_id, assignee, status))
+                break
+        except Exception:
+            pass
+    
+    # Count claims for this bot from cached or freshly-parsed entries
+    for _, assignee, status in queue_entries:
+        if bot.replace("_", "") in assignee or bot in assignee:
+            claimed += 1
+            if status in ("implemented", "done", "completed", "shipped"):
+                completed += 1
+    
     try:
         cp = STATE_DIR / f"{bot}.checkpoint.json"
         if cp.exists():
@@ -546,11 +573,65 @@ def _collect_scrutiny() -> dict[str, Any]:
     }
 
 
+def _build_docs_findings_cache() -> dict[str, int]:
+    """Perform ONE recursive glob of docs/ and count output files per bot.
+    
+    Returns:
+        Dict mapping bot name to count of matching output files.
+    """
+    cache: dict[str, int] = {bot: 0 for bot in KNOWN_BOTS}
+    docs_dir = BOTS_DIR / "docs"
+    if not docs_dir.exists():
+        return cache
+    try:
+        # Single recursive traversal - O(Files) instead of O(Bots*Files)
+        for f in docs_dir.rglob("*.md"):
+            if f.is_file():
+                fname = f.name.lower()
+                for bot in KNOWN_BOTS:
+                    bot_normalized = bot.replace("_", "")
+                    if fname.startswith(bot_normalized) or bot_normalized in fname:
+                        cache[bot] += 1
+    except Exception:
+        pass
+    return cache
+
+
+def _parse_queue_md_once() -> list[tuple[str, str, str]]:
+    """Read and parse QUEUE.md ONCE, returning list of (queue_id, assignee, status).
+    
+    Returns:
+        List of tuples for all queue entries found.
+    """
+    entries: list[tuple[str, str, str]] = []
+    try:
+        for cand in (BOTS_DIR.parent / "docs" / "triage" / "QUEUE.md",
+                     BOTS_DIR / "docs" / "triage" / "QUEUE.md"):
+            if not cand.exists():
+                continue
+            text = cand.read_text(encoding="utf-8")
+            import re as _re
+            for m in _re.finditer(r"\|\s*(Q-\d+|QUEUE-[A-Z]+-\d+)\s*\|[^|]*\|[^|]*\|[^|]*\|([^|]*)\|([^|]*)\|", text):
+                queue_id = m.group(1)
+                assignee = (m.group(2) or "").strip().lower()
+                status = (m.group(3) or "").strip().lower()
+                entries.append((queue_id, assignee, status))
+            break
+    except Exception:
+        pass
+    return entries
+
+
 def collect_all(only_fresh: bool = False) -> dict[str, Any]:
     now = time.time()
     measurements = _read_json(STATE_DIR / "measurements.json")
     ledger = _read_json(STATE_DIR / "token_ledger.json")
     fleet_tokens = _collect_tokens(ledger)
+    
+    # CACHE EXPENSIVE OPERATIONS: One glob + one file read per collect_all() call
+    docs_findings_cache = _build_docs_findings_cache()
+    queue_cache = _parse_queue_md_once()
+    
     bots: dict[str, Any] = {}
     active = idle = stale = erroring = improving = regressing = 0
     if only_fresh:
@@ -562,7 +643,7 @@ def collect_all(only_fresh: bool = False) -> dict[str, Any]:
             continue
         exe = _collect_execution(bot)
         ali = _collect_alignment(bot)
-        pro = _collect_progress(bot, now)
+        pro = _collect_progress(bot, now, docs_findings_cache)
         liv = _collect_liveness(bot, now)
         qua = _collect_quality(bot, measurements)
         lr = ali.get("last_reward")
@@ -592,7 +673,7 @@ def collect_all(only_fresh: bool = False) -> dict[str, Any]:
             "liveness": liv,
             "quality": qua,
             "tokens": tok,
-            "throughput": _collect_throughput(bot),
+            "throughput": _collect_throughput(bot, queue_cache),
             "output_quality": _collect_output_quality(bot),
             "economics": _collect_economics(bot, tok, exe),
             "autonomy": _collect_autonomy(bot, exe),
