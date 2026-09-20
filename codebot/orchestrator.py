@@ -4712,12 +4712,35 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
                     logger.info(f"Bot '{name}' rate-limited (exit 3) — backoff {backoff+jitter}s, rotated to {bot.config.model}, attempt {bot.consecutive_errors}/{RATE_LIMIT_DISABLE_AFTER}")
             elif exit_code != 0:
                 bot.consecutive_errors += 1
-                if bot.consecutive_errors >= 3:
+                base_role = name.split("-")[0] if "-" in name else name
+                if base_role in IMPLEMENTER_ROLE_NAMES:
+                    old_model = bot.config.model
+                    _rotate_model_on_error(bot, bots)
+                    if bot.config.model != old_model:
+                        logger.info(f"Bot '{name}' rotated model {old_model} -> {bot.config.model} (exit {exit_code})")
+                    if bot.consecutive_errors >= 5:
+                        bot.consecutive_errors = 0
+                        logger.warning(f"Bot '{name}' failed 5 times across models — resetting error count")
+                elif bot.consecutive_errors >= 3:
                     _rotate_model_on_error(bot, bots)
                     bot.consecutive_errors = 0
                     logger.warning(f"Bot '{name}' failed 3 times — rotated to {bot.config.model}")
                 else:
                     logger.warning(f"Bot '{name}' exited with code {exit_code} (attempt {bot.consecutive_errors}/3)")
+                base_role = name.split("-")[0] if "-" in name else name
+                assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+                if assigned_tid and base_role in IMPLEMENTER_ROLE_NAMES:
+                    try:
+                        from codebot.scratchpad import load_scratchpad, save_scratchpad
+                        scratch = load_scratchpad(STATE_DIR, assigned_tid)
+                        scratch.mark_error(f"exited with code {exit_code}, attempt {bot.consecutive_errors}")
+                        scratch.finish_agent(f"interrupted: exit_code={exit_code}")
+                        save_scratchpad(STATE_DIR, scratch)
+                    except Exception:
+                        pass
+                    bot.next_run_at = now + 5
+                    update_bot_state(bot, "waiting")
+                    continue
             if exit_code == 0 and bot.config.clean_exit_wait:
                 bot.next_run_at = now + bot.config.interval_seconds
                 logger.info(f"Bot '{name}' completed cleanly — next run in {bot.config.interval_seconds}s")
