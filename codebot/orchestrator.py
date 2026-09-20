@@ -822,7 +822,7 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
             return (depths.get("DISCOVERED", 0) + depths.get("VALIDATING", 0) + depths.get("TRIAGED", 0)) > 0
         if base in DISCOVERY_ROLE_NAMES:
             return depths.get("DISCOVERED", 0) > 0
-        return True
+        return False
 
     non_impl = [c for c in registry if c.name not in IMPLEMENTER_ROLE_NAMES and not _is_planning_role(c.name) and _role_has_demand(c.name)]
     base_impl = [c for c in registry if c.name in IMPLEMENTER_ROLE_NAMES]
@@ -899,6 +899,34 @@ def _scale_workers_to_demand(registry: list[BotConfig], max_concurrent: int) -> 
                 max_restarts=role_cfg.max_restarts,
             ))
             TIER_PRIORITY[name] = 11
+
+    review_queue = depths.get("REVIEWING", 0)
+    verify_queue = depths.get("VERIFYING", 0)
+    review_names = ["correctness_reviewer", "security_reviewer", "architecture_reviewer",
+                    "test_reviewer", "performance_reviewer", "simplicity_reviewer",
+                    "documentation_reviewer", "ux_reviewer"]
+    for rname in review_names:
+        if review_queue > 0 and len(out) < max_concurrent:
+            role_cfg = next((c for c in registry if c.name == rname), None)
+            if role_cfg:
+                out.append(BotConfig(
+                    rname, role_cfg.prompt_file, 30, 90,
+                    role_cfg.model, fallback_model=role_cfg.fallback_model,
+                    clean_exit_wait=False, runner_mode="api", tier=12,
+                    max_restarts=role_cfg.max_restarts,
+                ))
+                TIER_PRIORITY[rname] = 12
+
+    if verify_queue > 0 and len(out) < max_concurrent:
+        qg_cfg = next((c for c in registry if c.name == "quality_gate"), None)
+        if qg_cfg:
+            out.append(BotConfig(
+                "quality_gate", qg_cfg.prompt_file, 30, 90,
+                qg_cfg.model, fallback_model=qg_cfg.fallback_model,
+                clean_exit_wait=False, runner_mode="api", tier=12,
+                max_restarts=qg_cfg.max_restarts,
+            ))
+            TIER_PRIORITY["quality_gate"] = 12
 
     return out
 
