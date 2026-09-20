@@ -14,6 +14,7 @@ overwriting one another, while malformed data fails closed to avoid overspend.
 
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +91,14 @@ def _new_ledger(day_utc: str) -> dict[str, Any]:
 
 _FLUSH_AFTER_WRITES = max(1, int(os.getenv("CODEBOT_LEDGER_FLUSH_EVERY", "1")))
 _pending_writes = 0
+_thread_locks: dict[Path, threading.Lock] = {}
+_thread_locks_guard = threading.Lock()
+
+
+def _thread_lock(path: Path) -> threading.Lock:
+    """Return the process-local lock paired with the ledger's file lock."""
+    with _thread_locks_guard:
+        return _thread_locks.setdefault(path, threading.Lock())
 
 
 def record_usage(
@@ -105,26 +114,10 @@ def record_usage(
     """Add provider-reported actual usage for one model and UTC day."""
     if prompt_tokens < 0 or completion_tokens < 0:
         raise ValueError("actual token counts must be non-negative")
-    ledger_path = _ledger_path(path)
     global _pending_writes
     _pending_writes += 1
-    if _pending_writes < _FLUSH_AFTER_WRITES:
-        ledger: dict[str, Any] = _new_ledger(day_utc)
-        try:
-            ledger = _read(ledger_path) if ledger_path.exists() else _new_ledger(day_utc)
-            if ledger.get("day_utc") != day_utc:
-                ledger = _new_ledger(day_utc)
-            row = ledger["by_model"].setdefault(model, {})
-            row["prompt_actual"] = int(row.get("prompt_actual", 0)) + prompt_tokens
-            row["completion_actual"] = int(row.get("completion_actual", 0)) + completion_tokens
-            row["prompt_estimated"] = int(row.get("prompt_estimated", 0)) + max(0, int(prompt_estimated))
-            row["completion_estimated"] = int(row.get("completion_estimated", 0)) + max(0, int(completion_estimated))
-            ledger["total_actual"] = int(ledger.get("total_actual", 0)) + prompt_tokens + completion_tokens
-            _write(ledger_path, ledger)
-        except Exception:
-            pass
-        return ledger
-    _pending_writes = 0
+    if _pending_writes >= _FLUSH_AFTER_WRITES:
+        _pending_writes = 0
     return record_usage_locked(day_utc, model, prompt_tokens, completion_tokens, path=path, prompt_estimated=prompt_estimated, completion_estimated=completion_estimated)
 
 
@@ -142,30 +135,31 @@ def record_usage_locked(
     if prompt_tokens < 0 or completion_tokens < 0:
         raise ValueError("actual token counts must be non-negative")
     ledger_path = _ledger_path(path)
-    lock = _locked(ledger_path)
-    try:
-        if ledger_path.exists():
-            ledger = _read(ledger_path)
-            if ledger["day_utc"] != day_utc:
+    with _thread_lock(ledger_path):
+        lock = _locked(ledger_path)
+        try:
+            if ledger_path.exists():
+                ledger = _read(ledger_path)
+                if ledger["day_utc"] != day_utc:
+                    ledger = _new_ledger(day_utc)
+            else:
                 ledger = _new_ledger(day_utc)
-        else:
-            ledger = _new_ledger(day_utc)
-        row = ledger["by_model"].setdefault(model, {})
-        for key in ("prompt_actual", "completion_actual", "prompt_estimated", "completion_estimated"):
-            row[key] = int(row.get(key, 0))
-        row["prompt_actual"] += prompt_tokens
-        row["completion_actual"] += completion_tokens
-        row["prompt_estimated"] += max(0, int(prompt_estimated))
-        row["completion_estimated"] += max(0, int(completion_estimated))
-        ledger["total_actual"] = sum(
-            int(values.get("prompt_actual", 0)) + int(values.get("completion_actual", 0))
-            for values in ledger["by_model"].values()
-        )
-        _write(ledger_path, ledger)
-        return ledger
-    finally:
-        flock(lock.fileno(), LOCK_UN)
-        lock.close()
+            row = ledger["by_model"].setdefault(model, {})
+            for key in ("prompt_actual", "completion_actual", "prompt_estimated", "completion_estimated"):
+                row[key] = int(row.get(key, 0))
+            row["prompt_actual"] += prompt_tokens
+            row["completion_actual"] += completion_tokens
+            row["prompt_estimated"] += max(0, int(prompt_estimated))
+            row["completion_estimated"] += max(0, int(completion_estimated))
+            ledger["total_actual"] = sum(
+                int(values.get("prompt_actual", 0)) + int(values.get("completion_actual", 0))
+                for values in ledger["by_model"].values()
+            )
+            _write(ledger_path, ledger)
+            return ledger
+        finally:
+            flock(lock.fileno(), LOCK_UN)
+            lock.close()
 
 
 def day_total(day_utc: str, *, path: str | os.PathLike[str] | None = None) -> int:

@@ -1,0 +1,57 @@
+# CodeBot Adversarial Review & Gatekeeping Policy
+# Loaded by codebot/review_config.py:load_review_config().
+# Every key has a strict, safe default; values here override those defaults.
+# Environment variables (CODEBOT_REVIEW_*) override this file.
+#
+# NOTE: This file tunes CodeBot's own quality controls. Per the gate-tampering
+# rules, changes to it are treated as high-risk and receive elevated scrutiny.
+
+review:
+  # Hide implementer identity/reasoning from the reviewer on first pass.
+  blind_review_enabled: true
+  # Run the dedicated adversarial "find a reason not to merge" pass.
+  adversarial_review_enabled: true
+  # Use multiple independent reviewers for high-risk changes.
+  multi_reviewer_enabled: true
+  # Prefer a different model family for review than for implementation.
+  cross_model_preferred: true
+  # Behavioral changes must ship tests exercising the new behavior.
+  require_tests_for_behavior_changes: true
+  # Percentage of completed tickets re-reviewed by an independent auditor
+  # (risk-weighted sampling). 0 disables post-completion audits.
+  random_audit_percentage: 10
+  # Skip expensive adversarial passes for trivially low-risk diffs.
+  skip_adversarial_for_trivial: true
+
+# Independent reviewers required per change-risk class.
+# Monotonic by construction: higher risk never uses fewer reviewers.
+reviewers_per_risk:
+  LOW: 1
+  MEDIUM: 1
+  HIGH: 2
+  CRITICAL: 2
+
+# Specialized reviewer roles (comma-separated basenames from codebot/roles/)
+# added automatically per risk class. Empty = none for that class.
+specialized_reviewers_per_risk:
+  LOW:
+  MEDIUM:
+  HIGH: security_reviewer
+  CRITICAL: security_reviewer,architecture_reviewer
+
+gatekeeper:
+  # Severities that block completion while unresolved. A single valid finding
+  # at any of these severities blocks COMPLETE regardless of approvals.
+  blocking_severities: BLOCKER,CRITICAL,MAJOR
+  require_test_evidence: true
+  require_build_success: true
+  require_regression_check: true
+  require_checklist_complete: true
+  # Run cheap deterministic gates (build/tests/lint) before model reasoning.
+  deterministic_gates_first: true
+
+rework:
+  # After this many rework cycles, escalate instead of looping. Never force-complete.
+  max_cycles: 3
+  # After this many repetitions of the same finding across cycles, escalate.
+  repeated_finding_threshold: 2

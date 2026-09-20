@@ -35,6 +35,15 @@ class TestEvaluateGate:
         ev = evaluate_gate({"name": "slow", "command": "sleep 10"}, tmp_path, timeout=1)
         assert ev.result == GateResult.ERROR
 
+    def test_quoted_file_context_is_one_argument(self, tmp_path):
+        ev = evaluate_gate(
+            {"name": "quoted", "command": "echo '{file}'"},
+            tmp_path,
+            file_context="tests/path with spaces.py",
+        )
+        assert ev.passed is True
+        assert ev.output.strip() == "tests/path with spaces.py"
+
 class TestRunQualityGates:
     def test_all_pass(self, tmp_path):
         policy = QualityGatePolicy(required=[{"name": "ok", "command": "echo pass"}], conditional={})

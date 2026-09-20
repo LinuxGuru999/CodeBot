@@ -42,8 +42,11 @@ class TestGitSshCommandInjection:
         with patch.object(credentials, "get_ssh_key_path", return_value=mock_path):
             cmd = credentials.get_git_ssh_command()
 
-        # The malicious path must appear as a single quoted argument
-        quoted = shlex.quote(malicious_path)
+        # The malicious path must appear as a single quoted argument.
+        # Note: pathlib normalizes paths (e.g. stripping trailing slashes),
+        # so we verify against the normalized string representation.
+        normalized_path = str(mock_path)
+        quoted = shlex.quote(normalized_path)
         assert quoted in cmd, (
             f"Path not properly quoted.\n"
             f"Expected {quoted!r} in command.\n"
@@ -53,8 +56,8 @@ class TestGitSshCommandInjection:
         # by checking that splitting the command yields the path as one token
         parts = shlex.split(cmd)
         idx = parts.index("-i")
-        assert parts[idx + 1] == malicious_path, (
-            f"After shlex.split, -i argument should be the original path.\n"
+        assert parts[idx + 1] == normalized_path, (
+            f"After shlex.split, -i argument should be the normalized path.\n"
             f"Got parts[idx+1]={parts[idx + 1]!r}"
         )
 
@@ -67,7 +70,8 @@ class TestGitSshCommandInjection:
         assert "-i" in cmd
         assert str(key) in cmd
         assert "IdentitiesOnly=yes" in cmd
-        assert "StrictHostKeyChecking=accept-new" in cmd
+        assert "StrictHostKeyChecking=yes" in cmd
+        assert "UserKnownHostsFile=" in cmd
 
     def test_path_with_spaces_quoted(self, monkeypatch, tmp_path):
         """Paths containing spaces must be quoted to remain a single argument."""

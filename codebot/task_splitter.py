@@ -99,7 +99,7 @@ def split_ticket(
                 acceptance_criteria=sub_acceptance,
                 risk=parent_ticket.risk,
                 affected_modules=chunk.get("modules", []),
-                dependencies=[parent_ticket.id] + sub_ids,
+                dependencies=sub_ids,
             )
             store.add(sub)
             store.transition(sub.id, TicketState.VALIDATING)
@@ -165,3 +165,6 @@ def compute_chunks(ticket: Any, scratchpad: Any | None) -> list[dict[str, Any]]:
             })
 
     return chunks[:MAX_SUB_TASKS]
+
+
+_compute_chunks = compute_chunks

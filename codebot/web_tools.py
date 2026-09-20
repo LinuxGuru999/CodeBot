@@ -232,7 +232,13 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
                  source_address: tuple[str, int] | None = None,
                  pinned_ip: str | None = None,
                  context: ssl.SSLContext | None = None):
-        super().__init__(host, port, timeout, source_address, context=context)
+        super().__init__(
+            host,
+            port=port,
+            timeout=timeout,
+            source_address=source_address,
+            context=context,
+        )
         self._pinned_ip = pinned_ip
 
     def connect(self) -> None:
@@ -563,3 +569,6 @@ def extract_text_from_html(html: str) -> str:
     lines = [line.strip() for line in html.splitlines()]
     lines = [line for line in lines if line]
     return '\n'.join(lines)
+
+
+_extract_text_from_html = extract_text_from_html

@@ -45,7 +45,7 @@ from codebot.ticket_dispatcher import (
     dispatch_planning_agents, advance_reviewed_tickets,
     gatekeeper_verify_tickets, route_ready_tickets,
     process_rework_tickets, recover_deferred_tickets,
-    _sweep_orphan_claims, clear_ticket_store_cache,
+    _sweep_orphan_claims, clear_ticket_store_cache, get_ticket_store,
     TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER,
 )
 from codebot.dispatch_service import (
@@ -109,6 +109,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("orchestrator")
 
+DECOMPOSER_MAX_CONCURRENT = 12
+
+
+def read_prompt_with_mtime(prompt_path: Path) -> tuple[str, float]:
+    try:
+        content = prompt_path.read_text(encoding="utf-8")
+        return content, prompt_path.stat().st_mtime
+    except FileNotFoundError:
+        return "", 0.0
+
+
+def _check_prompt_changes(bots: dict[str, BotState]) -> None:
+    for bot in bots.values():
+        _, observed_mtime = read_prompt_with_mtime(BOTS_DIR / bot.config.prompt_file)
+        if observed_mtime <= bot.last_prompt_mtime:
+            continue
+        bot.last_prompt_mtime = observed_mtime
+        if bot.process is not None and bot.process.poll() is None:
+            stop_bot(bot, "prompt-hot-reload")
+
 
 def get_status(bots: dict[str, BotState]) -> dict:
     """Return a dict of bot statuses for display or API."""
@@ -153,6 +173,19 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     # Clear TicketStore cache to ensure fresh data for this tick
     clear_ticket_store_cache()
 
+    # Eagerly initialize TicketStore cache once per tick and log overhead
+    _tick_t0 = time.time()
+    _ts = get_ticket_store()
+    _tick_elapsed_ms = (time.time() - _tick_t0) * 1000
+    if _ts is not None:
+        _tick_ticket_count = len(getattr(_ts, '_tickets', {}))
+        logger.debug(
+            "TicketStore cache initialized: %d tickets in %.1fms (single read per tick)",
+            _tick_ticket_count, _tick_elapsed_ms,
+        )
+    else:
+        logger.debug("TicketStore cache: tickets.json unavailable")
+
     now = time.time()
 
     # --- Batch-read all heartbeats and statuses once per tick ---
@@ -172,6 +205,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
                 logger.info(f"Retrying '{name}' stuck in starting")
 
     # Handle exited bots
+    current_paths = get_paths()
     for name, bot in list(bots.items()):
         if not bot.config.enabled or bot.process is None or bot.process.poll() is None:
             continue
@@ -185,7 +219,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 
         if exit_code == 0:
             bot.consecutive_errors = 0
-            transition_ticket_on_success(bot, bots)
+            transition_ticket_on_success(bot, bots, store=_ts)
             bot.next_run_at = now + bot.config.interval_seconds
             update_bot_state(bot, "waiting")
         elif exit_code == 3:
@@ -207,13 +241,13 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             assigned_tid = getattr(bot, "_assigned_ticket_id", "")
             if assigned_tid:
                 try:
-                    scratch = load_scratchpad(_paths.state_dir, assigned_tid)
+                    scratch = load_scratchpad(current_paths.state_dir, assigned_tid)
                     scratch.mark_error(f"Bot exited with code {exit_code}")
                     scratch.finish_agent(f"error: exit_code={exit_code}")
-                    save_scratchpad(_paths.state_dir, scratch)
+                    save_scratchpad(current_paths.state_dir, scratch)
                 except Exception as e:
                     logger.warning(f"Failed to finish scratchpad for ticket {assigned_tid}: {e}")
-            transition_ticket_on_error(bot, bots, exit_code)
+            transition_ticket_on_error(bot, bots, exit_code, store=_ts)
             bot.next_run_at = now + 5
             update_bot_state(bot, "waiting")
 
@@ -236,18 +270,18 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 
     log_bot_statuses(bots, preloaded_statuses=status_cache)
 
-    # Run dispatcher tasks
+    # Run dispatcher tasks — all share the single TicketStore instance for this tick
     for fn, label in [
         (lambda: _sweep_orphan_claims(bots), "orphan sweep"),
-        (lambda: apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state), "availability"),
-        (lambda: spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot), "demand"),
-        (lambda: dispatch_decompose_agents(bots, start_bot_fn=start_bot), "decompose"),
-        (lambda: dispatch_planning_agents(bots, start_bot_fn=start_bot), "planning"),
-        (lambda: advance_reviewed_tickets(bots), "review"),
-        (lambda: gatekeeper_verify_tickets(), "gatekeeper"),
-        (lambda: route_ready_tickets(), "route"),
-        (lambda: process_rework_tickets(bots), "rework"),
-        (lambda: recover_deferred_tickets(), "deferred"),
+        (lambda: apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state, store=_ts), "availability"),
+        (lambda: spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT, start_bot_fn=start_bot, store=_ts), "demand"),
+        (lambda: dispatch_decompose_agents(bots, max_agents=DECOMPOSER_MAX_CONCURRENT, start_bot_fn=start_bot, store=_ts), "decompose"),
+        (lambda: dispatch_planning_agents(bots, start_bot_fn=start_bot, store=_ts), "planning"),
+        (lambda: advance_reviewed_tickets(bots, store=_ts), "review"),
+        (lambda: gatekeeper_verify_tickets(store=_ts), "gatekeeper"),
+        (lambda: route_ready_tickets(store=_ts), "route"),
+        (lambda: process_rework_tickets(bots, store=_ts), "rework"),
+        (lambda: recover_deferred_tickets(store=_ts), "deferred"),
     ]:
         try:
             fn()
@@ -255,7 +289,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             logger.warning(f"{label} failed: {e}")
 
     # Start eligible bots (skip implementers/reviewers — spawn_demand_agents handles them)
-    pipeline = get_pipeline_state()
+    pipeline = get_pipeline_state(store=_ts)
     for name, bot in bots.items():
         if not bot.config.enabled or is_draining() or bot.process is not None:
             continue

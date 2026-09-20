@@ -31,7 +31,7 @@ class TestTransitionTicketOnError:
         """Error exit (exit_code != 0 and != 3) should transition ticket to READY."""
         store_path = tmp_path / "tickets.json"
         store = TicketStore(store_path)
-        
+
         # Create a ticket in IMPLEMENTING state
         t = create_ticket(
             title="Test bug",
@@ -50,30 +50,24 @@ class TestTransitionTicketOnError:
         store.transition(t.id, TicketState.READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
         store.flush()
-        store.close()  # Close to prevent WAL interference
-        
+
         # Verify ticket is in IMPLEMENTING
-        store_check = TicketStore(store_path)
-        assert store_check.get(t.id).state == TicketState.IMPLEMENTING
-        store_check.close()
-        
+        assert store.get(t.id).state == TicketState.IMPLEMENTING
+
         # Create a bot with the ticket assigned
         bot = self._make_bot(t.id)
         bots = {"test_bot": bot}
-        
-        # Patch STATE_DIR in dispatch_service to use tmp_path
-        import codebot.dispatch_service as ds
-        with patch.object(ds, 'STATE_DIR', tmp_path):
-            transition_ticket_on_error(bot, bots, exit_code=1)
-        
-        # Reload store to see changes
-        store2 = TicketStore(store_path)
-        updated = store2.get(t.id)
+
+        # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
+        transition_ticket_on_error(bot, bots, exit_code=1, store=store)
+
+        # Verify ticket transitioned to READY
+        updated = store.get(t.id)
         assert updated.state == TicketState.READY, f"Expected READY, got {updated.state}"
-        
+
         # Verify assigned_ticket_id is cleared
         assert bot._assigned_ticket_id == ""
-        store2.close()
+        store.close()
 
     def test_error_exit_different_codes(self, tmp_path):
         """Various error exit codes should all transition to READY."""
@@ -83,7 +77,7 @@ class TestTransitionTicketOnError:
             if store_path.exists():
                 store_path.unlink()
             store = TicketStore(store_path)
-            
+
             t = create_ticket(
                 title=f"Test bug {exit_code}",
                 ticket_class=TicketClass.BUG,
@@ -101,26 +95,23 @@ class TestTransitionTicketOnError:
             store.transition(t.id, TicketState.READY)
             store.transition(t.id, TicketState.IMPLEMENTING)
             store.flush()
-            store.close()
-            
+
             bot = self._make_bot(t.id)
             bots = {"test_bot": bot}
-            
-            import codebot.dispatch_service as ds
-            with patch.object(ds, 'STATE_DIR', tmp_path):
-                transition_ticket_on_error(bot, bots, exit_code=exit_code)
-            
-            store2 = TicketStore(store_path)
-            updated = store2.get(t.id)
+
+            # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
+            transition_ticket_on_error(bot, bots, exit_code=exit_code, store=store)
+
+            updated = store.get(t.id)
             assert updated.state == TicketState.READY, f"Exit code {exit_code}: expected READY, got {updated.state}"
-            store2.close()
+            store.close()
 
     def test_error_exit_no_assigned_ticket(self, tmp_path):
         """Error exit with no assigned ticket should be a no-op."""
         bot = self._make_bot()  # No ticket assigned
         bots = {"test_bot": bot}
-        
-        # Should not raise
+
+        # Should not raise (no store needed when no ticket is assigned)
         transition_ticket_on_error(bot, bots, exit_code=1)
         assert getattr(bot, '_assigned_ticket_id', '') == ""
 
@@ -128,7 +119,7 @@ class TestTransitionTicketOnError:
         """Error exit when ticket is not in IMPLEMENTING should not transition."""
         store_path = tmp_path / "tickets.json"
         store = TicketStore(store_path)
-        
+
         t = create_ticket(
             title="Test bug",
             ticket_class=TicketClass.BUG,
@@ -145,25 +136,22 @@ class TestTransitionTicketOnError:
         store.transition(t.id, TicketState.TRIAGED)
         store.transition(t.id, TicketState.READY)
         store.flush()
-        store.close()
-        
+
         bot = self._make_bot(t.id)
         bots = {"test_bot": bot}
-        
-        import codebot.dispatch_service as ds
-        with patch.object(ds, 'STATE_DIR', tmp_path):
-            transition_ticket_on_error(bot, bots, exit_code=1)
-        
-        store2 = TicketStore(store_path)
-        updated = store2.get(t.id)
+
+        # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
+        transition_ticket_on_error(bot, bots, exit_code=1, store=store)
+
+        updated = store.get(t.id)
         assert updated.state == TicketState.READY
-        store2.close()
+        store.close()
 
     def test_error_exit_cleans_claims(self, tmp_path):
         """Error exit should clean up claim files."""
         store_path = tmp_path / "tickets.json"
         store = TicketStore(store_path)
-        
+
         t = create_ticket(
             title="Test bug",
             ticket_class=TicketClass.BUG,
@@ -181,22 +169,23 @@ class TestTransitionTicketOnError:
         store.transition(t.id, TicketState.READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
         store.flush()
-        store.close()
-        
+
         # Create a claim file
         claims_dir = tmp_path / "claims"
         claims_dir.mkdir(exist_ok=True)
         claim_file = claims_dir / f"{t.id}.test_agent.json"
         claim_file.write_text('{"claim": "test"}')
-        
+
         bot = self._make_bot(t.id)
         bots = {"test_bot": bot}
-        
+
+        # Pass store directly AND patch STATE_DIR for claims cleanup path
         import codebot.dispatch_service as ds
         with patch.object(ds, 'STATE_DIR', tmp_path):
-            transition_ticket_on_error(bot, bots, exit_code=1)
-        
+            transition_ticket_on_error(bot, bots, exit_code=1, store=store)
+
         assert not claim_file.exists()
+        store.close()
 
 
 class TestTransitionTicketOnSuccess:
@@ -213,7 +202,7 @@ class TestTransitionTicketOnSuccess:
         """Implementer success should transition ticket to REVIEWING."""
         store_path = tmp_path / "tickets.json"
         store = TicketStore(store_path)
-        
+
         t = create_ticket(
             title="Test bug",
             ticket_class=TicketClass.BUG,
@@ -231,25 +220,22 @@ class TestTransitionTicketOnSuccess:
         store.transition(t.id, TicketState.READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
         store.flush()
-        store.close()
-        
+
         bot = self._make_bot(t.id, name="general_implementer")
         bots = {"general_implementer": bot}
-        
-        import codebot.dispatch_service as ds
-        with patch.object(ds, 'STATE_DIR', tmp_path):
-            transition_ticket_on_success(bot, bots)
-        
-        store2 = TicketStore(store_path)
-        updated = store2.get(t.id)
-        assert updated.state == TicketState.REVIEWING
-        store2.close()
 
-    def test_reviewer_success_transitions_to_verifying(self, tmp_path):
-        """Reviewer success should transition ticket to VERIFYING."""
+        # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
+        transition_ticket_on_success(bot, bots, store=store)
+
+        updated = store.get(t.id)
+        assert updated.state == TicketState.REVIEWING
+        store.close()
+
+    def test_reviewer_success_does_not_transition_prematurely(self, tmp_path):
+        """Reviewer success should NOT transition ticket — advance_reviewed_tickets owns that decision."""
         store_path = tmp_path / "tickets.json"
         store = TicketStore(store_path)
-        
+
         t = create_ticket(
             title="Test bug",
             ticket_class=TicketClass.BUG,
@@ -268,19 +254,16 @@ class TestTransitionTicketOnSuccess:
         store.transition(t.id, TicketState.IMPLEMENTING)
         store.transition(t.id, TicketState.REVIEWING)
         store.flush()
-        store.close()
-        
+
         bot = self._make_bot(t.id, name="correctness_reviewer")
         bots = {"correctness_reviewer": bot}
-        
-        import codebot.dispatch_service as ds
-        with patch.object(ds, 'STATE_DIR', tmp_path):
-            transition_ticket_on_success(bot, bots)
-        
-        store2 = TicketStore(store_path)
-        updated = store2.get(t.id)
-        assert updated.state == TicketState.VERIFYING
-        store2.close()
+
+        # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
+        transition_ticket_on_success(bot, bots, store=store)
+
+        updated = store.get(t.id)
+        assert updated.state == TicketState.REVIEWING
+        store.close()
 
 
 # -----------------------------------------------------------------------

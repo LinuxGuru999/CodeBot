@@ -307,19 +307,17 @@ def log_bot_statuses(bots: dict[str, BotState]) -> None:
             pass
 
 
-def get_pipeline_state() -> dict[str, int]:
+def get_pipeline_state(store: Any | None = None) -> dict[str, int]:
     """Get current pipeline state counts."""
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if not store_path.exists():
+        from codebot.ticket_engine import TicketState
+        from codebot.ticket_dispatcher import get_ticket_store
+        _store = store if store is not None else get_ticket_store()
+        if _store is None:
             return {}
-        store = TicketStore(store_path)
         counts: dict[str, int] = {}
         for state in TicketState:
-            tickets = store.list_by_state(state)
+            tickets = _store.list_by_state(state)
             if tickets:
                 counts[state.value] = len(tickets)
         return counts
@@ -356,9 +354,9 @@ def is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
     return False
 
 
-def apply_agent_availability(bots: dict[str, BotState]) -> None:
+def apply_agent_availability(bots: dict[str, BotState], store: Any | None = None) -> None:
     """Enable or suppress bot spawns based on current ticket queue state."""
-    pipeline = get_pipeline_state()
+    pipeline = get_pipeline_state(store=store)
     ready = pipeline.get("READY", 0)
     decompose = pipeline.get("DECOMPOSE", 0)
     planning = pipeline.get("PLANNING", 0)

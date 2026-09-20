@@ -40,6 +40,28 @@ _is_running() {
     [[ -n "$pid" ]]
 }
 
+_worker_pids() {
+    pgrep -f "python3 -m codebot.api_runner .*${PROJECT_ROOT}" 2>/dev/null || true
+}
+
+_stop_workers() {
+    local pids waited=0
+    pids=$(_worker_pids)
+    [[ -z "$pids" ]] && return 0
+
+    echo "Stopping surviving workers..."
+    kill -TERM $pids 2>/dev/null || true
+    while [[ -n "$(_worker_pids)" ]] && (( waited < GRACE_PERIOD )); do
+        sleep 1
+        ((++waited))
+    done
+    pids=$(_worker_pids)
+    if [[ -n "$pids" ]]; then
+        echo "Worker grace period expired, sending SIGKILL..."
+        kill -KILL $pids 2>/dev/null || true
+    fi
+}
+
 _set_drain() {
     mkdir -p "$STATE_DIR"
     echo "$(date +%s) $1" > "$DRAIN_FILE"
@@ -54,6 +76,7 @@ cmd_start() {
         echo "CodeBot already running (PID $(_get_orch_pid))"
         return 0
     fi
+    _stop_workers
     _clear_drain
     mkdir -p "$LOG_DIR" "$BOT_LOG_DIR" "$STATE_DIR" \
              "$STATE_DIR/alignment_events" "$STATE_DIR/alignment_triggers"
@@ -86,13 +109,14 @@ cmd_stop() {
     local waited=0
     while kill -0 "$pid" 2>/dev/null && (( waited < GRACE_PERIOD )); do
         sleep 1
-        ((waited++))
+        ((++waited))
     done
     if kill -0 "$pid" 2>/dev/null; then
         echo "Grace period expired, sending SIGKILL..."
         kill -9 "$pid" 2>/dev/null || true
         sleep 1
     fi
+    _stop_workers
     rm -f "$PID_FILE"
     _clear_drain
     if kill -0 "$pid" 2>/dev/null; then

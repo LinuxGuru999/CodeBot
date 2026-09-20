@@ -1508,6 +1508,120 @@ class TestBackupWorker:
         store.close()
 
 
+class TestConcurrentSaves:
+    """Tests for CB-4888477-87D7: Race condition in TicketStore._save.
+
+    Validates that concurrent ticket saves do not lose data and that
+    lock failures are handled safely without silent corruption.
+    """
+
+    def _make_store(self, tmp_path):
+        return TicketStore(tmp_path / "tickets.json")
+
+    def test_concurrent_saves_do_not_lose_data(self, tmp_path):
+        """Multiple threads saving tickets concurrently should not lose data."""
+        import threading
+
+        path = tmp_path / "tickets.json"
+        store = self._make_store(tmp_path)
+
+        num_threads = 10
+        tickets_per_thread = 5
+        errors = []
+        saved_tickets = []
+        lock = threading.Lock()
+
+        def worker(thread_id):
+            try:
+                for i in range(tickets_per_thread):
+                    t = create_ticket(
+                        f"concurrent-{thread_id}-{i}",
+                        TicketClass.BUG,
+                        Severity.LOW,
+                        "test",
+                        f"evidence-{thread_id}-{i}",
+                        "problem",
+                        "desired",
+                        ["crit"],
+                        risk=RiskLevel.LOW,
+                    )
+                    store.add(t)
+                    with lock:
+                        saved_tickets.append(t.id)
+            except Exception as e:
+                errors.append(e)
+
+        threads = []
+        for tid in range(num_threads):
+            t = threading.Thread(target=worker, args=(tid,))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, f"Concurrent saves raised errors: {errors}"
+
+        # Flush to ensure all saves are persisted
+        store.flush()
+        store.close()
+
+        # Verify all tickets were saved
+        store2 = TicketStore(path)
+        assert store2.count() == num_threads * tickets_per_thread, (
+            f"Expected {num_threads * tickets_per_thread} tickets, got {store2.count()}"
+        )
+
+        for tid in saved_tickets:
+            assert store2.get(tid) is not None, f"Ticket {tid} was lost"
+
+        store2.close()
+
+    def test_lock_failure_raises_error_not_silent_corruption(self, tmp_path):
+        """If lock acquisition permanently fails, _save should raise error."""
+        import time
+
+        path = tmp_path / "tickets.json"
+        store = self._make_store(tmp_path)
+
+        # Add a ticket to make dirty_ids non-empty
+        t = create_ticket(
+            "lock-test",
+            TicketClass.BUG,
+            Severity.LOW,
+            "test",
+            "evidence",
+            "problem",
+            "desired",
+            ["crit"],
+            risk=RiskLevel.LOW,
+        )
+        store.add(t)
+
+        # Mock flock to always fail after max retries
+        original_flock = None
+        import codebot.ticket_engine as te
+        original_flock = te.flock
+
+        call_count = [0]
+
+        def failing_flock(fd, flag):
+            call_count[0] += 1
+            if flag == te.LOCK_EX:
+                raise OSError("Mocked lock failure")
+            return original_flock(fd, flag)
+
+        te.flock = failing_flock
+
+        try:
+            with pytest.raises(RuntimeError, match="failed after.*lock retries"):
+                store._save()
+        finally:
+            te.flock = original_flock
+
+        store.close()
+
+
 class TestBackupWorker:
     """Tests for CB-D4AD89D42A31: async backup worker consumer.
 

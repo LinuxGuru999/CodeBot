@@ -34,6 +34,8 @@ from codebot.api_runner import (
     _extract_provider_usage,
     _write_bot_status,
     _auto_commit,
+    _ticket_id_from_claim,
+    _is_implementation_bot,
     _create_ticket_tool,
     _log,
     HIGH_RISK_TOKEN_MANIFESTS,
@@ -346,6 +348,29 @@ class TestAutoCommitGatekeeperFailClosed:
         adapter.paths.return_value.state_dir.mkdir(parents=True, exist_ok=True)
         return adapter
 
+    def test_ticket_id_from_claim_returns_assigned_ticket(self, tmp_path):
+        state_dir = tmp_path / "state"
+        claims_dir = state_dir / "claims"
+        claims_dir.mkdir(parents=True)
+        (claims_dir / "CB-123.test-bot.json").write_text(
+            json.dumps({"ticket_id": "CB-123", "bot": "test-bot"})
+        )
+
+        assert _ticket_id_from_claim(state_dir, "test-bot") == "CB-123"
+
+    @pytest.mark.parametrize(
+        ("bot_name", "expected"),
+        [
+            ("backend_implementer", True),
+            ("test_implementer-2", True),
+            ("decomposer", False),
+            ("implementation_planner-4", False),
+            ("security_reviewer", False),
+        ],
+    )
+    def test_auto_commit_is_limited_to_implementation_roles(self, bot_name, expected):
+        assert _is_implementation_bot(bot_name) is expected
+
     def test_gatekeeper_import_error_blocks_commit(self, tmp_path):
         """When gatekeeper module cannot be imported, commit must be blocked."""
         adapter = self._make_adapter(tmp_path)
@@ -414,11 +439,12 @@ class TestAutoCommitGatekeeperFailClosed:
         }
         with patch("codebot.api_runner._adapter_instance", adapter), \
              patch("codebot.api_runner.WORK_ROOT", tmp_path), \
-             patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
-             patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
-            _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
+              patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
+              patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
+            _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"], ticket_id="CB-123")
             has_git_add = any("add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
             assert has_git_add, "git add should execute when gatekeeper returns COMPLETE"
+            assert mock_gk_cls.return_value.verify_ticket.call_args.kwargs["ticket_id"] == "CB-123"
 
 
 class TestApiKeyLoggingSecurity:
@@ -427,6 +453,23 @@ class TestApiKeyLoggingSecurity:
     Constitution §2 states: 'No secrets in code, logs, or error messages.'
     CWE-532: Insertion of Sensitive Information into Log File.
     """
+
+    def test_fails_when_key_material_is_logged(self, capsys):
+        """Prove the test catches violations: logging actual key content should fail assertions."""
+        from codebot.api_runner import _log
+        sensitive_key = "sk-secret-key-abcdef1234567890"
+        # Simulate a violation: logging part of the actual key
+        _log(f"API key value: {sensitive_key[:8]}")  # Logging first 8 chars is a violation
+        captured = capsys.readouterr()
+        # This demonstrates what a violation looks like - the assertion below SHOULD fail
+        # We're testing the negative case to prove our detection works
+        violation_detected = False
+        for i in range(len(sensitive_key) - 3):
+            substring = sensitive_key[i:i+4]
+            if substring in captured.out:
+                violation_detected = True
+                break
+        assert violation_detected, "Test should detect when key fragments are logged"
 
     def test_log_output_does_not_contain_key_characters(self, capsys):
         """Verify _log output does not contain any portion of an API key."""

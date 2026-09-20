@@ -62,6 +62,18 @@ except ImportError:
 # 1 MiB is generous for API response payloads while preventing memory exhaustion
 # from a malicious or misbehaving server.
 MAX_RESPONSE_BYTES = 1 * 1024 * 1024  # 1 MiB
+_IMPLEMENTER_ROLE_NAMES = frozenset({
+    "general_implementer",
+    "backend_implementer",
+    "frontend_implementer",
+    "test_implementer",
+    "migration_implementer",
+    "documentation_implementer",
+})
+
+
+def _is_implementation_bot(bot_name: str) -> bool:
+    return bot_name.split("-", 1)[0] in _IMPLEMENTER_ROLE_NAMES
 
 
 def _wait_for_rate_limit(model: str) -> float:
@@ -281,7 +293,19 @@ def _update_github_progress(
         _log(f"{bot_name}: GitHub progress update unavailable")
 
 
-def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
+def _ticket_id_from_claim(state_dir: Path, bot_name: str) -> str:
+    for claim_file in (state_dir / "claims").glob(f"*.{bot_name}.json"):
+        try:
+            claim = json.loads(claim_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        ticket_id = claim.get("ticket_id", claim.get("ticket", ""))
+        if isinstance(ticket_id, str) and ticket_id:
+            return ticket_id
+    return ""
+
+
+def _auto_commit(bot_name: str, files_touched: list[str], ticket_id: str = "") -> bool:
     """Auto-commit and push any uncommitted changes when a worker completes.
 
     Why: Workers often skip the git commit step even when told to commit.
@@ -295,6 +319,10 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
     """
     if not files_touched:
         return True
+
+    if not ticket_id:
+        _log(f"{bot_name}: gatekeeper unavailable (BLOCKING commit): no assigned ticket")
+        return False
 
     # Fail-closed: gatekeeper check is mandatory before any commit
     if _adapter_instance is None:
@@ -317,7 +345,7 @@ def _auto_commit(bot_name: str, files_touched: list[str]) -> bool:
         elif "security" in bot_name.lower():
             ticket_class = "security"
         result = gk.verify_ticket(
-            ticket_id=bot_name,
+            ticket_id=ticket_id,
             ticket_class=ticket_class,
             changed_files=files_touched,
         )
@@ -2034,12 +2062,11 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                     sys.exit(1)
                 except Exception as exc:
                     import traceback
-                    _log(f"{bot_name}: unexpected error ({type(exc).__name__}: {exc}), retrying in {delay}s")
-                    _log(f"{bot_name}: traceback: {traceback.format_exc()[:500]}")
                     if total_retries < MAX_RETRIES:
                         delay = BACKOFFS[min(total_retries, len(BACKOFFS) - 1)]
                         delay = min(delay, MAX_BACKOFF)
-                        _log(f"{bot_name}: unexpected error, retrying in {delay}s")
+                        _log(f"{bot_name}: unexpected error ({type(exc).__name__}: {exc}), retrying in {delay}s")
+                        _log(f"{bot_name}: traceback: {traceback.format_exc()[:500]}")
                         time.sleep(delay)
                         total_retries += 1
                         continue
@@ -2063,7 +2090,9 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
         if exit_reason == "completed":
             _log(f"{bot_name}: model returned content, completing ({tool_iterations} tool iterations)")
             _write_heartbeat(heartbeat_file)
-            _auto_commit(bot_name, files_touched)
+            if _is_implementation_bot(bot_name):
+                ticket_id = _ticket_id_from_claim(state_dir, bot_name)
+                _auto_commit(bot_name, files_touched, ticket_id=ticket_id)
             _write_checkpoint(ckpt_file, bot_name, "completed")
             sys.exit(0)
         elif exit_reason == "iteration_limit":
@@ -2119,6 +2148,13 @@ if __name__ == "__main__":
         )
         sys.exit(2)
     _bot_name, _model, _heartbeat_file, _ckpt_file, _mission_file = sys.argv[1:6]
+    try:
+        from codebot.codebot_bootstrap import bootstrap as _bootstrap
+        _adapter = _bootstrap(Path(_heartbeat_file).parent.parent.parent)
+        if _adapter:
+            set_project_adapter(_adapter)
+    except Exception:
+        pass
     _fallback = sys.argv[6] if len(sys.argv) > 6 else ""
     _mtr = int(sys.argv[7]) if len(sys.argv) > 7 else 0
     _fb_chain = sys.argv[8].split(",") if len(sys.argv) > 8 and sys.argv[8] else []

@@ -79,19 +79,22 @@ ALL_MODELS = [
 # Pipeline State
 # ---------------------------------------------------------------------------
 
-def get_pipeline_state() -> dict[str, int]:
-    """Get current pipeline state counts from TicketStore."""
+def get_pipeline_state(store: Any | None = None) -> dict[str, int]:
+    """Get current pipeline state counts from TicketStore.
+    
+    Args:
+        store: Optional shared TicketStore instance for this tick. If supplied,
+               used directly to avoid an extra tickets.json read/parse.
+    """
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if not store_path.exists():
+        from codebot.ticket_engine import TicketState
+        from codebot.ticket_dispatcher import get_ticket_store
+        _store = store if store is not None else get_ticket_store()
+        if _store is None:
             return {}
-        store = TicketStore(store_path)
         counts: dict[str, int] = {}
         for state in TicketState:
-            tickets = store.list_by_state(state)
+            tickets = _store.list_by_state(state)
             if tickets:
                 counts[state.value] = len(tickets)
         return counts
@@ -132,15 +135,16 @@ def is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
 # Agent Availability
 # ---------------------------------------------------------------------------
 
-def apply_agent_availability(bots: dict[str, Any], stop_fn: Any = None, update_state_fn: Any = None) -> None:
+def apply_agent_availability(bots: dict[str, Any], stop_fn: Any = None, update_state_fn: Any = None, store: Any | None = None) -> None:
     """Enable or suppress bot spawns based on current ticket queue state.
     
     Args:
         bots: Dict of bot name to BotState
         stop_fn: Optional callable(bot, reason) to stop a process
         update_state_fn: Optional callable(bot, status) to persist state
+        store: Optional shared TicketStore instance for this tick.
     """
-    pipeline = get_pipeline_state()
+    pipeline = get_pipeline_state(store=store)
     ready = pipeline.get("READY", 0)
     decompose = pipeline.get("DECOMPOSE", 0)
     planning = pipeline.get("PLANNING", 0)
@@ -246,8 +250,14 @@ def rotate_model_on_error(bot: Any, bots: dict[str, Any] | None = None) -> str:
 # Ticket Transition on Bot Exit
 # ---------------------------------------------------------------------------
 
-def transition_ticket_on_success(bot: Any, bots: dict[str, Any]) -> None:
-    """Transition assigned ticket when bot exits cleanly (exit code 0)."""
+def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | None = None) -> None:
+    """Transition assigned ticket when bot exits cleanly (exit code 0).
+    
+    Args:
+        bot: The bot that completed
+        bots: Dict of all bots
+        store: Optional shared TicketStore instance for this tick.
+    """
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
     if not assigned_tid:
         try:
@@ -271,41 +281,36 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any]) -> None:
     base_role = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
     
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if store_path.exists():
-            ts = TicketStore(store_path)
+        from codebot.ticket_dispatcher import get_ticket_store
+        from codebot.ticket_engine import TicketState
+        ts = store if store is not None else get_ticket_store()
+        if ts is not None:
             t = ts.get(assigned_tid)
             if t is not None:
                 if base_role in REVIEWER_ROLE_NAMES:
-                    if t.state == TicketState.REVIEWING:
-                        ts.transition(assigned_tid, TicketState.VERIFYING)
-                        ts.flush()  # Ensure changes are written to disk immediately
-                        logger.info(f"Ticket {assigned_tid} -> VERIFYING (reviewer {bot.config.name} completed)")
+                    logger.info(f"Reviewer {bot.config.name} completed for ticket {assigned_tid} (verdict evaluation deferred to advance_reviewed_tickets)")
                 else:
                     if t.state == TicketState.IMPLEMENTING:
                         ts.transition(assigned_tid, TicketState.REVIEWING)
-                        ts.flush()  # Ensure changes are written to disk immediately
+                        ts.flush()
                         logger.info(f"Ticket {assigned_tid} -> REVIEWING (agent {bot.config.name} completed)")
-            # Clean up only this bot's claim, not reviewer claims
             claims_dir = STATE_DIR / "claims"
-            for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
-                try:
-                    data = json.loads(cf.read_text(encoding="utf-8"))
-                    claim_bot = data.get("bot", data.get("worker", data.get("agent", "")))
-                    if claim_bot == bot.config.name:
+            if base_role not in REVIEWER_ROLE_NAMES:
+                for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
+                    try:
+                        data = json.loads(cf.read_text(encoding="utf-8"))
+                        claim_bot = data.get("bot", data.get("worker", data.get("agent", "")))
+                        if claim_bot == bot.config.name:
+                            cf.unlink(missing_ok=True)
+                    except Exception:
                         cf.unlink(missing_ok=True)
-                except Exception:
-                    cf.unlink(missing_ok=True)
     except Exception as te:
         logger.warning(f"Ticket transition failed for {assigned_tid}: {te}")
     
     bot._assigned_ticket_id = ''
 
 
-def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int) -> None:
+def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int, store: Any | None = None) -> None:
     """Return ticket to READY when bot exits with error (non-zero, non-3).
     
     Ensures that genuinely failed work is returned to the READY queue for retry,
@@ -322,16 +327,14 @@ def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int) -
         return
     
     try:
-        from codebot.ticket_engine import TicketStore, TicketState
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if not store_path.exists():
-            logger.warning(f"Ticket store not found, cannot transition ticket {assigned_tid}")
+        from codebot.ticket_dispatcher import get_ticket_store
+        from codebot.ticket_engine import TicketState
+        ts = store if store is not None else get_ticket_store()
+        if ts is None:
+            logger.warning(f"Ticket store unavailable, cannot transition ticket {assigned_tid}")
             bot._assigned_ticket_id = ''
             return
         
-        ts = TicketStore(store_path)
         ticket = ts.get(assigned_tid)
         if not ticket:
             logger.warning(f"Ticket {assigned_tid} not found in store, clearing assignment")

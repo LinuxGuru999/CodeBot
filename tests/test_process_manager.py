@@ -4,7 +4,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,9 +13,24 @@ from codebot.process_manager import (
     BotState,
     _prepare_prompt_with_context,
     _prompt_read_lock,
+    _count_api_runner_processes,
     batch_read_heartbeats,
     read_heartbeat,
 )
+
+
+def test_count_api_runner_processes_matches_module_invocation():
+    completed = MagicMock(returncode=0, stdout="101\n102\n")
+
+    with patch("codebot.process_manager.subprocess.run", return_value=completed) as run:
+        assert _count_api_runner_processes() == 2
+
+    run.assert_called_once_with(
+        ["pgrep", "-f", "codebot.api_runner"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
 
 
 def test_prompt_read_lock_basic(tmp_path):

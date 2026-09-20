@@ -252,7 +252,7 @@ class TestEdit:
 
     def test_edit_never_raises(self, ws, ws_file):
         ws_file("ok.txt", "one")
-        with patch.object(Path, "read_text", side_effect=OSError("read fail")):
+        with patch("codebot.api_tools.open", side_effect=OSError("open fail")):
             result = edit("ok.txt", "one", "two")
             assert result["success"] is False
 
@@ -488,6 +488,16 @@ class TestBash:
         assert result["success"] is False
         assert result["error"] == "command denied"
 
+    def test_bash_shell_redirection_denied(self, ws):
+        result = bash("echo hi > output.txt")
+        assert result["success"] is False
+        assert result["error"] == "command denied"
+
+    def test_bash_command_substitution_denied(self, ws):
+        result = bash("echo $(whoami)")
+        assert result["success"] is False
+        assert result["error"] == "command denied"
+
     def test_bash_timeout(self, ws):
         # Mock subprocess.run to raise TimeoutExpired
         def fake_run(*args, **kwargs):
@@ -714,6 +724,98 @@ class TestBatchGrep:
     def test_batch_grep_path_denied(self, ws):
         result = batch_grep(["foo"], path="../escape")
         assert result["success"] is True
+
+
+class TestEditLocking:
+    """Tests for file locking in edit()."""
+
+    def test_edit_lock_order_flock_ex_before_read(self, ws, ws_file):
+        """Verify flock is called with LOCK_EX before read and LOCK_UN after replace."""
+        ws_file("locked.txt", "unique_marker_12345")
+        # Import the actual flock to verify it's not mocked
+        from codebot.file_lock import flock as real_flock, LOCK_EX as real_LOCK_EX, LOCK_UN as real_LOCK_UN
+        
+        call_log = []
+        
+        def logging_flock(fd, op):
+            call_log.append((fd, op))
+            real_flock(fd, op)
+        
+        with patch("codebot.api_tools.flock", side_effect=logging_flock):
+            result = edit("locked.txt", "unique_marker_12345", "replaced")
+            assert result["success"] is True
+            # Check that flock was called with LOCK_EX (acquire) and LOCK_UN (release)
+            assert len(call_log) >= 2
+            # First call should be LOCK_EX (before read)
+            assert call_log[0][1] == real_LOCK_EX
+            # Last call should be LOCK_UN (after replace)
+            assert call_log[-1][1] == real_LOCK_UN
+
+    def test_edit_concurrent_no_data_loss(self, ws):
+        """Verify concurrent edits to the same file don't lose data."""
+        import threading
+        import time
+        import traceback
+
+        # Create a file with multiple unique markers
+        markers = [f"MARKER_{i:04d}" for i in range(16)]
+        initial_content = "\n".join(markers) + "\n"
+        test_file = ws / "concurrent.txt"
+        test_file.write_text(initial_content, encoding="utf-8")
+
+        results = []
+        errors = []
+        tracebacks = []
+        barrier = threading.Barrier(len(markers))
+
+        def do_edit(marker_idx):
+            try:
+                # Synchronize all threads to start at the same time
+                barrier.wait(timeout=10)
+                marker = f"MARKER_{marker_idx:04d}"
+                replacement = f"REPLACED_{marker_idx:04d}"
+                result = edit("concurrent.txt", marker, replacement)
+                results.append((marker_idx, result))
+            except Exception as e:
+                tb = traceback.format_exc()
+                tracebacks.append((marker_idx, tb))
+                errors.append((marker_idx, str(e)))
+
+        # Spawn threads to edit concurrently
+        threads = []
+        for i in range(len(markers)):
+            t = threading.Thread(target=do_edit, args=(i,))
+            threads.append(t)
+
+        # Start all threads
+        for t in threads:
+            t.start()
+
+        # Wait for all to complete
+        for t in threads:
+            t.join(timeout=30)
+
+        # Check no errors occurred
+        if tracebacks:
+            for idx, tb in tracebacks:
+                print(f"Thread {idx} traceback:\n{tb}")
+        assert len(errors) == 0, f"Errors during concurrent edit: {errors}"
+
+        # Check all edits succeeded
+        success_count = sum(1 for _, r in results if r["success"])
+        print(f"Results: {sorted(results)}")
+        print(f"Success count: {success_count}/{len(markers)}")
+        for idx, r in sorted(results):
+            print(f"  Marker {idx}: success={r['success']}, error={r['error']}")
+        assert success_count == len(markers), f"Only {success_count}/{len(markers)} edits succeeded: {results}"
+
+        # Verify final content has all replacements
+        final_content = test_file.read_text(encoding="utf-8")
+        for i in range(len(markers)):
+            replacement = f"REPLACED_{i:04d}"
+            assert replacement in final_content, f"Missing replacement: {replacement} in content:\n{final_content}"
+            original = f"MARKER_{i:04d}"
+            assert original not in final_content, f"Original marker still present: {original}"
 
 
 class TestAliases:

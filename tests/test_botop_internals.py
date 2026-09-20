@@ -25,6 +25,7 @@ from botop import (
     _parse_checkpoint_text,
     _collect_agents,
     _collect_ticket_throughput,
+    _implementation_claims,
     cmd_status,
     cmd_health,
     _find_state_dir,
@@ -248,6 +249,21 @@ def test_collect_ticket_throughput_throughput_24h_7d():
     assert result["throughput_7d"] >= 2
 
 
+def test_implementation_claims_excludes_non_implementers():
+    agents = [{"name": "backend_implementer-2", "current_task": "tool:write executing"}]
+    claims = [
+        {"worker": "backend_implementer-2", "ticket_id": "CB-IMPLEMENT"},
+        {"worker": "implementation_planner", "ticket_id": "CB-PLAN"},
+        {"worker": "security_reviewer", "ticket_id": "CB-REVIEW"},
+    ]
+
+    assert _implementation_claims(agents, claims) == [{
+        "ticket_id": "CB-IMPLEMENT",
+        "worker": "backend_implementer-2",
+        "task": "tool:write executing",
+    }]
+
+
 # ---------------------------------------------------------------------------
 # cmd_status tests
 # ---------------------------------------------------------------------------
@@ -335,3 +351,63 @@ def test_cmd_health_json_output(tmp_path, capsys):
                                                         output = json.loads(captured.out)
                                                         assert "project" in output
                                                         assert "orchestrator" in output
+
+
+# ---------------------------------------------------------------------------
+# Drain status text marker tests (CB-5100583-4313)
+# ---------------------------------------------------------------------------
+
+def test_drain_status_text_markers_in_source():
+    """Verify drain status strings include explicit [DRAIN] and [OK] markers."""
+    botop_path = Path(__file__).parent.parent / "codebot" / "botop.py"
+    content = botop_path.read_text()
+    
+    # Check drain_txt location uses [DRAIN] and [OK] markers
+    assert '[DRAIN] ACTIVE' in content, "drain_txt should contain '[DRAIN] ACTIVE' marker"
+    assert '[OK] clear' in content, "drain_txt should contain '[OK] clear' marker"
+    
+    # Check drain_badge location uses [DRAIN] and [OK] markers
+    assert '[DRAIN]' in content, "drain_badge should contain '[DRAIN]' marker"
+    assert '[OK]' in content, "drain_badge should contain '[OK]' marker"
+
+
+def test_drain_status_readable_without_color(tmp_path, capsys):
+    """Verify drain status is readable with NO_COLOR=1 (ticket CB-5100583-4313)."""
+    state_dir = tmp_path / ".codebot" / "state"
+    state_dir.mkdir(parents=True)
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    
+    # Test with drain active
+    with patch('codebot.botop._find_state_dir', return_value=state_dir):
+        with patch('codebot.botop._find_logs_dir', return_value=logs_dir):
+            with patch('codebot.botop._collect_orchestrator_info', return_value={"pid": 123, "alive": True, "drain": True}):
+                with patch('codebot.botop._collect_agents', return_value=[]):
+                    with patch.dict('os.environ', {'NO_COLOR': '1'}):
+                        exit_code = cmd_status(tmp_path, verbose=False, json_out=False)
+                        assert exit_code == 0
+                        captured = capsys.readouterr()
+                        # Verify [DRAIN] marker appears in output
+                        assert '[DRAIN]' in captured.out, f"Expected '[DRAIN]' marker in output: {captured.out}"
+                        assert 'ACTIVE' in captured.out, f"Expected 'ACTIVE' in output: {captured.out}"
+
+
+def test_drain_status_clear_readable_without_color(tmp_path, capsys):
+    """Verify drain clear status is readable with NO_COLOR=1 (ticket CB-5100583-4313)."""
+    state_dir = tmp_path / ".codebot" / "state"
+    state_dir.mkdir(parents=True)
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    
+    # Test with drain clear
+    with patch('codebot.botop._find_state_dir', return_value=state_dir):
+        with patch('codebot.botop._find_logs_dir', return_value=logs_dir):
+            with patch('codebot.botop._collect_orchestrator_info', return_value={"pid": 123, "alive": True, "drain": False}):
+                with patch('codebot.botop._collect_agents', return_value=[]):
+                    with patch.dict('os.environ', {'NO_COLOR': '1'}):
+                        exit_code = cmd_status(tmp_path, verbose=False, json_out=False)
+                        assert exit_code == 0
+                        captured = capsys.readouterr()
+                        # Verify [OK] marker appears in output
+                        assert '[OK]' in captured.out, f"Expected '[OK]' marker in output: {captured.out}"
+                        assert 'clear' in captured.out, f"Expected 'clear' in output: {captured.out}"

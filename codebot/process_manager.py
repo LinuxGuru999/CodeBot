@@ -349,10 +349,10 @@ _SPAWN_STAGGER_SECONDS: float = 5.0
 
 
 def _count_api_runner_processes() -> int:
-    """Count running api_runner.py processes using pgrep."""
+    """Count running module-invoked api runner processes using pgrep."""
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "api_runner.py"],
+            ["pgrep", "-f", "codebot.api_runner"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -915,13 +915,10 @@ def _get_code_mtimes() -> dict[str, float]:
 def _load_ticket_context(ticket_id: str) -> str:
     """Load ticket context for injection into bot prompt."""
     try:
-        from codebot.ticket_engine import TicketStore
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if not store_path.exists():
+        from codebot.ticket_dispatcher import get_ticket_store
+        ts = get_ticket_store()
+        if ts is None:
             return ""
-        ts = TicketStore(store_path)
         t = ts.get(ticket_id)
         if t is None:
             return ""

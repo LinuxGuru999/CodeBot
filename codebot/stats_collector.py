@@ -20,10 +20,21 @@ Invariants
 - Data persists across restarts via atomic JSON file writes
 """
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+
+_CLEANUP_INTERVAL = 10  # trigger cleanup every N record_call invocations
+_CLEANUP_DEFAULT_MAX_SUCCESSES = 3  # remove after N consecutive successes
+_CLEANUP_DEFAULT_MAX_AGE = 86400.0  # remove entries older than 24 hours
+
+# Module-level counter for amortised cleanup triggering
+_calls_since_cleanup: int = 0
 
 
 class StatsCollector:
@@ -80,6 +91,7 @@ class StatsCollector:
             tokens_in: Input token count
             tokens_out: Output token count
         """
+        global _calls_since_cleanup
         key = f"{model_name}:{task_type}"
         if key not in self._cache:
             self._cache[key] = {
@@ -89,22 +101,74 @@ class StatsCollector:
                 "total_cost": 0.0,
                 "total_tokens_in": 0,
                 "total_tokens_out": 0,
-                "last_updated": 0.0
+                "last_updated": 0.0,
+                "consecutive_successes": 0
             }
         
         entry = self._cache[key]
         entry["total_calls"] = entry.get("total_calls", 0) + 1
         if success:
             entry["successful_calls"] = entry.get("successful_calls", 0) + 1
+            entry["consecutive_successes"] = entry.get("consecutive_successes", 0) + 1
         else:
             entry["failed_calls"] = entry.get("failed_calls", 0) + 1
+            entry["consecutive_successes"] = 0
         entry["total_cost"] = entry.get("total_cost", 0.0) + cost
         entry["total_tokens_in"] = entry.get("total_tokens_in", 0) + tokens_in
         entry["total_tokens_out"] = entry.get("total_tokens_out", 0) + tokens_out
         entry["last_updated"] = time.time()
-        
+
+        # Check if this specific entry qualifies for immediate cleanup
+        if entry.get("consecutive_successes", 0) >= _CLEANUP_DEFAULT_MAX_SUCCESSES:
+            logger.debug("Cleaning up recovered stats entry: %s", key)
+            del self._cache[key]
+            self._save()
+            return
+
         self._save()
+
+        # Amortised cleanup: trigger periodically to avoid per-call overhead
+        _calls_since_cleanup += 1
+        if _calls_since_cleanup >= _CLEANUP_INTERVAL:
+            _calls_since_cleanup = 0
+            self.cleanup_stale_entries()
     
+    def cleanup_stale_entries(
+        self,
+        max_consecutive_successes: int = _CLEANUP_DEFAULT_MAX_SUCCESSES,
+        max_age_seconds: float = _CLEANUP_DEFAULT_MAX_AGE
+    ) -> int:
+        """Remove entries that have recovered or gone stale.
+        
+        An entry is removed if either condition is met:
+          - consecutive_successes >= max_consecutive_successes (model has recovered)
+          - time since last_updated > max_age_seconds (entry is stale)
+        
+        Args:
+            max_consecutive_successes: Threshold for consecutive successes to prune.
+            max_age_seconds: Maximum age in seconds before an entry is considered stale.
+        
+        Returns:
+            Number of entries removed.
+        """
+        now = time.time()
+        keys_to_remove: list[str] = []
+        for key, entry in self._cache.items():
+            successes = entry.get("consecutive_successes", 0)
+            last_updated = entry.get("last_updated", 0.0)
+            age = now - last_updated if last_updated > 0 else float("inf")
+            if successes >= max_consecutive_successes or age > max_age_seconds:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            logger.debug("Cleaning up stale stats entry: %s", key)
+            del self._cache[key]
+        
+        if keys_to_remove:
+            self._save()
+        
+        return len(keys_to_remove)
+
     def get_stats(
         self,
         model_name: Optional[str] = None,

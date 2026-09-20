@@ -295,6 +295,24 @@ class TestCurrentDayUtc:
 
 
 class TestConcurrentWriteSafety:
+    def test_record_usage_preserves_every_threaded_update(self, tmp_path, monkeypatch):
+        p = tmp_path / "ledger.json"
+        n_threads = 4
+        n_writes = 25
+        monkeypatch.setattr(tb, "_FLUSH_AFTER_WRITES", 3)
+
+        def worker():
+            for _ in range(n_writes):
+                record_usage("2026-01-01", "gpt-4", 1, 0, path=p)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert day_total("2026-01-01", path=p) == n_threads * n_writes
+
     def test_sequential_locked_writes_no_lost_updates(self, tmp_path):
         p = tmp_path / "ledger.json"
         for _ in range(50):
@@ -462,4 +480,3 @@ class TestLedgerFlushBehavior:
         assert tb._pending_writes == 1
         record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
         assert tb._pending_writes == 0
-

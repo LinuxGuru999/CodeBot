@@ -280,13 +280,10 @@ def collect_reviewer_feedback_for_trigger(bot_name: str) -> List[Dict[str, Any]]
     """
     feedback = []
     try:
-        from codebot.ticket_engine import TicketStore
-        store_path = _STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if not store_path.exists():
+        from codebot.ticket_dispatcher import get_ticket_store
+        ts = get_ticket_store()
+        if ts is None:
             return feedback
-        ts = TicketStore(store_path)
         for ticket in ts._tickets.values():
             if ticket.assigned_agent == bot_name and ticket.rework_count >= 3 and ticket.reviewer_feedback:
                 for fb in ticket.reviewer_feedback:

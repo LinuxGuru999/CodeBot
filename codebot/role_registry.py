@@ -29,9 +29,13 @@ Role Count: 29 (9 discovery + 6 implementation + 8 review + 4 control + 2 planni
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class RoleCategory(str, Enum):
@@ -442,17 +446,63 @@ ALL_ROLES: list[AgentRole] = DISCOVERY_ROLES + IMPLEMENTATION_ROLES + REVIEW_ROL
 ROLE_REGISTRY: dict[str, AgentRole] = {r.name: r for r in ALL_ROLES}
 
 
-def get_role(name: str) -> AgentRole | None:
-    return ROLE_REGISTRY.get(name)
+def get_role(name: str, ticket_id: str | None = None) -> AgentRole | None:
+    """Retrieve a role by name with structured error logging.
+    
+    Args:
+        name: The role name to look up
+        ticket_id: Optional ticket ID for context in error logs
+    
+    Returns:
+        AgentRole if found, None otherwise
+    """
+    try:
+        return ROLE_REGISTRY.get(name)
+    except Exception as e:
+        context = {"role_name": name}
+        if ticket_id:
+            context["ticket_id"] = ticket_id
+        logger.error(
+            "Role lookup failed: %s(%s) - %s: %s\nTraceback:\n%s",
+            type(e).__name__,
+            context,
+            type(e).__name__,
+            str(e),
+            traceback.format_exc()
+        )
+        return None
 
 
 def roles_by_category(category: RoleCategory) -> list[AgentRole]:
     return [r for r in ALL_ROLES if r.category == category]
 
 
-def find_adversarial_reviewers(implementer_role: str) -> list[AgentRole]:
-    reviewers = []
-    for role in REVIEW_ROLES:
-        if implementer_role in role.adversarial_to:
-            reviewers.append(role)
-    return reviewers
+def find_adversarial_reviewers(implementer_role: str, ticket_id: str | None = None) -> list[AgentRole]:
+    """Find reviewers adversarial to the given implementer role with structured error logging.
+    
+    Args:
+        implementer_role: The implementer role name to find adversarial reviewers for
+        ticket_id: Optional ticket ID for context in error logs
+    
+    Returns:
+        List of adversarial reviewer roles, empty list on error
+    """
+    try:
+        reviewers = []
+        for role in REVIEW_ROLES:
+            if implementer_role in role.adversarial_to:
+                reviewers.append(role)
+        return reviewers
+    except Exception as e:
+        context = {"implementer_role": implementer_role}
+        if ticket_id:
+            context["ticket_id"] = ticket_id
+        logger.error(
+            "Finding adversarial reviewers failed: %s(%s) - %s: %s\nTraceback:\n%s",
+            type(e).__name__,
+            context,
+            type(e).__name__,
+            str(e),
+            traceback.format_exc()
+        )
+        return []

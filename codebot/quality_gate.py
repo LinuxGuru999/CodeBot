@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
@@ -50,7 +51,7 @@ class GateEvaluation:
     
     Attributes:
         gate_name: Name of the gate (e.g., 'build', 'unit_tests')
-        check_type: Type of check (e.g., 'build', 'test', 'lint', 'security')
+        result: Gate execution result
         command: The command that was executed
         output: Captured stdout/stderr (truncated to 2000 chars)
         duration_ms: Execution time in milliseconds
@@ -59,17 +60,123 @@ class GateEvaluation:
         error_message: Error details if result is ERROR
     """
     gate_name: str
-    check_type: str
+    result: GateResult
     command: str
     output: str
-    duration_ms: int
+    duration_ms: float
     passed: bool
-    required: bool
+    required: bool = True
     error_message: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         return d
+
+
+@dataclass(frozen=True)
+class Gate:
+    """Definition of a quality gate to be executed.
+    
+    Attributes:
+        name: Name of the gate (e.g., 'build', 'unit_tests')
+        check_type: Type of check ('command', 'lint', 'test', etc.)
+        command: The command to execute for this gate
+        timeout: Timeout in seconds (default 120)
+        pass_criteria: Criteria for passing (default 'exit_code==0')
+    """
+    name: str
+    check_type: str = "command"
+    command: str = ""
+    timeout: int = 120
+    pass_criteria: str = "exit_code==0"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Gate:
+        """Create a Gate from a dictionary, with validation and defaults."""
+        if "name" not in data:
+            raise ValueError("Gate definition missing required field: 'name'")
+        if "command" not in data:
+            raise ValueError(f"Gate '{data.get('name', 'unknown')}' missing required field: 'command'")
+        
+        timeout_val = data.get("timeout", 120)
+        try:
+            timeout_int = int(timeout_val)
+        except (ValueError, TypeError):
+            raise ValueError(f"Gate '{data['name']}' has invalid timeout: {timeout_val}")
+        
+        if timeout_int <= 0:
+            raise ValueError(f"Gate '{data['name']}' has non-positive timeout: {timeout_int}")
+        
+        return cls(
+            name=data["name"],
+            check_type=data.get("check_type", "command"),
+            command=data["command"],
+            timeout=timeout_int,
+            pass_criteria=data.get("pass_criteria", "exit_code==0"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert Gate to dictionary representation."""
+        return {
+            "name": self.name,
+            "check_type": self.check_type,
+            "command": self.command,
+            "timeout": self.timeout,
+            "pass_criteria": self.pass_criteria,
+        }
+
+
+def load_gates_from_dict(data: dict[str, Any]) -> list[Gate]:
+    """Load a list of Gate objects from a dictionary.
+    
+    Expected format:
+        {"gates": [{"name": "...", "command": "...", ...}, ...]}
+    
+    Returns empty list if 'gates' key is missing or not a list.
+    Raises ValueError if any gate definition is invalid.
+    """
+    gates_data = data.get("gates", [])
+    if not isinstance(gates_data, list):
+        return []
+    
+    gates = []
+    for i, gate_data in enumerate(gates_data):
+        if not isinstance(gate_data, dict):
+            raise ValueError(f"Gate at index {i} is not a dictionary")
+        try:
+            gate = Gate.from_dict(gate_data)
+            gates.append(gate)
+        except ValueError as e:
+            raise ValueError(f"Gate at index {i}: {e}")
+    
+    return gates
+
+
+def load_gates_yaml(path: Path) -> list[Gate]:
+    """Load gates from a YAML file.
+    
+    Uses the existing _parse_simple_yaml stdlib-only parser.
+    Raises ValueError if file cannot be parsed or gates are invalid.
+    """
+    if not path.exists():
+        raise ValueError(f"Gate file not found: {path}")
+    
+    text = path.read_text(encoding="utf-8")
+    parsed = _parse_simple_yaml(text)
+    return load_gates_from_dict(parsed)
+
+
+def load_gates(path: Path | None = None) -> list[Gate]:
+    """Load gates from YAML file or return empty list.
+    
+    Default path: .codebot/gates.yaml relative to workspace.
+    Returns empty list if no path provided or file doesn't exist.
+    """
+    if path is None:
+        return []
+    if not path.exists():
+        return []
+    return load_gates_yaml(path)
 
 
 @dataclass
@@ -176,7 +283,7 @@ def evaluate_gate(
     command = command_template.replace("{file}", file_context).replace("{test_dirs}", test_dirs)
     start = time.monotonic()
     try:
-        argv = command.split() if isinstance(command, str) else command
+        argv = shlex.split(command) if isinstance(command, str) else command
         proc = subprocess.run(
             argv,
             shell=False,
@@ -189,17 +296,17 @@ def evaluate_gate(
         output = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0:
             return GateEvaluation(name, GateResult.PASS, command, output[:2000], duration, True)
-        return GateEvaluation(name, GateResult.FAIL, command, output[:2000], duration, True,
+        return GateEvaluation(name, GateResult.FAIL, command, output[:2000], duration, False, True,
                               f"exit code {proc.returncode}")
     except subprocess.TimeoutExpired:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, True, "timeout")
+        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, True, "timeout")
     except FileNotFoundError:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, True, "command not found")
+        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, True, "command not found")
     except Exception as e:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, True, str(e)[:500])
+        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, True, str(e)[:500])
 
 
 def run_quality_gates(
@@ -239,8 +346,6 @@ def run_quality_gates(
         if name == "unit_tests" and not changed_files:
             continue
         ev = evaluate_gate(gate, workspace, file_ctx, scoped_test_dirs)
-        if name == "unit_tests" and not ev.passed and scoped_test_dirs != test_dirs:
-            ev = GateEvaluation(ev.gate_name, GateResult.PASS, ev.command, "scoped tests passed", ev.duration_ms, ev.required)
         evaluations.append(ev)
 
     active_conditions = set(conditions or [])

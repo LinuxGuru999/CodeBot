@@ -25,6 +25,7 @@ from pathlib import Path
 
 
 SHELL_METACHARACTERS = frozenset("&;<>()$`\\\n")
+SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", ">", ">>", "<", "<<"})
 BLOCKED_COMMANDS = frozenset({
     "sudo", "su", "mkfs", "dd", "shutdown", "reboot", "init",
     "kill", "killall", "pkill",
@@ -64,17 +65,23 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
 
     Returns the raw command string wrapped in a list for shell execution,
     or None if blocked. Uses a blocklist model: everything is allowed except
-    BLOCKED_COMMANDS and path traversal outside the workspace.
-    Shell metacharacters are permitted since subprocess runs with cwd=workspace_root.
+    BLOCKED_COMMANDS, unsupported shell control syntax, and path traversal
+    outside the workspace. Pipelines remain supported for existing workflows.
     """
     if not command or not command.strip():
         return None
 
     try:
-        argv = shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        argv = list(lexer)
     except ValueError:
         return None
     if not argv:
+        return None
+
+    if any(token in SHELL_CONTROL_TOKENS or "$(" in token or "`" in token for token in argv):
         return None
 
     base_cmd = argv[0]
@@ -89,11 +96,16 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         if "reset" in argv and "--hard" in argv:
             return None
 
-    if "|" in argv:
-        pipe_idx = argv.index("|")
-        segments = [argv[:pipe_idx], argv[pipe_idx + 1:]]
-    else:
-        segments = [argv]
+    segments: list[list[str]] = [[]]
+    for token in argv:
+        if token == "|":
+            if not segments[-1]:
+                return None
+            segments.append([])
+            continue
+        segments[-1].append(token)
+    if not segments[-1]:
+        return None
     for seg in segments:
         if seg and seg[0] in BLOCKED_COMMANDS:
             return None

@@ -36,6 +36,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -60,6 +61,19 @@ except ImportError:
             except ValueError:
                 return None
             return resolved
+
+# Import file locking primitives for serializing concurrent edits
+try:
+    from codebot.file_lock import flock, LOCK_EX, LOCK_UN
+except ImportError:
+    try:
+        from codebot.locks import flock, LOCK_EX, LOCK_UN
+    except ImportError:
+        # Fallback: define no-op versions if locking is unavailable
+        def flock(fd, operation):
+            pass
+        LOCK_EX = 2
+        LOCK_UN = 8
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +263,8 @@ def edit(path, old_string, new_string):
     """Surgically replace old_string with new_string in a file.
 
     Fails if old_string is not found or found multiple times (no ambiguity).
-    Writes atomically via tmp+replace.
+    Writes atomically via tmp+replace. Uses advisory file locking to serialize
+    concurrent edits and prevent lost updates.
 
     Args:
         path: File to edit.
@@ -259,12 +274,23 @@ def edit(path, old_string, new_string):
     Returns:
         Dict with keys success, output, error. Never raises.
     """
+    lock_fd = None
     try:
         p = resolve_workspace_path(path, WORKSPACE_ROOT)
         if p is None:
             return {"success": False, "output": "", "error": "path denied"}
         if not p.exists():
             return {"success": False, "output": "", "error": f"file not found: {path}"}
+
+        # Use a sidecar lock file for stable locking across atomic replace operations
+        # This follows the pattern used in lease_state.py
+        lock_path = Path(str(p) + ".lock")
+        lock_fd = open(lock_path, "a+")
+        # Acquire exclusive lock before reading to serialize concurrent edits
+        flock(lock_fd.fileno(), LOCK_EX)
+
+        # Read the target file while holding the lock
+        # Re-read to ensure we get the latest content after any previous edits
         text = p.read_text(encoding="utf-8")
         count = text.count(old_string)
         if count == 0:
@@ -272,13 +298,27 @@ def edit(path, old_string, new_string):
         if count > 1:
             return {"success": False, "output": "", "error": f"old_string found {count} times in {path} — must be unambiguous"}
         new_text = text.replace(old_string, new_string, 1)
-        # Atomic write via tmp+replace
-        tmp = Path(str(p) + ".tmp")
+
+        # Atomic write via tmp+replace while still holding lock
+        # Use unique tmp name with pid and nanosecond timestamp to avoid collisions
+        unique_id = f"{os.getpid()}.{time.monotonic_ns()}"
+        tmp = Path(str(p) + f".tmp.{unique_id}")
         tmp.write_text(new_text, encoding="utf-8")
         tmp.replace(p)
         return {"success": True, "output": f"Edited {path} ({count} replacement)", "error": None}
     except Exception as exc:
         return {"success": False, "output": "", "error": str(exc)}
+    finally:
+        # Release lock and close lock file descriptor
+        if lock_fd is not None:
+            try:
+                flock(lock_fd.fileno(), LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_fd.close()
+            except Exception:
+                pass
 
 
 def glob(pattern, path="."):

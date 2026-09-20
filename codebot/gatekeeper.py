@@ -114,23 +114,13 @@ class Gatekeeper:
 
     def _transition_ticket(self, ticket_id: str, decision: str, failed_gates: list[str] | None = None) -> None:
         try:
-            from codebot.ticket_engine import TicketStore, TicketState
+            from codebot.ticket_engine import TicketState
+            from codebot.ticket_dispatcher import get_ticket_store
 
-            store_path = self._state_dir / "tickets.json"
-            if not store_path.exists():
-                for alt in [
-                    Path(".codebot/state/tickets.json"),
-                    self._state_dir.parent / "tickets.json",
-                ]:
-                    if alt.exists():
-                        store_path = alt
-                        break
-
-            if not store_path.exists():
-                logger.warning("tickets.json not found for ticket %s", ticket_id)
+            store = get_ticket_store()
+            if store is None:
+                logger.warning("TicketStore unavailable for ticket %s", ticket_id)
                 return
-
-            store = TicketStore(store_path)
             ticket = store.get(ticket_id)
 
             if ticket is None:

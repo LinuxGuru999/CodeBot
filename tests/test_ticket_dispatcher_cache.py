@@ -2,7 +2,7 @@
 """Tests for TicketStore cache sharing in ticket_dispatcher.
 
 Verifies that:
-- Multiple calls to _get_ticket_store() return the same instance within a tick
+- Multiple calls to get_ticket_store() return the same instance within a tick
 - clear_ticket_store_cache() invalidates the cache and forces reload
 - The orchestrator tick uses exactly one disk read per cycle
 """
@@ -50,15 +50,15 @@ def reset_cache():
 # ---------------------------------------------------------------------------
 
 class TestTicketStoreCacheSharing:
-    """Verify that _get_ticket_store returns the same instance across calls."""
+    """Verify that get_ticket_store returns the same instance across calls."""
 
     def test_returns_same_instance(self, ticket_store_dir: Path):
-        """Multiple calls to _get_ticket_store() should return the same object."""
+        """Multiple calls to get_ticket_store() should return the same object."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
-            store1 = td._get_ticket_store()
-            store2 = td._get_ticket_store()
-            store3 = td._get_ticket_store()
+            store1 = td.get_ticket_store()
+            store2 = td.get_ticket_store()
+            store3 = td.get_ticket_store()
             assert store1 is not None
             assert store1 is store2
             assert store2 is store3
@@ -67,7 +67,7 @@ class TestTicketStoreCacheSharing:
         """The cached instance should be stored in the module-level variable."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
-            store = td._get_ticket_store()
+            store = td.get_ticket_store()
             assert td._ticket_store_cache is store
 
     def test_returns_none_when_no_file(self, tmp_path: Path, monkeypatch):
@@ -89,7 +89,7 @@ class TestTicketStoreCacheSharing:
 
         with patch.object(td, "STATE_DIR", empty_dir), \
              patch.object(Path, "exists", mock_exists):
-            store = td._get_ticket_store()
+            store = td.get_ticket_store()
             assert store is None
 
 
@@ -104,18 +104,18 @@ class TestClearTicketStoreCache:
         """clear_ticket_store_cache() should set _ticket_store_cache to None."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
-            td._get_ticket_store()
+            td.get_ticket_store()
             assert td._ticket_store_cache is not None
             td.clear_ticket_store_cache()
             assert td._ticket_store_cache is None
 
     def test_clear_forces_new_instance(self, ticket_store_dir: Path):
-        """After clear, _get_ticket_store should create a new instance."""
+        """After clear, get_ticket_store should create a new instance."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
-            store1 = td._get_ticket_store()
+            store1 = td.get_ticket_store()
             td.clear_ticket_store_cache()
-            store2 = td._get_ticket_store()
+            store2 = td.get_ticket_store()
             assert store1 is not None
             assert store2 is not None
             assert store1 is not store2
@@ -145,6 +145,7 @@ class TestOrchestratorTickIntegration:
         """orchestrator.py should import clear_ticket_store_cache."""
         import codebot.orchestrator as orch
         assert hasattr(orch, "clear_ticket_store_cache")
+        assert hasattr(orch, "get_ticket_store")
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +153,7 @@ class TestOrchestratorTickIntegration:
 # ---------------------------------------------------------------------------
 
 class TestDispatcherFunctionsUseCache:
-    """Verify all dispatcher functions go through _get_ticket_store."""
+    """Verify all dispatcher functions go through get_ticket_store."""
 
     DIRECT_IMPORT_REFS = [
         "TicketStore(",
@@ -164,21 +165,21 @@ class TestDispatcherFunctionsUseCache:
         import codebot.ticket_dispatcher as td
         source_file = Path(td.__file__)
         source_text = source_file.read_text(encoding="utf-8")
-        # Find lines with direct TicketStore( instantiation, excluding _get_ticket_store
+        # Find lines with direct TicketStore( instantiation, excluding get_ticket_store
         in_get_ticket_store = False
         for line in source_text.splitlines():
             stripped = line.strip()
-            if "def _get_ticket_store" in stripped:
+            if "def get_ticket_store" in stripped:
                 in_get_ticket_store = True
                 continue
-            if in_get_ticket_store and stripped.startswith("def ") and not stripped.startswith("def _get_ticket_store"):
+            if in_get_ticket_store and stripped.startswith("def ") and not stripped.startswith("def get_ticket_store"):
                 in_get_ticket_store = False
             if in_get_ticket_store:
                 continue
             for ref in self.DIRECT_IMPORT_REFS:
                 if ref in line and "from codebot.ticket_engine import TicketStore" not in line:
                     pytest.fail(
-                        f"Direct TicketStore instantiation found outside _get_ticket_store: {line.strip()}"
+                        f"Direct TicketStore instantiation found outside get_ticket_store: {line.strip()}"
                     )
 
     def test_all_dispatch_functions_call_get_ticket_store(self):
@@ -217,8 +218,8 @@ class TestDispatcherFunctionsUseCache:
                         break
 
             body_text = "\n".join(func_body_lines)
-            assert "_get_ticket_store()" in body_text, (
-                f"Function {func_name} does not call _get_ticket_store()"
+            assert "_get_ticket_store()" in body_text or "get_ticket_store()" in body_text, (
+                f"Function {func_name} does not call get_ticket_store()"
             )
 
 
@@ -230,15 +231,15 @@ class TestCacheBenchmark:
     """Verify the cache eliminates per-call overhead."""
 
     def test_cached_access_is_fast(self, ticket_store_dir: Path):
-        """10 calls to _get_ticket_store with cache should be well under 10ms."""
+        """10 calls to get_ticket_store with cache should be well under 10ms."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
             # Prime the cache
-            td._get_ticket_store()
+            td.get_ticket_store()
             # Time 10 subsequent cached calls
             start = time.monotonic()
             for _ in range(10):
-                ts = td._get_ticket_store()
+                ts = td.get_ticket_store()
                 assert ts is not None
             elapsed_ms = (time.monotonic() - start) * 1000
             # Cached access should be sub-millisecond for 10 calls
@@ -250,7 +251,7 @@ class TestCacheBenchmark:
         with patch.object(td, "STATE_DIR", ticket_store_dir):
             start = time.monotonic()
             td.clear_ticket_store_cache()
-            ts = td._get_ticket_store()
+            ts = td.get_ticket_store()
             assert ts is not None
             elapsed_ms = (time.monotonic() - start) * 1000
             assert elapsed_ms < 10, f"Clear+reload took {elapsed_ms:.2f}ms (expected <10ms)"

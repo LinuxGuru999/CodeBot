@@ -21,11 +21,13 @@ Invariants
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +86,13 @@ TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
 CLAIM_TTL_SECONDS = 1800
 SWEEP_INTERVAL = 300
 _last_sweep_time: float = 0.0
+
+# ---------------------------------------------------------------------------
+# In-Memory Claim Index
+# ---------------------------------------------------------------------------
+# Maps claim_file_name -> {"worker": str, "at": float, "path": Path}
+# Eliminates disk I/O during sweep by tracking claims in memory.
+_claim_index: dict[str, dict[str, Any]] = {}
 
 DEMAND_STAGGER_SECONDS = 1.0
 REVIEWER_TYPES = (
@@ -156,13 +165,19 @@ def clear_ticket_store_cache() -> None:
     logger.debug("TicketStore cache cleared")
 
 
-def _get_ticket_store():
-    """Get TicketStore instance with per-tick caching.
+def get_ticket_store():
+    """Get a shared TicketStore instance, cached per orchestrator tick.
 
-    Returns a shared, module-level TicketStore that is only instantiated
-    once between calls to ``clear_ticket_store_cache()``.  This eliminates
-    redundant disk reads and JSON parses when multiple dispatcher functions
-    are invoked within a single orchestrator tick.
+    Returns a module-level TicketStore that is only instantiated once between
+    calls to ``clear_ticket_store_cache()``.  This eliminates redundant disk
+    reads and JSON parses when multiple dispatcher/service functions are
+    invoked within a single orchestrator health-check tick.
+
+    All callers within a health-check cycle (dispatcher, gatekeeper, services,
+    process_manager, alignment_events) should use this instead of creating
+    their own ``TicketStore(path)`` instances.
+
+    Returns ``None`` if tickets.json is missing or unreadable.
     """
     global _ticket_store_cache
     if _ticket_store_cache is not None:
@@ -188,6 +203,10 @@ def _get_ticket_store():
         return None
 
 
+# Backward-compatible alias for tests and internal callers
+_get_ticket_store = get_ticket_store
+
+
 # ---------------------------------------------------------------------------
 # Claim Management
 # ---------------------------------------------------------------------------
@@ -206,11 +225,13 @@ def _reap_expired_claims(bot_name: str) -> int:
                 at = float(data.get("at", 0))
                 if now - at > CLAIM_TTL_SECONDS:
                     p.unlink()
+                    release_claim(p.name)
                     reaped += 1
             except Exception:
                 try:
                     if now - p.stat().st_mtime > CLAIM_TTL_SECONDS:
                         p.unlink()
+                        release_claim(p.name)
                         reaped += 1
                 except Exception:
                     pass
@@ -221,41 +242,80 @@ def _reap_expired_claims(bot_name: str) -> int:
     return reaped
 
 
+def register_claim(claim_name: str, worker: str, at: float, path: Path) -> None:
+    """Register a claim in the in-memory index when created."""
+    _claim_index[claim_name] = {"worker": worker, "at": at, "path": path}
+
+
+def release_claim(claim_name: str) -> None:
+    """Remove a claim from the in-memory index when released/deleted."""
+    _claim_index.pop(claim_name, None)
+
+
 def _sweep_orphan_claims(bots: dict[str, Any]) -> int:
-    """Delete claim files whose owning bot process is dead or timed out."""
+    """Delete claim files whose owning bot process is dead or timed out.
+
+    Uses in-memory claim index for O(1) lookup per claim instead of
+    performing disk I/O (glob + JSON parse) on every sweep cycle.
+    Falls back to directory scan only on first run to seed the index.
+    """
     global _last_sweep_time
     now = time.time()
 
     if now - _last_sweep_time < SWEEP_INTERVAL:
         return 0
+    _last_sweep_time = now
 
-    swept = 0
     claims_dir = STATE_DIR / "claims"
     if not claims_dir.exists():
         return 0
 
-    alive_bots = {name for name, bot in bots.items() if bot.process is not None and bot.process.poll() is None}
-    for p in claims_dir.glob("*.json"):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            worker = data.get("worker", data.get("bot", ""))
-            at = float(data.get("at", 0))
-            age = now - at
-            if worker not in alive_bots and age > CLAIM_TTL_SECONDS:
-                p.unlink()
-                swept += 1
-                logger.info(f"Swept orphan claim {p.name} (worker={worker}, age={age:.0f}s)")
-            elif age > CLAIM_TTL_SECONDS * 2:
-                p.unlink()
-                swept += 1
-                logger.warning(f"Swept expired claim {p.name} (worker={worker}, age={age:.0f}s > {CLAIM_TTL_SECONDS * 2}s)")
-        except (json.JSONDecodeError, ValueError, OSError):
+    # Seed index on first run if empty but claims exist on disk
+    if not _claim_index:
+        for p in claims_dir.glob("*.json"):
             try:
-                if now - p.stat().st_mtime > CLAIM_TTL_SECONDS:
-                    p.unlink()
-                    swept += 1
+                data = json.loads(p.read_text(encoding="utf-8"))
+                worker = data.get("worker", data.get("bot", ""))
+                at = float(data.get("at", 0))
+                _claim_index[p.name] = {"worker": worker, "at": at, "path": p}
+            except (json.JSONDecodeError, ValueError, OSError):
+                try:
+                    _claim_index[p.name] = {"worker": "", "at": p.stat().st_mtime, "path": p}
+                except OSError:
+                    pass
+
+    alive_bots = {name for name, bot in bots.items() if bot.process is not None and bot.process.poll() is None}
+    swept = 0
+    stale_keys: list[str] = []
+
+    # O(n) iteration over in-memory index, no disk I/O
+    for claim_name, info in _claim_index.items():
+        worker = info["worker"]
+        at = info["at"]
+        age = now - at
+        path = info["path"]
+
+        should_sweep = False
+        if worker not in alive_bots and age > CLAIM_TTL_SECONDS:
+            should_sweep = True
+            logger.info(f"Swept orphan claim {claim_name} (worker={worker}, age={age:.0f}s)")
+        elif age > CLAIM_TTL_SECONDS * 2:
+            should_sweep = True
+            logger.warning(f"Swept expired claim {claim_name} (worker={worker}, age={age:.0f}s > {CLAIM_TTL_SECONDS * 2}s)")
+
+        if should_sweep:
+            try:
+                if path.exists():
+                    path.unlink()
             except OSError:
                 pass
+            stale_keys.append(claim_name)
+            swept += 1
+
+    # Remove swept claims from index
+    for key in stale_keys:
+        del _claim_index[key]
+
     return swept
 
 
@@ -263,13 +323,15 @@ def _sweep_orphan_claims(bots: dict[str, Any]) -> int:
 # Ticket Dispatching
 # ---------------------------------------------------------------------------
 
-def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn) -> int:
+def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn, store: Any | None = None) -> int:
     """Spawn agents based on current ticket demand.
     
     Args:
         bots: Dict of bot name to BotState
         max_concurrent: Maximum concurrent bots allowed
         start_bot_fn: Function to start a bot (injected from orchestrator)
+        store: Optional shared TicketStore instance for this tick. If supplied,
+               used directly to avoid an extra tickets.json read/parse.
     
     Returns:
         Number of agents spawned
@@ -279,7 +341,7 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
     except ImportError:
         return 0
     
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
 
@@ -306,10 +368,15 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
             if worker in alive_bots:
                 active_claims.add(p.stem.rsplit(".", 1)[0])
             else:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+                base = worker.split("-")[0] if "-" in worker else worker
+                if base in REVIEWER_ROLE_NAMES:
+                    active_claims.add(p.stem.rsplit(".", 1)[0])
+                else:
+                    try:
+                        p.unlink()
+                        release_claim(p.name)
+                    except OSError:
+                        pass
         except Exception:
             pass
 
@@ -362,10 +429,12 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
         if claim_file.exists():
             return False
         try:
-            claim_data = {"ticket_id": tid, "bot": bot.config.name, "worker": bot.config.name, "at": time.time()}
+            claim_at = time.time()
+            claim_data = {"ticket_id": tid, "bot": bot.config.name, "worker": bot.config.name, "at": claim_at}
             tmp = claim_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(claim_data), encoding="utf-8")
             tmp.replace(claim_file)
+            register_claim(claim_file.name, bot.config.name, claim_at, claim_file)
         except OSError:
             return False
         bot._assigned_ticket_id = tid
@@ -382,6 +451,7 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
                 claim_file.unlink(missing_ok=True)
             except OSError:
                 pass
+            release_claim(claim_file.name)
             bot._assigned_ticket_id = ""
             return False
 
@@ -492,14 +562,14 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn)
     return spawned + reviewer_spawned
 
 
-def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None) -> int:
+def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None, store: Any | None = None) -> int:
     """Dispatch DECOMPOSE tickets to decomposer agents."""
     try:
         from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
 
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
 
@@ -533,6 +603,7 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
                 if age < claim_grace_seconds:
                     continue
                 p.unlink()
+                release_claim(p.name)
             except OSError:
                 pass
 
@@ -556,10 +627,42 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
         else:
             idle_decomposers.append((name, bot))
 
+    running_decomposers = len(unassigned_running) + len(busy_ticket_ids)
+    dispatch_capacity = max_agents - running_decomposers if max_agents > 0 else None
     available = idle_decomposers + unassigned_running
-    if max_agents > 0:
-        available = available[:max_agents]
+    if dispatch_capacity is not None:
+        available = available[:max(dispatch_capacity, 0)]
     dispatched = 0
+
+    def _get_or_create_decomposer(suffix: str = "") -> Any:
+        from codebot.process_manager import BotConfig, BotState
+        bot_name = f"decomposer-{suffix}" if suffix else "decomposer"
+        if bot_name in bots:
+            bot = bots[bot_name]
+            if not bot.config.enabled:
+                bot.config.enabled = True
+            return bot
+        prompt_path = BOTS_DIR / "codebot" / "roles" / "decomposer.md"
+        if not prompt_path.exists():
+            prompt_path = BOTS_DIR / "decomposer.md"
+        if not prompt_path.exists():
+            return None
+        cfg = BotConfig(
+            name=bot_name,
+            prompt_file="codebot/roles/decomposer.md",
+            interval_seconds=30,
+            heartbeat_timeout=90,
+            model="qwen-3.7-plus",
+            fallback_model="xiaomi-mimo-2.5",
+            enabled=True,
+            clean_exit_wait=False,
+            runner_mode="api",
+            tier=12,
+            max_restarts=5,
+        )
+        state = BotState(config=cfg)
+        bots[bot_name] = state
+        return state
 
     # Phase 1: Collect transitions for completed decompositions and dispatch new ones
     transitions: list[tuple[str, Any, list[dict] | None]] = []
@@ -567,6 +670,8 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
     transition_logs: list[str] = []
 
     for ticket in decomposing:
+        if dispatch_capacity is not None and dispatched >= dispatch_capacity:
+            break
         tid = getattr(ticket, 'id', '')
         if not tid:
             continue
@@ -590,7 +695,13 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
             continue
 
         if not available:
-            break
+            existing_decomp = [n for n in bots if n.split("-")[0] == "decomposer"]
+            suffix = str(len(existing_decomp) + 1)
+            bot = _get_or_create_decomposer(suffix)
+            if bot and (bot.process is None or bot.process.poll() is not None):
+                available.append((bot.config.name, bot))
+            else:
+                break
 
         bot_name, bot = available.pop(0)
 
@@ -600,21 +711,28 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
 
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
-            claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "decompose"}
+            claim_at = time.time()
+            claim_data = {"ticket_id": tid, "bot": bot_name, "at": claim_at, "class": "decompose"}
             tmp = claim_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(claim_data), encoding="utf-8")
             tmp.replace(claim_file)
+            register_claim(claim_file.name, bot_name, claim_at, claim_file)
         except OSError:
             continue
 
         bot._assigned_ticket_id = tid
-        dispatched += 1
-        logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
         if bot.process is not None and bot.process.poll() is None:
-            pass
+            dispatched += 1
+            logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
         else:
-            if start_bot_fn:
-                start_bot_fn(bot, bots=bots, is_demand=True)
+            started = start_bot_fn(bot, bots=bots, is_demand=True) if start_bot_fn else False
+            if not started:
+                claim_file.unlink(missing_ok=True)
+                release_claim(claim_file.name)
+                bot._assigned_ticket_id = ""
+                break
+            dispatched += 1
+            logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
 
     # Phase 2: Apply all decomposition-complete transitions in a single batch
     if transitions:
@@ -625,6 +743,7 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
                 logger.info(msg)
             for tid in transition_tids:
                 for cf in claims_dir.glob(f"{tid}.*.json"):
+                    release_claim(cf.name)
                     try:
                         cf.unlink()
                     except OSError:
@@ -637,6 +756,7 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
                     logger.info(transition_logs[i])
                     dispatched += 1
                     for cf in claims_dir.glob(f"{tid}.*.json"):
+                        release_claim(cf.name)
                         try:
                             cf.unlink()
                         except OSError:
@@ -647,14 +767,14 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
     return dispatched
 
 
-def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None) -> int:
+def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None, store: Any | None = None) -> int:
     """Dispatch PLANNING tickets to planner agents."""
     try:
         from codebot.ticket_engine import TicketState
     except ImportError:
         return 0
 
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
 
@@ -688,6 +808,7 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
                 if age < claim_grace_seconds:
                     continue
                 p.unlink()
+                release_claim(p.name)
             except OSError:
                 pass
 
@@ -733,6 +854,19 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
                 transition_tids.append(tid)
                 continue
             except (json.JSONDecodeError, ValueError):
+                raw = plan_file.read_text(encoding="utf-8")
+                try:
+                    parsed = ast.literal_eval(raw)
+                    if isinstance(parsed, dict):
+                        tmp = plan_file.with_suffix(".tmp")
+                        tmp.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+                        tmp.replace(plan_file)
+                        transitions.append((tid, TicketState.IMPLEMENTING, None))
+                        transition_tids.append(tid)
+                        logger.info(f"Normalized Python-dict plan to JSON for {tid}")
+                        continue
+                except (ValueError, SyntaxError):
+                    pass
                 try:
                     plan_file.unlink()
                     logger.warning(f"Deleted malformed plan for {tid}, re-queuing for planning")
@@ -756,21 +890,28 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
 
         claim_file = claims_dir / f"{tid}.{bot_name}.json"
         try:
-            claim_data = {"ticket_id": tid, "bot": bot_name, "at": time.time(), "class": "planning"}
+            claim_at = time.time()
+            claim_data = {"ticket_id": tid, "bot": bot_name, "at": claim_at, "class": "planning"}
             tmp = claim_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(claim_data), encoding="utf-8")
             tmp.replace(claim_file)
+            register_claim(claim_file.name, bot_name, claim_at, claim_file)
         except OSError:
             continue
 
         bot._assigned_ticket_id = tid
-        dispatched += 1
-        logger.info(f"Dispatched planning for {tid} -> {bot_name}")
         if bot.process is not None and bot.process.poll() is None:
-            pass
+            dispatched += 1
+            logger.info(f"Dispatched planning for {tid} -> {bot_name}")
         else:
-            if start_bot_fn:
-                start_bot_fn(bot, bots=bots, is_demand=True)
+            started = start_bot_fn(bot, bots=bots, is_demand=True) if start_bot_fn else False
+            if not started:
+                claim_file.unlink(missing_ok=True)
+                release_claim(claim_file.name)
+                bot._assigned_ticket_id = ""
+                break
+            dispatched += 1
+            logger.info(f"Dispatched planning for {tid} -> {bot_name}")
 
     # Phase 2: Apply all planning-complete transitions in a single batch
     if transitions:
@@ -780,6 +921,7 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
             for tid in transition_tids:
                 logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
                 for cf in claims_dir.glob(f"{tid}.*.json"):
+                    release_claim(cf.name)
                     try:
                         cf.unlink()
                     except OSError:
@@ -792,6 +934,7 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
                     logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
                     dispatched += 1
                     for cf in claims_dir.glob(f"{tid}.*.json"):
+                        release_claim(cf.name)
                         try:
                             cf.unlink()
                         except OSError:
@@ -802,7 +945,7 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
     return dispatched
 
 
-def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
+def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> int:
     """Transition REVIEWING tickets to VERIFYING or REWORK based on reviewer verdicts.
 
     Uses batch_transition to apply all state changes in memory and save once,
@@ -813,7 +956,7 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
     except ImportError:
         return 0
 
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
 
@@ -834,7 +977,12 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
         if not tid:
             continue
 
-        review_claims = list(claims_dir.glob(f"{tid}.*.json"))
+        # Use in-memory index to find claims for this ticket instead of glob
+        review_claims = [info["path"] for name, info in _claim_index.items()
+                         if name.startswith(f"{tid}.") and info["path"].exists()]
+        if not review_claims:
+            # Fallback to disk glob only if index has no entries for this ticket
+            review_claims = list(claims_dir.glob(f"{tid}.*.json"))
         if not review_claims:
             continue
 
@@ -919,6 +1067,7 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
     # Phase 3: Clean up claims and assignments for successfully transitioned tickets
     for tid, review_claims in tickets_to_clean:
         for claim_file in review_claims:
+            release_claim(claim_file.name)
             try:
                 claim_file.unlink()
             except OSError:
@@ -930,7 +1079,7 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
     return advanced
 
 
-def gatekeeper_verify_tickets() -> int:
+def gatekeeper_verify_tickets(store: Any | None = None) -> int:
     """Advance VERIFYING tickets to COMPLETE via quality gate evaluation.
 
     Uses batch_transition to apply all state changes in memory and save once,
@@ -941,7 +1090,7 @@ def gatekeeper_verify_tickets() -> int:
     except ImportError:
         return 0
 
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
 
@@ -1039,7 +1188,7 @@ def gatekeeper_verify_tickets() -> int:
     return advanced
 
 
-def route_ready_tickets() -> int:
+def route_ready_tickets(store: Any | None = None) -> int:
     """Route READY tickets: decomposer sub-tickets to PLANNING, originals to DECOMPOSE.
 
     Uses batch_transition to apply all state changes in memory and save once,
@@ -1050,7 +1199,7 @@ def route_ready_tickets() -> int:
     except ImportError:
         return 0
 
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
 
@@ -1094,7 +1243,7 @@ def route_ready_tickets() -> int:
     return routed
 
 
-def process_rework_tickets(bots: dict[str, Any]) -> int:
+def process_rework_tickets(bots: dict[str, Any], store: Any | None = None) -> int:
     """Process REWORK tickets by routing them back to PLANNING or DECOMPOSE.
 
     Uses batch_transition to apply all state changes in memory and save once,
@@ -1105,7 +1254,7 @@ def process_rework_tickets(bots: dict[str, Any]) -> int:
     except ImportError:
         return 0
 
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
     try:
@@ -1152,7 +1301,7 @@ def process_rework_tickets(bots: dict[str, Any]) -> int:
     return advanced
 
 
-def recover_deferred_tickets() -> int:
+def recover_deferred_tickets(store: Any | None = None) -> int:
     """Recover DEFERRED tickets back to READY or DECOMPOSE.
 
     Uses batch_transition to apply all state changes in memory and save once,
@@ -1163,7 +1312,7 @@ def recover_deferred_tickets() -> int:
     except ImportError:
         return 0
 
-    ts = _get_ticket_store()
+    ts = store if store is not None else get_ticket_store()
     if ts is None:
         return 0
     try:

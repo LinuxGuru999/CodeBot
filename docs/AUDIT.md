@@ -1,6 +1,6 @@
 # CodeBot Security & Performance Audit
 
-Last updated: 2026-09-18
+Last updated: 2026-09-20
 
 This document records all security and performance issues identified during systematic audit of the CodeBot codebase, their fixes, and current status.
 
@@ -41,6 +41,56 @@ This document records all security and performance issues identified during syst
 | KNOWN-05 | `api_runner.py:133,138` | `subprocess.run` without explicit timeout | Low | Used for `pgrep` calls with 3-second timeout already present in surrounding code. |
 | KNOWN-06 | `ticket_engine.py` | `json.dumps(indent=2)` in save path | Low | Pretty-printing adds ~30% size overhead vs compact JSON. Acceptable for human-readable state files. |
 | KNOWN-07 | `cost_tracker.py` | Linear scan in `get_ticket_total()` | Low | Reads JSONL line-by-line. Could index by ticket_id for O(1) lookup. Current scale (< 1000 tickets) makes this negligible. |
+
+## Prioritized Remediation Plan (2026-09-20)
+
+The following findings were identified during a full-codebase review. They are
+ordered by the risk of incorrect work, lost accounting, or unsafe agent action.
+
+| Priority | Area | Finding | Planned direction |
+|----------|------|---------|-------------------|
+| P0 | Test contract | The suite cannot collect because tests import symbols that production no longer exports. | Restore intentional compatibility exports or migrate tests with an explicit replacement contract. |
+| P0 | Ticket splitting | Split children depend on a parent that is moved to `BLOCKED`; completed dependencies are required before work is eligible. | Make children independently ready, serialize only where chunks truly depend on one another, and retain the blocked parent as an aggregate. |
+| P0 | Agent command execution | Model-provided command strings are executed through a shell after blocklist validation. | Reject shell control and redirection operators at the tool-policy seam; preserve only explicitly supported pipeline behavior until an argv-native tool interface replaces it. |
+| P0 | Token accounting | The optional unlocked ledger path can lose concurrent updates. | Use the existing file-locking write path for every persisted usage update. |
+| P1 | Retry reliability | The unexpected-error retry branch references `delay` before assigning it. | Compute bounded retry delay before logging or sleeping. |
+| P1 | Quality gate parsing | Gate commands are split on whitespace, so quoted paths are not preserved. | Parse trusted policy commands with `shlex.split`; keep `shell=False` and validate substituted path inputs. |
+| P1 | Portability | Adapter-aware paths coexist with package-relative state paths in operational modules. | Incrementally route lifecycle modules through the existing path configuration seam. |
+
+## Ticket Lifecycle Throughput Analysis
+
+The lifecycle remains quality-first: only the gatekeeper can transition a
+ticket from `VERIFYING` to `COMPLETE`, and failed gates continue to send work
+to `REWORK`. Throughput improvements must therefore remove avoidable waits,
+not bypass reviews or verification.
+
+| Stage | Bottleneck or blockage | Throughput-preserving action |
+|-------|------------------------|------------------------------|
+| Discovery / triage | Duplicate work and invalid tickets consume downstream capacity. | Keep evidence deduplication and validate before assigning scarce worker slots. |
+| Decomposition | Parent-to-child dependency direction can permanently block every child. | Create independent children; chain only chunks with a real ordering constraint. |
+| Planning | Large tickets can monopolize one worker. | Use bounded decomposition and ready children to expose safe parallelism. |
+| Implementation | Agent tools can fail or act unsafely through shell interpretation. | Enforce the command-policy seam before execution and retain bounded I/O/timeouts. |
+| Review / verification | Rework is necessary but repeated gate setup and missing focused tests add delay. | Run changed-module tests first, then preserve the full gatekeeper decision and evidence trail. |
+| Completion | Concurrent ledger writes can undercount spend and permit unsafe over-allocation. | Serialize ledger updates across processes so scheduler decisions use correct data. |
+
+Future high-leverage work is to make all lifecycle modules consume the same
+adapter-provided path configuration and to consolidate TicketStore ownership;
+those changes need a dedicated migration because they affect process lifetime
+and persistence semantics.
+
+## Lifecycle Remediation (2026-09-20)
+
+| Finding | Remediation | Live evidence |
+|---------|-------------|---------------|
+| Capacity rejection left decomposition/planning claims assigned and inflated dispatch counts. | Release the claim and assignment immediately when `start_bot` rejects a launch; stop that saturated dispatch pass. | No post-restart claim storm; worker count remains at or below the configured 26-slot gateway cap. |
+| Decomposition could consume all gateway capacity while the large planning backlog was idle. | Limit active decomposers to 12, reserving slots for planners and demand-driven implementation/review work. | Restarted fleet ran all 12 decomposers and four planners concurrently. |
+| API subprocesses bootstrapped from the package path and treated a stale local drain marker as active. | Bootstrap from the heartbeat-derived project root. | Restarted workers remained active with drain inactive. |
+| Auto-commit used a bot name as the gatekeeper ticket ID and also gated planning/decomposition state artifacts. | Resolve the assigned ID from the bot claim; run auto-commit gating only for implementation roles. | New gatekeeper entries use `CB-*` IDs; planner/decomposer gate entries stopped after restart. |
+
+Focused lifecycle tests cover failed-launch claim cleanup, decomposition caps,
+claim-to-ticket attribution, and implementation-role auto-commit selection.
+The full suite remains blocked by existing contract and test-isolation failures;
+these are tracked separately and were not changed by the lifecycle work.
 
 ## Audit Methodology
 

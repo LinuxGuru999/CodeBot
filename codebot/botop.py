@@ -339,7 +339,7 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
             scratch = {}
 
         paused = paused_path.exists()
-        pid = pid_map.get(name) or _find_agent_pid(name)
+        pid = pid_map.get(name)
         running = pid is not None
 
         # derive status bucket
@@ -526,6 +526,24 @@ def _collect_claims(project_root: Path) -> list[dict[str, Any]]:
             claims.append({"file": cf.name, "path": cf, "ticket_id": "?", "worker": "?", "at": 0, "age": 0, "class": "", "raw": {}})
     claims.sort(key=lambda c: c["age"], reverse=True)
     return claims
+
+
+def _implementation_claims(
+    agents: list[dict[str, Any]], claims: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    agents_by_name = {str(agent.get("name", "")): agent for agent in agents}
+    implementation_claims: list[dict[str, Any]] = []
+    for claim in claims:
+        worker = str(claim.get("worker", ""))
+        role = re.sub(r"-\d+$", "", worker)
+        if not role.endswith("_implementer"):
+            continue
+        implementation_claims.append({
+            "ticket_id": str(claim.get("ticket_id", "?")),
+            "worker": worker,
+            "task": str(agents_by_name.get(worker, {}).get("current_task", "")),
+        })
+    return implementation_claims
 
 
 def _collect_rl(project_root: Path) -> dict | None:
@@ -858,7 +876,7 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
     orch_alive = orch.get("alive")
     ls_age = orch.get("last_spawn_age")
     ls_s = f"{ls_age:.0f}s ago" if isinstance(ls_age, (int, float)) else "?"
-    drain_txt = _c("DRAIN ACTIVE", "red", enabled) if orch.get("drain") else _c("drain clear", "green", enabled)
+    drain_txt = _c("[DRAIN] ACTIVE", "red", enabled) if orch.get("drain") else _c("[OK] clear", "green", enabled)
     paused_txt = f"paused={orch.get('paused_count')}" if orch.get("paused_count") else "paused=0"
     orch_s = f"orch pid={orch_pid or '-'} {'alive' if orch_alive else 'down'}  last_spawn {ls_s}  {drain_txt}  {paused_txt}"
     print(orch_s)
@@ -1526,7 +1544,7 @@ def cmd_health(project_root: Path, json_out: bool = False) -> int:
 
     # Orch
     print(_c("\n─ Orchestrator ─", "bold", enabled))
-    print(f"pid {orch.get('pid') or '-'} {'alive' if orch.get('alive') else 'down'}  last_spawn {f'{orch.get('last_spawn_age'):.0f}s ago' if orch.get('last_spawn_age') is not None else '?'}  heartbeats {orch.get('heartbeat_count')}  paused {orch.get('paused_count')}  drain {_c('YES','red',enabled) if orch.get('drain') else _c('no','green',enabled)}")
+    print(f"pid {orch.get('pid') or '-'} {'alive' if orch.get('alive') else 'down'}  last_spawn {f'{orch.get('last_spawn_age'):.0f}s ago' if orch.get('last_spawn_age') is not None else '?'}  heartbeats {orch.get('heartbeat_count')}  paused {orch.get('paused_count')}  drain {_c('[DRAIN] YES','red',enabled) if orch.get('drain') else _c('[OK] no','green',enabled)}")
     if orch.get('paused_names'):
         print(f"  paused: {', '.join(orch['paused_names'][:10])}")
     if orch.get('drain_text'):
@@ -1665,11 +1683,12 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     ledger = _collect_token_ledger(project_root)
     orch = _collect_orchestrator_info(project_root)
     thr = _collect_ticket_throughput(tickets)
+    implementation_claims = _implementation_claims(agents, claims)
 
     lines: list[str] = []
     # header
     proj = _find_project_name(project_root)
-    drain_badge = _c(" ● DRAIN ", "red", enabled) if orch.get("drain") else _c(" ○ live ", "green", enabled)
+    drain_badge = _c("[DRAIN] ●", "red", enabled) if orch.get("drain") else _c("[OK] ○", "green", enabled)
     lines.append(_c(f" CodeBot BOTOP — {proj} — {now_h} — refresh {interval:.0f}s  (q quit, r refresh) ", "bold", enabled) + drain_badge + _c(f"  tick {ticker}", "dim", enabled))
     lines.append(f" {state_dir}  logs:{_find_logs_dir(project_root).name}/  interval {interval:.1f}s")
 
@@ -1685,6 +1704,24 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     lines.append(_c("┌─ Orchestrator ─────────────────────────────────────────────────────────", "dim", enabled))
     lines.append(f"│ {orch_s}")
     lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
+
+    if view in ("both", "agents"):
+        lines.append(_c(
+            f"┌─ Implementation ({len(implementation_claims)} active) ─────────────────────────────────────────────",
+            "bold",
+            enabled,
+        ))
+        if not implementation_claims:
+            lines.append("│ No active implementation claims.")
+        else:
+            for implementation in implementation_claims[:6]:
+                worker = implementation["worker"][:24]
+                ticket_id = implementation["ticket_id"][:18]
+                task = implementation["task"][:38] or "-"
+                lines.append(f"│ {worker:<24s} {ticket_id:<18s} {task}")
+            if len(implementation_claims) > 6:
+                lines.append(f"│ ... +{len(implementation_claims) - 6} more")
+        lines.append(_c("└────────────────────────────────────────────────────────────────────", "dim", enabled))
 
     # agents table
     if view in ("both", "agents"):
@@ -1759,7 +1796,7 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     return "\n".join(lines)
 
 
-def cmd_live(project_root: Path, interval: float = 2.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both") -> int:
+def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both") -> int:
     """Live dashboard with view switching (1=agents, 2=tickets, 3=both)."""
     if json_out:
         # single snapshot as json
@@ -1938,7 +1975,7 @@ botop term — interactive
         # dispatch
         try:
             if cmd in ("live", "watch", "top", "dash"):
-                iv = 2.0
+                iv = 1.0
                 once = False
                 jout = False
                 nc = no_color
@@ -2094,7 +2131,7 @@ def main() -> None:
         epilog="examples:\n"
                "  python -m codebot.botop status\n"
                "  python -m codebot.botop tickets --state READY\n"
-               "  python -m codebot.botop live --interval 2\n"
+               "  python -m codebot.botop live --interval 1\n"
                "  python -m codebot.botop term\n"
                "  python -m codebot.botop logs scheduler --follow\n"
                "  python -m codebot.botop health\n",
@@ -2190,14 +2227,14 @@ def main() -> None:
 
     # live dashboard
     p_live = sub.add_parser("live", help="Live dashboard (auto-refresh)")
-    p_live.add_argument("--interval", type=float, default=2.0, help="Refresh seconds")
+    p_live.add_argument("--interval", type=float, default=1.0, help="Refresh seconds")
     p_live.add_argument("--once", action="store_true", help="Single snapshot, no loop")
     p_live.add_argument("--json", action="store_true", help="JSON snapshot, no UI")
     p_live.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     p_live.add_argument("--view", choices=["both", "agents", "tickets"], default="both", help="Initial view (or use 1/2/3 keys to toggle)")
     for alias in ("watch", "top", "dash", "dashboard"):
         pa = sub.add_parser(alias, help=f"Alias for live")
-        pa.add_argument("--interval", type=float, default=2.0, help="Refresh seconds")
+        pa.add_argument("--interval", type=float, default=1.0, help="Refresh seconds")
         pa.add_argument("--once", action="store_true", help="Single snapshot")
         pa.add_argument("--json", action="store_true", help="JSON snapshot")
         pa.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
@@ -2268,7 +2305,7 @@ def main() -> None:
     elif cmd in ("health", "doctor", "diagnostics", "diag"):
         sys.exit(cmd_health(project_root, json_out=getattr(args, "json", False)))
     elif cmd in ("live", "watch", "top", "dash", "dashboard"):
-        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 2.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both")))
+        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 1.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both")))
     elif cmd in ("term", "terminal", "shell", "repl", "interactive"):
         sys.exit(cmd_term(project_root, no_color=getattr(args, "no_color", False)))
     else:
