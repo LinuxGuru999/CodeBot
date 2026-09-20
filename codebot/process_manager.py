@@ -520,8 +520,11 @@ def _check_inputs_changed(bot: BotState, last_run_mtime: float) -> bool:
     return False
 
 
-def _should_skip_run(bot: BotState, last_run_mtime: float) -> bool:
+def _should_skip_run(bot: BotState, last_run_mtime: float, is_demand: bool = False) -> bool:
     """Determine if bot should skip this run (no input changes, not worker/demand)."""
+    # Demand-driven agents and ticket-assigned bots always run
+    if is_demand or getattr(bot, '_assigned_ticket_id', ''):
+        return False
     if _check_inputs_changed(bot, last_run_mtime):
         return False
     if last_run_mtime <= 0:
@@ -714,7 +717,7 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
     ckpt = checkpoint_path(bot.config.name)
     last_run_mtime = ckpt.stat().st_mtime if ckpt.exists() else 0.0
 
-    if _should_skip_run(bot, last_run_mtime):
+    if _should_skip_run(bot, last_run_mtime, is_demand=is_demand):
         logger.info(f"Bot '{bot.config.name}' skipped \u2014 no input change since last run")
         bot.next_run_at = time.time() + bot.config.interval_seconds
         update_bot_state(bot, "noop")

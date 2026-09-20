@@ -580,7 +580,7 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
             pass
         else:
             if start_bot_fn:
-                start_bot_fn(bot, bots=bots)
+                start_bot_fn(bot, bots=bots, is_demand=True)
 
     # Phase 2: Apply all decomposition-complete transitions in a single batch
     if transitions:
@@ -735,7 +735,7 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
             pass
         else:
             if start_bot_fn:
-                start_bot_fn(bot, bots=bots)
+                start_bot_fn(bot, bots=bots, is_demand=True)
 
     # Phase 2: Apply all planning-complete transitions in a single batch
     if transitions:

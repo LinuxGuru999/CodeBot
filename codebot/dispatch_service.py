@@ -289,10 +289,16 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any]) -> None:
                         ts.transition(assigned_tid, TicketState.REVIEWING)
                         ts.flush()  # Ensure changes are written to disk immediately
                         logger.info(f"Ticket {assigned_tid} -> REVIEWING (agent {bot.config.name} completed)")
-            # Clean up claims
+            # Clean up only this bot's claim, not reviewer claims
             claims_dir = STATE_DIR / "claims"
             for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
-                cf.unlink(missing_ok=True)
+                try:
+                    data = json.loads(cf.read_text(encoding="utf-8"))
+                    claim_bot = data.get("bot", data.get("worker", data.get("agent", "")))
+                    if claim_bot == bot.config.name:
+                        cf.unlink(missing_ok=True)
+                except Exception:
+                    cf.unlink(missing_ok=True)
     except Exception as te:
         logger.warning(f"Ticket transition failed for {assigned_tid}: {te}")
     

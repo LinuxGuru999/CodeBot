@@ -29,7 +29,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import queue
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -40,6 +43,7 @@ from typing import Any
 
 from codebot.file_lock import flock, LOCK_SH, LOCK_EX, LOCK_UN
 
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "2.0"
 
@@ -382,6 +386,11 @@ class TicketStore:
         self._save_condition = threading.Condition(self._save_lock)
         self._save_worker = threading.Thread(target=self._save_worker_loop, daemon=True)
         self._save_worker.start()
+        # Backup worker: async file-copy consumer
+        self._backup_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        self._backup_shutdown = False
+        self._backup_worker = threading.Thread(target=self._backup_worker_loop, daemon=True)
+        self._backup_worker.start()
 
     def _save_worker_loop(self) -> None:
         """Background worker that debounces saves.
@@ -410,6 +419,40 @@ class TicketStore:
             except Exception:
                 pass
 
+    # ---- Backup worker ----
+
+    def _backup_worker_loop(self) -> None:
+        """Background worker that performs queued file copies (shutil.copy2).
+
+        Consumes (src, dst) tuples from _backup_queue.  A ``None`` sentinel
+        signals the worker to exit.  Errors are logged but never propagate
+        so the worker keeps processing subsequent tasks.
+        """
+        while True:
+            try:
+                item = self._backup_queue.get(timeout=1.0)
+            except queue.Empty:
+                if self._backup_shutdown:
+                    break
+                continue
+            if item is None:
+                break
+            src, dst = item
+            try:
+                shutil.copy2(src, dst)
+            except Exception as exc:
+                logger.warning("backup copy failed: %s -> %s: %s", src, dst, exc)
+            finally:
+                self._backup_queue.task_done()
+
+    def queue_backup_task(self, src: str, dst: str) -> None:
+        """Enqueue an asynchronous file-copy backup task.
+
+        The actual ``shutil.copy2`` runs in the background worker thread
+        so the caller is never blocked.
+        """
+        self._backup_queue.put((src, dst))
+
     def flush(self) -> None:
         """Force an immediate save of all dirty tickets.
 
@@ -424,12 +467,18 @@ class TicketStore:
         self._save()
 
     def close(self) -> None:
-        """Shut down the background save worker and flush pending changes.
+        """Shut down the background save and backup workers, then flush.
 
-        After calling close(), no further mutations should be queued.
-        This ensures all dirty tickets are persisted before the store
-        is discarded (e.g., at process exit or test teardown).
+        After calling close(), no further mutations or backup tasks should
+        be queued.  This ensures all dirty tickets are persisted before the
+        store is discarded (e.g., at process exit or test teardown).
         """
+        # Shut down the backup worker first (it only does file I/O, fast)
+        self._backup_shutdown = True
+        self._backup_queue.put(None)
+        if self._backup_worker.is_alive():
+            self._backup_worker.join(timeout=5.0)
+
         self._shutdown = True
         with self._save_condition:
             self._save_condition.notify_all()

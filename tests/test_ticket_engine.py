@@ -1423,3 +1423,221 @@ class TestBatchTransition:
         assert len(results) == 1
         assert results[0].state == TicketState.IMPLEMENTING
         store.close()
+
+
+class TestBackupWorker:
+    """Tests for async backup worker consumer (CB-D4AD89D42A31)."""
+
+    def test_backup_worker_processes_task(self, tmp_path):
+        """Worker copies file from src to dst asynchronously."""
+        store = TicketStore(tmp_path / "tickets.json")
+
+        # Create a source file
+        src = tmp_path / "source.txt"
+        src.write_text("backup content", encoding="utf-8")
+        dst = tmp_path / "backup_dest.txt"
+
+        # Enqueue backup task
+        store.queue_backup_task(str(src), str(dst))
+
+        # Wait for async processing (worker uses 1s timeout on queue.get)
+        store._backup_queue.join()
+
+        assert dst.exists()
+        assert dst.read_text(encoding="utf-8") == "backup content"
+        store.close()
+
+    def test_backup_worker_handles_error(self, tmp_path):
+        """Worker continues running after a failed copy (e.g., missing src)."""
+        store = TicketStore(tmp_path / "tickets.json")
+
+        # Enqueue a task with a non-existent source file
+        store.queue_backup_task(str(tmp_path / "nonexistent.txt"), str(tmp_path / "dst.txt"))
+
+        # Wait for the bad task to be processed
+        store._backup_queue.join()
+
+        # Worker should still be alive after the error
+        assert store._backup_worker.is_alive()
+
+        # Now enqueue a valid task to prove the worker is still processing
+        src = tmp_path / "valid_src.txt"
+        src.write_text("valid", encoding="utf-8")
+        dst = tmp_path / "valid_dst.txt"
+        store.queue_backup_task(str(src), str(dst))
+        store._backup_queue.join()
+
+        assert dst.exists()
+        assert dst.read_text(encoding="utf-8") == "valid"
+        store.close()
+
+    def test_backup_worker_shuts_down_cleanly(self, tmp_path):
+        """close() stops the backup worker thread."""
+        store = TicketStore(tmp_path / "tickets.json")
+
+        # Verify worker is alive
+        assert store._backup_worker.is_alive()
+
+        # Close the store
+        store.close()
+
+        # Worker should be stopped
+        assert not store._backup_worker.is_alive()
+
+    def test_backup_worker_does_not_block_main_thread(self, tmp_path):
+        """queue_backup_task returns immediately without blocking."""
+        import time
+
+        store = TicketStore(tmp_path / "tickets.json")
+
+        src = tmp_path / "src.txt"
+        src.write_text("data", encoding="utf-8")
+
+        # Enqueue multiple tasks and measure time
+        start = time.perf_counter()
+        for i in range(10):
+            dst = tmp_path / f"dst_{i}.txt"
+            store.queue_backup_task(str(src), str(dst))
+        elapsed = time.perf_counter() - start
+
+        # Enqueueing should be near-instant (<100ms for 10 tasks)
+        assert elapsed < 0.1, f"queue_backup_task blocked for {elapsed:.3f}s"
+
+        # Wait for all to complete
+        store._backup_queue.join()
+        store.close()
+
+
+class TestBackupWorker:
+    """Tests for CB-D4AD89D42A31: async backup worker consumer.
+
+    Validates that a background worker thread consumes backup tasks from
+    a queue, performs shutil.copy2 operations, handles errors gracefully,
+    and shuts down cleanly.
+    """
+
+    def _make_store(self, tmp_path):
+        return TicketStore(tmp_path / "tickets.json")
+
+    def test_worker_thread_starts_on_init(self, tmp_path):
+        """Worker thread should be alive immediately after TicketStore.__init__."""
+        store = self._make_store(tmp_path)
+        assert store._backup_worker.is_alive()
+        store.close()
+
+    def test_worker_copies_file(self, tmp_path):
+        """Worker copies src to dst asynchronously via shutil.copy2."""
+        store = self._make_store(tmp_path)
+
+        src = tmp_path / "src.txt"
+        dst = tmp_path / "dst.txt"
+        src.write_text("hello backup", encoding="utf-8")
+
+        store.queue_backup_task(str(src), str(dst))
+        # Give the worker time to process
+        time.sleep(0.5)
+
+        assert dst.exists()
+        assert dst.read_text(encoding="utf-8") == "hello backup"
+        store.close()
+
+    def test_worker_handles_missing_source(self, tmp_path):
+        """Worker should log a warning and continue processing on copy failure."""
+        store = self._make_store(tmp_path)
+
+        src = tmp_path / "nonexistent.txt"
+        dst = tmp_path / "dst.txt"
+
+        # Queue a failing task followed by a valid one
+        store.queue_backup_task(str(src), str(dst))
+
+        # Queue a second valid task to confirm the worker keeps running
+        valid_src = tmp_path / "valid.txt"
+        valid_dst = tmp_path / "valid_dst.txt"
+        valid_src.write_text("valid data", encoding="utf-8")
+        store.queue_backup_task(str(valid_src), str(valid_dst))
+
+        time.sleep(0.5)
+
+        # The failing task should not have created dst
+        assert not dst.exists()
+        # The valid task should have been processed
+        assert valid_dst.exists()
+        assert valid_dst.read_text(encoding="utf-8") == "valid data"
+        store.close()
+
+    def test_worker_shuts_down_cleanly(self, tmp_path):
+        """close() should stop the backup worker thread."""
+        store = self._make_store(tmp_path)
+        assert store._backup_worker.is_alive()
+
+        store.close()
+        assert not store._backup_worker.is_alive()
+
+    def test_multiple_concurrent_tasks(self, tmp_path):
+        """Multiple queued tasks should all be processed."""
+        store = self._make_store(tmp_path)
+
+        src_dir = tmp_path / "srcs"
+        src_dir.mkdir()
+        dst_dir = tmp_path / "dsts"
+        dst_dir.mkdir()
+
+        num_tasks = 5
+        for i in range(num_tasks):
+            src_file = src_dir / f"file{i}.txt"
+            src_file.write_text(f"data-{i}", encoding="utf-8")
+            dst_file = dst_dir / f"file{i}.txt"
+            store.queue_backup_task(str(src_file), str(dst_file))
+
+        # Give worker time to process all tasks
+        time.sleep(1.0)
+
+        for i in range(num_tasks):
+            dst_file = dst_dir / f"file{i}.txt"
+            assert dst_file.exists(), f"dst file{i}.txt not found"
+            assert dst_file.read_text(encoding="utf-8") == f"data-{i}"
+        store.close()
+
+    def test_does_not_block_main_thread(self, tmp_path):
+        """queue_backup_task should return immediately without blocking."""
+        store = self._make_store(tmp_path)
+
+        # Create a large-ish file to copy
+        src = tmp_path / "big_src.bin"
+        src.write_bytes(b"x" * (1024 * 1024))  # 1 MB
+        dst = tmp_path / "big_dst.bin"
+
+        start = time.perf_counter()
+        store.queue_backup_task(str(src), str(dst))
+        elapsed = time.perf_counter() - start
+
+        # Enqueue should be nearly instant (< 50ms), not the copy time
+        assert elapsed < 0.05, f"queue_backup_task blocked for {elapsed*1000:.1f}ms"
+
+        # Wait for actual copy to finish and verify
+        time.sleep(1.0)
+        assert dst.exists()
+        assert dst.stat().st_size == 1024 * 1024
+        store.close()
+
+    def test_worker_is_daemon_thread(self, tmp_path):
+        """Worker thread should be a daemon thread so it doesn't prevent process exit."""
+        store = self._make_store(tmp_path)
+        assert store._backup_worker.daemon is True
+        store.close()
+
+    def test_regression_existing_store_functionality(self, tmp_path):
+        """Existing TicketStore functionality is unaffected by backup worker."""
+        store = self._make_store(tmp_path)
+        t = create_ticket(
+            "regression-test", TicketClass.BUG, Severity.LOW,
+            "s", "e", "p", "d", ["a"]
+        )
+        store.add(t)
+        assert store.get(t.id) is not None
+        assert store.count() == 1
+
+        # Backup worker is alive alongside normal operations
+        assert store._backup_worker.is_alive()
+        store.close()
