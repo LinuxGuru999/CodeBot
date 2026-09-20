@@ -17,7 +17,10 @@ looking up authoritative references.
 
 Invariants
 ----------
-- stdlib-only (urllib.request, urllib.parse, html.parser, re)
+- stdlib-only baseline (urllib.request, urllib.parse, html.parser, re); optionally
+  uses beautifulsoup4 + lxml for robust HTML parsing when installed, otherwise falls
+  back to regex-based extraction -- no required third-party runtime dependencies
+  (see docs/adr/005-web-tools-html-parsing-strategy.md)
 - All I/O bounded: search response capped at 500KB, fetch at 1MB
 - Timeouts enforced: 15s for search, 30s for fetch
 - Never follows redirects to private IPs (SSRF guard)
