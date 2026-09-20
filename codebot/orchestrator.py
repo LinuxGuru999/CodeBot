@@ -167,20 +167,16 @@ def set_alignment_service(service: AlignmentServiceProtocol) -> None:
 
 
 def set_project_adapter(adapter: Any) -> None:
-    global _adapter_instance, BOTS_DIR, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR, DRAIN_FILE, UPDATE_LOCK, RESTART_FILE
+    """Inject a ProjectAdapter instance. Paths are resolved via the adapter, not by mutating globals.
+
+    The adapter's paths() method returns an object with repository_root, state_dir, logs_dir, etc.
+    Callers should use get_adapter().paths() to resolve paths dynamically, or rely on the
+    default global constants if no adapter is set.
+    """
+    global _adapter_instance
     _adapter_instance = adapter
-    try:
-        p = adapter.paths()
-        BOTS_DIR = p.repository_root
-        STATE_DIR = p.state_dir
-        LOGS_DIR = p.logs_dir
-        BACKUP_DIR = p.state_dir / "backup"
-        ALIGNMENT_EVENTS_DIR = p.state_dir / "alignment_events"
-        DRAIN_FILE = p.state_dir / ".drain"
-        UPDATE_LOCK = p.state_dir / ".update_lock"
-        RESTART_FILE = p.state_dir / ".restart"
-    except Exception:
-        pass
+    # Do NOT mutate global path constants (BOTS_DIR, STATE_DIR, etc.).
+    # Path resolution should happen via adapter queries or dependency injection.
 
 
 def get_adapter() -> Any:

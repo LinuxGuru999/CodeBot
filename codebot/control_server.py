@@ -715,8 +715,23 @@ class ControlHandler(BaseHTTPRequestHandler):
             bots = body.get("bots")
             try:
                 if bots:
+                    if not isinstance(bots, list):
+                        self._json(400, {"error": "bots must be an array"})
+                        return
+                    # Validate each bot name against BOT_REGISTRY (Constitution §2)
+                    # Reject unknown bots with 404 to prevent arbitrary process targeting
+                    valid_bot_names = {c.name for c in BOT_REGISTRY}
                     for n in bots:
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {n}"], timeout=5)
+                        if not isinstance(n, str):
+                            self._json(400, {"error": "bot names must be strings"})
+                            return
+                        if n not in valid_bot_names:
+                            self._json(404, {"error": f"unknown bot: {n}"})
+                            return
+                    # Use re.escape to prevent regex injection in pkill patterns
+                    for n in bots:
+                        escaped_name = re.escape(n)
+                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)

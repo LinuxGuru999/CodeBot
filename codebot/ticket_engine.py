@@ -347,6 +347,8 @@ class TicketStore:
         self._word_index: dict[str, set[str]] = {}
         # Per-state index: state -> set of ticket IDs for O(k) list_by_state lookups
         self._state_index: dict[TicketState, set[str]] = {}
+        # In-memory cache for gate approvals: ticket_id -> bool (latest passed status)
+        self._approval_cache: dict[str, bool] = {}
         # Debounced save mechanism
         self._save_pending = False
         self._save_lock = threading.Lock()
