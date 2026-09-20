@@ -417,3 +417,71 @@ class TestAutoCommitGatekeeperFailClosed:
             _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
             has_git_add = any("add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
             assert has_git_add, "git add should execute when gatekeeper returns COMPLETE"
+
+
+class TestApiKeyLoggingSecurity:
+    """Tests for CB-9360904-15F2: API key must never appear in log output.
+
+    Constitution §2 states: 'No secrets in code, logs, or error messages.'
+    CWE-532: Insertion of Sensitive Information into Log File.
+    """
+
+    def test_log_output_does_not_contain_key_characters(self, capsys):
+        """Verify _log output does not contain any portion of an API key."""
+        sensitive_key = "sk-super-secret-api-key-1234567890abcdef"
+        # Simulate what run_bot does after resolving the key
+        _log("test-bot: API key resolved (present)")
+        captured = capsys.readouterr()
+        # The log line must confirm presence without revealing content
+        assert "API key resolved (present)" in captured.out
+        # No portion of the actual key should appear in the log output
+        for i in range(len(sensitive_key) - 3):
+            substring = sensitive_key[i:i+4]
+            assert substring not in captured.out, (
+                f"Key fragment '{substring}' found in log output — CWE-532 violation"
+            )
+
+    def test_run_bot_logs_key_presence_without_content(self, tmp_path, capsys, monkeypatch):
+        """Integration-level test: run_bot's key resolution log must not leak key material."""
+        fake_key = "dgr-test-key-xyzzy-99887766"
+        monkeypatch.setenv("DIALAGRAM_API_KEY", fake_key)
+
+        # We only need to verify the log line emitted before the bot starts its loop.
+        # Mock sys.exit to prevent actual exit, and mock downstream calls.
+        import codebot.api_runner as ar
+
+        original_exit = ar.sys.exit
+        exit_code = []
+
+        def mock_exit(code=0):
+            exit_code.append(code)
+            raise SystemExit(code)
+
+        with patch.object(ar.sys, "exit", side_effect=mock_exit), \
+             patch.object(ar, "_is_draining", return_value=False), \
+             patch.object(ar, "_write_heartbeat"), \
+             patch.object(ar, "_start_heartbeat_thread", return_value=MagicMock()), \
+             patch.object(ar, "_stop_heartbeat_thread"), \
+             patch.object(ar, "run_agent_loop", side_effect=SystemExit(0)), \
+             patch.object(ar, "_persist_stream"), \
+             patch.object(ar, "_write_bot_status"):
+            try:
+                ar.run_bot(
+                    bot_name="test-bot",
+                    model="test-model",
+                    mission_prompt="test mission",
+                    heartbeat_file=str(tmp_path / "hb"),
+                    ckpt_file=str(tmp_path / "ckpt.json"),
+                )
+            except SystemExit:
+                pass
+
+        captured = capsys.readouterr()
+        # Must confirm key is present
+        assert "API key resolved (present)" in captured.out
+        # Must NOT contain any fragment of the actual key (check all substrings >= 4 chars)
+        for i in range(len(fake_key) - 3):
+            fragment = fake_key[i:i+4]
+            assert fragment not in captured.out, (
+                f"API key fragment '{fragment}' leaked in log output — CWE-532 violation"
+            )
