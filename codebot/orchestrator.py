@@ -1482,8 +1482,8 @@ def _dispatch_tickets_to_reviewers(bots: dict[str, BotState]) -> int:
     unassigned_running = []
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name
-        if base_name not in REVIEWER_ROLE_NAMES:
-            continue
+            if base_name not in REVIEWER_ROLE_NAMES:
+                continue
         if bot.process is not None and bot.process.poll() is None:
             if not getattr(bot, '_assigned_ticket_id', ''):
                 unassigned_running.append((name, bot))
