@@ -3361,12 +3361,16 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
 
     idle_planners = []
     unassigned_running = []
+    busy_ticket_ids: set[str] = set()
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name
         if base_name not in PLANNING_ROLE_NAMES:
             continue
         if bot.process is not None and bot.process.poll() is None:
-            if not getattr(bot, '_assigned_ticket_id', ''):
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                busy_ticket_ids.add(assigned)
+            else:
                 unassigned_running.append((name, bot))
         else:
             idle_planners.append((name, bot))
