@@ -4,85 +4,97 @@
 Cross-platform advisory file locking primitives for serializing access to shared state files.
 
 ## Purpose
-Provides a portable `flock()` function that abstracts platform differences between Unix (`fcntl.flock`) and Windows (`msvcrt.locking`). Used by CodeBot modules that need to serialize concurrent access to shared state files such as leases, tickets, and ledgers.
+Abstracts platform-specific locking mechanisms (`fcntl` on Unix, `msvcrt` on Windows) behind a unified API, enabling CodeBot to safely coordinate access to shared state files (leases, tickets, ledgers) across different operating systems.
 
 ## Why
-The `fcntl` module is Unix-only. Hard-importing it breaks portability on Windows (violating Goal 1). Rather than scattering platform checks throughout the codebase, this module centralizes the abstraction behind a single API. On unsupported platforms, locking degrades gracefully to a no-op with a one-time warning, ensuring the system remains functional even if concurrent access protection is unavailable.
+The `fcntl` module is Unix-only. Hard imports break on Windows, violating CodeBot's portability goal. This module provides a stdlib-only solution that degrades gracefully on unsupported platforms with warnings, ensuring the system remains functional even without proper locking.
 
 ## Invariants
-- stdlib-only: uses `fcntl` on Unix, `msvcrt` on Windows
-- Fail-open on unsupported platforms: locking becomes a no-op with a single `RuntimeWarning`
-- Lock constants (`LOCK_SH`, `LOCK_EX`, `LOCK_UN`, `LOCK_NB`) mirror `fcntl` values for API compatibility
+- stdlib-only (`fcntl` on Unix, `msvcrt` on Windows)
+- Fail-open on unsupported platforms: locking becomes no-op with one-time `RuntimeWarning`
+- Lock semantics match `fcntl.flock` where possible
 - Thread-safe within a single process
-- On Windows, `LOCK_SH` is treated as `LOCK_EX` because `msvcrt.locking` does not support shared locks
-- On Windows, non-blocking semantics are implemented via catching `OSError` from `LK_LOCK`
+- Warns only once per session to avoid log spam
 
 ## Dependencies
-- `os`, `sys`, `warnings` (stdlib)
-- `fcntl` (Unix only, optional import)
-- `msvcrt` (Windows only, optional import)
+- `os`, `sys`, `warnings`, `typing`
+- `fcntl` (Unix, optional)
+- `msvcrt` (Windows, optional)
 
 ## Exports
-
-### Constants
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `LOCK_SH` | 0 | Shared lock |
-| `LOCK_EX` | 1 | Exclusive lock |
-| `LOCK_UN` | 8 | Unlock |
-| `LOCK_NB` | 4 | Non-blocking flag (OR with lock type) |
-
-### `flock(fd: int | TextIO, operation: int) -> None`
-Apply or remove an advisory lock on a file descriptor.
-
-**Args:**
-- `fd`: File descriptor (int) or file object with `fileno()` method
-- `operation`: Lock operation constant (`LOCK_SH`, `LOCK_EX`, `LOCK_UN`), optionally OR'd with `LOCK_NB`
-
-**Raises:**
-- `OSError`: If locking fails (e.g., would block when `LOCK_NB` is set, or invalid fd)
-- `ValueError`: If fd is invalid
-
-**Platform notes:**
-- Unix: delegates directly to `fcntl.flock`
-- Windows: uses `msvcrt.locking` with byte-range locking over a large region; saves/restores file position
-- Unsupported: emits `RuntimeWarning` once, then proceeds without locking
+- `flock(fd, operation)` — Apply or remove advisory lock on file descriptor
+- `LOCK_SH` — Shared lock constant (0)
+- `LOCK_EX` — Exclusive lock constant (1)
+- `LOCK_UN` — Unlock constant (8)
+- `LOCK_NB` — Non-blocking flag (4)
 
 ## Usage Example
 
 ```python
-from pathlib import Path
-from codebot.file_lock import flock, LOCK_EX, LOCK_UN
+from codebot.file_lock import flock, LOCK_EX, LOCK_UN, LOCK_SH
+import fcntl  # for comparison on Unix
 
-state_file = Path(".codebot/state/tickets.json")
-
-with state_file.open("a+") as f:
+# Open a file for locking
+with open("state/ticket_ledger.json", "a+") as f:
     # Acquire exclusive lock (blocks until available)
     flock(f, LOCK_EX)
+    
     try:
-        # Critical section: read-modify-write shared state
+        # Critical section: read-modify-write
         f.seek(0)
-        data = f.read()
-        f.seek(0)
-        f.truncate()
-        f.write(updated_data)
+        content = f.read()
+        # ... process content ...
+        f.write(updated_content)
     finally:
-        # Always release the lock
+        # Always release lock
+        flock(f, LOCK_UN)
+
+# Non-blocking lock attempt
+with open("state/claims.lock", "a+") as f:
+    try:
+        flock(f, LOCK_EX | LOCK_NB)  # LOCK_NB makes it non-blocking
+        # Got the lock, proceed
+        # ... do work ...
+        flock(f, LOCK_UN)
+    except OSError:
+        # Lock held by another process, skip or retry later
+        print("Could not acquire lock, skipping...")
+
+# Shared lock (multiple readers allowed)
+with open("state/config.json", "r") as f:
+    flock(f, LOCK_SH)  # Multiple processes can hold shared locks
+    try:
+        config = json.load(f)
+    finally:
         flock(f, LOCK_UN)
 ```
 
-### Non-blocking example
+## Platform Behavior
 
-```python
-from codebot.file_lock import flock, LOCK_EX, LOCK_NB
-import errno
+| Platform | Implementation | Notes |
+|----------|----------------|-------|
+| Linux/macOS/BSD | `fcntl.flock()` | Full POSIX advisory locking |
+| Windows | `msvcrt.locking()` | Byte-range locking; locks large region from current position |
+| Other | No-op + warning | Logs `RuntimeWarning` once; proceeds without locking |
 
-try:
-    flock(fd, LOCK_EX | LOCK_NB)
-except OSError as e:
-    if e.errno == errno.EAGAIN or e.errno == errno.EDEADLOCK:
-        print("Lock held by another process, skipping")
-    else:
-        raise
-```
+## Lock Constants
+
+- `LOCK_SH` (0): Shared lock — multiple holders allowed
+- `LOCK_EX` (1): Exclusive lock — only one holder
+- `LOCK_UN` (8): Release lock
+- `LOCK_NB` (4): Non-blocking flag (OR with LOCK_SH or LOCK_EX)
+
+## Windows Semantics Note
+
+On Windows, `msvcrt.locking()` operates on byte ranges rather than whole files:
+- We lock a large region (0x3FFFFFFF bytes) from the start of the file
+- `LOCK_SH` is treated as `LOCK_EX` (msvcrt doesn't distinguish)
+- Position is saved/restored around lock operations to minimize side effects
+- Non-blocking mode relies on `OSError` (errno 36, EDEADLOCK) when lock would block
+
+## Error Handling
+
+- Unsupported platform: Issues `RuntimeWarning` once, then no-op
+- Invalid fd: Raises `ValueError`
+- Lock conflict with `LOCK_NB`: Raises `OSError`
+- Other locking failures: Raises `OSError` (caller should handle)
