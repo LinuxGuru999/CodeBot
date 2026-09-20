@@ -199,7 +199,8 @@ class TestReadiness:
         assert "T-001" in result
 
 
-def _valid_manifest(**overrides) -> dict:
+def valid_manifest(**overrides) -> dict:
+    """Public helper to build a valid manifest for testing."""
     base = {
         "name": "test_bot",
         "kind": "scan",
@@ -224,13 +225,13 @@ def _valid_manifest(**overrides) -> dict:
 class TestManifestSchema:
     def test_validate_manifest_minimal_valid(self):
         from codebot.manifest_schema import validate_manifest
-        ok, errors = validate_manifest(_valid_manifest())
+        ok, errors = validate_manifest(valid_manifest())
         assert ok is True
         assert errors == []
 
     def test_validate_manifest_missing_name(self):
         from codebot.manifest_schema import validate_manifest
-        m = _valid_manifest()
+        m = valid_manifest()
         del m["name"]
         ok, errors = validate_manifest(m)
         assert ok is False
@@ -243,14 +244,14 @@ class TestManifestSchema:
 
     def test_validate_manifest_bad_kind(self):
         from codebot.manifest_schema import validate_manifest
-        ok, errors = validate_manifest(_valid_manifest(kind="invalid"))
+        ok, errors = validate_manifest(valid_manifest(kind="invalid"))
         assert ok is False
         assert any("kind" in e.lower() for e in errors)
 
     def test_load_manifest_from_file(self, tmp_path):
         from codebot.manifest_schema import load_manifest
         manifest_file = tmp_path / "test.json"
-        manifest_file.write_text(json.dumps(_valid_manifest()))
+        manifest_file.write_text(json.dumps(valid_manifest()))
         result = load_manifest(manifest_file)
         assert result["name"] == "test_bot"
 

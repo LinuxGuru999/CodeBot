@@ -25,8 +25,8 @@ from codebot.ticket_engine import (
 from codebot.implementation_planner import PlanStore, generate_plan
 
 
-def _advance_to_ready(store: TicketStore, ticket_id: str) -> None:
-    """Helper to move a ticket through DISCOVERED -> VALIDATING -> TRIAGED -> READY."""
+def advance_to_ready(store: TicketStore, ticket_id: str) -> None:
+    """Public helper to move a ticket through DISCOVERED -> VALIDATING -> TRIAGED -> READY."""
     store.transition(ticket_id, TicketState.VALIDATING)
     store.transition(ticket_id, TicketState.TRIAGED)
     store.transition(ticket_id, TicketState.READY)
@@ -43,7 +43,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.MEDIUM,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="requires an implementation plan"):
             store.transition(t.id, TicketState.IMPLEMENTING)
@@ -56,7 +56,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.HIGH,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="requires an implementation plan"):
             store.transition(t.id, TicketState.IMPLEMENTING)
@@ -69,7 +69,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.CRITICAL,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="requires an implementation plan"):
             store.transition(t.id, TicketState.IMPLEMENTING)
@@ -82,7 +82,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         # Low risk should bypass planning requirement
         updated = store.transition(t.id, TicketState.IMPLEMENTING)
@@ -96,7 +96,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.MEDIUM,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         # Generate and save a plan
         plan = generate_plan(
@@ -121,7 +121,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.HIGH,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="risk=high"):
             store.transition(t.id, TicketState.IMPLEMENTING)
@@ -134,7 +134,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.MEDIUM,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="PLANNING"):
             store.transition(t.id, TicketState.IMPLEMENTING)
@@ -148,7 +148,7 @@ class TestPlanningPrerequisiteEnforcement:
             risk=RiskLevel.MEDIUM,
         )
         store.add(t)
-        _advance_to_ready(store, t.id)
+        advance_to_ready(store, t.id)
 
         # DEFERRED is allowed from READY without a plan
         updated = store.transition(t.id, TicketState.DEFERRED)
@@ -175,7 +175,7 @@ class TestRiskThresholdConfigurable:
                 risk=RiskLevel.MEDIUM,
             )
             store.add(t)
-            _advance_to_ready(store, t.id)
+            advance_to_ready(store, t.id)
 
             # With threshold at HIGH, MEDIUM risk should pass
             updated = store.transition(t.id, TicketState.IMPLEMENTING)

@@ -17,6 +17,18 @@ from codebot.scratchpad import (
 from codebot.task_splitter import should_split, split_ticket, compute_chunks
 
 
+def make_test_ticket(**kwargs):
+    """Public helper to create test tickets without relying on private internals."""
+    from codebot.ticket_engine import create_ticket, TicketClass, Severity
+    defaults = dict(
+        title="Test", ticket_class=TicketClass.BUG, severity=Severity.MEDIUM,
+        source="test", evidence="ev", problem_statement="prob",
+        desired_state="des", acceptance_criteria=["ac"],
+    )
+    defaults.update(kwargs)
+    return create_ticket(**defaults)
+
+
 class TestIsBlockedUrl:
     def test_blocks_localhost(self):
         assert is_blocked_url("http://localhost/admin") is True
@@ -255,20 +267,10 @@ class TestHandoffNote:
 
 
 class TestShouldSplit:
-    def _make_ticket(self, **kwargs):
-        from codebot.ticket_engine import create_ticket, TicketClass, Severity
-        defaults = dict(
-            title="Test", ticket_class=TicketClass.BUG, severity=Severity.MEDIUM,
-            source="test", evidence="ev", problem_statement="prob",
-            desired_state="des", acceptance_criteria=["ac"],
-        )
-        defaults.update(kwargs)
-        return create_ticket(**defaults)
-
     def test_no_split_on_complete(self, tmp_path):
         from codebot.ticket_engine import TicketState, TicketStore, RiskLevel
         from codebot.implementation_planner import PlanStore
-        t = self._make_ticket(risk=RiskLevel.LOW)
+        t = make_test_ticket(risk=RiskLevel.LOW)
         store = TicketStore(tmp_path / "tickets.json")
         store.add(t)
         for s in [TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
@@ -284,19 +286,19 @@ class TestShouldSplit:
         assert should_split(t, exit_reason="timeout") is False
 
     def test_split_on_timeout(self):
-        t = self._make_ticket()
+        t = make_test_ticket()
         assert should_split(t, exit_reason="timeout") is True
 
     def test_split_on_rate_limit(self):
-        t = self._make_ticket()
+        t = make_test_ticket()
         assert should_split(t, exit_reason="rate_limit") is True
 
     def test_split_on_many_modules(self):
-        t = self._make_ticket(affected_modules=["a.py", "b.py", "c.py", "d.py", "e.py"])
+        t = make_test_ticket(affected_modules=["a.py", "b.py", "c.py", "d.py", "e.py"])
         assert should_split(t) is True
 
     def test_no_split_small_ticket(self):
-        t = self._make_ticket(affected_modules=["a.py"])
+        t = make_test_ticket(affected_modules=["a.py"])
         assert should_split(t) is False
 
 
