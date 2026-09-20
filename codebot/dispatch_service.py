@@ -264,10 +264,12 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any]) -> None:
                 if base_role in REVIEWER_ROLE_NAMES:
                     if t.state == TicketState.REVIEWING:
                         ts.transition(assigned_tid, TicketState.VERIFYING)
+                        ts.flush()  # Ensure changes are written to disk immediately
                         logger.info(f"Ticket {assigned_tid} -> VERIFYING (reviewer {bot.config.name} completed)")
                 else:
                     if t.state == TicketState.IMPLEMENTING:
                         ts.transition(assigned_tid, TicketState.REVIEWING)
+                        ts.flush()  # Ensure changes are written to disk immediately
                         logger.info(f"Ticket {assigned_tid} -> REVIEWING (agent {bot.config.name} completed)")
             # Clean up claims
             claims_dir = STATE_DIR / "claims"
@@ -295,6 +297,7 @@ def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int) -
             ticket = ts.get(assigned_tid)
             if ticket and ticket.state == TicketState.IMPLEMENTING:
                 ts.transition(assigned_tid, TicketState.READY)
+                ts.flush()  # Ensure changes are written to disk immediately
                 logger.info(f"Bot '{bot.config.name}' errored (exit {exit_code}), returning ticket {assigned_tid} to READY for retry")
             bot._assigned_ticket_id = ''
     except Exception as e:

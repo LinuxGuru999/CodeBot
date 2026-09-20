@@ -3,7 +3,7 @@
 import json
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -41,38 +41,38 @@ class TestTransitionTicketOnError:
             problem_statement="problem",
             desired_state="desired",
             acceptance_criteria=["ac"],
-            risk=RiskLevel.LOW,  # Low risk to skip planning prerequisite
+            risk=RiskLevel.LOW,
         )
         store.add(t)
         store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
         store.transition(t.id, TicketState.READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
+        store.flush()
+        store.close()  # Close to prevent WAL interference
         
         # Verify ticket is in IMPLEMENTING
-        assert store.get(t.id).state == TicketState.IMPLEMENTING
+        store_check = TicketStore(store_path)
+        assert store_check.get(t.id).state == TicketState.IMPLEMENTING
+        store_check.close()
         
         # Create a bot with the ticket assigned
         bot = self._make_bot(t.id)
         bots = {"test_bot": bot}
         
-        # Mock STATE_DIR to use tmp_path
+        # Patch STATE_DIR in dispatch_service to use tmp_path
         import codebot.dispatch_service as ds
-        original_state_dir = ds.STATE_DIR
-        ds.STATE_DIR = tmp_path
-        
-        try:
-            # Call transition_ticket_on_error with exit_code=1 (genuine error)
+        with patch.object(ds, 'STATE_DIR', tmp_path):
             transition_ticket_on_error(bot, bots, exit_code=1)
-        finally:
-            ds.STATE_DIR = original_state_dir
         
-        # Verify ticket is now in READY
-        updated = store.get(t.id)
+        # Reload store to see changes
+        store2 = TicketStore(store_path)
+        updated = store2.get(t.id)
         assert updated.state == TicketState.READY, f"Expected READY, got {updated.state}"
         
         # Verify assigned_ticket_id is cleared
         assert bot._assigned_ticket_id == ""
+        store2.close()
 
     def test_error_exit_different_codes(self, tmp_path):
         """Various error exit codes should all transition to READY."""
@@ -96,21 +96,20 @@ class TestTransitionTicketOnError:
             store.transition(t.id, TicketState.TRIAGED)
             store.transition(t.id, TicketState.READY)
             store.transition(t.id, TicketState.IMPLEMENTING)
+            store.flush()
+            store.close()
             
             bot = self._make_bot(t.id)
             bots = {"test_bot": bot}
             
             import codebot.dispatch_service as ds
-            original_state_dir = ds.STATE_DIR
-            ds.STATE_DIR = tmp_path
-            
-            try:
+            with patch.object(ds, 'STATE_DIR', tmp_path):
                 transition_ticket_on_error(bot, bots, exit_code=exit_code)
-            finally:
-                ds.STATE_DIR = original_state_dir
             
-            updated = store.get(t.id)
+            store2 = TicketStore(store_path)
+            updated = store2.get(t.id)
             assert updated.state == TicketState.READY, f"Exit code {exit_code}: expected READY, got {updated.state}"
+            store2.close()
 
     def test_error_exit_no_assigned_ticket(self, tmp_path):
         """Error exit with no assigned ticket should be a no-op."""
@@ -119,7 +118,7 @@ class TestTransitionTicketOnError:
         
         # Should not raise
         transition_ticket_on_error(bot, bots, exit_code=1)
-        assert bot._assigned_ticket_id == ""
+        assert getattr(bot, '_assigned_ticket_id', '') == ""
 
     def test_error_exit_ticket_not_in_implementing(self, tmp_path):
         """Error exit when ticket is not in IMPLEMENTING should not transition."""
@@ -138,26 +137,23 @@ class TestTransitionTicketOnError:
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        # Leave ticket in READY state
         store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
         store.transition(t.id, TicketState.READY)
+        store.flush()
+        store.close()
         
         bot = self._make_bot(t.id)
         bots = {"test_bot": bot}
         
         import codebot.dispatch_service as ds
-        original_state_dir = ds.STATE_DIR
-        ds.STATE_DIR = tmp_path
-        
-        try:
+        with patch.object(ds, 'STATE_DIR', tmp_path):
             transition_ticket_on_error(bot, bots, exit_code=1)
-        finally:
-            ds.STATE_DIR = original_state_dir
         
-        # Ticket should still be in READY (not transitioned again)
-        updated = store.get(t.id)
+        store2 = TicketStore(store_path)
+        updated = store2.get(t.id)
         assert updated.state == TicketState.READY
+        store2.close()
 
     def test_error_exit_cleans_claims(self, tmp_path):
         """Error exit should clean up claim files."""
@@ -180,6 +176,8 @@ class TestTransitionTicketOnError:
         store.transition(t.id, TicketState.TRIAGED)
         store.transition(t.id, TicketState.READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
+        store.flush()
+        store.close()
         
         # Create a claim file
         claims_dir = tmp_path / "claims"
@@ -191,15 +189,9 @@ class TestTransitionTicketOnError:
         bots = {"test_bot": bot}
         
         import codebot.dispatch_service as ds
-        original_state_dir = ds.STATE_DIR
-        ds.STATE_DIR = tmp_path
-        
-        try:
+        with patch.object(ds, 'STATE_DIR', tmp_path):
             transition_ticket_on_error(bot, bots, exit_code=1)
-        finally:
-            ds.STATE_DIR = original_state_dir
         
-        # Claim file should be deleted
         assert not claim_file.exists()
 
 
@@ -234,21 +226,20 @@ class TestTransitionTicketOnSuccess:
         store.transition(t.id, TicketState.TRIAGED)
         store.transition(t.id, TicketState.READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
+        store.flush()
+        store.close()
         
         bot = self._make_bot(t.id, name="general_implementer")
         bots = {"general_implementer": bot}
         
         import codebot.dispatch_service as ds
-        original_state_dir = ds.STATE_DIR
-        ds.STATE_DIR = tmp_path
-        
-        try:
+        with patch.object(ds, 'STATE_DIR', tmp_path):
             transition_ticket_on_success(bot, bots)
-        finally:
-            ds.STATE_DIR = original_state_dir
         
-        updated = store.get(t.id)
+        store2 = TicketStore(store_path)
+        updated = store2.get(t.id)
         assert updated.state == TicketState.REVIEWING
+        store2.close()
 
     def test_reviewer_success_transitions_to_verifying(self, tmp_path):
         """Reviewer success should transition ticket to VERIFYING."""
@@ -272,18 +263,17 @@ class TestTransitionTicketOnSuccess:
         store.transition(t.id, TicketState.READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
         store.transition(t.id, TicketState.REVIEWING)
+        store.flush()
+        store.close()
         
         bot = self._make_bot(t.id, name="correctness_reviewer")
         bots = {"correctness_reviewer": bot}
         
         import codebot.dispatch_service as ds
-        original_state_dir = ds.STATE_DIR
-        ds.STATE_DIR = tmp_path
-        
-        try:
+        with patch.object(ds, 'STATE_DIR', tmp_path):
             transition_ticket_on_success(bot, bots)
-        finally:
-            ds.STATE_DIR = original_state_dir
         
-        updated = store.get(t.id)
+        store2 = TicketStore(store_path)
+        updated = store2.get(t.id)
         assert updated.state == TicketState.VERIFYING
+        store2.close()
