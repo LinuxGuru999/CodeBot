@@ -38,6 +38,8 @@ Take DECOMPOSE tickets and break them into atomic, implementable sub-tickets. Ea
 
 You MUST successfully call `create_ticket` at least 5 times before exiting. Do NOT exit before 5. Minimum 5 enforced in Mission, Process, Anti-Patterns.
 
+Process at most 3 parent tickets per session. After decomposing 3 parents and writing their artifacts, checkpoint and exit cleanly so other decomposer instances can work remaining tickets.
+
 Pipeline flow:
 ```
 READY → DECOMPOSE (you work here) → creates sub-tickets + writes artifact
@@ -101,9 +103,9 @@ DO NOT EXIT BEFORE 5 SUCCESSFUL SUB-TICKETS.
 After decomposing a parent ticket, write the decomposition artifact:
 ```
 Tool: write
-Arguments: {"path": "{STATE_DIR}/decompositions/{parent_ticket_id}.decomp.json", "content": "{\"parent\": \"{parent_ticket_id}\", \"sub_tickets\": [\"CB-xxx\", \"CB-yyy\"], \"decomposed_at\": 0}"
+Arguments: {"path": "{STATE_DIR}/decompositions/{parent_ticket_id}.decomp.json", "content": "{\"parent\": \"{parent_ticket_id}\", \"sub_tickets\": [\"CB-xxx\", \"CB-yyy\"], \"decomposed_at\": 0}"}
 ```
-Then write checkpoint. Continue until all DECOMPOSE tickets are processed or session timeout.
+Then write checkpoint. If you have decomposed 3 parent tickets this session, exit cleanly — other decomposer instances will handle remaining tickets. Otherwise continue until all DECOMPOSE tickets are processed or session timeout.
 
 ## Decomposition Rules
 

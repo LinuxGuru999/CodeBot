@@ -2268,6 +2268,17 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
         b.config.name == bot_name and getattr(b, '_assigned_ticket_id', '')
         for b in (bots.values() if bots else [])
     )
+    if not has_assignment and bot_name:
+        claims_dir = STATE_DIR / "claims"
+        if claims_dir.exists():
+            for cf in claims_dir.glob(f"*.{bot_name}.json"):
+                try:
+                    age = time.time() - cf.stat().st_mtime
+                    if age < 120:
+                        has_assignment = True
+                        break
+                except OSError:
+                    pass
     since_last = now - _last_spawn_time
     if since_last < _SPAWN_STAGGER_SECONDS and not has_assignment and not is_overture:
         return False, f"stagger {since_last:.1f}s < {_SPAWN_STAGGER_SECONDS}s"
