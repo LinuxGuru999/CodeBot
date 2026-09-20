@@ -12,12 +12,12 @@ Why
 ---
 The previous QUEUE.md format was Monitor-specific markdown with no enforced
 schema, no state transitions, and no deduplication guarantees. This module
-provides a stdlib-only, JSON-serializable ticket representation with
-validated state transitions that any project adapter can consume.
+provides a JSON-serializable ticket representation with validated state
+transitions that any project adapter can consume.
 
 Invariants
 ----------
-- stdlib-only (json, enum, dataclasses, hashlib, time, re)
+- Uses stdlib plus codebot.file_lock for cross-process file locking
 - Tickets are immutable once created; state changes produce new snapshots
 - State transitions are validated; invalid transitions raise ValueError
 - Evidence hash is SHA-256 of canonical evidence string for deduplication
