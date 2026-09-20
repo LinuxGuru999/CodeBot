@@ -1416,25 +1416,19 @@ def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
         active_claims.add(p.stem.rsplit(".", 1)[0])
     idle_impl = []
     unassigned_running = []
-    disabled_count = 0
-    running_with_ticket = 0
     for name, bot in bots.items():
         base_name = name.split("-")[0] if "-" in name else name
         if base_name not in IMPLEMENTER_ROLE_NAMES:
             continue
         if not bot.config.enabled:
-            disabled_count += 1
             continue
         if bot.process is not None and bot.process.poll() is None:
             if not getattr(bot, '_assigned_ticket_id', ''):
                 unassigned_running.append((name, bot))
-            else:
-                running_with_ticket += 1
         else:
             idle_impl.append((name, bot))
 
     available = idle_impl + unassigned_running
-    logger.info(f"Dispatch implementers: idle={len(idle_impl)}, unassigned_running={len(unassigned_running)}, disabled={disabled_count}, running_with_ticket={running_with_ticket}, implementing_tickets={len(ready)}")
     if not available:
         return 0
     dispatched = 0
