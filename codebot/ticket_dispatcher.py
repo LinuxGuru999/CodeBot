@@ -882,21 +882,11 @@ def advance_reviewed_tickets(bots: dict[str, Any]) -> int:
 
     # Phase 2: Apply all transitions in a single batch save
     advanced = 0
-    try:
-        results = ts.batch_transition(transitions)
-        advanced = len(results)
-        for i, (tid, target_state, _) in enumerate(transitions):
+    results = ts.batch_transition(transitions)
+    advanced = len(results)
+    for i, (tid, target_state, _) in enumerate(transitions):
+        if any(r.id == tid for r in results):
             logger.info(f"Review verdict: {tid} -> {target_state.value}")
-    except (ValueError, KeyError) as e:
-        # Fallback: apply individually if batch fails
-        logger.warning(f"Batch advance failed ({e}), falling back to individual transitions")
-        for tid, target_state, fb in transitions:
-            try:
-                ts.transition(tid, target_state, fb)
-                logger.info(f"Review verdict: {tid} -> {target_state.value}")
-                advanced += 1
-            except ValueError as ve:
-                logger.warning(f"Failed to advance {tid}: {ve}")
 
     # Phase 3: Clean up claims and assignments for successfully transitioned tickets
     for tid, review_claims in tickets_to_clean:
@@ -1006,28 +996,16 @@ def gatekeeper_verify_tickets() -> int:
 
     # Phase 2: Apply all transitions in a single batch save
     advanced = 0
-    try:
-        results = ts.batch_transition(transitions)
-        advanced = len(results)
-        for level, msg in log_messages:
+    results = ts.batch_transition(transitions)
+    advanced = len(results)
+    result_ids = {r.id for r in results}
+    for i, (tid, target_state, fb) in enumerate(transitions):
+        if tid in result_ids:
+            level, msg = log_messages[i] if i < len(log_messages) else ("info", f"Gatekeeper: {tid} -> {target_state.value}")
             if level == "warning":
                 logger.warning(msg)
             else:
                 logger.info(msg)
-    except (ValueError, KeyError) as e:
-        # Fallback: apply individually if batch fails
-        logger.warning(f"Batch gatekeeper failed ({e}), falling back to individual transitions")
-        for i, (tid, target_state, fb) in enumerate(transitions):
-            try:
-                ts.transition(tid, target_state, fb)
-                level, msg = log_messages[i] if i < len(log_messages) else ("info", f"Gatekeeper: {tid} -> {target_state.value}")
-                if level == "warning":
-                    logger.warning(msg)
-                else:
-                    logger.info(msg)
-                advanced += 1
-            except ValueError as ve:
-                logger.warning(f"Failed to advance {tid}: {ve}")
 
     # Phase 3: Clear scratchpads for completed tickets
     for tid in completed_tids:
