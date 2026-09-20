@@ -145,6 +145,80 @@ def _ansi_pad(s: str, width: int, align: str = "left") -> str:
     return s + pad if align == "left" else pad + s
 
 
+def _wrap_text(text: str, max_width: int) -> list[str]:
+    """Split *text* into lines that fit within *max_width* visible characters.
+
+    Respects ANSI escape codes (they don't count toward width).
+    Replaces embedded newlines with spaces first.
+    Returns a list of line strings.
+    """
+    if not text:
+        return [""]
+    # Replace newlines with spaces
+    text = text.replace("\n", " ").replace("\r", " ")
+    # If text fits, return as-is
+    if _visible_width(text) <= max_width:
+        return [text]
+    
+    lines: list[str] = []
+    current_line = ""
+    words = text.split(" ")
+    
+    for word in words:
+        if not word:
+            continue
+        # Check if adding this word would exceed max_width
+        test_line = current_line + (" " if current_line else "") + word
+        if _visible_width(test_line) <= max_width:
+            current_line = test_line
+        else:
+            # Current line is full, start a new one
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+            # If single word exceeds max_width, we need to hard-wrap it
+            if _visible_width(current_line) > max_width:
+                # Hard wrap the word character by character
+                wrapped = _hard_wrap_ansi(word, max_width)
+                lines.extend(wrapped[:-1])
+                current_line = wrapped[-1] if wrapped else ""
+    
+    if current_line:
+        lines.append(current_line)
+    
+    return lines if lines else [""]
+
+
+def _hard_wrap_ansi(text: str, max_width: int) -> list[str]:
+    """Hard-wrap a single word/string that exceeds max_width, respecting ANSI codes."""
+    lines: list[str] = []
+    current_line = ""
+    current_vw = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        # Check for ANSI escape sequence
+        if ch == "\033":
+            # Find the end of the escape sequence
+            j = text.find("m", i)
+            if j != -1:
+                # Include the entire escape sequence
+                current_line += text[i:j+1]
+                i = j + 1
+                continue
+        # Regular character
+        current_line += ch
+        current_vw += 1
+        i += 1
+        if current_vw >= max_width:
+            lines.append(current_line)
+            current_line = ""
+            current_vw = 0
+    if current_line:
+        lines.append(current_line)
+    return lines if lines else [text]
+
+
 # ---------------------------------------------------------------------------
 # Safe readers
 # ---------------------------------------------------------------------------
@@ -856,7 +930,7 @@ def _state_color(st: str, enabled: bool) -> str:
 # Commands — original + improved
 # ---------------------------------------------------------------------------
 
-def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False) -> int:
+def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False, no_wrap: bool = False) -> int:
     agents = _collect_agents(project_root)
     orch = _collect_orchestrator_info(project_root)
     state_dir = _find_state_dir(project_root)
@@ -1674,10 +1748,12 @@ def cmd_health(project_root: Path, json_out: bool = False) -> int:
 # Live dashboard
 # ---------------------------------------------------------------------------
 
-def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interval: float, detail_lines: int = 0, view: str = "both") -> str:
+def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interval: float, detail_lines: int = 0, view: str = "both", limit: int = 15, offset: int = 0) -> str:
     """Return a full live frame as string.
 
     view: "both" (default), "agents", or "tickets"
+    limit: max number of agents to display per page (default 15)
+    offset: starting index for agent list pagination (default 0)
     """
     now = time.time()
     now_h = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1705,6 +1781,8 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     ls_s = f"{ls_age:.0f}s ago" if isinstance(ls_age, (int,float)) else "?"
     paused_n = orch.get("paused_count",0)
     orch_s = f"orch pid {pid or '-'} {'alive' if alive else 'DOWN'}  last_spawn {ls_s}  hb {orch.get('heartbeat_count')} agents  paused {paused_n}"
+    if paused_n > 0:
+        orch_s += "  " + _c("[PAUSED]", "yellow", enabled)
     if orch.get("drain_text"):
         orch_s += f"  drain:{orch['drain_text'][:40]}"
     lines.append(_c("┌─ Orchestrator ─────────────────────────────────────────────────────────", "dim", enabled))
@@ -1738,7 +1816,8 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
         else:
             lines.append(f"│ {'Agent':<24s} {'State':<10s} {'HB':>8s} {'LOG':>8s} {'IT':>4s} {'TASK':<20s} {'PID':>7s} {'ERR':>4s} {'MODEL':<20s}")
             lines.append(_c("│ " + "─"*101, "dim", enabled))
-            for a in agents[:15]:
+            page = agents[offset:offset + limit]
+            for a in page:
                 bucket = _bucket_color(a["bucket"], enabled)
                 hb = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("-", "gray", enabled)
                 loga = _age_str(a["log_age"], enabled) if a["log_age"] is not None else _c("-", "gray", enabled)
@@ -1749,8 +1828,11 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
                 name = a["name"][:24]
                 model = (a["model"] or "-")[:20]
                 lines.append(f"│ {name:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb, 8, 'right')} {_ansi_pad(loga, 8, 'right')} {iter_s:>4s} {task:<20s} {pid_s:>7s} {err:>4s} {model:<20s}")
-            if len(agents) > 27:
-                lines.append(f"│ ... +{len(agents)-15} more (use botop status --verbose)")
+            remaining = len(agents) - offset - limit
+            if remaining > 0:
+                lines.append(f"│ ... +{remaining} more (page {offset // limit + 1}; use --offset {offset + limit} to see next)")
+            elif offset > 0:
+                lines.append(f"│ (showing agents {offset+1}-{offset+len(page)} of {len(agents)}; use --offset 0 for first page)")
         lines.append(_c("└──────────────────────────────────────────────────────────────────────────", "dim", enabled))
 
     # tickets
@@ -1802,7 +1884,7 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     return "\n".join(lines)
 
 
-def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both") -> int:
+def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both", no_clear: bool = False, limit: int = 15, offset: int = 0) -> int:
     """Live dashboard with view switching (1=agents, 2=tickets, 3=both)."""
     if json_out:
         # single snapshot as json
@@ -1834,7 +1916,7 @@ def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_c
     if not sys.stdout.isatty():
         once = True
     if once:
-        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view)
+        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view, limit=limit, offset=offset)
         # don't clear screen in once mode
         print(frame)
         return 0
@@ -1846,11 +1928,17 @@ def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_c
     time.sleep(0.2)
     while True:
         ticker += 1
-        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view)
-        if sys.stdout.isatty():
-            sys.stdout.write("\033[2J\033[H")
+        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view, limit=limit, offset=offset)
+        if ticker == 1:
+            # first frame: show keyboard-discoverable help (screen-reader friendly)
+            sys.stdout.write(_c(" Keys: q quit | <enter> refresh | 1 agents | 2 tickets | 3 both | p pause (when running live loop) | --no-clear to avoid screen erase", "dim", enabled) + "\n")
+        if not no_clear:
+            if sys.stdout.isatty():
+                sys.stdout.write("\033[2J\033[H")
+            else:
+                sys.stdout.write("\n" + "="*80 + "\n")
         else:
-            sys.stdout.write("\n" + "="*80 + "\n")
+            sys.stdout.write("---\n")
         sys.stdout.write(frame + "\n")
         sys.stdout.flush()
 
@@ -1986,6 +2074,9 @@ botop term — interactive
                 jout = False
                 nc = no_color
                 vw = "both"
+                noclr = False
+                lm = 15
+                ofst = 0
                 i = 0
                 while i < len(args):
                     if args[i] in ("--interval", "-i") and i+1 < len(args):
@@ -2000,9 +2091,19 @@ botop term — interactive
                         nc=True; i+=1
                     elif args[i] == "--view" and i+1 < len(args):
                         vw = args[i+1]; i+=2
+                    elif args[i] == "--no-clear":
+                        noclr = True; i+=1
+                    elif args[i] == "--limit" and i+1 < len(args):
+                        try: lm = int(args[i+1])
+                        except: pass
+                        i+=2
+                    elif args[i] == "--offset" and i+1 < len(args):
+                        try: ofst = int(args[i+1])
+                        except: pass
+                        i+=2
                     else:
                         i+=1
-                cmd_live(project_root, interval=iv, once=once, no_color=nc, json_out=jout, view=vw)
+                cmd_live(project_root, interval=iv, once=once, no_color=nc, json_out=jout, view=vw, no_clear=noclr, limit=lm, offset=ofst)
             elif cmd == "status":
                 verbose = "--verbose" in args or "-v" in args
                 jout = "--json" in args
@@ -2150,6 +2251,7 @@ def main() -> None:
     p_status = sub.add_parser("status", help="Show agent status")
     p_status.add_argument("--verbose", action="store_true", help="Show full table with model/task/err")
     p_status.add_argument("--json", action="store_true", help="JSON output")
+    p_status.add_argument("--no-wrap", action="store_true", help="Disable word-wrapping for long task descriptions")
 
     # claims
     p_claims = sub.add_parser("claims", help="Show active ticket claims")
@@ -2237,6 +2339,10 @@ def main() -> None:
     p_live.add_argument("--once", action="store_true", help="Single snapshot, no loop")
     p_live.add_argument("--json", action="store_true", help="JSON snapshot, no UI")
     p_live.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+    p_live.add_argument("--no-wrap", action="store_true", help="Disable word-wrapping for long task descriptions")
+    p_live.add_argument("--no-clear", action="store_true", help="Do not clear screen between refreshes (screen-reader friendly)")
+    p_live.add_argument("--limit", type=int, default=15, help="Max agents to display per page (default 15)")
+    p_live.add_argument("--offset", type=int, default=0, help="Agent list pagination offset (default 0)")
     p_live.add_argument("--view", choices=["both", "agents", "tickets"], default="both", help="Initial view (or use 1/2/3 keys to toggle)")
     for alias in ("watch", "top", "dash", "dashboard"):
         pa = sub.add_parser(alias, help=f"Alias for live")
@@ -2244,6 +2350,10 @@ def main() -> None:
         pa.add_argument("--once", action="store_true", help="Single snapshot")
         pa.add_argument("--json", action="store_true", help="JSON snapshot")
         pa.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+        pa.add_argument("--no-wrap", action="store_true", help="Disable word-wrapping for long task descriptions")
+        pa.add_argument("--no-clear", action="store_true", help="Do not clear screen between refreshes (screen-reader friendly)")
+        pa.add_argument("--limit", type=int, default=15, help="Max agents to display per page (default 15)")
+        pa.add_argument("--offset", type=int, default=0, help="Agent list pagination offset (default 0)")
         pa.add_argument("--view", choices=["both", "agents", "tickets"], default="both", help="Initial view (or use 1/2/3 keys to toggle)")
 
     # terminal
@@ -2311,7 +2421,7 @@ def main() -> None:
     elif cmd in ("health", "doctor", "diagnostics", "diag"):
         sys.exit(cmd_health(project_root, json_out=getattr(args, "json", False)))
     elif cmd in ("live", "watch", "top", "dash", "dashboard"):
-        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 1.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both")))
+        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 1.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both"), no_clear=getattr(args, "no_clear", False), limit=getattr(args, "limit", 15), offset=getattr(args, "offset", 0)))
     elif cmd in ("term", "terminal", "shell", "repl", "interactive"):
         sys.exit(cmd_term(project_root, no_color=getattr(args, "no_color", False)))
     else:
