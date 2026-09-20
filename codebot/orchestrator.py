@@ -2283,7 +2283,7 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
     except Exception:
         last = 0.0
     gap = now - last
-    if not is_overture:
+    if not is_overture and not has_assignment:
         if bot_name in WORKER_POOL:
             worker_gap = max(3, GATEWAY_MIN_SPAWN_GAP // 4)
             if gap < worker_gap:
