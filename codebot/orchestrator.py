@@ -3483,8 +3483,12 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
         decomp_file = decomp_dir / f"{tid}.decomp.json"
         if decomp_file.exists():
             try:
+                artifact = json.loads(decomp_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                artifact = {}
+            try:
                 ts.transition(tid, TicketState.PLANNING)
-                logger.info(f"Decomposition complete: {tid} DECOMPOSE -> PLANNING")
+                logger.info(f"Decomposition complete: {tid} DECOMPOSE -> PLANNING (sub_tickets={len(artifact.get('sub_tickets', []))})")
                 dispatched += 1
                 for cf in claims_dir.glob(f"{tid}.*.json"):
                     try:

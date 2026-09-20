@@ -146,11 +146,12 @@ DO NOT re-read tickets.json. DO NOT re-grep. Just call create_ticket for each su
 
 ### Step 6: Write decomposition artifact and checkpoint
 
-After decomposing a parent ticket, write the artifact:
+After decomposing a parent ticket, write the artifact. Use simple flat JSON — no nested objects or arrays with quotes inside strings. Write each sub-ticket ID on its own line after the parent:
 ```
 Tool: write
-Arguments: {"path": "{STATE_DIR}/decompositions/{parent_ticket_id}.decomp.json", "content": "{\"parent\": \"{parent_ticket_id}\", \"sub_tickets\": [\"CB-xxx\", \"CB-yyy\"], \"dag_edges\": {\"CB-yyy\": [\"CB-xxx\"]}, \"shared_contracts\": [{\"between\": [\"CB-xxx\", \"CB-yyy\"], \"interface\": \"description\"}], \"completeness_check\": \"all children solve parent: yes\", \"decomposed_at\": 0}"}
+Arguments: {"path": "{STATE_DIR}/decompositions/{parent_ticket_id}.decomp.json", "content": "{\"parent\": \"{parent_ticket_id}\", \"sub_tickets\": [\"CB-xxx\", \"CB-yyy\"], \"dag_edges\": {}, \"shared_contracts\": [], \"completeness_check\": \"yes\", \"decomposed_at\": 0}"}
 ```
+IMPORTANT: The content value MUST be valid JSON. Use only simple string values and flat arrays of strings. Do NOT nest objects with quotes inside the content string. If you need DAG edges, write them as comma-separated strings like `"CB-yyy:CB-xxx"` meaning CB-yyy depends on CB-xxx.
 Then write checkpoint. If you have decomposed 2 parent tickets this session, exit cleanly. Otherwise continue.
 
 ## Decomposition Rules
