@@ -689,6 +689,10 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
         available = available[:max_agents]
     dispatched = 0
 
+    # Phase 1: Collect transitions for completed plans and dispatch new ones
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
+    transition_tids: list[str] = []
+
     for ticket in planning:
         tid = getattr(ticket, 'id', '')
         if not tid:
@@ -696,17 +700,8 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
 
         plan_file = plans_dir / f"{tid}.plan.json"
         if plan_file.exists():
-            try:
-                ts.transition(tid, TicketState.IMPLEMENTING)
-                logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
-                dispatched += 1
-                for cf in claims_dir.glob(f"{tid}.*.json"):
-                    try:
-                        cf.unlink()
-                    except OSError:
-                        pass
-            except ValueError as e:
-                logger.debug(f"Failed to advance {tid} to IMPLEMENTING: {e}")
+            transitions.append((tid, TicketState.IMPLEMENTING, None))
+            transition_tids.append(tid)
             continue
 
         if tid in active_claims:
@@ -741,6 +736,33 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
         else:
             if start_bot_fn:
                 start_bot_fn(bot, bots=bots)
+
+    # Phase 2: Apply all planning-complete transitions in a single batch
+    if transitions:
+        try:
+            results = ts.batch_transition(transitions)
+            dispatched += len(results)
+            for tid in transition_tids:
+                logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
+                for cf in claims_dir.glob(f"{tid}.*.json"):
+                    try:
+                        cf.unlink()
+                    except OSError:
+                        pass
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Batch planning transition failed ({e}), falling back to individual")
+            for i, (tid, target_state, fb) in enumerate(transitions):
+                try:
+                    ts.transition(tid, target_state, fb)
+                    logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
+                    dispatched += 1
+                    for cf in claims_dir.glob(f"{tid}.*.json"):
+                        try:
+                            cf.unlink()
+                        except OSError:
+                            pass
+                except ValueError as ve:
+                    logger.debug(f"Failed to advance {tid} to IMPLEMENTING: {ve}")
 
     return dispatched
 

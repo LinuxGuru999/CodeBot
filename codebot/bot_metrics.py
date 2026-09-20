@@ -63,7 +63,20 @@ def _get_events_path() -> Path:
 
 
 def _write_json_atomic(path: Path, data: Any) -> None:
-    """Write JSON atomically via tmp+replace."""
+    """Write JSON data to *path* atomically via tmp-file + replace.
+
+    Serialises *data* as indented JSON to a per-PID temporary file
+    (``{name}.{pid}.tmp``) and renames it over *path*, guaranteeing readers
+    never observe a half-written file. Used for the compacted snapshot and
+    events-log truncation.
+
+    Args:
+        path: Destination file path.
+        data: JSON-serialisable object to persist.
+
+    Returns:
+        None. Raises ``OSError`` on I/O failure.
+    """
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.replace(path)

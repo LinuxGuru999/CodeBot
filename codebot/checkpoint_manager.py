@@ -33,9 +33,10 @@ try:
     LOCK_EX = fcntl.LOCK_EX
     LOCK_UN = fcntl.LOCK_UN
 except ImportError:
-    LOCK_EX = 2
-    LOCK_UN = 8
+    LOCK_EX = 2  # fcntl.LOCK_EX value on Linux; used for exclusive state-file locking
+    LOCK_UN = 8  # fcntl.LOCK_UN value on Linux; used to release the flock
     def _noop_flock(fd, operation):
+        """No-op flock on platforms without fcntl (e.g. Windows)."""
         pass
     fcntl = type('fcntl', (), {'flock': _noop_flock})()
 
@@ -54,12 +55,33 @@ def set_state_dir(state_dir: Path) -> None:
 
 
 def checkpoint_path(bot_name: str) -> Path:
-    """Path to bot's checkpoint file."""
+    """Return the path to a bot's checkpoint file.
+
+    Args:
+        bot_name: Bot directory/name whose checkpoint location is needed.
+
+    Returns:
+        Path under ``_STATE_DIR`` for ``{bot_name}.checkpoint.json``. No I/O
+        is performed; the file may not exist.
+    """
     return _STATE_DIR / f"{bot_name}.checkpoint.json"
 
 
 def _write_json_atomic(path: Path, data: Any) -> None:
-    """Write JSON to path atomically via tmp+replace to prevent mid-write corruption."""
+    """Write JSON data to *path* atomically via tmp-file + ``os.replace``.
+
+    Serialises *data* as indented JSON (or ``str(data)`` for non-dict/list)
+    to ``{name}.{pid}.tmp`` alongside *path* and renames it over *path*,
+    guaranteeing readers never observe a half-written file. Used for both
+    checkpoint and state files.
+
+    Args:
+        path: Destination file path.
+        data: JSON-serialisable payload (dict/list) or string fallback.
+
+    Returns:
+        None. Raises ``OSError`` on I/O failure.
+    """
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
     tmp.replace(path)
@@ -67,7 +89,23 @@ def _write_json_atomic(path: Path, data: Any) -> None:
 
 @contextmanager
 def _state_write_lock(bot_name: str) -> Iterator[None]:
-    """Acquire exclusive lock on bot's state file."""
+    """Acquire an exclusive advisory lock on a bot's state file.
+
+    Creates/opens ``{bot_name}.state.lock`` under ``_STATE_DIR`` and holds
+    an ``LOCK_EX`` flock for the duration of the ``with`` block, serialising
+    concurrent read-modify-write cycles (e.g. ``update_bot_state`` vs
+    ``_manifest_restart_record``). Always releases the lock even on exception.
+
+    Args:
+        bot_name: Bot whose state is being guarded.
+
+    Yields:
+        None — the critical section runs inside the ``with`` block.
+
+    Invariants:
+        - Uses ``fcntl.flock`` on Unix; no-ops on unsupported platforms.
+        - Lock file is created with ``a+`` so it persists across calls.
+    """
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = _STATE_DIR / f"{bot_name}.state.lock"
     lock_fd = None
