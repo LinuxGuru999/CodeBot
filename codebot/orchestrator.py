@@ -3264,6 +3264,8 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
             if assigned:
                 live_bots[name] = assigned
 
+    now = time.time()
+    claim_grace_seconds = 60
     for p in claims_dir.glob("*.json"):
         parts = p.stem.rsplit(".", 1)
         if len(parts) != 2:
@@ -3271,6 +3273,9 @@ def _dispatch_decompose_agents(bots: dict[str, BotState], max_agents: int = 0) -
         claimed_tid, claimed_bot = parts
         if claimed_bot not in live_bots or live_bots[claimed_bot] != claimed_tid:
             try:
+                age = now - p.stat().st_mtime
+                if age < claim_grace_seconds:
+                    continue
                 p.unlink()
             except OSError:
                 pass
@@ -3389,6 +3394,8 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
             if assigned:
                 live_bots[name] = assigned
 
+    now = time.time()
+    claim_grace_seconds = 60
     for p in claims_dir.glob("*.json"):
         parts = p.stem.rsplit(".", 1)
         if len(parts) != 2:
@@ -3396,6 +3403,9 @@ def _dispatch_planning_agents(bots: dict[str, BotState], max_agents: int = 0) ->
         claimed_tid, claimed_bot = parts
         if claimed_bot not in live_bots or live_bots[claimed_bot] != claimed_tid:
             try:
+                age = now - p.stat().st_mtime
+                if age < claim_grace_seconds:
+                    continue
                 p.unlink()
             except OSError:
                 pass
