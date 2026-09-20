@@ -168,5 +168,55 @@ class TestPauseResumeBotValidation(unittest.TestCase):
                     self.assertEqual(status_code, 200, f"Expected 200 for valid bot, got {status_code}: {body}")
 
 
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_pkill_not_called_with_unvalidated_input_pause(self):
+        """pkill must never be called when bot name is not in BOT_REGISTRY (pause)."""
+        from codebot.control_server import ControlHandler
+
+        malicious_names = [".*", "$(rm -rf /)", "; ls", "| cat /etc/passwd"]
+
+        for name in malicious_names:
+            handler = self._make_handler("POST", f"/bots/{name}/pause")
+            responses = []
+            handler._json = lambda code, data, r=responses: r.append((code, data))
+            handler._auth = lambda: True
+            handler._read_json_body = lambda: (None, None, None)
+
+            with patch("subprocess.run") as mock_run:
+                ControlHandler.do_POST(handler)
+                mock_run.assert_not_called()
+
+            self.assertTrue(len(responses) > 0, f"Handler must respond for malicious name: {name}")
+            status_code, body = responses[0]
+            self.assertEqual(status_code, 404,
+                             f"Expected 404 for unvalidated bot name '{name}', got {status_code}")
+            self.assertIn("unknown bot", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_pkill_not_called_with_unvalidated_input_resume(self):
+        """pkill/subprocess must never be called when bot name is not in BOT_REGISTRY (resume)."""
+        from codebot.control_server import ControlHandler
+
+        malicious_names = [".*", "$(rm -rf /)", "; ls", "| cat /etc/passwd"]
+
+        for name in malicious_names:
+            handler = self._make_handler("POST", f"/bots/{name}/resume")
+            responses = []
+            handler._json = lambda code, data, r=responses: r.append((code, data))
+            handler._auth = lambda: True
+            handler._read_json_body = lambda: (None, None, None)
+
+            with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+                ControlHandler.do_POST(handler)
+                mock_popen.assert_not_called()
+                mock_run.assert_not_called()
+
+            self.assertTrue(len(responses) > 0, f"Handler must respond for malicious name: {name}")
+            status_code, body = responses[0]
+            self.assertEqual(status_code, 404,
+                             f"Expected 404 for unvalidated bot name '{name}', got {status_code}")
+            self.assertIn("unknown bot", body.get("error", "").lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -681,7 +681,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {name}"], timeout=5)
+                # Use re.escape to prevent regex injection in pkill pattern
+                escaped_name = re.escape(name)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
                 self._json(200, {"ok": True, "paused": name})
             except Exception as e:
                 self._json(500, {"error": str(e)})
