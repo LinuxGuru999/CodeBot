@@ -607,17 +607,19 @@ class TicketStore:
 
     def list_by_state(self, state: TicketState) -> list[Ticket]:
         with self._lock:
-            return [t for t in self._tickets.values() if t.state == state]
+            ticket_ids = self._state_index.get(state, set())
+            return [self._tickets[tid] for tid in ticket_ids if tid in self._tickets]
 
     def list_ready(self) -> list[Ticket]:
-        with self._lock:
-            ready = [t for t in self._tickets.values() if t.state == TicketState.READY]
         severity_order = {
             Severity.CRITICAL: 0,
             Severity.HIGH: 1,
             Severity.MEDIUM: 2,
             Severity.LOW: 3,
         }
+        with self._lock:
+            ready_ids = self._state_index.get(TicketState.READY, set())
+            ready = [self._tickets[tid] for tid in ready_ids if tid in self._tickets]
         return sorted(ready, key=lambda t: severity_order.get(t.severity, 99))
 
     def count(self) -> int:
