@@ -1391,6 +1391,203 @@ def _adaptive_schedule_gate(bots: dict[str, BotState]) -> None:
     )
 
 
+DEMAND_STAGGER_SECONDS = 1.0
+REVIEWER_TYPES = (
+    "correctness_reviewer", "security_reviewer", "architecture_reviewer",
+    "test_reviewer", "performance_reviewer", "simplicity_reviewer",
+    "documentation_reviewer",
+)
+
+
+def _spawn_demand_agents(bots: dict[str, BotState], max_concurrent: int) -> int:
+    try:
+        from codebot.ticket_engine import TicketStore, TicketState
+    except ImportError:
+        return 0
+    store_path = STATE_DIR / "tickets.json"
+    if not store_path.exists():
+        store_path = Path(".codebot/state/tickets.json")
+    if not store_path.exists():
+        return 0
+    try:
+        ts = TicketStore(store_path)
+    except Exception:
+        return 0
+
+    implementing = ts.list_by_state(TicketState.IMPLEMENTING)
+    reviewing = ts.list_by_state(TicketState.REVIEWING)
+    decompose_count = len(ts.list_by_state(TicketState.DECOMPOSE))
+    planning_count = len(ts.list_by_state(TicketState.PLANNING))
+    rework_tickets = ts.list_by_state(TicketState.REWORK)
+
+    running_count = sum(
+        1 for b in bots.values()
+        if b.process is not None and b.process.poll() is None
+    )
+    always_on_names = {"scheduler", "conflict_resolver"}
+    demand_running = sum(
+        1 for name, b in bots.items()
+        if b.process is not None and b.process.poll() is None
+        and name.split("-")[0] not in always_on_names
+    )
+    budget = max(0, max_concurrent - demand_running)
+    if budget <= 0:
+        return 0
+
+    claims_dir = STATE_DIR / "claims"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    active_claims: set[str] = set()
+    for p in claims_dir.glob("*.json"):
+        active_claims.add(p.stem.rsplit(".", 1)[0])
+
+    spawned = 0
+    model_idx = 0
+
+    def _get_or_create_bot(base_name: str, suffix: str = "") -> BotState | None:
+        bot_name = f"{base_name}-{suffix}" if suffix else base_name
+        if bot_name in bots:
+            return bots[bot_name]
+        prompt_file = f"{base_name}.md"
+        prompt_path = BOTS_DIR / prompt_file
+        if not prompt_path.exists():
+            return None
+        nonlocal model_idx
+        idx = model_idx % len(WORKER_MODEL_CYCLE)
+        model = WORKER_MODEL_CYCLE[idx]
+        fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
+        model_idx += 1
+        tier = 13 if model in MODEL_TIER_EXPENSIVE or "thinking" in model else 12
+        cfg = BotConfig(
+            name=bot_name,
+            prompt_file=prompt_file,
+            interval_seconds=30,
+            heartbeat_timeout=90,
+            model=model,
+            fallback_model=fb,
+            enabled=True,
+            clean_exit_wait=False,
+            runner_mode="api",
+            tier=tier,
+            max_restarts=5,
+        )
+        TIER_PRIORITY[bot_name] = tier
+        state = BotState(config=cfg)
+        bots[bot_name] = state
+        return state
+
+    def _is_idle(bot: BotState) -> bool:
+        return bot.process is None or bot.process.poll() is not None
+
+    def _assign_and_spawn(bot: BotState, tid: str) -> bool:
+        claim_file = claims_dir / f"{tid}.{bot.config.name}.json"
+        if claim_file.exists():
+            return False
+        try:
+            claim_data = {"ticket_id": tid, "bot": bot.config.name, "at": time.time()}
+            tmp = claim_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
+            tmp.replace(claim_file)
+        except OSError:
+            return False
+        bot._assigned_ticket_id = tid
+        ok = start_bot(bot, bots=bots)
+        if ok:
+            nonlocal spawned
+            spawned += 1
+            logger.info(f"Demand spawn: {bot.config.name} -> ticket {tid}")
+            time.sleep(DEMAND_STAGGER_SECONDS)
+            return True
+        else:
+            try:
+                claim_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            bot._assigned_ticket_id = ""
+            return False
+
+    impl_all = list(implementing) + list(rework_tickets)
+    impl_needed = min(len(impl_all), budget)
+    for ticket in impl_all[:impl_needed]:
+        if spawned >= budget:
+            break
+        tid = getattr(ticket, "id", "")
+        if not tid or tid in active_claims:
+            continue
+        tc = getattr(ticket, "ticket_class", None)
+        tc_val = tc.value if hasattr(tc, "value") else str(tc) if tc else "feature"
+        target_base = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
+
+        assigned = False
+        for name, bot in bots.items():
+            base = name.split("-")[0] if "-" in name else name
+            if base != target_base:
+                continue
+            if not bot.config.enabled:
+                continue
+            if not _is_idle(bot):
+                continue
+            if getattr(bot, "_assigned_ticket_id", ""):
+                continue
+            if _assign_and_spawn(bot, tid):
+                assigned = True
+                active_claims.add(tid)
+                break
+        if assigned:
+            continue
+
+        existing = [
+            name for name in bots
+            if (name.split("-")[0] if "-" in name else name) == target_base
+        ]
+        suffix = str(len(existing) + 1) if existing else ""
+        bot = _get_or_create_bot(target_base, suffix)
+        if bot and _is_idle(bot):
+            if _assign_and_spawn(bot, tid):
+                active_claims.add(tid)
+
+    budget -= spawned
+    if budget <= 0:
+        return spawned
+
+    review_budget = min(len(reviewing) * len(REVIEWER_TYPES), budget)
+    for ticket in reviewing[:max(1, len(reviewing))]:
+        if spawned >= budget + (len(reviewing) * len(REVIEWER_TYPES) - review_budget):
+            break
+        tid = getattr(ticket, "id", "")
+        if not tid or tid in active_claims:
+            continue
+        for rtype in REVIEWER_TYPES:
+            if spawned >= max_concurrent:
+                break
+            assigned = False
+            for name, bot in bots.items():
+                base = name.split("-")[0] if "-" in name else name
+                if base != rtype:
+                    continue
+                if not bot.config.enabled:
+                    continue
+                if not _is_idle(bot):
+                    continue
+                if getattr(bot, "_assigned_ticket_id", ""):
+                    continue
+                if _assign_and_spawn(bot, tid):
+                    assigned = True
+                    break
+            if assigned:
+                continue
+
+            existing = [
+                name for name in bots
+                if (name.split("-")[0] if "-" in name else name) == rtype
+            ]
+            suffix = str(len(existing) + 1) if existing else ""
+            bot = _get_or_create_bot(rtype, suffix)
+            if bot and _is_idle(bot):
+                _assign_and_spawn(bot, tid)
+
+    return spawned
+
+
 def _dispatch_tickets_to_implementers(bots: dict[str, BotState]) -> int:
     try:
         from codebot.ticket_engine import TicketStore, TicketState
@@ -4882,13 +5079,9 @@ def _check_all_bots_manifest(bots: dict[str, BotState]) -> None:
     except Exception as e:
         logger.warning(f"Adaptive schedule gate failed: {e}")
     try:
-        _dispatch_tickets_to_implementers(bots)
+        _spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT)
     except Exception as e:
-        logger.warning(f"Ticket dispatch failed: {e}")
-    try:
-        _dispatch_tickets_to_reviewers(bots)
-    except Exception as e:
-        logger.warning(f"Review dispatch failed: {e}")
+        logger.warning(f"Demand agent spawn failed: {e}")
     try:
         _advance_reviewed_tickets(bots)
     except Exception as e:
@@ -5255,17 +5448,9 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     except Exception as e:
         logger.warning(f"Dynamic scaling failed: {e}")
     try:
-        from codebot.ticket_engine import TicketStore
-        store_path = STATE_DIR / "tickets.json"
-        if not store_path.exists():
-            store_path = Path(".codebot/state/tickets.json")
-        if store_path.exists():
-            ts = TicketStore(store_path)
-            counts = ts.summary()
-            if counts.get("IMPLEMENTING", 0) > 0:
-                _dispatch_tickets_to_implementers(bots)
+        _spawn_demand_agents(bots, GATEWAY_MAX_CONCURRENT)
     except Exception as e:
-        logger.warning(f"Early implementer dispatch failed: {e}")
+        logger.warning(f"Demand agent spawn failed: {e}")
     try:
         _recover_stuck_implementing_tickets(bots)
     except Exception as e:
