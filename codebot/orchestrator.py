@@ -321,14 +321,15 @@ def set_alignment_service(service: AlignmentServiceProtocol) -> None:
 
 
 def set_project_adapter(adapter: Any) -> None:
-    """Inject a ProjectAdapter instance and update PathConfig from its paths.
+    """Inject a ProjectAdapter instance and return updated PathConfig.
 
     The adapter's paths() method returns an object with repository_root,
     state_dir, logs_dir, etc. This function updates the module-level _paths
     config object so all path access goes through the adapter-provided values.
-    No individual global path constants are mutated.
+    No individual global path constants are mutated — callers access paths
+    via _paths or the module-level __getattr__ backward-compat layer.
     """
-    global _adapter_instance, _paths, BOTS_DIR, STATE_DIR, LOGS_DIR, BACKUP_DIR, ALIGNMENT_EVENTS_DIR
+    global _adapter_instance, _paths
     _adapter_instance = adapter
     try:
         ap = adapter.paths()
@@ -347,11 +348,6 @@ def set_project_adapter(adapter: Any) -> None:
             update_lock=state / ".update_lock",
             restart_file=state / ".restart",
         )
-        BOTS_DIR = _paths.bots_dir
-        STATE_DIR = _paths.state_dir
-        LOGS_DIR = _paths.logs_dir
-        BACKUP_DIR = _paths.backup_dir
-        ALIGNMENT_EVENTS_DIR = _paths.alignment_events_dir
     except Exception:
         pass
 
@@ -477,7 +473,9 @@ def _get_available_memory_mb() -> float:
 
 
 def is_draining() -> bool:
-    return _paths.drain_file.exists()
+    # Support both _paths-based access and legacy DRAIN_FILE patching in tests
+    drain = globals().get("DRAIN_FILE", _paths.drain_file)
+    return drain.exists()
 
 
 def _check_self_restart(bots: dict[str, BotState]) -> bool:
@@ -5793,12 +5791,12 @@ def print_status(bots: dict[str, BotState]) -> None:
 # ---------------------------------------------------------------------------
 
 def set_drain(reason: str = "") -> None:
-    DRAIN_FILE.write_text(f"{time.time()}\n{reason}\n")
+    _paths.drain_file.write_text(f"{time.time()}\n{reason}\n")
     logger.info(f"Drain flag set: {reason}")
 
 
 def clear_drain() -> None:
-    for f in (DRAIN_FILE, UPDATE_LOCK):
+    for f in (_paths.drain_file, _paths.update_lock):
         try:
             f.unlink()
         except FileNotFoundError:
@@ -5809,9 +5807,9 @@ def clear_drain() -> None:
 def drain_status() -> dict:
     return {
         "draining": is_draining(),
-        "drain_file": str(DRAIN_FILE) if DRAIN_FILE.exists() else None,
-        "update_lock": str(UPDATE_LOCK) if UPDATE_LOCK.exists() else None,
-        "drain_reason": DRAIN_FILE.read_text().strip() if DRAIN_FILE.exists() else None,
+        "drain_file": str(_paths.drain_file) if _paths.drain_file.exists() else None,
+        "update_lock": str(_paths.update_lock) if _paths.update_lock.exists() else None,
+        "drain_reason": _paths.drain_file.read_text().strip() if _paths.drain_file.exists() else None,
     }
 
 
@@ -5970,7 +5968,7 @@ def main() -> None:
             parser.error("--update requires at least one PATH (file or directory) to apply")
         backup = backup_botnet(tag="pre-update")
         set_drain(f"update from {', '.join(str(s) for s in srcs)}")
-        UPDATE_LOCK.write_text(f"{time.time()}\n")
+        _paths.update_lock.write_text(f"{time.time()}\n")
         safe_stop_all(bots)
         try:
             for src in srcs:
