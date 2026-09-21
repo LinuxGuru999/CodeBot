@@ -161,28 +161,18 @@ TELEMETRY_NOT_CONFIGURED_HINT = (
     "export CODEBOT_TELEMETRY_TOKEN=your-telemetry-token"
 )
 
-# Import orchestrator model profiles without starting it
-try:
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("orch_cfg", str(ORCH))
-    _m = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    spec.loader.exec_module(_m)  # type: ignore[union-attr]
-    BOT_REGISTRY = _m.BOT_REGISTRY
-    MODEL_PROFILES = _m.MODEL_PROFILES
-    def eff_timeout(cfg):  # type: ignore[no-untyped-def]
-        from dataclasses import dataclass
-        # reuse orchestrator effective_heartbeat_timeout logic
-        prof = MODEL_PROFILES.get(cfg.model)
-        if prof:
-            return max(int(cfg.interval_seconds * prof.heartbeat_multiplier), cfg.heartbeat_timeout)
-        return cfg.heartbeat_timeout
-except Exception:
-    # Log import failures so operators detect degraded state instead of silent empty registry
-    logger.exception("Failed to load orchestrator module; bot registry will be empty")
-    BOT_REGISTRY = []
-    MODEL_PROFILES = {}
-    def eff_timeout(cfg):  # type: ignore[no-untyped-def]
-        return getattr(cfg, "heartbeat_timeout", 600)
+# Import bot registry and model profiles safely from process_manager.
+# This avoids dynamic code execution (exec_module) of orchestrator.py,
+# preventing arbitrary code execution vulnerabilities (CB-495709-D068).
+from codebot.process_manager import BOT_REGISTRY, MODEL_PROFILES, BotConfig, ModelProfile
+
+
+def eff_timeout(cfg: BotConfig) -> int:
+    """Calculate effective heartbeat timeout for a bot config."""
+    prof = MODEL_PROFILES.get(cfg.model)
+    if prof:
+        return max(int(cfg.interval_seconds * prof.heartbeat_multiplier), cfg.heartbeat_timeout)
+    return cfg.heartbeat_timeout
 
 
 def validate_bot_name(name: str) -> bool:
@@ -1196,16 +1186,16 @@ class ControlHandler(BaseHTTPRequestHandler):
                             self._json(400, {"error": "invalid bot name format"})
                             return
                     # Validate each bot name against BOT_REGISTRY (Constitution §2)
-                    # Reject unknown bots with 404 to prevent arbitrary process targeting
+                    # Reject unknown bots with 400 to prevent arbitrary process targeting
                     valid_bot_names = {c.name for c in BOT_REGISTRY}
                     for n in bots:
                         if n not in valid_bot_names:
-                            self._json(404, {"error": f"unknown bot: {n}"})
+                            self._json(400, {"error": f"unknown bot: {n}"})
                             return
-                    # Apply defense-in-depth: re.escape for pkill regex safety
+                    # Apply defense-in-depth: shlex.quote for shell escaping safety
                     for n in bots:
-                        escaped_name = re.escape(n)
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
+                        quoted_name = shlex.quote(n)
+                        subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)
