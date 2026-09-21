@@ -251,7 +251,8 @@ def bot_status(name: str) -> dict:
     running = False
     pid = None
     try:
-        ps = subprocess.run(["pgrep", "-f", f"api_runner\\.py {name}"], capture_output=True, text=True, timeout=3)
+        escaped_name = re.escape(name)
+        ps = subprocess.run(["pgrep", "-f", f"api_runner\\.py {escaped_name}"], capture_output=True, text=True, timeout=3)
         if ps.stdout.strip():
             running = True
             pid = ps.stdout.strip().split()[0]
@@ -1078,9 +1079,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             # ask orchestrator via pkill + let interval-aware respawn handle, or direct start
             try:
-                # kill existing if running; apply defense-in-depth: regex validation + shlex.quote
-                quoted_name = shlex.quote(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
+                # kill existing if running; apply defense-in-depth: re.escape for pkill regex safety
+                escaped_name = re.escape(name)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
                 time.sleep(1)
                 # orchestrator will respawn on next health check if waiting; force start via orchestrator CLI
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
@@ -1116,9 +1117,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
-                # Apply defense-in-depth: regex validation + shlex.quote
-                quoted_name = shlex.quote(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
+                # Apply defense-in-depth: re.escape for pkill regex safety
+                escaped_name = re.escape(name)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
                 self._json(200, {"ok": True, "paused": name,
                                  "undo": f"POST /bots/{name}/resume to unpause"})
             except Exception as e:
@@ -1168,7 +1169,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 valid_bot_names = {c.name for c in BOT_REGISTRY}
                 for n in bots:
                     if n not in valid_bot_names:
-                        self._json(404, {"error": f"unknown bot: {n}"})
+                        self._json(400, {"error": f"unknown bot: {n}"})
                         return
             try:
                 # Apply defense-in-depth: shlex.quote for each bot name
@@ -1201,10 +1202,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                         if n not in valid_bot_names:
                             self._json(404, {"error": f"unknown bot: {n}"})
                             return
-                    # Apply defense-in-depth: regex validation + shlex.quote
+                    # Apply defense-in-depth: re.escape for pkill regex safety
                     for n in bots:
-                        quoted_name = shlex.quote(n)
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
+                        escaped_name = re.escape(n)
+                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)
