@@ -48,6 +48,13 @@ FETCH_TIMEOUT = 30
 MAX_RESULTS = 10
 MAX_OUTPUT_CHARS = 8_000
 
+# Secure SSL context with certificate verification enabled.
+# Created once at module level to avoid per-connection overhead and ensure
+# all HTTPS connections enforce TLS certificate validation.
+_SECURE_SSL_CONTEXT = ssl.create_default_context()
+_SECURE_SSL_CONTEXT.check_hostname = True
+_SECURE_SSL_CONTEXT.verify_mode = ssl.CERT_REQUIRED
+
 _BLOCKED_PATTERNS = (
     "127.0.0.", "localhost", "::1", "169.254.",
     "10.", "172.16.", "172.17.", "172.18.", "172.19.",
@@ -189,14 +196,13 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
         # Create a new request with the pinned IP
         # We reuse the original method and body if applicable
         new_req = urllib.request.Request(newurl)
-        new_req.add_header('X-Pinned-IP', resolved_ip)
+        new_req._pinned_ip = resolved_ip
         new_req.add_header('Host', host)
         
         # Copy over essential headers from the original request if needed (e.g., cookies, auth)
         # But be careful not to copy the old X-Pinned-IP
         for key, value in req.headers.items():
-            if key.lower() != 'x-pinned-ip':
-                new_req.add_header(key, value)
+            new_req.add_header(key, value)
 
         # All checks passed — allow redirect with pinned IP
         return new_req
@@ -270,10 +276,15 @@ class _PinnedURLHandler(urllib.request.AbstractHTTPHandler):
     (which we inject internally) and uses the appropriate connection class.
     """
     def http_open(self, req: urllib.request.Request) -> Any:
-        return self.do_open(_PinnedHTTPConnection, req, pinned_ip=req.headers.get('X-Pinned-IP'))
+        return self.do_open(_PinnedHTTPConnection, req, pinned_ip=getattr(req, '_pinned_ip', None))
 
     def https_open(self, req: urllib.request.Request) -> Any:
-        return self.do_open(_PinnedHTTPSConnection, req, pinned_ip=req.headers.get('X-Pinned-IP'))
+        return self.do_open(
+            _PinnedHTTPSConnection,
+            req,
+            pinned_ip=getattr(req, '_pinned_ip', None),
+            context=_SECURE_SSL_CONTEXT,
+        )
 
 
 def _safe_open_url(req: urllib.request.Request, timeout: float) -> Any:
@@ -306,9 +317,8 @@ def _safe_open_url(req: urllib.request.Request, timeout: float) -> Any:
     except ValueError:
         raise
 
-    # Inject the pinned IP into the request headers for the handler to pick up
-    # We use a custom header that will be stripped/used internally, not sent to the server
-    req.add_header('X-Pinned-IP', resolved_ip)
+    # Store the pinned IP as a request attribute (not a header) to prevent wire leakage
+    req._pinned_ip = resolved_ip
     
     # Ensure the Host header is correct (urllib usually sets this, but we ensure it matches original host)
     if 'Host' not in req.headers:
