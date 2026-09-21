@@ -466,6 +466,200 @@ def scheduler_status() -> dict:
     }
 
 
+def _check_budget_alerts(budget_pct: float, budget_state: str) -> list[dict]:
+    """Check budget thresholds and return alert list.
+
+    Alerts trigger at 80% (warn) and 90% (critical) of daily budget cap.
+    Returns list of alert dicts with threshold, level, message, and timestamp.
+    """
+    alerts: list[dict] = []
+    now = time.time()
+    if budget_pct >= 90:
+        alerts.append({
+            "threshold": 90,
+            "level": "critical",
+            "message": f"Daily budget at {budget_pct:.1f}% — shedding tier-3 work",
+            "ts": now,
+        })
+    elif budget_pct >= 80:
+        alerts.append({
+            "threshold": 80,
+            "level": "warn",
+            "message": f"Daily budget at {budget_pct:.1f}% — approaching limit",
+            "ts": now,
+        })
+    # Also check budget_state for additional context
+    if budget_state == "stop":
+        alerts.append({
+            "threshold": 100,
+            "level": "critical",
+            "message": "Daily budget exhausted — all work stopped",
+            "ts": now,
+        })
+    return alerts
+
+
+def economics_budget_status() -> dict:
+    """Return current daily budget status from token_budget module.
+
+    Returns dict with: budget_cap, budget_used, budget_remaining,
+    budget_pct, budget_state, day_utc, per_model_actual.
+    Follows same try/except ImportError pattern as scheduler_status().
+    """
+    budget_cap = 4_000_000_000  # Default CAP
+    budget_used = 0
+    budget_state = "budget-unknown"
+    day_utc = None
+    per_model: dict[str, dict[str, int]] = {}
+
+    try:
+        try:
+            from codebot.token_budget import current_day_utc, day_total, get_budget_state, CAP
+        except ImportError:
+            from bots.token_budget import current_day_utc, day_total, get_budget_state, CAP
+
+        budget_cap = CAP
+        day_utc = current_day_utc()
+        ledger_path = STATE_DIR / "token_ledger.json"
+        total = day_total(day_utc, path=ledger_path)
+        budget_used = int(total) if isinstance(total, (int, float)) else 0
+        budget_state = get_budget_state(budget_used, budget_cap)
+
+        # Read per-model actuals from ledger
+        try:
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+            if isinstance(ledger, dict) and ledger.get("day_utc") == day_utc:
+                by_model = ledger.get("by_model")
+                if isinstance(by_model, dict):
+                    for name, row in list(by_model.items())[:32]:
+                        if not isinstance(name, str) or not isinstance(row, dict):
+                            continue
+                        try:
+                            per_model[name] = {
+                                "prompt_actual": int(row.get("prompt_actual", 0) or 0),
+                                "completion_actual": int(row.get("completion_actual", 0) or 0),
+                            }
+                        except (TypeError, ValueError):
+                            continue
+        except (OSError, ValueError):
+            pass
+    except (ImportError, OSError, ValueError):
+        pass
+
+    budget_remaining = max(0, budget_cap - budget_used)
+    budget_pct = (budget_used / budget_cap * 100) if budget_cap > 0 else 0.0
+
+    return {
+        "budget_cap": budget_cap,
+        "budget_used": budget_used,
+        "budget_remaining": budget_remaining,
+        "budget_pct": round(budget_pct, 2),
+        "budget_state": budget_state,
+        "day_utc": day_utc,
+        "per_model_actual": per_model,
+    }
+
+
+def economics_summary() -> dict:
+    """Return combined economics summary: budget status + fleet cost data.
+
+    Combines token_budget data with CostTracker.build_summary() and
+    pricing_table.calculate_cost_usd() for USD conversion.
+    Includes budget alerts at 80%/90% thresholds.
+    """
+    # Get budget status
+    budget_data = economics_budget_status()
+    budget_pct = budget_data.get("budget_pct", 0.0)
+    budget_state = budget_data.get("budget_state", "budget-unknown")
+
+    # Check alerts
+    alerts = _check_budget_alerts(budget_pct, budget_state)
+
+    # Log alerts if any triggered
+    for alert in alerts:
+        level = alert.get("level", "warn")
+        msg = alert.get("message", "")
+        if level == "critical":
+            logger.warning("ECONOMICS ALERT [CRITICAL]: %s", msg)
+        else:
+            logger.info("ECONOMICS ALERT [%s]: %s", level.upper(), msg)
+
+    # Get fleet cost data from CostTracker
+    fleet_totals = {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "ticket_count": 0, "total_usd": 0.0}
+    by_model: dict[str, dict] = {}
+    by_day: dict[str, int] = {}
+
+    try:
+        try:
+            from codebot.cost_tracker import CostTracker
+        except ImportError:
+            from bots.cost_tracker import CostTracker
+
+        tracker = CostTracker(STATE_DIR)
+        summary = tracker.build_summary()
+
+        ft = summary.get("fleet_totals", {})
+        fleet_totals["total_tokens"] = int(ft.get("total_tokens", 0))
+        fleet_totals["prompt_tokens"] = int(ft.get("prompt_tokens", 0))
+        fleet_totals["completion_tokens"] = int(ft.get("completion_tokens", 0))
+        fleet_totals["ticket_count"] = int(ft.get("ticket_count", 0))
+
+        # Calculate USD costs per model using pricing_table
+        try:
+            try:
+                from codebot.pricing_table import calculate_cost_usd
+            except ImportError:
+                from bots.pricing_table import calculate_cost_usd
+
+            tickets = summary.get("tickets", {})
+            model_tokens: dict[str, dict[str, int]] = {}
+            for tid, tdata in tickets.items():
+                models = tdata.get("models", [])
+                prompt = int(tdata.get("prompt_tokens", 0))
+                completion = int(tdata.get("completion_tokens", 0))
+                # Attribute tokens to first model listed (simplified)
+                if models:
+                    model_name = models[0] if isinstance(models, list) and models else "unknown"
+                else:
+                    model_name = "unknown"
+                if model_name not in model_tokens:
+                    model_tokens[model_name] = {"prompt": 0, "completion": 0}
+                model_tokens[model_name]["prompt"] += prompt
+                model_tokens[model_name]["completion"] += completion
+
+            total_usd = 0.0
+            for model_name, tokens in model_tokens.items():
+                usd = calculate_cost_usd(model_name, tokens["prompt"], tokens["completion"])
+                by_model[model_name] = {
+                    "tokens": tokens["prompt"] + tokens["completion"],
+                    "usd": round(usd, 6),
+                }
+                total_usd += usd
+            fleet_totals["total_usd"] = round(total_usd, 6)
+        except (ImportError, OSError, ValueError):
+            pass
+
+    except (ImportError, OSError, ValueError):
+        pass
+
+    return {
+        "version": 1,
+        "generated_at": time.time(),
+        "budget": {
+            "cap": budget_data.get("budget_cap"),
+            "used": budget_data.get("budget_used"),
+            "remaining": budget_data.get("budget_remaining"),
+            "pct": budget_data.get("budget_pct"),
+            "state": budget_data.get("budget_state"),
+            "day": budget_data.get("day_utc"),
+        },
+        "fleet": fleet_totals,
+        "by_model": by_model,
+        "by_day": by_day,
+        "alerts": alerts,
+    }
+
+
 def retry_dead_letter(item_id: str) -> dict:
     try:
         try:
@@ -809,6 +1003,15 @@ class ControlHandler(BaseHTTPRequestHandler):
                     "alerts": [],
                     "generated_at": time.time(),
                 })
+            return
+
+        # Economics endpoints — read-only observability for budget/cost data
+        if path in ("/economics/budget-status", "/api/economics/budget-status"):
+            self._json(200, economics_budget_status())
+            return
+
+        if path in ("/economics/summary", "/api/economics/summary"):
+            self._json(200, economics_summary())
             return
 
         self._json(404, {"error": "not found"})

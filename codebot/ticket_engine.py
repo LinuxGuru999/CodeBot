@@ -32,10 +32,10 @@ import json
 import logging
 import queue
 import re
+import secrets
 import shutil
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
@@ -230,6 +230,13 @@ class Ticket:
     commit_sha: str = ""
     committed_at: float = 0.0
     pr_url: str = ""
+    confidence: str = ""
+    priority: str = ""
+    repo_revision: str = ""
+    atomicity: str = ""
+    discovery_category: str = ""
+    finding_id: str = ""
+    fingerprint: str = ""
 
     def evidence_hash(self) -> str:
         canonical = f"{self.ticket_class}:{self.problem_statement}:{self.evidence}"
@@ -288,14 +295,16 @@ class Ticket:
 
 
 def generate_ticket_id(prefix: str = "CB") -> str:
-    """Generate a globally unique ticket ID using uuid4.
+    """Generate a globally unique ticket ID with 128-bit cryptographic randomness.
 
-    Uses uuid4 to guarantee uniqueness across process restarts, module reimports,
-    and rapid-fire creation bursts. No timestamp modulo is used to avoid any
-    collision window. Format: CB-{12-char-uuid-hex-upper} provides 48 bits of
-    cryptographic randomness per ID.
+    Uses secrets.token_hex(16) to guarantee 128 bits of entropy, ensuring
+    uniqueness across process restarts, module reimports, and rapid-fire
+    creation bursts. No timestamp or counter is used to avoid any predictability
+    or collision window. Format: CB-{32-char-hex-upper} provides 128 bits of
+    cryptographic randomness per ID, making enumeration attacks computationally
+    prohibitive.
     """
-    return f"{prefix}-{uuid.uuid4().hex[:12].upper()}"
+    return f"{prefix}-{secrets.token_hex(16).upper()}"
 
 
 def create_ticket(
@@ -318,6 +327,13 @@ def create_ticket(
     documentation_requirements: list[str] | None = None,
     rollback_strategy: str = "revert commit",
     estimated_cost_tokens: int = 0,
+    confidence: str = "",
+    priority: str = "",
+    repo_revision: str = "",
+    atomicity: str = "",
+    discovery_category: str = "",
+    finding_id: str = "",
+    fingerprint: str = "",
 ) -> Ticket:
     if not title or not title.strip():
         raise ValueError("title is required")
@@ -351,6 +367,13 @@ def create_ticket(
         estimated_cost_tokens=estimated_cost_tokens,
         created_at=now,
         updated_at=now,
+        confidence=confidence,
+        priority=priority,
+        repo_revision=repo_revision,
+        atomicity=atomicity,
+        discovery_category=discovery_category,
+        finding_id=finding_id,
+        fingerprint=fingerprint,
     )
 
 
@@ -364,9 +387,18 @@ def _normalize_title_words(title: str) -> frozenset[str]:
     return frozenset(w for w in title.lower().split() if len(w) >= 3)
 
 
+_PROBLEM_WORD_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _normalize_problem_words(text: str) -> frozenset[str]:
+    words = _PROBLEM_WORD_RE.findall(text.lower())
+    return frozenset(w for w in words if len(w) >= 3)
+
+
 class TicketStore:
     SIMILARITY_THRESHOLD = 0.8  # Jaccard threshold for "similar" titles
     SAVE_DEBOUNCE_SECONDS = 0.5  # Debounce window for batching saves
+    MAX_TICKETS_FILE_SIZE = 50 * 1024 * 1024  # 50MB max file size
     # Backup frequency: perform a full backup every N compactions (not every one)
     # to amortize O(n) I/O cost of backup + prune across more saves.
     BACKUP_EVERY_N_COMPACT = 5
@@ -381,6 +413,8 @@ class TicketStore:
         self._evidence_index: dict[str, str] = {}
         # Word inverted index: word -> set of ticket IDs whose title contains it
         self._word_index: dict[str, set[str]] = {}
+        self._problem_index: dict[str, set[str]] = {}
+        self._fingerprint_index: dict[str, str] = {}
         # Per-state index: state -> set of ticket IDs for O(k) list_by_state lookups
         self._state_index: dict[TicketState, set[str]] = {}
         # Cached per-state counts for O(1) summary() lookups
@@ -407,6 +441,8 @@ class TicketStore:
         # Backup frequency tracking: avoid O(n) backup on every compaction
         self._compact_count: int = 0  # compactions since last backup
         self._backup_count: int = 0  # backups since last prune
+        # Cached sorted list of READY tickets for O(1) list_ready() after first sort
+        self._ready_sorted_cache: list[Ticket] | None = None
         # Backup worker: async file-copy and prune consumer
         self._backup_queue: queue.Queue[tuple[str, str] | tuple[str, str] | None] = queue.Queue()
         self._backup_shutdown = False
@@ -569,6 +605,26 @@ class TicketStore:
             with open(lock_path, "a+") as lock_fd:
                 flock(lock_fd, LOCK_EX)
                 try:
+                    # Check file size before reading to prevent OOM on oversized files
+                    file_size = self._path.stat().st_size
+                    if file_size > self.MAX_TICKETS_FILE_SIZE:
+                        logger.warning(
+                            "tickets.json is oversized (%.1f MB > %d MB limit); "
+                            "loading empty ticket list to prevent memory exhaustion",
+                            file_size / (1024 * 1024),
+                            self.MAX_TICKETS_FILE_SIZE // (1024 * 1024),
+                        )
+                        self._tickets = {}
+                        self._evidence_index = {}
+                        self._word_index = {}
+                        self._problem_index = {}
+                        self._fingerprint_index = {}
+                        self._state_index = {}
+                        self._state_counts = {}
+                        flock(lock_fd, LOCK_UN)
+                        self._replay_wal()
+                        self._build_approval_cache()
+                        return
                     data = json.loads(self._path.read_text(encoding="utf-8"))
                 finally:
                     flock(lock_fd, LOCK_UN)
@@ -577,12 +633,15 @@ class TicketStore:
                 self._tickets[t.id] = t
                 self._evidence_index[t.evidence_hash()] = t.id
                 self._index_title(t)
-                # Maintain per-state index for O(k) list_by_state lookups
+                self._index_problem(t)
+                self._index_fingerprint(t)
                 self._state_index.setdefault(t.state, set()).add(t.id)
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             self._tickets = {}
             self._evidence_index = {}
             self._word_index = {}
+            self._problem_index = {}
+            self._fingerprint_index = {}
             self._state_index = {}
             self._state_counts = {}
         # Replay WAL entries written after last compaction
@@ -616,6 +675,8 @@ class TicketStore:
                         self._tickets[t.id] = t
                         self._evidence_index[t.evidence_hash()] = t.id
                         self._index_title(t)
+                        self._index_problem(t)
+                        self._index_fingerprint(t)
                         self._state_index.setdefault(t.state, set()).add(t.id)
                     except (json.JSONDecodeError, KeyError, ValueError):
                         continue
@@ -636,6 +697,14 @@ class TicketStore:
                 if not bucket:
                     del self._word_index[word]
 
+    def _index_problem(self, ticket: Ticket) -> None:
+        for word in _normalize_problem_words(ticket.problem_statement):
+            self._problem_index.setdefault(word, set()).add(ticket.id)
+
+    def _index_fingerprint(self, ticket: Ticket) -> None:
+        if ticket.fingerprint:
+            self._fingerprint_index[ticket.fingerprint] = ticket.id
+
     def _jaccard_similarity(self, s1: frozenset[str], s2: frozenset[str]) -> float:
         """Compute Jaccard index between two word sets.  O(min(|s1|, |s2|))."""
         if not s1 and not s2:
@@ -645,33 +714,40 @@ class TicketStore:
         return intersection / union if union else 0.0
 
     def _backup(self) -> None:
-        """Queue an async backup of the ticket store file.
+        """Create an atomic backup of the ticket store file.
 
-        Instead of synchronously reading the entire file and writing a copy
-        (O(n) I/O on the critical path), this method:
+        Performs a synchronous atomic write (read + tmp.write + tmp.replace)
+        while still inside the _save() lock context. This prevents torn backup
+        files that could occur when the async shutil.copy2 ran after the lock
+        was released and another process was replacing the main file.
 
-        1. Ensures the backup directory exists (fast sync mkdir)
-        2. Queues the actual file copy to the background worker thread
-           (via ``shutil.copy2``) so the caller is never blocked
-        3. Periodically queues a backup-prune task to clean up old backups
+        The backup write itself uses tmp+replace to ensure no partial/corrupt
+        backup files are visible to readers even under concurrent saves from
+        multiple TicketStore instances.
 
-        The backup directory must exist before the copy task is queued,
-        hence the synchronous ``mkdir`` call (which is effectively O(1)).
+        Periodically queues a backup-prune task to clean up old backups
+        (pruning remains async as it does not affect data integrity).
         """
         backup_dir = self._path.parent / "ticket_backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
         backup_path = backup_dir / f"tickets-{ts}.json"
         try:
-            # Async file copy via the background backup worker
-            self.queue_backup_task(str(self._path), str(backup_path))
+            # Atomic backup: read current content, write to temp, then rename
+            # This runs while holding the flock in _save(), so self._path is
+            # stable and will not be mid-replace by another process.
+            if self._path.exists():
+                content = self._path.read_text(encoding="utf-8")
+                tmp = backup_path.with_suffix(".tmp")
+                tmp.write_text(content, encoding="utf-8")
+                tmp.replace(backup_path)
             # Periodically prune old backups (every N backups)
             self._backup_count += 1
             if self._backup_count >= self.PRUNE_EVERY_N_BACKUPS:
                 self._backup_count = 0
                 self.queue_prune_task(backup_dir)
         except Exception:
-            pass
+            logger.debug("backup creation failed", exc_info=True)
 
     def prune_stale_sibling_backups(self, keep_pre_backups: int = 1) -> int:
         """Delete one-off `tickets*.pre-*` / `tickets.backup.json` siblings.
@@ -725,6 +801,8 @@ class TicketStore:
             self._tickets = {}
             self._evidence_index = {}
             self._word_index = {}
+            self._problem_index = {}
+            self._fingerprint_index = {}
             self._state_index = {}
             self._state_counts = {}
             for entry in data["tickets"]:
@@ -732,9 +810,13 @@ class TicketStore:
                 self._tickets[t.id] = t
                 self._evidence_index[t.evidence_hash()] = t.id
                 self._index_title(t)
+                self._index_problem(t)
+                self._index_fingerprint(t)
                 self._state_index.setdefault(t.state, set()).add(t.id)
             for state, ticket_ids in self._state_index.items():
                 self._state_counts[state.value] = len(ticket_ids)
+            # Invalidate cache after full restore
+            self._ready_sorted_cache = None
             self._dirty_ids.clear()
             self._save()
             return True
@@ -852,11 +934,29 @@ class TicketStore:
                     raise ValueError(
                         f"duplicate ticket: evidence matches {existing_id}"
                     )
+            if ticket.fingerprint:
+                fp_id = self._fingerprint_index.get(ticket.fingerprint)
+                if fp_id and fp_id != ticket.id:
+                    fp_ticket = self._tickets.get(fp_id)
+                    if fp_ticket and fp_ticket.state not in (
+                        TicketState.COMPLETE,
+                        TicketState.REJECTED,
+                        TicketState.DUPLICATE,
+                    ):
+                        raise ValueError(
+                            f"duplicate ticket: fingerprint matches {fp_id}"
+                        )
             self._tickets[ticket.id] = ticket
             self._evidence_index[eh] = ticket.id
+            self._index_title(ticket)
+            self._index_problem(ticket)
+            self._index_fingerprint(ticket)
             # Maintain per-state index and counts cache
             self._state_index.setdefault(ticket.state, set()).add(ticket.id)
             self._state_counts[ticket.state.value] = len(self._state_index[ticket.state])
+            # Invalidate sorted ready cache if ticket added to READY
+            if ticket.state == TicketState.READY:
+                self._ready_sorted_cache = None
             # Track dirty for incremental save
             self._dirty_ids.add(ticket.id)
             self._queue_save()
@@ -961,7 +1061,37 @@ class TicketStore:
         with self._lock:
             return self._approval_cache.get(ticket_id, False)
 
-    def transition(self, ticket_id: str, new_state: TicketState, reviewer_feedback: list[dict] | None = None) -> Ticket:
+    def _build_lifecycle_event(
+        self,
+        ticket_id: str,
+        old_state: TicketState,
+        prev_updated_at: float,
+        updated: Ticket,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Build an additive lifecycle event record for one successful transition."""
+        return {
+            "ticket_id": ticket_id,
+            "from_state": old_state.value,
+            "to_state": updated.state.value,
+            "timestamp": updated.updated_at,
+            "attempts": updated.attempts,
+            "rework_count": updated.rework_count,
+            "queue_age_seconds": round(max(0.0, updated.updated_at - prev_updated_at), 6),
+            "actor": actor,
+            "revision": updated.updated_at,
+        }
+
+    def _emit_lifecycle_event(self, event: dict[str, Any]) -> None:
+        """Append one lifecycle event; best-effort so telemetry never blocks a transition."""
+        try:
+            events_path = self._path.parent / "lifecycle_events.jsonl"
+            with open(events_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
+        except OSError:
+            pass
+
+    def transition(self, ticket_id: str, new_state: TicketState, reviewer_feedback: list[dict] | None = None, actor: str = "") -> Ticket:
         with self._lock:
             ticket = self._tickets.get(ticket_id)
             if ticket is None:
@@ -986,10 +1116,11 @@ class TicketStore:
                             f"requires an implementation plan before IMPLEMENTING; "
                             f"create plan in PLANNING state"
                         )
+            old_state = ticket.state
+            prev_updated_at = ticket.updated_at
             updated = ticket.transition(new_state, reviewer_feedback)
             self._tickets[ticket_id] = updated
             # Maintain per-state index: remove from old state, add to new
-            old_state = ticket.state
             if old_state in self._state_index:
                 self._state_index[old_state].discard(ticket_id)
                 if not self._state_index[old_state]:
@@ -999,14 +1130,21 @@ class TicketStore:
                     self._state_counts[old_state.value] = len(self._state_index[old_state])
             self._state_index.setdefault(new_state, set()).add(ticket_id)
             self._state_counts[new_state.value] = len(self._state_index[new_state])
+            # Invalidate sorted ready cache if READY set changed
+            if old_state == TicketState.READY or new_state == TicketState.READY:
+                self._ready_sorted_cache = None
             # Track dirty for incremental save
             self._dirty_ids.add(ticket_id)
+            self._emit_lifecycle_event(
+                self._build_lifecycle_event(ticket_id, old_state, prev_updated_at, updated, actor)
+            )
             self._queue_save()
             return updated
 
     def batch_transition(
         self,
         transitions: list[tuple[str, TicketState, list[dict] | None]],
+        actor: str = "",
     ) -> list[Ticket]:
         """Apply multiple ticket transitions in memory, then save once.
 
@@ -1028,6 +1166,7 @@ class TicketStore:
             return []
 
         results: list[Ticket] = []
+        pending_events: list[dict[str, Any]] = []
         with self._lock:
             # Snapshot state for rollback on failure to guarantee atomicity.
             # We capture only the tickets that will be mutated so the cost is
@@ -1068,11 +1207,12 @@ class TicketStore:
                                     f"create plan in PLANNING state"
                                 )
 
+                    old_state = ticket.state
+                    prev_updated_at = ticket.updated_at
                     updated = ticket.transition(new_state, reviewer_feedback)
                     self._tickets[ticket_id] = updated
 
                     # Maintain per-state index: remove from old state, add to new
-                    old_state = ticket.state
                     if old_state in self._state_index:
                         self._state_index[old_state].discard(ticket_id)
                         if not self._state_index[old_state]:
@@ -1083,8 +1223,15 @@ class TicketStore:
                     self._state_index.setdefault(new_state, set()).add(ticket_id)
                     self._state_counts[new_state.value] = len(self._state_index[new_state])
 
+                    # Invalidate sorted ready cache if READY set changed
+                    if old_state == TicketState.READY or new_state == TicketState.READY:
+                        self._ready_sorted_cache = None
+
                     # Track dirty for incremental save
                     self._dirty_ids.add(ticket_id)
+                    pending_events.append(
+                        self._build_lifecycle_event(ticket_id, old_state, prev_updated_at, updated, actor)
+                    )
                     results.append(updated)
             except (ValueError, KeyError):
                 # Rollback all mutations applied so far in this batch
@@ -1108,8 +1255,12 @@ class TicketStore:
                         self._state_counts[orig_state.value] = len(self._state_index[orig_state])
                 # Remove rolled-back IDs from dirty tracking
                 self._dirty_ids -= set(original_tickets.keys())
+                # Invalidate cache since we don't know final state after rollback
+                self._ready_sorted_cache = None
                 raise
 
+        for event in pending_events:
+            self._emit_lifecycle_event(event)
         # Queue a single save for all dirty tickets
         self._queue_save()
         return results
@@ -1130,13 +1281,17 @@ class TicketStore:
             return [self._tickets[tid] for tid in ready_ids if tid in self._tickets]
 
     def list_ready(self) -> list[Ticket]:
+        if self._ready_sorted_cache is not None:
+            return list(self._ready_sorted_cache)
         severity_order = {
             Severity.CRITICAL: 0,
             Severity.HIGH: 1,
             Severity.MEDIUM: 2,
             Severity.LOW: 3,
         }
-        return sorted(self.list_ready_raw(), key=lambda t: severity_order.get(t.severity, 99))
+        raw = self.list_ready_raw()
+        self._ready_sorted_cache = sorted(raw, key=lambda t: severity_order.get(t.severity, 99))
+        return list(self._ready_sorted_cache)
 
     def count(self) -> int:
         with self._lock:
@@ -1151,6 +1306,76 @@ class TicketStore:
         """
         with self._lock:
             return dict(self._state_counts)
+
+    def find_similar(
+        self,
+        problem_statement: str,
+        affected_modules: list[str] | None = None,
+        threshold: float | None = None,
+        exclude_states: frozenset[TicketState] | None = None,
+        limit: int = 10,
+    ) -> list[tuple[Ticket, float]]:
+        if threshold is None:
+            threshold = self.SIMILARITY_THRESHOLD
+        query_words = _normalize_problem_words(problem_statement)
+        if affected_modules:
+            for module in affected_modules:
+                query_words = query_words | _normalize_problem_words(module)
+        if not query_words:
+            return []
+        with self._lock:
+            candidate_ids: set[str] = set()
+            for word in query_words:
+                bucket = self._problem_index.get(word)
+                if bucket:
+                    candidate_ids |= bucket
+            results: list[tuple[Ticket, float]] = []
+            for tid in candidate_ids:
+                ticket = self._tickets.get(tid)
+                if ticket is None:
+                    continue
+                if exclude_states and ticket.state in exclude_states:
+                    continue
+                ticket_words = _normalize_problem_words(ticket.problem_statement)
+                for module in ticket.affected_modules:
+                    ticket_words = ticket_words | _normalize_problem_words(module)
+                similarity = self._jaccard_similarity(query_words, ticket_words)
+                if similarity >= threshold:
+                    results.append((ticket, similarity))
+        results.sort(key=lambda pair: pair[1], reverse=True)
+        return results[:limit]
+
+    def discovery_history(
+        self,
+        fingerprint: str = "",
+        evidence_hash: str = "",
+        discovery_category: str = "",
+    ) -> list[Ticket]:
+        matches: dict[str, Ticket] = {}
+        with self._lock:
+            if fingerprint and fingerprint in self._fingerprint_index:
+                tid = self._fingerprint_index[fingerprint]
+                ticket = self._tickets.get(tid)
+                if ticket is not None:
+                    matches[tid] = ticket
+            if evidence_hash and evidence_hash in self._evidence_index:
+                tid = self._evidence_index[evidence_hash]
+                ticket = self._tickets.get(tid)
+                if ticket is not None:
+                    matches[tid] = ticket
+            if discovery_category:
+                terminal = (
+                    TicketState.COMPLETE,
+                    TicketState.REJECTED,
+                    TicketState.DUPLICATE,
+                )
+                for tid, ticket in self._tickets.items():
+                    if (
+                        ticket.discovery_category == discovery_category
+                        and ticket.state in terminal
+                    ):
+                        matches[tid] = ticket
+        return sorted(matches.values(), key=lambda t: t.updated_at, reverse=True)
 
 
 # ---------------------------------------------------------------------------

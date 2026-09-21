@@ -47,6 +47,7 @@ from codebot.process_manager import (
     GATEWAY_MAX_CONCURRENT,
     _get_code_mtimes as _pm_get_code_mtimes,
     batch_read_heartbeats as _pm_batch_read_heartbeats,
+    get_prompt_gateway, set_prompt_gateway, clear_prompt_gateway,
 )
 
 # ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ def batch_read_heartbeats(bot_names: list):
 # ---------------------------------------------------------------------------
 # Test-compatible manifest wrappers & thin re-exports
 # ---------------------------------------------------------------------------
-from codebot.model_router import select_model_tier as _model_tier_for_complexity
+from codebot.worker_scaler import _model_tier_for_complexity
 from codebot.orchestrator_services import _read_state_file as _svc_read_state_file
 
 
@@ -257,7 +258,9 @@ from codebot.dispatch_service import (
     get_pipeline_state, is_needed_bot, apply_agent_availability,
     rotate_model_on_error, transition_ticket_on_success,
     transition_ticket_on_error, compute_rate_limit_backoff,
+    record_workforce_completion,
     retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
+    run_all_dispatchers,
     IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
     batch_read_bot_statuses,
 )
@@ -281,9 +284,8 @@ from codebot.orchestrator_services import (
 )
 from codebot.health_check import check_all_bots
 
-# Module-level path configuration instance — delegates to state_manager.
-# Paths are always read dynamically from state_manager.get_paths().
-_paths: PathConfig = get_paths()
+# Paths are resolved dynamically via get_paths() or __getattr__.
+# No module-level _paths cache; state_manager.get_paths() is the single source.
 
 
 # Backward compatibility aliases via __getattr__ — no global mutation needed.
@@ -345,14 +347,13 @@ __all__ = [
     "_get_code_mtimes", "write_alignment_event", "_manifest_restart_budget_exceeded",
     "_manifest_error_disabled", "is_restart_budget_exceeded", "is_error_disabled",
     "batch_read_heartbeats", "WORKER_POOL",
+    "get_prompt_gateway", "set_prompt_gateway", "clear_prompt_gateway",
 ]
 
 
 def set_project_adapter(adapter: Any) -> PathConfig:
-    """Delegate to state_manager.set_project_adapter and update local _paths reference."""
-    import codebot.orchestrator as _mod
-    _mod._paths = _sm_set_project_adapter(adapter)
-    return _mod._paths
+    """Delegate to state_manager.set_project_adapter; no module-level mutation."""
+    return _sm_set_project_adapter(adapter)
 
 
 # Code-change detection — O(M+B)
@@ -522,6 +523,7 @@ def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any = None) -
         if exit_code == 0:
             bot.consecutive_errors = 0
             transition_ticket_on_success(bot, bots)
+            record_workforce_completion(bot, completed_at=now)
             bot.next_run_at = now + bot.config.interval_seconds
             update_bot_state(bot, "waiting")
         elif exit_code == 3:
@@ -586,19 +588,20 @@ def _handle_stuck_bots(bots: dict[str, BotState], now: float, hb_cache: dict) ->
             restart_bot(bot, reason="stuck", bots=bots)
 
 
-from codebot.dispatch_service import run_all_dispatchers
-
-
 def _run_dispatchers(bots: dict[str, BotState], skip_route_tids: set[str] | None = None) -> None:
-    """Thin wrapper delegating to dispatch_service.run_all_dispatchers."""
+    """Run all ticket dispatchers in sequence.
+    
+    Delegates to individual dispatcher functions from ticket_dispatcher module.
+    """
+    from codebot.ticket_dispatcher import get_ticket_store
+
     run_all_dispatchers(
         bots,
-        skip_route_tids=skip_route_tids,
-        start_bot_fn=start_bot,
-        stop_bot_fn=stop_bot,
-        update_state_fn=update_bot_state,
-        max_concurrent=GATEWAY_MAX_CONCURRENT,
-        decomposer_max_concurrent=DECOMPOSER_MAX_CONCURRENT,
+        get_ticket_store(),
+        start_bot,
+        stop_bot,
+        update_bot_state,
+        skip_route_tids,
     )
 
 

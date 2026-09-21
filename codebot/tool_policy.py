@@ -47,20 +47,6 @@ def resolve_workspace_path(path: str, workspace_root: Path) -> Path | None:
     return resolved
 
 
-def _has_path_escape(argv: list[str], workspace_root: Path) -> bool:
-    """Check if any argument attempts path traversal or escapes workspace."""
-    for token in argv[1:]:
-        if token.startswith("-"):
-            continue
-        if ".." in token:
-            return True
-        if token.startswith("/"):
-            resolved = resolve_workspace_path(token, workspace_root)
-            if resolved is None:
-                return True
-    return False
-
-
 def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
     """Validate that all path arguments for file-operating bare commands stay within workspace.
 
