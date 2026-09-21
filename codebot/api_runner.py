@@ -71,6 +71,10 @@ _IMPLEMENTER_ROLE_NAMES = frozenset({
     "documentation_implementer",
 })
 
+# Bot name allowlist — defense-in-depth against shell injection in _auto_commit.
+# Matches control_server.BOT_NAME_PATTERN; rejected names never reach git commands.
+_BOT_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
 
 def _is_implementation_bot(bot_name: str) -> bool:
     return bot_name.split("-", 1)[0] in _IMPLEMENTER_ROLE_NAMES
@@ -622,6 +626,11 @@ def _auto_commit(bot_name: str, files_touched: list[str], ticket_id: str = "") -
     if not files_touched:
         return True
 
+    # Defense-in-depth: reject bot_name with shell metacharacters before any git commands.
+    if not isinstance(bot_name, str) or not _BOT_NAME_RE.match(bot_name):
+        _log(f"{bot_name}: BLOCKED auto-commit: invalid bot_name characters")
+        return False
+
     if not ticket_id:
         _log(f"{bot_name}: gatekeeper unavailable (BLOCKING commit): no assigned ticket")
         return False
@@ -824,14 +833,19 @@ def _write_scratchpad(bot_name: str, state_dir: Path, task: str, detail: str = "
     line = f"- [{ts}] {task}" + (f": {detail}" if detail else "") + "\n"
     try:
         path = _scratchpad_path(bot_name, Path(state_dir))
-        existing: list[str] = []
-        if path.exists():
+        # O(1) append — avoids read-all + write-all on every iteration.
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+        # Lazy truncation: only read-truncate-write when file exceeds the cap.
+        # After truncation to ~100 lines the file stays under the cap for many
+        # more appends, so this O(N) path executes at most once per run.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        if size > SCRATCHPAD_MAX_BYTES:
             existing = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        existing.append(line)
-        blob = "".join(existing)
-        if len(blob.encode("utf-8")) > SCRATCHPAD_MAX_BYTES:
-            blob = "".join(existing[-100:])
-        path.write_text(blob, encoding="utf-8")
+            path.write_text("".join(existing[-100:]), encoding="utf-8")
     except Exception:
         pass
 
@@ -967,20 +981,26 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_ticket",
-            "description": "Create a new work ticket in the TicketStore. Use this to report bugs, security issues, performance problems, missing tests, documentation gaps, or feature requests discovered during code analysis.",
+            "description": "Create a new work ticket in the TicketStore. Use this to report bugs, security issues, performance problems, missing tests, documentation gaps, or feature requests discovered during code analysis. Evidence is validated against the current repository state before ticket creation.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Short descriptive title of the issue found"},
                     "ticket_class": {"type": "string", "enum": ["bug", "feature", "security", "performance", "documentation", "test", "refactor", "dependency", "architecture", "infrastructure"], "description": "Category of work needed"},
-                    "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "How severe is this issue"},
+                    "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "How bad is the problem (impact magnitude)"},
+                    "priority": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "How soon should this be worked on (scheduling urgency, may differ from severity)"},
                     "source": {"type": "string", "description": "Your role name (e.g., bug_hunter, security_auditor)"},
                     "evidence": {"type": "string", "description": "Exact code snippet, file path:line, or log output proving the issue"},
+                    "evidence_file": {"type": "string", "description": "Relative file path containing the evidence (validated for existence)"},
+                    "evidence_symbol": {"type": "string", "description": "Function/class name at the evidence location (validated for existence)"},
+                    "evidence_line": {"type": "integer", "description": "Line number of the evidence in the file"},
                     "problem_statement": {"type": "string", "description": "What is wrong and why it matters"},
                     "desired_state": {"type": "string", "description": "What correct behavior looks like"},
                     "acceptance_criteria": {"type": "string", "description": "Semicolon-separated list of conditions that prove this is fixed"},
                     "affected_modules": {"type": "string", "description": "Comma-separated list of files or directories affected"},
                     "risk": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "Risk level of implementing the fix"},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"], "description": "How certain you are this finding is real (based on evidence strength)"},
+                    "atomicity": {"type": "string", "enum": ["atomic", "compound", "unknown"], "description": "Is this a single work unit or does it need decomposition?"},
                 },
                 "required": ["title", "ticket_class", "severity", "evidence", "problem_statement", "desired_state", "acceptance_criteria"],
             },
@@ -1062,6 +1082,41 @@ def _create_ticket_tool(
         )
     except ImportError:
         return {"success": False, "output": "", "error": "ticket_engine not available"}
+
+    # Resolve project root for evidence validation
+    project_root = Path.cwd()
+    if _adapter_instance is not None:
+        try:
+            project_root = _adapter_instance.paths().project_root  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+    # Evidence pre-validation (§7, §37): verify file references exist
+    evidence_file = str(kwargs.get("evidence_file", "") or "")
+    evidence_symbol = str(kwargs.get("evidence_symbol", "") or "")
+    evidence_line = int(kwargs.get("evidence_line", 0) or 0)
+    if evidence_file and project_root.exists():
+        try:
+            from codebot.evidence_validator import revalidate_before_ticket_creation
+            evidence_items = [{
+                "file_path": evidence_file,
+                "symbol": evidence_symbol,
+                "line_number": evidence_line,
+            }]
+            should_create, reason = revalidate_before_ticket_creation(
+                project_root, evidence_items
+            )
+            if not should_create:
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": f"Evidence validation failed: {reason}",
+                }
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
     class_map = {v.value: v for v in TicketClass}
     sev_map = {v.value: v for v in Severity}
     risk_map = {v.value: v for v in RiskLevel}
@@ -1081,6 +1136,24 @@ def _create_ticket_tool(
         problem_statement = title
     if not desired_state:
         desired_state = f"Resolve: {title}"
+
+    # New discovery fields (§2-3, §13-14, §43)
+    confidence = str(kwargs.get("confidence", "") or "").strip().lower()
+    priority = str(kwargs.get("priority", "") or "").strip().lower()
+    atomicity = str(kwargs.get("atomicity", "") or "").strip().lower()
+    discovery_category = str(kwargs.get("discovery_category", "") or ticket_class).strip().lower()
+    finding_id = str(kwargs.get("finding_id", "") or "").strip()
+    fingerprint = str(kwargs.get("fingerprint", "") or "").strip()
+    repo_revision = str(kwargs.get("repo_revision", "") or "").strip()
+
+    # Get current repo revision if not provided
+    if not repo_revision and project_root.exists():
+        try:
+            from codebot.evidence_validator import get_current_revision
+            repo_revision = get_current_revision(project_root)
+        except (ImportError, Exception):
+            pass
+
     try:
         ticket = create_ticket(
             title=title,
@@ -1094,6 +1167,13 @@ def _create_ticket_tool(
             risk=rk,
             affected_modules=modules,
             dependencies=deps if deps else None,
+            confidence=confidence,
+            priority=priority,
+            repo_revision=repo_revision,
+            atomicity=atomicity,
+            discovery_category=discovery_category,
+            finding_id=finding_id,
+            fingerprint=fingerprint,
         )
     except ValueError as ve:
         return {"success": False, "output": "", "error": str(ve)}
@@ -1458,6 +1538,8 @@ def _execute_provider_session(
     rate_429_retries = 0
     MAX_429_RETRIES = 5
     nudges = 0
+    fallback_used = False
+    active_model = model
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     api_calls = 0
 
@@ -1470,7 +1552,7 @@ def _execute_provider_session(
             "tool_iterations": tool_iterations,
             "exit_reason": reason or status,
             "api_calls": api_calls,
-            "model": model,
+            "model": active_model,
         }
 
     def _sleep(d):
@@ -1515,7 +1597,7 @@ def _execute_provider_session(
         resp_json = None
         while True:
             try:
-                resp_json = api_call(msgs, model, api_key)
+                resp_json = api_call(msgs, active_model, api_key)
                 api_calls += 1
                 break
             except urllib.error.HTTPError as exc:
@@ -1671,6 +1753,12 @@ def _execute_provider_session(
         if nudges < 2:
             msgs.append({"role": "user", "content": "continue"})
             nudges += 1
+            continue
+        if fallback_model and not fallback_used:
+            _log(f"{bot_name}: primary '{active_model}' returned no content, switching to fallback '{fallback_model}'")
+            active_model = fallback_model
+            fallback_used = True
+            nudges = 0
             continue
         return _result("no_content")
 
@@ -2141,6 +2229,12 @@ def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_ite
         has_content = bool(content is not None and str(content).strip() != "")
         if has_tool_calls:
             messages.append(msg)
+            # --- Parallel read-only tool execution ---
+            # Parse all tool calls first, then split into read-only (parallelizable)
+            # and mutating (sequential) groups. Read-only tools are executed via
+            # ThreadPoolExecutor; mutating tools run sequentially to avoid races.
+            _READ_ONLY_TOOLS = frozenset({"read", "grep", "glob", "batch_read", "batch_grep"})
+            parsed_calls: list[dict] = []
             for tc in tool_calls_raw:
                 if not isinstance(tc, dict):
                     continue
@@ -2159,10 +2253,53 @@ def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_ite
                         args = {}
                     if not isinstance(args, dict):
                         args = {}
+                parsed_calls.append({"tc_id": tc_id, "name": name, "args": args})
+
+            def _execute_parsed(parsed: dict) -> dict:
+                """Execute a single parsed tool call, return enriched dict."""
+                n = parsed["name"]
+                a = parsed["args"]
                 try:
-                    result = _execute_tool(name, args)
+                    r = _execute_tool(n, a)
                 except Exception as exc:
-                    result = {"success": False, "output": "", "error": str(exc)}
+                    r = {"success": False, "output": "", "error": str(exc)}
+                return {**parsed, "result": r}
+
+            # Split into read-only and mutating while preserving original order
+            read_only_indices: list[int] = []
+            mutating_indices: list[int] = []
+            for idx, pc in enumerate(parsed_calls):
+                if pc["name"] in _READ_ONLY_TOOLS:
+                    read_only_indices.append(idx)
+                else:
+                    mutating_indices.append(idx)
+
+            results_by_index: dict[int, dict] = {}
+
+            # Execute read-only tools in parallel
+            if read_only_indices:
+                ro_calls = [parsed_calls[i] for i in read_only_indices]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ro_calls), 8)) as pool:
+                    futures = {pool.submit(_execute_parsed, pc): idx for pc, idx in zip(ro_calls, read_only_indices)}
+                    for future in concurrent.futures.as_completed(futures):
+                        orig_idx = futures[future]
+                        try:
+                            results_by_index[orig_idx] = future.result()
+                        except Exception as exc:
+                            pc = parsed_calls[orig_idx]
+                            results_by_index[orig_idx] = {**pc, "result": {"success": False, "output": "", "error": str(exc)}}
+
+            # Execute mutating tools sequentially
+            for idx in mutating_indices:
+                results_by_index[idx] = _execute_parsed(parsed_calls[idx])
+
+            # Process results in original order to maintain tool_call_id mapping
+            for idx in range(len(parsed_calls)):
+                completed = results_by_index[idx]
+                name = completed["name"]
+                args = completed["args"]
+                result = completed["result"]
+                tc_id = completed["tc_id"]
                 # Trace: log tool output processing
                 if tracer is not None:
                     try:
