@@ -31,7 +31,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
 import codebot.health_monitor as _hm
 from codebot.health_monitor import (
@@ -292,10 +292,125 @@ class BotState:
 
 
 # ---------------------------------------------------------------------------
+# Prompt Gateway Interface — injected service seam (CB-7976975-5D65)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class PromptGatewayProtocol(Protocol):
+    """Interface for prompt gateway operations.
+
+    Abstracts codebot.prompt_gateway so orchestrator/process_manager delegate
+    via the interface and tests can mock the gateway without direct imports.
+    """
+
+    def build_message(
+        self,
+        bot: str,
+        model: str,
+        prompt_text: str,
+        heartbeat_file: str,
+        ckpt_file: str,
+        ckpt_block: str,
+        state_dir: str,
+        logs_dir: str,
+        prompt_name: str,
+    ) -> str:
+        """Assemble the spawn message."""
+        ...
+
+    def note_spawn(self) -> None:
+        """Record a successful spawn for gap pacing."""
+        ...
+
+    def spawn_allowed(self, bots: dict, model: str = "") -> tuple[bool, str]:
+        """Check the global spawn gate without mutating state."""
+        ...
+
+    @property
+    def max_concurrent(self) -> int:
+        """Maximum concurrent bot subprocesses allowed."""
+        ...
+
+    @property
+    def min_spawn_gap(self) -> int:
+        """Minimum seconds between spawns."""
+        ...
+
+
+class DefaultPromptGateway:
+    """Default implementation that lazy-imports codebot.prompt_gateway.
+
+    Each method performs an inside-body import to avoid top-level coupling
+    between process_manager and prompt_gateway modules.
+    """
+
+    def build_message(
+        self,
+        bot: str,
+        model: str,
+        prompt_text: str,
+        heartbeat_file: str,
+        ckpt_file: str,
+        ckpt_block: str,
+        state_dir: str,
+        logs_dir: str,
+        prompt_name: str,
+    ) -> str:
+        import codebot.prompt_gateway as _pg
+        return _pg.build_message(
+            bot, model, prompt_text, heartbeat_file, ckpt_file,
+            ckpt_block, state_dir, logs_dir, prompt_name,
+        )
+
+    def note_spawn(self) -> None:
+        import codebot.prompt_gateway as _pg
+        _pg.note_spawn()
+
+    def spawn_allowed(self, bots: dict, model: str = "") -> tuple[bool, str]:
+        import codebot.prompt_gateway as _pg
+        return _pg.spawn_allowed(bots, model)
+
+    @property
+    def max_concurrent(self) -> int:
+        import codebot.prompt_gateway as _pg
+        return _pg.MAX_CONCURRENT
+
+    @property
+    def min_spawn_gap(self) -> int:
+        import codebot.prompt_gateway as _pg
+        return _pg.MIN_SPAWN_GAP
+
+
+_prompt_gateway_instance: Optional[PromptGatewayProtocol] = None
+
+
+def get_prompt_gateway() -> PromptGatewayProtocol:
+    """Return the current gateway instance, creating default if needed."""
+    global _prompt_gateway_instance
+    if _prompt_gateway_instance is None:
+        _prompt_gateway_instance = DefaultPromptGateway()
+    return _prompt_gateway_instance
+
+
+def set_prompt_gateway(gw: Optional[PromptGatewayProtocol]) -> None:
+    """Inject a custom gateway (or None to restore default)."""
+    global _prompt_gateway_instance
+    _prompt_gateway_instance = gw
+
+
+def clear_prompt_gateway() -> None:
+    """Reset gateway to default (for test teardown)."""
+    global _prompt_gateway_instance
+    _prompt_gateway_instance = None
+
+
+# ---------------------------------------------------------------------------
 # Process Management
 # ---------------------------------------------------------------------------
 
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "26"))
+# Backward-compatible aliases delegating to gateway when available,
+# falling back to env vars. Kept for external callers (orchestrator, health_check).
+GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "55"))
 GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "25"))
 
 _last_spawn_time: float = 0.0
@@ -665,34 +780,16 @@ def _build_checkpoint_block(bot_name: str, ckpt: dict | None, ckpt_file: Path) -
 
 def _build_mission_message(bot: BotState, prompt_text: str, heartbeat_file: Path,
                            ckpt_file: Path, ckpt_block: str) -> str:
-    """Build the full mission message for the bot subprocess."""
+    """Build the full mission message for the bot subprocess via injected gateway."""
     state_dir = _resolve_state_dir()
     logs_dir = _resolve_logs_dir()
     bots_dir = _resolve_bots_dir()
     prompt_path = bots_dir / bot.config.prompt_file
-    try:
-        from codebot.prompt_gateway import build_message as _gateway_build_message
-        _GATEWAY = True
-    except ImportError:
-        _GATEWAY = False
-
-    if _GATEWAY:
-        return _gateway_build_message(
-            bot.config.name, bot.config.model, prompt_text,
-            str(heartbeat_file), str(ckpt_file), ckpt_block,
-            str(state_dir), str(logs_dir), prompt_path.name)
-
-    return (
-        f"Sisyphus \u2014 delegated task: '{bot.config.name}' workflow (model {bot.config.model}).\n"
-        f"Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
-        f"- At startup and after every atomic task, write Unix timestamp to {heartbeat_file} using the `write` tool.\n"
-        f"- After every atomic task, write <4KB checkpoint to {ckpt_file} using the `write` tool (atomic tmp->replace).\n"
-        f"- Before each atomic task, run `bash` with `test -f {state_dir}/.drain || test -f {state_dir}/.update_lock && echo DRAIN` to check for drain. If output contains DRAIN, exit 0. Do NOT use the `read` tool for drain checks.\n"
-        f"- State dir: {state_dir}  Log dir: {logs_dir}  Prompt: {prompt_path.name}\n"
-        f"{ckpt_block}\n"
-        f"--- Task Specification ({prompt_path.name}) ---\n"
-        f"{prompt_text}"
-    )
+    gw = get_prompt_gateway()
+    return gw.build_message(
+        bot.config.name, bot.config.model, prompt_text,
+        str(heartbeat_file), str(ckpt_file), ckpt_block,
+        str(state_dir), str(logs_dir), prompt_path.name)
 
 
 def _build_popen_args(bot: BotState, heartbeat_file: Path,
@@ -716,6 +813,11 @@ def _update_bot_after_launch(bot: BotState, state_data: dict) -> None:
     bot.started_at = state_data["started"]
     global _last_spawn_time
     _last_spawn_time = time.time()
+    # Record spawn via injected gateway interface (CB-7976975-5D65)
+    try:
+        get_prompt_gateway().note_spawn()
+    except Exception:
+        pass
     try:
         (_resolve_state_dir() / ".last_spawn").write_text(str(time.time()))
     except OSError:
@@ -816,6 +918,15 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
         logger.info(f"Queued '{bot.config.name}' ({why})")
         update_bot_state(bot, "queued")
         return False
+
+    from codebot.model_manager import next_model_for_role
+    base_role = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
+    assignment = next_model_for_role(base_role)
+    old_model = bot.config.model
+    bot.config.model = assignment.model
+    bot.config.fallback_model = assignment.fallback
+    if old_model != assignment.model:
+        logger.info(f"Model rotation '{bot.config.name}': {old_model} -> {assignment.model} (fallback {assignment.fallback})")
 
     try:
         heartbeat_file, ckpt_file, message = _init_and_prepare_bot(bot, resume_checkpoint)
