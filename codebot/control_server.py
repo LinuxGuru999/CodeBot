@@ -1192,10 +1192,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                         if n not in valid_bot_names:
                             self._json(400, {"error": f"unknown bot: {n}"})
                             return
-                    # Apply defense-in-depth: shlex.quote for shell escaping safety
+                    # Apply defense-in-depth: re.escape for pkill regex safety
                     for n in bots:
-                        quoted_name = shlex.quote(n)
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
+                        escaped_name = re.escape(n)
+                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)
