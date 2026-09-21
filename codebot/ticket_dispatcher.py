@@ -1690,7 +1690,11 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
 
 
 def route_ready_tickets(store: Any | None = None, skip_tids: set[str] | None = None) -> int:
-    """Route READY tickets: decomposer sub-tickets to PLANNING, originals to DECOMPOSE.
+    """Route READY tickets with risk-aware fast-path for low-risk items.
+
+    Low-risk tickets (risk < MIN_RISK_FOR_PLANNING) go READY -> IMPLEMENTING
+    directly, skipping DECOMPOSE and PLANNING. Medium+ tickets follow the
+    existing decomposer/original routing.
 
     Uses batch_transition to apply all state changes in memory and save once,
     avoiding O(K*N) serialization cost per dispatch cycle.
@@ -1715,11 +1719,30 @@ def route_ready_tickets(store: Any | None = None, skip_tids: set[str] | None = N
 
     _skip = skip_tids or set()
 
-    # Collect all transitions first, then apply in a single batch
+    try:
+        from codebot.ticket_engine import MIN_RISK_FOR_PLANNING as _min_risk
+        from codebot.ticket_engine import _RISK_ORDER as _risk_order_map
+        _threshold_order: int = _risk_order_map.get(_min_risk.value, 1)
+        _risk_order: dict[str, int] = _risk_order_map
+    except ImportError:
+        _threshold_order = 1
+        _risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
     transitions: list[tuple[str, Any, list[dict] | None]] = []
     for ticket in ready:
         tid = getattr(ticket, 'id', '')
         if not tid or tid in _skip:
+            continue
+        risk_obj = getattr(ticket, 'risk', None)
+        if isinstance(risk_obj, str):
+            risk_val = risk_obj
+        elif risk_obj is not None:
+            v = getattr(risk_obj, "value", None)
+            risk_val = v if isinstance(v, str) else "low"
+        else:
+            risk_val = "low"
+        if _risk_order.get(risk_val, 0) < _threshold_order:
+            transitions.append((tid, TicketState.IMPLEMENTING, None))
             continue
         source = getattr(ticket, 'source', '')
         if source == 'decomposer':

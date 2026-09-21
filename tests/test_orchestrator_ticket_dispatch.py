@@ -156,9 +156,14 @@ class TestTicketStoreExclusiveDispatch:
         assert routed >= 1, "Should have routed at least 1 READY ticket"
 
         # Verify the ticket was actually transitioned (in-memory state)
+        # Low-risk tickets bypass DECOMPOSE/PLANNING and go directly to IMPLEMENTING
         updated_ticket = store.get(t1.id)
-        assert updated_ticket.state in (TicketState.PLANNING, TicketState.DECOMPOSE), (
+        assert updated_ticket.state in (TicketState.IMPLEMENTING, TicketState.PLANNING, TicketState.DECOMPOSE), (
             f"Ticket should have been routed from READY, got {updated_ticket.state}"
+        )
+        # Low-risk without a plan goes IMPLEMENTING directly
+        assert updated_ticket.state == TicketState.IMPLEMENTING, (
+            f"Low-risk READY ticket should route to IMPLEMENTING, got {updated_ticket.state}"
         )
 
         # Also verify persistence after flush
@@ -166,8 +171,8 @@ class TestTicketStoreExclusiveDispatch:
         store.close()
         reloaded_store = TicketStore(store_path)
         reloaded_ticket = reloaded_store.get(t1.id)
-        assert reloaded_ticket.state in (TicketState.PLANNING, TicketState.DECOMPOSE), (
-            f"Persisted ticket should be routed, got {reloaded_ticket.state}"
+        assert reloaded_ticket.state == TicketState.IMPLEMENTING, (
+            f"Persisted low-risk ticket should be IMPLEMENTING, got {reloaded_ticket.state}"
         )
         reloaded_store.close()
 
