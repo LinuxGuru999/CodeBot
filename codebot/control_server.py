@@ -241,6 +241,7 @@ def bot_status(name: str) -> dict:
     running = False
     pid = None
     try:
+        # Defense-in-depth: escape bot name to prevent regex injection in pgrep pattern
         escaped_name = re.escape(name)
         ps = subprocess.run(["pgrep", "-f", f"api_runner\\.py {escaped_name}"], capture_output=True, text=True, timeout=3)
         if ps.stdout.strip():
@@ -1071,7 +1072,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             try:
                 # kill existing if running; apply defense-in-depth: re.escape for pkill regex safety
                 escaped_name = re.escape(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
+                # Anchor pattern with $ to prevent partial matches (CB-D9EE209C1657)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}$"], timeout=5)
                 time.sleep(1)
                 # orchestrator will respawn on next health check if waiting; force start via orchestrator CLI
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
@@ -1107,9 +1109,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
-                # Apply defense-in-depth: re.escape for pkill regex safety
+                # Apply defense-in-depth: re.escape + anchor for pkill regex safety (CB-D9EE209C1657)
                 escaped_name = re.escape(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
+                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}$"], timeout=5)
                 self._json(200, {"ok": True, "paused": name,
                                  "undo": f"POST /bots/{name}/resume to unpause"})
             except Exception as e:
@@ -1130,9 +1132,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 p = STATE_DIR / f"{name}.paused"
                 if p.exists():
                     p.unlink()
-                # Apply defense-in-depth: regex validation + shlex.quote
-                quoted_name = shlex.quote(name)
-                subprocess.Popen(["python3", str(ORCH), "--start", quoted_name], cwd=str(BOTS_DIR))
+                # Safe: list-mode subprocess + validate_bot_name() regex check above
+                # prevents injection. Do NOT use shlex.quote with list args.
+                subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "resumed": name})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -1156,15 +1158,16 @@ class ControlHandler(BaseHTTPRequestHandler):
                         self._json(400, {"error": "invalid bot name format"})
                         return
                 # Validate each bot name against BOT_REGISTRY (Constitution §2)
+                # Return 400 for unknown bots to prevent enumeration and argument injection
                 valid_bot_names = {c.name for c in BOT_REGISTRY}
                 for n in bots:
                     if n not in valid_bot_names:
                         self._json(400, {"error": f"unknown bot: {n}"})
                         return
             try:
-                # Apply defense-in-depth: shlex.quote for each bot name
-                quoted_bots = [shlex.quote(n) for n in bots]
-                subprocess.Popen(["python3", str(ORCH), "--start", *quoted_bots], cwd=str(BOTS_DIR))
+                # Safe: list-mode subprocess + validate_bot_name() regex check above
+                # prevents injection. Do NOT use shlex.quote with list args.
+                subprocess.Popen(["python3", str(ORCH), "--start", *bots], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "started": bots})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -1192,10 +1195,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                         if n not in valid_bot_names:
                             self._json(400, {"error": f"unknown bot: {n}"})
                             return
-                    # Apply defense-in-depth: re.escape for pkill regex safety
+                    # Apply defense-in-depth: re.escape + anchor for pkill regex safety (CB-D9EE209C1657)
                     for n in bots:
                         escaped_name = re.escape(n)
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}"], timeout=5)
+                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}$"], timeout=5)
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)

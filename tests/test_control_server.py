@@ -514,3 +514,305 @@ class TestFailClosedSecurity:
         handler._json.assert_called_once()
         call_args = handler._json.call_args
         assert call_args[0][0] == 404, f"Expected 404 for /api/state, got {call_args[0][0]}"
+
+
+class TestBotsStartInputValidation:
+    """Security tests for POST /bots/start input validation (CB-2F79A10527A3).
+
+    Verifies that POST /bots/start validates bot names against BOT_REGISTRY
+    and rejects unknown or malicious argument-like names to prevent argument
+    injection via unsanitized bot list passed to subprocess.Popen.
+    """
+
+    def _make_post_handler(self, body: dict | None):
+        """Create a mock ControlHandler for POST /bots/start."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/bots/start"
+        handler.command = "POST"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = ControlHandler._auth.__get__(handler, ControlHandler)
+        # Bind _read_json_body to return the supplied body
+        handler._read_json_body = MagicMock(return_value=(body if body is not None else {}, None, None))
+        handler.rfile = io.BytesIO(json.dumps(body).encode()) if body is not None else io.BytesIO(b"{}")
+        handler.wfile = io.BytesIO()
+        return handler
+
+    def _do_post(self, body: dict | None, bot_registry):
+        """Helper: execute POST /bots/start and capture (code, response) tuples."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_post_handler(body)
+        responses: list[tuple[int, dict]] = []
+        # Capture _json calls as (code, body)
+        handler._json = lambda code, data, r=responses, **kw: r.append((code, data))  # type: ignore[assignment]
+        # Auth always passes for these unit tests; focus is on input validation
+        handler._auth = lambda: True  # type: ignore[assignment]
+        with patch("codebot.control_server.BOT_REGISTRY", bot_registry):
+            with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+                mock_popen.return_value = MagicMock(pid=9999)
+                ControlHandler.do_POST(handler)
+                return responses, mock_popen
+
+    # ------------------------------------------------------------------
+    # Happy path: valid registered bots
+    # ------------------------------------------------------------------
+    def test_valid_registered_bot_start_succeeds(self):
+        """POST /bots/start with a valid registered bot returns 200 and starts it."""
+        # Arrange
+        mock_bot = MagicMock()
+        mock_bot.name = "valid-bot"
+        body = {"bots": ["valid-bot"]}
+
+        # Act
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        # Assert
+        assert len(responses) == 1, "expected exactly one response"
+        code, data = responses[0]
+        assert code == 200, f"expected 200 for valid bot, got {code}: {data}"
+        assert data.get("ok") is True
+        assert data.get("started") == ["valid-bot"]
+        mock_popen.assert_called_once()
+        # Verify Popen args contain the bot name and do not contain injection
+        args = mock_popen.call_args[0][0]
+        assert "valid-bot" in args
+
+    def test_valid_multiple_registered_bots_succeeds(self):
+        """POST /bots/start with multiple valid registered bots starts all."""
+        # Arrange
+        bot_a = MagicMock(); bot_a.name = "alpha-bot"
+        bot_b = MagicMock(); bot_b.name = "beta_bot"
+        body = {"bots": ["alpha-bot", "beta_bot"]}
+
+        # Act
+        responses, mock_popen = self._do_post(body, [bot_a, bot_b])
+
+        # Assert
+        code, data = responses[0]
+        assert code == 200
+        assert set(data.get("started", [])) == {"alpha-bot", "beta_bot"}
+        mock_popen.assert_called_once()
+
+    def test_empty_bots_list_starts_with_empty(self):
+        """POST /bots/start with empty list returns 200 with empty started (no-op)."""
+        # Arrange: empty list is valid but starts nothing
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body: dict = {"bots": []}
+
+        # Act
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        # Assert: empty list is allowed; Popen is still called with no extra args
+        code, data = responses[0]
+        assert code == 200
+        assert data.get("started") == []
+        mock_popen.assert_called_once()
+
+    def test_no_bots_key_starts_all_registered(self):
+        """POST /bots/start with {} (no bots key) starts all registered bots."""
+        bot_a = MagicMock(); bot_a.name = "alpha-bot"
+        bot_b = MagicMock(); bot_b.name = "beta-bot"
+
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_post_handler({})
+        responses: list[tuple[int, dict]] = []
+        handler._json = lambda code, data, r=responses, **kw: r.append((code, data))  # type: ignore[assignment]
+        handler._auth = lambda: True  # type: ignore[assignment]
+        # _read_json_body returns {} -> body.get("bots") is None -> start all
+        handler._read_json_body = MagicMock(return_value=({}, None, None))
+
+        with patch("codebot.control_server.BOT_REGISTRY", [bot_a, bot_b]):
+            with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+                mock_popen.return_value = MagicMock(pid=1111)
+                ControlHandler.do_POST(handler)
+
+        code, data = responses[0]
+        assert code == 200
+        assert set(data.get("started", [])) == {"alpha-bot", "beta-bot"}
+
+    # ------------------------------------------------------------------
+    # Rejection: unknown bots -> 400
+    # ------------------------------------------------------------------
+    def test_unknown_bot_returns_400(self):
+        """POST /bots/start with unknown bot name returns 400 unknown bot."""
+        # Arrange: registry has only valid-bot, request asks for nonexistent
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": ["nonexistent"]}
+
+        # Act
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        # Assert
+        assert len(responses) == 1
+        code, data = responses[0]
+        assert code == 400, f"expected 400 for unknown bot, got {code}: {data}"
+        assert "unknown bot" in data.get("error", "").lower()
+        mock_popen.assert_not_called()
+
+    def test_unknown_bot_among_valid_returns_400_and_no_subprocess(self):
+        """If any bot in list is unknown, entire request is rejected and no subprocess runs."""
+        bot_a = MagicMock(); bot_a.name = "alpha-bot"
+        body = {"bots": ["alpha-bot", "ghost-bot"]}
+
+        responses, mock_popen = self._do_post(body, [bot_a])
+
+        code, data = responses[0]
+        assert code == 400
+        assert "unknown bot" in data.get("error", "").lower()
+        mock_popen.assert_not_called()
+
+    def test_unknown_bot_case_sensitive_returns_400(self):
+        """Bot name validation is case-sensitive; wrong case is unknown -> 400."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": ["Valid-Bot"]}
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, data = responses[0]
+        assert code == 400
+        assert "unknown bot" in data.get("error", "").lower()
+        mock_popen.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Rejection: argument-like / crafted injection names -> 400
+    # ------------------------------------------------------------------
+    def test_arg_help_rejected(self):
+        """POST /bots/start rejects '--help' (argument injection via --help)."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": ["--help"]}
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, data = responses[0]
+        assert code == 400, f"expected 400 for '--help', got {code}: {data}"
+        # May be unknown bot (passes regex but not registry) or invalid format;
+        # both are 400. Ensure injection blocked and no subprocess.
+        assert data.get("error")
+        mock_popen.assert_not_called()
+
+    def test_arg_config_rejected(self):
+        """POST /bots/start rejects '--config=/etc/passwd' (argument injection)."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": ["--config=/etc/passwd"]}
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, data = responses[0]
+        assert code == 400, f"expected 400 for '--config=/etc/passwd', got {code}: {data}"
+        assert "invalid bot name" in data.get("error", "").lower()
+        mock_popen.assert_not_called()
+
+    def test_arg_double_dash_rejected(self):
+        """Bare '--' should be rejected as not in registry."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": ["--"]}
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, _ = responses[0]
+        assert code == 400
+        mock_popen.assert_not_called()
+
+    def test_arg_verbose_rejected(self):
+        """POST /bots/start rejects '--verbose' (flag-like name)."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": ["--verbose"]}
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, _ = responses[0]
+        assert code == 400
+        mock_popen.assert_not_called()
+
+    def test_arg_with_equals_and_slash_rejected_as_invalid_format(self):
+        """Names containing '=' or '/' must be rejected with invalid format."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        for crafted in ["--config=/etc/passwd", "evil=1", "a/b", "bot/name"]:
+            body = {"bots": [crafted]}
+            responses, mock_popen = self._do_post(body, [mock_bot])
+            code, data = responses[0]
+            assert code == 400, f"expected 400 for {crafted!r}, got {code}"
+            assert "invalid" in data.get("error", "").lower()
+            mock_popen.assert_not_called()
+
+    def test_crafted_names_never_reach_subprocess(self):
+        """All crafted argument-like payloads must be blocked before Popen."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        payloads = [
+            "--help",
+            "--config=/etc/passwd",
+            "--verbose",
+            "--version",
+            "-c",
+            "--",
+            " --help",  # leading space -> invalid format
+        ]
+        for payload in payloads:
+            body = {"bots": [payload]}
+            responses, mock_popen = self._do_post(body, [mock_bot])
+            code, _ = responses[0]
+            assert code == 400, f"crafted payload {payload!r} should be 400, got {code}"
+            mock_popen.assert_not_called()
+
+    def test_injection_with_semicolon_rejected_before_registry_check(self):
+        """Semicolon injection must be rejected with invalid format, not unknown."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": ["evil; rm -rf /"]}
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, data = responses[0]
+        assert code == 400
+        assert "invalid bot name" in data.get("error", "").lower()
+        mock_popen.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Edge: type validation
+    # ------------------------------------------------------------------
+    def test_bots_not_a_list_returns_400(self):
+        """POST /bots/start with bots as string returns 400."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": "valid-bot"}  # type: ignore[dict-item]
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, data = responses[0]
+        assert code == 400
+        assert "must be an array" in data.get("error", "").lower()
+        mock_popen.assert_not_called()
+
+    def test_bot_names_must_be_strings(self):
+        """POST /bots/start with non-string bot name returns 400."""
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        body = {"bots": [123]}  # type: ignore[list-item]
+
+        responses, mock_popen = self._do_post(body, [mock_bot])
+
+        code, data = responses[0]
+        assert code == 400
+        assert "must be strings" in data.get("error", "").lower()
+        mock_popen.assert_not_called()
+
+    def test_api_prefix_also_validated(self):
+        """POST /api/bots/start must enforce same validation as /bots/start."""
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock(); mock_bot.name = "valid-bot"
+        handler = self._make_post_handler({"bots": ["--help"]})
+        handler.path = "/api/bots/start"
+        responses: list[tuple[int, dict]] = []
+        handler._json = lambda code, data, r=responses, **kw: r.append((code, data))  # type: ignore[assignment]
+        handler._auth = lambda: True  # type: ignore[assignment]
+        handler._read_json_body = MagicMock(return_value=({"bots": ["--help"]}, None, None))
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+                ControlHandler.do_POST(handler)
+                code, _ = responses[0]
+                assert code == 400
+                mock_popen.assert_not_called()
