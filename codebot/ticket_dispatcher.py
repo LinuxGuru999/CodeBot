@@ -70,6 +70,10 @@ DECOMPOSER_ROLE_NAMES: frozenset[str] = frozenset({
     "decomposer",
 })
 
+TRIAGER_ROLE_NAMES: frozenset[str] = frozenset({
+    "ticket_triager",
+})
+
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
     "bug": "general_implementer",
     "feature": "general_implementer",
@@ -84,6 +88,7 @@ TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
 }
 
 CLAIM_TTL_SECONDS = 1800
+TRIAGER_MAX_CONCURRENT = 5
 SWEEP_INTERVAL = 300
 _last_sweep_time: float = 0.0
 
@@ -428,6 +433,49 @@ def _sweep_and_build_active_claims(live_bots: dict[str, str], grace_seconds: flo
 # Ticket Dispatching
 # ---------------------------------------------------------------------------
 
+def _rank_tickets_for_dispatch(
+    tickets: list[Any],
+    state_counts: dict[str, int] | None = None,
+) -> list[Any]:
+    """Rank tickets by work score for dispatch ordering.
+
+    Uses work_scorer.rank_work_items with queue pressure derived from
+    state_counts. Falls back to original order if scoring fails.
+    Does NOT change eligibility — only ordering.
+    """
+    if not tickets:
+        return tickets
+    try:
+        from codebot.work_scorer import rank_work_items
+        from codebot.queue_pressure import calculate_pressure
+        pressure = None
+        if state_counts is not None:
+            try:
+                pressure = calculate_pressure(
+                    ready_count=state_counts.get("READY", 0),
+                    implementing_count=state_counts.get("IMPLEMENTING", 0),
+                    reviewing_count=state_counts.get("REVIEWING", 0),
+                    verifying_count=state_counts.get("VERIFYING", 0),
+                    rework_count=state_counts.get("REWORK", 0),
+                    planning_count=state_counts.get("PLANNING", 0),
+                )
+            except Exception:
+                pressure = None
+        ranked = rank_work_items(tickets, queue_pressure=pressure)
+        id_to_ticket = {getattr(t, "id", ""): t for t in tickets if getattr(t, "id", "")}
+        result = []
+        for scored in ranked:
+            t = id_to_ticket.get(scored.ticket_id)
+            if t is not None:
+                result.append(t)
+        for t in tickets:
+            if t not in result:
+                result.append(t)
+        return result
+    except Exception:
+        return tickets
+
+
 def spawn_demand_agents(
     bots: dict[str, Any],
     max_concurrent: int,
@@ -589,6 +637,10 @@ def spawn_demand_agents(
     impl_all = list(implementing) + list(rework_tickets)
     max_concurrent_impl = 8 if implementation_limit is None else implementation_limit
 
+    # Rank tickets by work score so bottleneck/critical work dispatches first
+    summary = ts.summary() if ts is not None else {}
+    impl_all = _rank_tickets_for_dispatch(impl_all, state_counts=summary)
+
     # Build role-indexed dictionary: O(m) where m = number of bots
     # Why O(1) per-ticket: idle_bots_by_role maps role -> deque[idle bots],
     # avoiding the prior O(n*m) nested scan over tickets×bots. Index build is
@@ -706,6 +758,198 @@ def spawn_demand_agents(
     return spawned + reviewer_spawned
 
 
+def dispatch_triage_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None, store: Any | None = None) -> int:
+    try:
+        from codebot.ticket_engine import TicketState
+    except ImportError:
+        return 0
+
+    ts = store if store is not None else get_ticket_store()
+    if ts is None:
+        return 0
+
+    discovered = ts.list_by_state(TicketState.DISCOVERED)
+    validating = ts.list_by_state(TicketState.VALIDATING)
+    triaged = ts.list_by_state(TicketState.TRIAGED)
+    if not discovered and not validating and not triaged:
+        return 0
+
+    summary = ts.summary() if ts is not None else {}
+    all_tickets = list(discovered) + list(validating) + list(triaged)
+    all_tickets = _rank_tickets_for_dispatch(all_tickets, state_counts=summary)
+
+    claims_dir = STATE_DIR / "claims"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+
+    live_bots: dict[str, str] = {}
+    for name, bot in bots.items():
+        if bot.process is not None and bot.process.poll() is None:
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                live_bots[name] = assigned
+
+    active_claims = _sweep_and_build_active_claims(live_bots)
+
+    idle_triagers = []
+    unassigned_running = []
+    busy_ticket_ids: set[str] = set()
+    for name, bot in bots.items():
+        base_name = name.split("-")[0] if "-" in name else name
+        if base_name not in TRIAGER_ROLE_NAMES:
+            continue
+        if bot.process is not None and bot.process.poll() is None:
+            assigned = getattr(bot, '_assigned_ticket_id', '')
+            if assigned:
+                busy_ticket_ids.add(assigned)
+            else:
+                unassigned_running.append((name, bot))
+        else:
+            idle_triagers.append((name, bot))
+
+    running_triagers = len(unassigned_running) + len(busy_ticket_ids)
+    dispatch_capacity = max(0, max_agents - running_triagers) if max_agents > 0 else 0
+    dispatch_capacity = min(dispatch_capacity, TRIAGER_MAX_CONCURRENT)
+    available = idle_triagers + unassigned_running
+    available = available[:max(dispatch_capacity, 0)]
+    dispatched = 0
+
+    def _get_or_create_triager(suffix: str = "") -> Any:
+        from codebot.process_manager import BotConfig, BotState
+        from codebot.model_manager import next_model_for_role
+        bot_name = f"ticket_triager-{suffix}" if suffix else "ticket_triager"
+        if bot_name in bots:
+            bot = bots[bot_name]
+            if not bot.config.enabled:
+                bot.config.enabled = True
+            return bot
+        prompt_path = BOTS_DIR / "codebot" / "roles" / "ticket_triager.md"
+        if not prompt_path.exists():
+            prompt_path = BOTS_DIR / "ticket_triager.md"
+        if not prompt_path.exists():
+            return None
+        assignment = next_model_for_role("ticket_triager")
+        cfg = BotConfig(
+            name=bot_name,
+            prompt_file="codebot/roles/ticket_triager.md",
+            interval_seconds=30,
+            heartbeat_timeout=90,
+            model=assignment.model,
+            fallback_model=assignment.fallback,
+            enabled=True,
+            clean_exit_wait=False,
+            runner_mode="api",
+            tier=11,
+            max_restarts=5,
+        )
+        state = BotState(config=cfg)
+        bots[bot_name] = state
+        return state
+
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
+    transition_logs: list[str] = []
+
+    for ticket in all_tickets:
+        if dispatch_capacity is not None and dispatched >= dispatch_capacity:
+            break
+        tid = getattr(ticket, 'id', '')
+        if not tid:
+            continue
+
+        current_state = getattr(ticket, 'state', None)
+        if hasattr(current_state, 'value'):
+            current_state_val = current_state.value
+        else:
+            current_state_val = str(current_state) if current_state else "DISCOVERED"
+
+        if current_state_val == "TRIAGED":
+            transitions.append((tid, TicketState.READY, None))
+            transition_logs.append(f"Triaged: {tid} TRIAGED -> READY")
+            continue
+
+        if current_state_val == "VALIDATING":
+            transitions.append((tid, TicketState.TRIAGED, None))
+            transition_logs.append(f"Validated: {tid} VALIDATING -> TRIAGED")
+            continue
+
+        if tid in active_claims or tid in busy_ticket_ids:
+            continue
+
+        if not available:
+            existing = [n for n, b in bots.items() if n.split("-")[0] == "ticket_triager" and b.process is not None and b.process.poll() is None]
+            if len(existing) >= TRIAGER_MAX_CONCURRENT:
+                break
+            suffix = str(len(existing) + 1)
+            bot = _get_or_create_triager(suffix)
+            if bot and (bot.process is None or bot.process.poll() is not None):
+                available.append((bot.config.name, bot))
+            else:
+                break
+
+        bot_name, bot = available.pop(0)
+
+        claim_file = claims_dir / f"{tid}.{bot_name}.json"
+        if claim_file.exists():
+            continue
+
+        try:
+            claim_at = time.time()
+            claim_data = {"ticket_id": tid, "bot": bot_name, "at": claim_at, "class": "triage"}
+            tmp = claim_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
+            tmp.replace(claim_file)
+            register_claim(claim_file.name, bot_name, claim_at, claim_file)
+        except OSError:
+            continue
+
+        bot._assigned_ticket_id = tid
+        if bot.process is not None and bot.process.poll() is None:
+            dispatched += 1
+            logger.info(f"Dispatched triage for {tid} -> {bot_name}")
+        else:
+            started = start_bot_fn(bot, bots=bots, is_demand=True) if start_bot_fn else False
+            if not started:
+                claim_file.unlink(missing_ok=True)
+                release_claim(claim_file.name)
+                bot._assigned_ticket_id = ""
+                break
+            dispatched += 1
+            logger.info(f"Dispatched triage for {tid} -> {bot_name}")
+
+    if transitions:
+        try:
+            results = ts.batch_transition(transitions)
+            dispatched += len(results)
+            for msg in transition_logs:
+                logger.info(msg)
+            for tid, _, _ in transitions:
+                for cf in claims_dir.glob(f"{tid}.*.json"):
+                    release_claim(cf.name)
+                    try:
+                        cf.unlink()
+                    except OSError:
+                        pass
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Batch triage transition failed ({e}), falling back to individual")
+            for i, (tid, target_state, fb) in enumerate(transitions):
+                try:
+                    ts.transition(tid, target_state, fb)
+                    logger.info(transition_logs[i])
+                    dispatched += 1
+                    for cf in claims_dir.glob(f"{tid}.*.json"):
+                        release_claim(cf.name)
+                        try:
+                            cf.unlink()
+                        except OSError:
+                            pass
+                except ValueError as ve:
+                    for cf in claims_dir.glob(f"{tid}.*.json"):
+                        release_claim(cf.name)
+                        cf.unlink(missing_ok=True)
+                    logger.debug(f"Failed to advance {tid}: {ve}")
+
+    return dispatched
+
+
 def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None, store: Any | None = None) -> int:
     """Dispatch DECOMPOSE tickets to decomposer agents."""
     try:
@@ -720,6 +964,10 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
     decomposing = ts.list_by_state(TicketState.DECOMPOSE)
     if not decomposing:
         return 0
+
+    # Rank by work score so higher-priority decomposition runs first
+    summary = ts.summary() if ts is not None else {}
+    decomposing = _rank_tickets_for_dispatch(decomposing, state_counts=summary)
 
     decomp_dir = STATE_DIR / "decompositions"
     decomp_dir.mkdir(parents=True, exist_ok=True)
@@ -754,10 +1002,9 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
             idle_decomposers.append((name, bot))
 
     running_decomposers = len(unassigned_running) + len(busy_ticket_ids)
-    dispatch_capacity = max_agents - running_decomposers if max_agents > 0 else None
+    dispatch_capacity = max(0, max_agents - running_decomposers) if max_agents > 0 else 0
     available = idle_decomposers + unassigned_running
-    if dispatch_capacity is not None:
-        available = available[:max(dispatch_capacity, 0)]
+    available = available[:max(dispatch_capacity, 0)]
     dispatched = 0
 
     def _get_or_create_decomposer(suffix: str = "") -> Any:
@@ -821,7 +1068,7 @@ def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_b
             continue
 
         if not available:
-            existing_decomp = [n for n in bots if n.split("-")[0] == "decomposer"]
+            existing_decomp = [n for n, b in bots.items() if n.split("-")[0] == "decomposer" and b.process is not None and b.process.poll() is None]
             suffix = str(len(existing_decomp) + 1)
             bot = _get_or_create_decomposer(suffix)
             if bot and (bot.process is None or bot.process.poll() is not None):
@@ -911,6 +1158,10 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
     if not planning:
         return 0
 
+    # Rank by work score so higher-priority planning runs first
+    summary = ts.summary() if ts is not None else {}
+    planning = _rank_tickets_for_dispatch(planning, state_counts=summary)
+
     plans_dir = STATE_DIR / "plans"
     plans_dir.mkdir(parents=True, exist_ok=True)
 
@@ -943,9 +1194,10 @@ def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bo
         else:
             idle_planners.append((name, bot))
 
+    running_planners = len(unassigned_running) + len(busy_ticket_ids)
+    dispatch_capacity = max(0, max_agents - running_planners) if max_agents > 0 else 0
     available = idle_planners + unassigned_running
-    if max_agents > 0:
-        available = available[:max_agents]
+    available = available[:max(dispatch_capacity, 0)]
     dispatched = 0
 
     # Phase 1: Collect transitions for completed plans and dispatch new ones
@@ -1318,6 +1570,7 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
             tc = getattr(ticket, 'ticket_class', None)
             tc_val = tc.value if hasattr(tc, 'value') else str(tc) if tc else "feature"
             changed = list(getattr(ticket, 'affected_modules', None) or [])
+            t_rev = getattr(ticket, "updated_at", 0.0)
             passed, evaluations = run_quality_gates_with_cache(
                 policy=policy,
                 workspace=workspace,
@@ -1325,6 +1578,7 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
                 ticket_id=tid,
                 ticket_class=tc_val,
                 changed_files=changed,
+                ticket_revision=t_rev,
             )
             record_gate_results(STATE_DIR, tid, passed, evaluations)
 
