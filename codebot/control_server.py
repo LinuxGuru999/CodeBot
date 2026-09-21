@@ -1168,7 +1168,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 valid_bot_names = {c.name for c in BOT_REGISTRY}
                 for n in bots:
                     if n not in valid_bot_names:
-                        self._json(404, {"error": f"unknown bot: {n}"})
+                        self._json(400, {"error": f"unknown bot: {n}"})
                         return
             try:
                 # Apply defense-in-depth: shlex.quote for each bot name
