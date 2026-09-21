@@ -3,7 +3,7 @@
 
 Purpose
 -------
-Provides stdlib-only internet research capabilities: web_search queries
+Provides internet research capabilities using stdlib baseline with optional enhanced parsing: web_search queries
 DuckDuckGo's HTML lite endpoint and parses structured results; web_fetch
 retrieves bounded page content from a URL. Both return the uniform
 {success, output, error} dict expected by api_runner's tool dispatch.
@@ -254,16 +254,24 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         """Connect to the pinned IP and verify SSL against the original hostname.
         
         Raises:
-            ValueError: If pinned_ip is not provided, preventing fallback to DNS resolution.
+            ValueError: If pinned_ip is missing, empty, whitespace-only, or not a valid IP literal.
         """
-        if not self._pinned_ip:
+        if not self._pinned_ip or not str(self._pinned_ip).strip():
             raise ValueError("Pinned IP is required for secure connection; refusing to resolve hostname")
+        
+        # Validate that pinned_ip is actually an IP address, never a hostname
+        try:
+            ipaddress.ip_address(self._pinned_ip)
+        except ValueError as e:
+            raise ValueError(f"pinned_ip must be a valid IP address, got: {self._pinned_ip!r}") from e
         
         sock = socket.create_connection(
             (self._pinned_ip, self.port), self.timeout, self.source_address
         )
+        
+        # Handle proxy tunneling correctly via the connection object, not raw socket
         if self._tunnel_host:
-            sock.set_tunnel(self._tunnel_host, self._tunnel_port)
+            self._tunnel()
         
         # Wrap with SSL, using the original hostname for SNI and verification
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
