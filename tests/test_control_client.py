@@ -570,5 +570,130 @@ class TestPlaintextTokenGuard(unittest.TestCase):
         self.assertEqual(status, 200)
 
 
+class TestLoadingFeedbackAndTimeout(unittest.TestCase):
+    """Test loading feedback timer and timeout error messages."""
+
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+        importlib.reload(control_client)
+
+    def tearDown(self):
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_timeout_error_includes_retry_guidance(self, mock_urlopen):
+        """Test that timeout errors include actionable retry guidance."""
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.URLError("timed out")
+
+        status, body = control_client.req("GET", "/bots")
+
+        self.assertEqual(status, 0)
+        self.assertIsInstance(body, dict)
+        err_msg = body.get("error", "")
+        self.assertIn("timed out", err_msg.lower())
+        self.assertIn("--timeout", err_msg)
+        self.assertIn("CONTROL_URL", err_msg)
+        self.assertIn("network", err_msg.lower())
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_loading_feedback_shown_on_slow_request(self, mock_urlopen):
+        """Test that loading message appears on stderr when request takes >500ms."""
+        import time
+
+        def slow_response(*args, **kwargs):
+            time.sleep(0.7)
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b'{}'
+            mock_resp.status = 200
+            mock_resp.__enter__ = lambda self: self
+            mock_resp.__exit__ = lambda self, *a: None
+            return mock_resp
+
+        mock_urlopen.side_effect = slow_response
+
+        held_stderr = StringIO()
+        original_stderr = sys.stderr
+        sys.stderr = held_stderr
+        try:
+            control_client.req("GET", "/health")
+        finally:
+            sys.stderr = original_stderr
+
+        output = held_stderr.getvalue()
+        self.assertIn("Request in progress", output)
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_no_loading_feedback_on_fast_request(self, mock_urlopen):
+        """Test that loading message does NOT appear when request completes quickly."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
+        mock_response.status = 200
+        mock_response.__enter__ = lambda self: self
+        mock_response.__exit__ = lambda self, *a: None
+        mock_urlopen.return_value = mock_response
+
+        held_stderr = StringIO()
+        original_stderr = sys.stderr
+        sys.stderr = held_stderr
+        try:
+            control_client.req("GET", "/health")
+        finally:
+            sys.stderr = original_stderr
+
+        output = held_stderr.getvalue()
+        self.assertNotIn("Request in progress", output)
+
+
+class TestTimeoutFlag(unittest.TestCase):
+    """Test --timeout CLI flag parsing."""
+
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        self.original_argv = sys.argv
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+        importlib.reload(control_client)
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
+
+    @patch('codebot.control_client.cmd_status')
+    def test_timeout_flag_overrides_default(self, mock_cmd_status):
+        """Test that --timeout flag changes REQUEST_TIMEOUT."""
+        sys.argv = ['control_client.py', '--timeout', '30', 'status']
+        control_client.main()
+        self.assertEqual(control_client.REQUEST_TIMEOUT, 30)
+        mock_cmd_status.assert_called_once()
+
+    def test_timeout_flag_invalid_value_exits(self):
+        """Test that --timeout with non-integer exits with code 1."""
+        sys.argv = ['control_client.py', '--timeout', 'abc', 'status']
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+        self.assertEqual(cm.exception.code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
