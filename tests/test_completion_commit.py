@@ -131,7 +131,67 @@ class TestSyncRolesRegistered:
     def test_role_count_bumped(self):
         from codebot.role_registry import ALL_ROLES
         assert len(ALL_ROLES) == 31
-    def test_record_commit_persists_sha(self, tmp_path):
+
+
+class TestTicketBranchFlow:
+    def test_branch_name_sanitized(self):
+        from codebot.completion_commit import _branch_name
+        assert _branch_name("CB-1") == "cb/CB-1"
+        assert _branch_name("a/b c") == "cb/a-b-c"
+
+    def test_commit_on_branch_lands_there(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        (repo / "a.py").write_text("a\n")
+        ok, sha = commit_ticket_files(repo, "CB-B1", "branch work", ["a.py"], branch=True)
+        assert ok is True and len(sha) == 40
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "cb/CB-B1"
+        names = _git(repo, "show", "--name-only", "--pretty=format:", sha).split()
+        assert names == ["a.py"]
+
+    def test_open_pr_idempotent_on_existing(self, tmp_path, monkeypatch):
+        import subprocess as _sp
+        from codebot.completion_commit import open_pull_request
+        monkeypatch.setattr(_sp, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no subprocess")))
+        import codebot.completion_commit as cc
+        monkeypatch.setattr(cc, "_run_git", lambda *a, **k: (True, ""))
+        seq = iter([
+            (True, "https://github.com/o/r/pull/7\n"),
+        ])
+        real_pr_list = None
+        def fake_run(cmd, **kw):
+            assert cmd[:3] == ["gh", "pr", "list"]
+            class R: returncode = 0; stdout = "https://github.com/o/r/pull/7\n"; stderr = ""
+            return R()
+        monkeypatch.setattr(_sp, "run", fake_run)
+        ok, url = open_pull_request(tmp_path, "CB-B2", "t", "abc123")
+        assert ok is True and url == "https://github.com/o/r/pull/7"
+
+    def test_auto_merge_shape(self, tmp_path, monkeypatch):
+        import subprocess as _sp
+        from codebot.completion_commit import auto_merge_pull_request
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            class R: returncode = 0; stdout = "merged"; stderr = ""
+            return R()
+        monkeypatch.setattr(_sp, "run", fake_run)
+        ok, _ = auto_merge_pull_request("https://github.com/o/r/pull/7")
+        assert ok is True
+        assert calls[0][:4] == ["gh", "pr", "merge", "https://github.com/o/r/pull/7"]
+        assert "--auto" in calls[0] and "--squash" in calls[0]
+        assert "--force" not in " ".join(calls[0])
+
+    def test_record_commit_stores_pr_url(self, tmp_path):
+        from codebot.ticket_engine import TicketStore, create_ticket, TicketClass, Severity, RiskLevel
+        store = TicketStore(tmp_path / "t.json")
+        t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e9", "p", "d", ["a"], risk=RiskLevel.LOW)
+        store.add(t)
+        updated = store.record_commit(t.id, "abc123", "https://github.com/o/r/pull/7")
+        assert updated is not None and updated.pr_url == "https://github.com/o/r/pull/7"
+        assert store.get(t.id).pr_url == "https://github.com/o/r/pull/7"
+        store.close()
+
+    def test_record_commit(self, tmp_path):
         from codebot.ticket_engine import TicketStore, create_ticket, TicketClass, Severity, RiskLevel
         store = TicketStore(tmp_path / "t.json")
         t = create_ticket("t", TicketClass.BUG, Severity.LOW, "s", "e1", "p", "d", ["a"], risk=RiskLevel.LOW)

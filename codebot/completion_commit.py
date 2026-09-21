@@ -139,6 +139,95 @@ def sync_ticket_issue(
                "--body", body, "--label", "codebot")
 
 
+def _branch_name(ticket_id: str) -> str:
+    """Branch name for a ticket. Exported for tests."""
+    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in ticket_id)
+    return f"cb/{safe}"
+
+
+def open_ticket_branch(
+    repo: Path,
+    ticket_id: str,
+    timeout: int = 30,
+) -> tuple[bool, str]:
+    """Create/reset branch cb/<ticket> at HEAD (fail-open). Returns (ok, branch)."""
+    branch = _branch_name(ticket_id)
+    ok, cur = _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD", timeout=timeout)
+    if ok and cur.strip() == branch:
+        return True, branch
+    ok, out = _run_git(repo, "checkout", "-B", branch, timeout=timeout)
+    if not ok:
+        logger.warning("ticket %s: branch checkout failed: %s", ticket_id, out[:200])
+        return False, ""
+    return True, branch
+
+
+def open_pull_request(
+    repo: Path,
+    ticket_id: str,
+    title: str,
+    sha: str,
+    base: str = "master",
+    timeout: int = 60,
+) -> tuple[bool, str]:
+    """Push branch and open/update a PR via gh (fail-open). Returns (ok, url).
+
+    Idempotent: if a PR already exists for the branch, returns its URL
+    without creating a duplicate.
+    """
+    branch = _branch_name(ticket_id)
+    ok, out = _run_git(repo, "push", "-u", "origin", branch, timeout=timeout)
+    if not ok:
+        logger.warning("ticket %s: branch push failed: %s", ticket_id, out[:200])
+        return False, out
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--json", "url,state",
+             "--jq", ".[0].url // empty"],
+            capture_output=True, text=True, timeout=timeout, cwd=str(repo),
+        )
+        existing = (proc.stdout or "").strip()
+        if proc.returncode == 0 and existing:
+            return True, existing
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    msg = build_commit_message(ticket_id, title)
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "create", "--base", base, "--head", branch,
+             "--title", msg, "--body", f"Ticket {ticket_id}\n\nCommit: {sha}"],
+            capture_output=True, text=True, timeout=timeout, cwd=str(repo),
+        )
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if proc.returncode == 0:
+            url = out.splitlines()[0].strip() if out else ""
+            logger.info("ticket %s PR opened: %s", ticket_id, url)
+            return True, url
+        logger.warning("ticket %s: PR create failed: %s", ticket_id, out[:300])
+        return False, out
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, str(e)
+
+
+def auto_merge_pull_request(
+    pr_url_or_branch: str,
+    timeout: int = 60,
+) -> tuple[bool, str]:
+    """Enable squash auto-merge on a PR (fail-open). Returns (ok, output)."""
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "merge", pr_url_or_branch, "--auto", "--squash"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if proc.returncode == 0:
+            return True, out
+        logger.warning("auto-merge failed for %s: %s", pr_url_or_branch, out[:200])
+        return False, out
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, str(e)
+
+
 def _run_git(repo: Path, *args: str, timeout: int = 30) -> tuple[bool, str]:
     """Run a git command in repo. Returns (success, stripped output)."""
     try:
@@ -170,6 +259,7 @@ def commit_ticket_files(
     title: str,
     files: list[str],
     timeout: int = 60,
+    branch: bool = False,
 ) -> tuple[bool, str]:
     """Stage + commit exactly `files` in workspace. Returns (ok, sha).
 
@@ -177,6 +267,8 @@ def commit_ticket_files(
       outside the repo (never commits stray absolute paths).
     - Stages per-file (`git add -- <file>`), commits once with message
       `[<ticket_id>] <title>`, returns the new HEAD SHA.
+    - With branch=True, opens/resets branch cb/<ticket> first so the commit
+      lands on the ticket branch instead of the current branch.
     - "Nothing to commit" (files already committed/clean) is success with
       the current HEAD SHA — the work is already in the tree.
     - Any failure returns (False, "") and logs at WARNING.
@@ -205,6 +297,11 @@ def commit_ticket_files(
     if not scoped:
         logger.warning("ticket %s: no committable files after scoping", ticket_id)
         return False, ""
+
+    if branch:
+        ok, _ = open_ticket_branch(workspace, ticket_id, timeout=timeout)
+        if not ok:
+            return False, ""
 
     ok, status = _run_git(workspace, "status", "--short", "--", *scoped)
     if not ok:

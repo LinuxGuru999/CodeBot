@@ -46,6 +46,15 @@ from codebot.review_config import get_review_config
 
 logger = logging.getLogger("gatekeeper")
 
+
+def _push_enabled_for_prs() -> bool:
+    """PR flow shares the push gate: off when GITHUB_DRY_RUN is on."""
+    try:
+        from codebot.completion_commit import _push_enabled
+        return _push_enabled()
+    except Exception:
+        return False
+
 MAX_REWORK_ATTEMPTS = 3
 
 _REVIEW_FILE_PATTERNS: tuple[str, ...] = (
@@ -359,11 +368,12 @@ class Gatekeeper:
             logger.error("failed to transition ticket %s: %s", ticket_id, e)
 
     def _commit_completed_ticket(self, ticket_id: str) -> None:
-        """Commit the ticket's own files and record the SHA. Fail-open."""
+        """Commit the ticket's files on cb/<ticket>, open PR, record SHA+URL. Fail-open."""
         try:
             from codebot.ticket_dispatcher import get_ticket_store
             from codebot.completion_commit import (
-                commit_ticket_files, push_current_branch, sync_ticket_issue,
+                commit_ticket_files, open_pull_request, auto_merge_pull_request,
+                push_current_branch, sync_ticket_issue,
             )
 
             store = get_ticket_store()
@@ -377,10 +387,19 @@ class Gatekeeper:
                 return
             title = getattr(ticket, "title", "")
             ok, sha = commit_ticket_files(
-                self._workspace, ticket_id, title, files,
+                self._workspace, ticket_id, title, files, branch=True,
             )
             if ok and sha:
-                store.record_commit(ticket_id, sha)
+                pr_url = getattr(ticket, "pr_url", "")
+                if not pr_url and _push_enabled_for_prs():
+                    pok, pr_url = open_pull_request(
+                        self._workspace, ticket_id, title, sha,
+                    )
+                    if pok and pr_url:
+                        auto_merge_pull_request(pr_url)
+                    else:
+                        pr_url = ""
+                store.record_commit(ticket_id, sha, pr_url)
                 push_current_branch(self._workspace)
                 sync_ticket_issue(ticket_id, title, sha, "COMPLETE")
         except Exception as e:

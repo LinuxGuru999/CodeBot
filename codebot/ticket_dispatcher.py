@@ -428,7 +428,15 @@ def _sweep_and_build_active_claims(live_bots: dict[str, str], grace_seconds: flo
 # Ticket Dispatching
 # ---------------------------------------------------------------------------
 
-def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn, store: Any | None = None) -> int:
+def spawn_demand_agents(
+    bots: dict[str, Any],
+    max_concurrent: int,
+    start_bot_fn,
+    store: Any | None = None,
+    implementation_limit: int | None = None,
+    review_limit: int | None = None,
+    reservations: Any | None = None,
+) -> int:
     """Spawn agents based on current ticket demand.
     
     Args:
@@ -544,6 +552,8 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn,
         claim_file = claims_dir / f"{tid}.{bot.config.name}.json"
         if claim_file.exists():
             return False
+        if reservations is not None and not reservations.try_reserve_count(tid, running_count):
+            return False
         try:
             claim_at = time.time()
             claim_data = {"ticket_id": tid, "bot": bot.config.name, "worker": bot.config.name, "at": claim_at}
@@ -552,6 +562,8 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn,
             tmp.replace(claim_file)
             register_claim(claim_file.name, bot.config.name, claim_at, claim_file)
         except OSError:
+            if reservations is not None:
+                reservations.release(tid)
             return False
         bot._assigned_ticket_id = tid
         ok = start_bot_fn(bot, bots=bots, is_demand=True)
@@ -569,13 +581,19 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn,
                 pass
             release_claim(claim_file.name)
             bot._assigned_ticket_id = ""
+            if reservations is not None:
+                reservations.release(tid)
             return False
 
     # Dispatch implementers — O(n+m) via role-indexed lookup
     impl_all = list(implementing) + list(rework_tickets)
-    max_concurrent_impl = 8
+    max_concurrent_impl = 8 if implementation_limit is None else implementation_limit
 
     # Build role-indexed dictionary: O(m) where m = number of bots
+    # Why O(1) per-ticket: idle_bots_by_role maps role -> deque[idle bots],
+    # avoiding the prior O(n*m) nested scan over tickets×bots. Index build is
+    # measured and logged so perf regressions are observable per tick.
+    _index_start = time.perf_counter()
     idle_bots_by_role: dict[str, deque[Any]] = {}
     all_bots_by_role: dict[str, list[str]] = {}
     running_impl = 0
@@ -590,9 +608,12 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn,
                 if base not in idle_bots_by_role:
                     idle_bots_by_role[base] = deque()
                 idle_bots_by_role[base].append(b)
+    _index_elapsed = time.perf_counter() - _index_start
+    logger.info("Dispatch index built in %.3fs for %d bots (O(1) lookup enabled)", _index_elapsed, len(bots))
 
     impl_budget = min(len(impl_all), budget, max(0, max_concurrent_impl - running_impl))
 
+    _o1_logged = False
     for ticket in impl_all[:impl_budget]:
         if spawned >= impl_budget:
             break
@@ -605,6 +626,9 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn,
 
         assigned = False
         # O(1) average-case lookup by role instead of O(m) scan
+        if not _o1_logged:
+            logger.debug("O(1) role-indexed lookup for ticket %s -> role %s", tid, target_base)
+            _o1_logged = True
         candidates = idle_bots_by_role.get(target_base)
         while candidates:
             bot = candidates.popleft()
@@ -629,7 +653,7 @@ def spawn_demand_agents(bots: dict[str, Any], max_concurrent: int, start_bot_fn,
         return spawned
 
     # Dispatch reviewers — O(n+m) via role-indexed lookup
-    max_concurrent_reviewers = 8
+    max_concurrent_reviewers = 8 if review_limit is None else review_limit
 
     # Reuse idle_bots_by_role built above; also build reviewer-specific indexes: O(m)
     idle_reviewers_by_role: dict[str, deque[Any]] = {}
@@ -1368,13 +1392,16 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
         except Exception:
             pass
 
-    # Phase 4: Commit each newly-COMPLETE ticket's own files (fail-open)
+    # Phase 4: Commit each newly-COMPLETE ticket's files on cb/<ticket>,
+    # open PR + auto-merge, record SHA+URL (all fail-open)
     if completed_tids:
         try:
             from codebot.completion_commit import (
-                commit_ticket_files, push_current_branch, sync_ticket_issue,
+                commit_ticket_files, open_pull_request, auto_merge_pull_request,
+                push_current_branch, sync_ticket_issue, _push_enabled,
             )
             workspace = Path(os.environ.get("CODEBOT_PROJECT_ROOT", Path.cwd()))
+            pr_flow = _push_enabled()
             for tid in completed_tids:
                 try:
                     ticket = ts.get(tid)
@@ -1383,13 +1410,23 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
                     files = list(getattr(ticket, "affected_modules", None) or [])
                     if not files:
                         continue
+                    title = getattr(ticket, "title", "")
                     ok, sha = commit_ticket_files(
-                        workspace, tid, getattr(ticket, "title", ""), files,
+                        workspace, tid, title, files, branch=True,
                     )
                     if ok and sha:
-                        ts.record_commit(tid, sha)
+                        pr_url = getattr(ticket, "pr_url", "")
+                        if not pr_url and pr_flow:
+                            pok, pr_url = open_pull_request(
+                                workspace, tid, title, sha,
+                            )
+                            if pok and pr_url:
+                                auto_merge_pull_request(pr_url)
+                            else:
+                                pr_url = ""
+                        ts.record_commit(tid, sha, pr_url)
                         push_current_branch(workspace)
-                        sync_ticket_issue(tid, getattr(ticket, "title", ""), sha, "COMPLETE")
+                        sync_ticket_issue(tid, title, sha, "COMPLETE")
                 except Exception as e:
                     logger.warning(f"ticket {tid}: completion commit failed (fail-open): {e}")
         except Exception as e:

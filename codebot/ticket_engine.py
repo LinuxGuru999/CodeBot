@@ -229,6 +229,7 @@ class Ticket:
     gate_history: list[dict[str, Any]] = field(default_factory=list)
     commit_sha: str = ""
     committed_at: float = 0.0
+    pr_url: str = ""
 
     def evidence_hash(self) -> str:
         canonical = f"{self.ticket_class}:{self.problem_statement}:{self.evidence}"
@@ -861,16 +862,18 @@ class TicketStore:
             self._queue_save()
         return ticket
 
-    def record_commit(self, ticket_id: str, sha: str) -> Ticket | None:
-        """Record the git SHA for a COMPLETE ticket. Returns updated ticket or None."""
+    def record_commit(self, ticket_id: str, sha: str, pr_url: str = "") -> Ticket | None:
+        """Record the git SHA (and PR URL) for a COMPLETE ticket."""
         import time as _time
         with self._lock:
             ticket = self._tickets.get(ticket_id)
             if ticket is None:
                 return None
-            if ticket.commit_sha == sha and sha:
+            if ticket.commit_sha == sha and sha and (not pr_url or ticket.pr_url == pr_url):
                 return ticket
-            updated = Ticket(**{**asdict(ticket), "commit_sha": sha, "committed_at": _time.time()})
+            updated = Ticket(**{**asdict(ticket), "commit_sha": sha,
+                                "committed_at": _time.time(),
+                                "pr_url": pr_url or ticket.pr_url})
             self._tickets[ticket_id] = updated
             self._dirty_ids.add(ticket_id)
             self._queue_save()
