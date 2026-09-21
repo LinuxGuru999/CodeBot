@@ -443,6 +443,9 @@ class TicketStore:
         self._backup_count: int = 0  # backups since last prune
         # Cached sorted list of READY tickets for O(1) list_ready() after first sort
         self._ready_sorted_cache: list[Ticket] | None = None
+        # Buffered lifecycle events — flushed in batches to reduce syscalls
+        self._lifecycle_event_buffer: list[dict[str, Any]] = []
+        self._LIFECYCLE_FLUSH_THRESHOLD = 50
         # Backup worker: async file-copy and prune consumer
         self._backup_queue: queue.Queue[tuple[str, str] | tuple[str, str] | None] = queue.Queue()
         self._backup_shutdown = False
@@ -564,6 +567,7 @@ class TicketStore:
         Use this when durability is required (e.g., before shutdown or
         in tests that verify persistence).
         """
+        self._flush_lifecycle_events()
         # Drain any pending debounce signals so the worker doesn't also
         # attempt a redundant save of the same dirty IDs.
         with self._save_condition:
@@ -588,7 +592,8 @@ class TicketStore:
             self._save_condition.notify_all()
         if self._save_worker.is_alive():
             self._save_worker.join(timeout=5.0)
-        # Final flush of any remaining dirty tickets
+        # Final flush of any remaining dirty tickets and lifecycle events
+        self._flush_lifecycle_events()
         try:
             self._save()
         except Exception:
@@ -1083,13 +1088,23 @@ class TicketStore:
         }
 
     def _emit_lifecycle_event(self, event: dict[str, Any]) -> None:
-        """Append one lifecycle event; best-effort so telemetry never blocks a transition."""
+        """Buffer a lifecycle event; flushed in batches to reduce file I/O syscalls."""
+        self._lifecycle_event_buffer.append(event)
+        if len(self._lifecycle_event_buffer) >= self._LIFECYCLE_FLUSH_THRESHOLD:
+            self._flush_lifecycle_events()
+
+    def _flush_lifecycle_events(self) -> None:
+        """Write all buffered lifecycle events to disk in a single append."""
+        if not self._lifecycle_event_buffer:
+            return
         try:
             events_path = self._path.parent / "lifecycle_events.jsonl"
+            lines = "\n".join(json.dumps(e) for e in self._lifecycle_event_buffer) + "\n"
             with open(events_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(event) + "\n")
+                f.write(lines)
         except OSError:
             pass
+        self._lifecycle_event_buffer.clear()
 
     def transition(self, ticket_id: str, new_state: TicketState, reviewer_feedback: list[dict] | None = None, actor: str = "") -> Ticket:
         with self._lock:
