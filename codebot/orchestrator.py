@@ -565,6 +565,18 @@ def _handle_exited_bots(bots: dict[str, BotState], now: float, ts: Any = None) -
             transition_ticket_on_error(bot, bots, exit_code)
             bot.next_run_at = now + 5
             update_bot_state(bot, "waiting")
+    # Prune dead bots from the registry to prevent unbounded growth.
+    # Only remove bots that were created dynamically (have "-" suffix with numeric part)
+    # and have exited. Keep base roles (e.g., "ticket_triager" without suffix).
+    dead_names = [
+        name for name, bot in bots.items()
+        if bot.process is None
+        and bot.config.enabled
+        and "-" in name
+        and name.split("-")[-1].isdigit()
+    ]
+    for name in dead_names:
+        del bots[name]
     return error_recovered_tids
 
 
