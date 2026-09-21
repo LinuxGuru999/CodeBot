@@ -49,7 +49,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BOTS_DIR = Path(__file__).parent
-STATE_DIR = BOTS_DIR / "state"
+_PROJECT_ROOT = BOTS_DIR.parent
+STATE_DIR = _PROJECT_ROOT / ".codebot" / "state"
 EVENTS_DIR = STATE_DIR / "alignment_events"
 RL_STATE_PATH = STATE_DIR / "rl_state.json"
 
@@ -611,10 +612,6 @@ def score_event(event: dict[str, Any], bots_dir: Path | None = None) -> dict[str
         no_tickets_marker = STATE_DIR / f"{bot}.no_tickets"
         if no_tickets_marker.exists():
             no_tickets_penalty = 15
-            try:
-                no_tickets_marker.unlink()
-            except OSError:
-                pass
 
     # --- metrics-derived signals (backprop ingress from bot_metrics.json) ---
     signals = _metrics_signals(bot, bd)
