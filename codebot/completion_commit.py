@@ -113,6 +113,19 @@ def sync_ticket_issue(
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             return False, str(e)
 
+def _add_to_fleet_project(number: str, timeout: int = 30) -> None:
+    """Add an issue to the CodeBot Fleet project board (fail-open)."""
+    try:
+        import subprocess as _sp
+        _sp.run(
+            ["gh", "project", "item-add", "1", "--owner", "LinuxGuru999",
+             "--url", f"https://github.com/LinuxGuru999/CodeBot/issues/{number}"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        pass
+
+
     ok, listing = _gh("issue", "list", "--search", f"[{ticket_id}]", "--state", "all",
                       "--limit", "5", "--json", "number,state")
     number = ""
@@ -129,14 +142,21 @@ def sync_ticket_issue(
         if number:
             _gh("issue", "comment", number, "--body", f"Completed in {sha}\n\n{title[:200]}")
             ok, out = _gh("issue", "close", number)
+            if ok:
+                _add_to_fleet_project(number)
             return ok, number if ok else out
         ok, out = _gh("issue", "create", "--title", f"[{ticket_id}] {title[:120]}",
                       "--body", body, "--label", "codebot")
+        if ok:
+            _add_to_fleet_project(out.strip().split("/")[-1])
         return ok, out
     if number:
         return True, number
-    return _gh("issue", "create", "--title", f"[{ticket_id}] {title[:120]}",
-               "--body", body, "--label", "codebot")
+    ok, out = _gh("issue", "create", "--title", f"[{ticket_id}] {title[:120]}",
+                  "--body", body, "--label", "codebot")
+    if ok:
+        _add_to_fleet_project(out.strip().split("/")[-1])
+    return ok, out
 
 
 def _branch_name(ticket_id: str) -> str:
