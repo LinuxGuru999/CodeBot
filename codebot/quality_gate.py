@@ -26,6 +26,7 @@ Invariants
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -410,6 +411,104 @@ def check_gate_pass_cache(
     )
 
 
+_policy_revision_cache: dict[int, str] = {}
+
+
+def _policy_revision(policy: QualityGatePolicy) -> str:
+    """Compute a deterministic revision fingerprint for the gate policy.
+
+    Memoized by policy object identity — within a single tick the same
+    policy object is reused across all tickets, so this avoids redundant
+    SHA-256 computation.
+    """
+    pid = id(policy)
+    cached = _policy_revision_cache.get(pid)
+    if cached is not None:
+        return cached
+    parts: list[str] = []
+    for g in policy.required:
+        parts.append(f"{g.get('name', '')}:{g.get('command', '')}:{g.get('check_type', '')}:{g.get('timeout', 120)}:{g.get('pass_criteria', '')}")
+    for condition, gates in sorted(policy.conditional.items()):
+        for g in gates:
+            parts.append(f"{condition}/{g.get('name', '')}:{g.get('command', '')}:{g.get('check_type', '')}:{g.get('timeout', 120)}:{g.get('pass_criteria', '')}")
+    raw = "|".join(parts)
+    result = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    _policy_revision_cache[pid] = result
+    return result
+
+
+def _workspace_revision(workspace: Path) -> str:
+    """Compute a workspace revision fingerprint from git HEAD.
+
+    For non-git workspaces, returns a stable constant. File content changes
+    are already detected by the files_hash dimension, so mtime-based
+    fingerprints are unnecessary and cause false cache invalidation when
+    gate execution creates artifacts (e.g. __pycache__) in the workspace.
+    """
+    git_head = workspace / ".git" / "HEAD"
+    try:
+        if git_head.exists():
+            content = git_head.read_text(encoding="utf-8").strip()
+            if content.startswith("ref:"):
+                ref_path = workspace / ".git" / content.split(":", 1)[1].strip()
+                if ref_path.exists():
+                    return ref_path.read_text(encoding="utf-8").strip()[:40]
+            return content[:40]
+    except OSError:
+        pass
+    return "no-git"
+
+
+_review_evidence_cache: dict[str, tuple[float, int, str]] = {}
+_REVIEW_PATTERNS = (
+    "correctness_review.json", "security_review.json",
+    "architecture_review.json", "performance_review.json",
+    "simplicity_review.json", "test_review.json",
+    "documentation_review.json", "adversarial_review.json",
+)
+
+
+def _review_evidence_hash(state_dir: Path, ticket_id: str) -> str:
+    """Hash all structured review evidence files for a ticket.
+
+    Memoized by (state_dir, ticket_id) keyed on file mtime+size so the
+    hash is recomputed only when review files actually change on disk.
+    """
+    cache_key = f"{state_dir}:{ticket_id}"
+    file_keys: list[tuple[str, float, int]] = []
+    for pattern in _REVIEW_PATTERNS:
+        for search_dir in (state_dir, state_dir.parent / "state"):
+            review_path = search_dir / pattern
+            if review_path.exists():
+                try:
+                    st = review_path.stat()
+                    file_keys.append((pattern, st.st_mtime, st.st_size))
+                except OSError:
+                    file_keys.append((pattern, 0.0, -1))
+                break
+    fingerprint = str(file_keys)
+    cached = _review_evidence_cache.get(cache_key)
+    if cached is not None and cached[0] == hash(fingerprint):
+        return cached[2]
+    digest = hashlib.sha256()
+    for pattern in _REVIEW_PATTERNS:
+        for search_dir in (state_dir, state_dir.parent / "state"):
+            review_path = search_dir / pattern
+            if review_path.exists():
+                try:
+                    data = review_path.read_text(encoding="utf-8")
+                    if ticket_id in data:
+                        digest.update(pattern.encode("utf-8"))
+                        digest.update(data.encode("utf-8"))
+                except OSError:
+                    digest.update(pattern.encode("utf-8"))
+                    digest.update(b"<unreadable>")
+                break
+    result = digest.hexdigest()[:16]
+    _review_evidence_cache[cache_key] = (hash(fingerprint), 0, result)
+    return result
+
+
 def run_quality_gates_with_cache(
     policy: QualityGatePolicy,
     workspace: Path,
@@ -419,20 +518,53 @@ def run_quality_gates_with_cache(
     changed_files: list[str] | None = None,
     test_dirs: str = "tests/",
     conditions: list[str] | None = None,
+    ticket_revision: float = 0.0,
 ) -> tuple[bool, list[GateEvaluation]]:
     """Run gates, skipping subprocesses on a verified cache hit.
 
     Only full passes are cached. Any miss runs every gate normally and
     records a fresh cache entry when everything passes.
+
+    Cache validity requires ALL of these dimensions to match:
+    - ticket_id, files list, files content hash
+    - gate names (derived from policy + conditions + ticket_class)
+    - ticket_revision (updated_at timestamp)
+    - policy_revision (fingerprint of all gate commands/config)
+    - conditions list
+    - workspace_revision (git HEAD or mtime)
+    - review_evidence_hash (structured review findings)
+
+    Any mismatch forces a full gate re-run.
     """
     gate_names = [g.get("name", "") for g in policy.required]
     for condition in (conditions or []):
         gate_names.extend(g.get("name", "") for g in policy.conditional.get(condition, []))
     if ticket_class == "security":
         gate_names.extend(g.get("name", "") for g in policy.conditional.get("security_boundary", []))
+
+    pol_rev = _policy_revision(policy)
+    ws_rev = _workspace_revision(workspace)
+    rev_ev = _review_evidence_hash(state_dir, ticket_id)
+    cond_key = sorted(conditions or [])
+
     hit = check_gate_pass_cache(state_dir, ticket_id, workspace, changed_files, gate_names)
     if hit is not None:
+        cache = _load_pass_cache(state_dir)
+        entry = cache.get(ticket_id, {})
+        if isinstance(entry, dict):
+            if entry.get("ticket_revision", 0.0) != ticket_revision:
+                hit = None
+            elif entry.get("policy_revision", "") != pol_rev:
+                hit = None
+            elif sorted(entry.get("conditions", [])) != cond_key:
+                hit = None
+            elif entry.get("workspace_revision", "") != ws_rev:
+                hit = None
+            elif entry.get("review_evidence_hash", "") != rev_ev:
+                hit = None
+    if hit is not None:
         return True, [hit]
+
     passed, evaluations = run_quality_gates(
         policy, workspace, ticket_class, changed_files, test_dirs, conditions,
     )
@@ -444,6 +576,11 @@ def run_quality_gates_with_cache(
             "files": sorted(changed_files),
             "files_hash": _hash_files(workspace, list(changed_files)),
             "gates": sorted(gate_names),
+            "ticket_revision": ticket_revision,
+            "policy_revision": pol_rev,
+            "conditions": cond_key,
+            "workspace_revision": ws_rev,
+            "review_evidence_hash": rev_ev,
         }
         _store_pass_cache(state_dir, cache)
     return passed, evaluations
@@ -479,14 +616,14 @@ def run_quality_gates(
         if test_modules:
             scoped_test_dirs = " ".join(sorted(test_modules)[:5])
 
+    gates_to_run: list[dict[str, str]] = []
     for gate in policy.required:
         name = gate.get("name", "")
         if name == "build" and not python_files:
             continue
         if name == "unit_tests" and not changed_files:
             continue
-        ev = evaluate_gate(gate, workspace, file_ctx, scoped_test_dirs)
-        evaluations.append(ev)
+        gates_to_run.append(gate)
 
     active_conditions = set(conditions or [])
     if ticket_class == "security":
@@ -498,10 +635,25 @@ def run_quality_gates(
             active_conditions.add("data_migration")
 
     for condition in active_conditions:
-        gates = policy.conditional.get(condition, [])
-        for gate in gates:
-            ev = evaluate_gate(gate, workspace, file_ctx, scoped_test_dirs)
-            evaluations.append(ev)
+        for gate in policy.conditional.get(condition, []):
+            gates_to_run.append(gate)
+
+    if len(gates_to_run) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(gates_to_run), 4)) as executor:
+            futures = {
+                executor.submit(evaluate_gate, gate, workspace, file_ctx, scoped_test_dirs): gate
+                for gate in gates_to_run
+            }
+            evaluations = []
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                evaluations.append(result)
+            evaluations.sort(key=lambda ev: ev.gate_name)
+    else:
+        evaluations = [
+            evaluate_gate(g, workspace, file_ctx, scoped_test_dirs)
+            for g in gates_to_run
+        ]
 
     all_passed = all(
         ev.passed for ev in evaluations if ev.required
