@@ -189,6 +189,109 @@ def validate_bot_name(name: str) -> bool:
     return bool(BOT_NAME_PATTERN.match(name))
 
 
+def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]]:
+    """Safely kill bot process by finding and verifying PIDs before termination.
+
+    Instead of relying on pkill -f regex matching (which can match unintended
+    processes), this function:
+    1. Uses pgrep to find candidate PIDs matching the bot pattern
+    2. Reads /proc/<pid>/cmdline for each candidate to verify exact match
+    3. Only sends SIGTERM to verified PIDs
+
+    Args:
+        name: Validated bot name (must pass validate_bot_name first)
+        timeout: Timeout for subprocess calls
+
+    Returns:
+        Tuple of (success, killed_pids) where success indicates no errors occurred
+    """
+    if not validate_bot_name(name):
+        logger.error("_safe_kill_bot_process: invalid bot name rejected: %s", repr(name))
+        return False, []
+
+    escaped_name = re.escape(name)
+    # Pattern must match api_runner.py followed by space and exact bot name at end
+    pattern = f"api_runner\\.py {escaped_name}$"
+
+    killed_pids: list[int] = []
+    try:
+        # Step 1: Find candidate PIDs using pgrep
+        ps = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if not ps.stdout.strip():
+            # No matching processes found - this is OK (bot may not be running)
+            return True, []
+
+        candidate_pids = []
+        for line in ps.stdout.strip().split('\n'):
+            line = line.strip()
+            if line.isdigit():
+                candidate_pids.append(int(line))
+
+        if not candidate_pids:
+            return True, []
+
+        # Step 2: Verify each PID's cmdline matches exactly
+        expected_suffix = f"api_runner.py {name}"
+        for pid in candidate_pids:
+            try:
+                cmdline_path = f"/proc/{pid}/cmdline"
+                with open(cmdline_path, 'rb') as f:
+                    cmdline_bytes = f.read()
+                # cmdline is null-separated; decode and check
+                cmdline = cmdline_bytes.decode('utf-8', errors='replace').replace('\x00', ' ').strip()
+                # Verify the command line ends with expected pattern
+                # This prevents matching processes like "api_runner.py foo-bar-baz" when looking for "foo"
+                if cmdline.endswith(expected_suffix) or f" {expected_suffix}" in cmdline:
+                    # Additional safety: ensure it's actually a python process running api_runner
+                    if "python" in cmdline.lower() or "api_runner.py" in cmdline:
+                        killed_pids.append(pid)
+                    else:
+                        logger.warning(
+                            "_safe_kill_bot_process: PID %d matched pattern but not python/api_runner, skipping: %s",
+                            pid, cmdline[:200]
+                        )
+                else:
+                    logger.debug(
+                        "_safe_kill_bot_process: PID %d did not match expected suffix '%s': %s",
+                        pid, expected_suffix, cmdline[:200]
+                    )
+            except FileNotFoundError:
+                # Process already exited
+                continue
+            except PermissionError:
+                logger.warning("_safe_kill_bot_process: permission denied reading /proc/%d/cmdline", pid)
+                continue
+            except Exception as e:
+                logger.warning("_safe_kill_bot_process: error verifying PID %d: %s", pid, e)
+                continue
+
+        # Step 3: Kill only verified PIDs
+        for pid in killed_pids:
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+                logger.info("_safe_kill_bot_process: sent SIGTERM to verified PID %d for bot '%s'", pid, name)
+            except ProcessLookupError:
+                # Process already exited
+                pass
+            except PermissionError:
+                logger.warning("_safe_kill_bot_process: permission denied killing PID %d", pid)
+            except Exception as e:
+                logger.warning("_safe_kill_bot_process: error killing PID %d: %s", pid, e)
+
+        return True, killed_pids
+
+    except subprocess.TimeoutExpired:
+        logger.warning("_safe_kill_bot_process: pgrep timed out for bot '%s'", name)
+        return False, killed_pids
+    except Exception as e:
+        logger.error("_safe_kill_bot_process: unexpected error for bot '%s': %s", name, e)
+        return False, killed_pids
+
+
 def heartbeat_age(name: str) -> float | None:
     p = STATE_DIR / f"{name}.heartbeat"
     try:
@@ -1068,16 +1171,17 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not (force is True or confirm is True):
                 self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
                 return
-            # ask orchestrator via pkill + let interval-aware respawn handle, or direct start
+            # Safely kill existing process using PID verification, then restart
             try:
-                # kill existing if running; apply defense-in-depth: re.escape for pkill regex safety
-                escaped_name = re.escape(name)
-                # Anchor pattern with $ to prevent partial matches (CB-D9EE209C1657)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}$"], timeout=5)
+                # Use safe kill with PID verification instead of pkill regex (CB-8668967-A113)
+                success, killed_pids = _safe_kill_bot_process(name, timeout=5)
+                if not success:
+                    logger.warning("restart: safe kill reported errors for bot '%s', proceeding with restart anyway", name)
                 time.sleep(1)
                 # orchestrator will respawn on next health check if waiting; force start via orchestrator CLI
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "action": "restart", "bot": name,
+                                 "killed_pids": killed_pids,
                                  "undo": "Bot will auto-respawn on next orchestrator health check"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -1109,10 +1213,12 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
-                # Apply defense-in-depth: re.escape + anchor for pkill regex safety (CB-D9EE209C1657)
-                escaped_name = re.escape(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}$"], timeout=5)
+                # Use safe kill with PID verification instead of pkill regex (CB-8668967-A113)
+                success, killed_pids = _safe_kill_bot_process(name, timeout=5)
+                if not success:
+                    logger.warning("pause: safe kill reported errors for bot '%s'", name)
                 self._json(200, {"ok": True, "paused": name,
+                                 "killed_pids": killed_pids,
                                  "undo": f"POST /bots/{name}/resume to unpause"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -1195,15 +1301,21 @@ class ControlHandler(BaseHTTPRequestHandler):
                         if n not in valid_bot_names:
                             self._json(400, {"error": f"unknown bot: {n}"})
                             return
-                    # Apply defense-in-depth: re.escape + anchor for pkill regex safety (CB-D9EE209C1657)
+                    # Use safe kill with PID verification instead of pkill regex (CB-8668967-A113)
+                    all_killed_pids: list[int] = []
                     for n in bots:
-                        escaped_name = re.escape(n)
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {escaped_name}$"], timeout=5)
+                        success, killed_pids = _safe_kill_bot_process(n, timeout=5)
+                        if not success:
+                            logger.warning("stop: safe kill reported errors for bot '%s'", n)
+                        all_killed_pids.extend(killed_pids)
                 else:
                     subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
                     subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)
-                self._json(200, {"ok": True, "stopped": bots or "all",
-                                 "undo": "Run 'start' or 'restart <bot>' to resume bots; orchestrator will auto-respawn if still running"})
+                response_data = {"ok": True, "stopped": bots or "all",
+                                 "undo": "Run 'start' or 'restart <bot>' to resume bots; orchestrator will auto-respawn if still running"}
+                if bots:
+                    response_data["killed_pids"] = all_killed_pids
+                self._json(200, response_data)
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
