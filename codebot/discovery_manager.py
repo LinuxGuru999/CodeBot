@@ -46,8 +46,13 @@ DISCOVERY_ROLES: tuple[str, ...] = (
     "ux_auditor",
 )
 
-# Roles that use cheap models (§28)
-CHEAP_DISCOVERY_ROLES: frozenset[str] = frozenset()
+# Roles that use cheap models (§28): lower reasoning requirements,
+# metadata-driven checks rather than deep semantic analysis
+CHEAP_DISCOVERY_ROLES: frozenset[str] = frozenset({
+    "test_gap_auditor",
+    "documentation_auditor",
+    "dependency_auditor",
+})
 
 # Roles that need premium models
 PREMIUM_DISCOVERY_ROLES: frozenset[str] = frozenset({
@@ -75,12 +80,16 @@ class DiscoveryCooldown:
 
 @dataclass
 class RoleYieldStats:
-    """Productivity tracking for a single discovery role (§11)."""
+    """Productivity tracking for a single discovery role (§11, §32, §34)."""
     role: str
     total_scans: int = 0
     validated_tickets: int = 0
     duplicates: int = 0
     rejected: int = 0
+    no_actionable_runs: int = 0
+    completed_downstream: int = 0
+    hallucinated_references: int = 0
+    stale_findings_prevented: int = 0
     total_cost_tokens: int = 0
     last_scan_at: float = 0.0
 
@@ -102,6 +111,12 @@ class RoleYieldStats:
             return float("inf")
         return self.total_cost_tokens / self.validated_tickets
 
+    @property
+    def hallucination_rate(self) -> float:
+        if self.total_scans == 0:
+            return 0.0
+        return self.hallucinated_references / self.total_scans
+
     def record_scan(
         self,
         validated: int,
@@ -109,11 +124,18 @@ class RoleYieldStats:
         rejected: int,
         cost_tokens: int,
         now: float | None = None,
+        no_actionable: bool = False,
+        hallucinated: int = 0,
+        stale_prevented: int = 0,
     ) -> None:
         self.total_scans += 1
         self.validated_tickets += validated
         self.duplicates += duplicates
         self.rejected += rejected
+        if no_actionable:
+            self.no_actionable_runs += 1
+        self.hallucinated_references += hallucinated
+        self.stale_findings_prevented += stale_prevented
         self.total_cost_tokens += cost_tokens
         self.last_scan_at = now or time.time()
 
@@ -124,9 +146,14 @@ class RoleYieldStats:
             "validated_tickets": self.validated_tickets,
             "duplicates": self.duplicates,
             "rejected": self.rejected,
+            "no_actionable_runs": self.no_actionable_runs,
+            "completed_downstream": self.completed_downstream,
+            "hallucinated_references": self.hallucinated_references,
+            "stale_findings_prevented": self.stale_findings_prevented,
             "yield_rate": round(self.yield_rate, 4),
             "duplicate_rate": round(self.duplicate_rate, 4),
             "cost_per_ticket": round(self.cost_per_ticket, 1),
+            "hallucination_rate": round(self.hallucination_rate, 4),
             "last_scan_at": self.last_scan_at,
         }
 
@@ -163,12 +190,17 @@ class DiscoveryManager:
     in _cooldowns for efficient cooldown lookups.
     """
 
+    BURST_WINDOW_SECONDS = 300.0
+    BURST_THRESHOLD = 15
+    BURST_MULTIPLIER = 5.0
+
     def __init__(self, state_dir: Path | None = None) -> None:
         self._state_dir = state_dir
         self._cooldowns: list[DiscoveryCooldown] = []
         self._cooldown_index: dict[tuple[str, str], int] = {}  # (role, scope) -> index in _cooldowns
         self._yields: dict[str, RoleYieldStats] = {}
         self._last_prune_at: float = 0.0
+        self._ticket_creation_times: list[float] = []
         self._load()
 
     def _state_path(self) -> Path | None:
@@ -198,9 +230,15 @@ class DiscoveryManager:
                 ys.validated_tickets = stats.get("validated_tickets", 0)
                 ys.duplicates = stats.get("duplicates", 0)
                 ys.rejected = stats.get("rejected", 0)
+                ys.no_actionable_runs = stats.get("no_actionable_runs", 0)
+                ys.completed_downstream = stats.get("completed_downstream", 0)
+                ys.hallucinated_references = stats.get("hallucinated_references", 0)
+                ys.stale_findings_prevented = stats.get("stale_findings_prevented", 0)
                 ys.total_cost_tokens = stats.get("total_cost_tokens", 0)
                 ys.last_scan_at = stats.get("last_scan_at", 0.0)
                 self._yields[role] = ys
+            for ts in data.get("ticket_creation_times", []):
+                self._ticket_creation_times.append(float(ts))
             # Set _last_prune_at to now so we don't immediately re-prune
             self._last_prune_at = time.time()
         except Exception:
@@ -226,6 +264,7 @@ class DiscoveryManager:
                 for c in recent_cooldowns
             ],
             "yields": {r: s.to_dict() for r, s in self._yields.items()},
+            "ticket_creation_times": list(self._ticket_creation_times[-500:]),
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -241,14 +280,13 @@ class DiscoveryManager:
         rejected: int,
         cost_tokens: int,
         now: float | None = None,
+        *,
+        no_actionable: bool = False,
+        hallucinated: int = 0,
+        stale_prevented: int = 0,
+        tickets_created: int = 0,
     ) -> None:
-        """Record a completed discovery scan (§10, §11).
-        
-        Updates the O(1) cooldown index immediately after appending to ensure
-        new cooldowns are visible to is_on_cooldown without delay.
-        Pruning is amortized: only runs when the list exceeds 500 entries
-        or more than 24 hours since the last prune.
-        """
+        """Record a completed discovery scan (§10, §11, §34, §52)."""
         now = now or time.time()
         idx = len(self._cooldowns)
         cd = DiscoveryCooldown(
@@ -260,11 +298,19 @@ class DiscoveryManager:
             duplicate_count=duplicates,
         )
         self._cooldowns.append(cd)
-        # Update index: this is now the latest entry for (role, scope)
         self._cooldown_index[(role, scope)] = idx
         if role not in self._yields:
             self._yields[role] = RoleYieldStats(role=role)
-        self._yields[role].record_scan(findings, duplicates, rejected, cost_tokens, now)
+        self._yields[role].record_scan(
+            findings, duplicates, rejected, cost_tokens, now,
+            no_actionable=no_actionable,
+            hallucinated=hallucinated,
+            stale_prevented=stale_prevented,
+        )
+        for _ in range(max(0, tickets_created)):
+            self._ticket_creation_times.append(now)
+        if len(self._ticket_creation_times) > 500:
+            self._ticket_creation_times = self._ticket_creation_times[-500:]
         # Amortized pruning: skip if list is small and recently pruned
         needs_prune = len(self._cooldowns) > 500 or (now - self._last_prune_at) > 86400
         if not needs_prune:
@@ -342,6 +388,78 @@ class DiscoveryManager:
 
         return saturated_count >= len(active_roles) * 0.6
 
+    def detect_burst(self, now: float | None = None) -> bool:
+        now = now or time.time()
+        cutoff = now - self.BURST_WINDOW_SECONDS
+        recent = [t for t in self._ticket_creation_times if t >= cutoff]
+        if len(recent) < self.BURST_THRESHOLD:
+            return False
+        older = [t for t in self._ticket_creation_times if t < cutoff]
+        if not older:
+            return len(recent) >= self.BURST_THRESHOLD
+        baseline_rate = len(older) / self.BURST_WINDOW_SECONDS
+        return len(recent) >= baseline_rate * self.BURST_MULTIPLIER
+
+    def record_ticket_created(self, now: float | None = None) -> None:
+        now = now or time.time()
+        self._ticket_creation_times.append(now)
+        if len(self._ticket_creation_times) > 500:
+            self._ticket_creation_times = self._ticket_creation_times[-500:]
+
+    def get_coverage_summary(self, now: float | None = None) -> dict[str, Any]:
+        now = now or time.time()
+        coverage: dict[str, Any] = {}
+        scanned_roles: set[str] = set()
+        for cd in self._cooldowns:
+            scanned_roles.add(cd.role)
+            key = cd.scope
+            if key not in coverage:
+                coverage[key] = {
+                    "scope": cd.scope,
+                    "last_role": cd.role,
+                    "last_commit": cd.commit_sha,
+                    "last_scanned_at": cd.completed_at,
+                    "findings": cd.findings_count,
+                    "duplicates": cd.duplicate_count,
+                }
+            elif cd.completed_at > coverage[key]["last_scanned_at"]:
+                coverage[key] = {
+                    "scope": cd.scope,
+                    "last_role": cd.role,
+                    "last_commit": cd.commit_sha,
+                    "last_scanned_at": cd.completed_at,
+                    "findings": cd.findings_count,
+                    "duplicates": cd.duplicate_count,
+                }
+        never_scanned = [r for r in DISCOVERY_ROLES if r not in scanned_roles]
+        return {
+            "scopes": coverage,
+            "never_scanned_roles": never_scanned,
+            "total_scans": len(self._cooldowns),
+            "as_of": now,
+        }
+
+    @staticmethod
+    def roles_for_change(change_kind: str) -> tuple[str, ...]:
+        triggers: dict[str, tuple[str, ...]] = {
+            "security": ("security_auditor",),
+            "concurrency": ("bug_hunter",),
+            "scheduler": ("bug_hunter", "performance_auditor"),
+            "dependency": ("dependency_auditor", "security_auditor"),
+            "ui": ("ux_auditor", "test_gap_auditor"),
+            "api": ("documentation_auditor", "test_gap_auditor"),
+            "architecture": ("architecture_auditor",),
+            "performance": ("performance_auditor",),
+            "documentation": (),
+            "test": (),
+        }
+        return triggers.get(change_kind, ())
+
+    def record_downstream_completion(self, role: str, count: int = 1) -> None:
+        if role not in self._yields:
+            self._yields[role] = RoleYieldStats(role=role)
+        self._yields[role].completed_downstream += count
+
     def compute_allocation(
         self,
         available_slots: int,
@@ -349,14 +467,17 @@ class DiscoveryManager:
         current_commit_sha: str = "",
         project_signals: dict[str, float] | None = None,
         now: float | None = None,
+        downstream_backlog: int = 0,
     ) -> DiscoveryAllocation:
-        """Determine how to distribute discovery slots across roles (§9).
+        """Determine how to distribute discovery slots across roles (§9, §31).
 
         Uses weighted allocation based on:
         1. Base weights (all roles get some representation)
         2. Yield history (high-yield roles get more)
         3. Project signals (low test coverage → more test auditors)
         4. Cooldown filtering (skip recently-scanned scopes)
+        5. Backpressure: large downstream backlog reduces discovery slots (§31)
+        6. Burst detection: active bursts suppress discovery (§52)
 
         Args:
             available_slots: number of free slots for discovery
@@ -364,6 +485,7 @@ class DiscoveryManager:
             current_commit_sha: HEAD commit for cooldown checking
             project_signals: optional hints like {"test_coverage": 0.3}
             now: current timestamp
+            downstream_backlog: count of actionable downstream tickets (§31)
 
         Returns:
             DiscoveryAllocation with per-role counts
@@ -374,6 +496,12 @@ class DiscoveryManager:
         if available_slots <= 0:
             return DiscoveryAllocation(
                 allocations={}, total_slots=0, reason="no slots available"
+            )
+
+        if self.detect_burst(now):
+            return DiscoveryAllocation(
+                allocations={}, total_slots=0,
+                reason="ticket burst detected — discovery throttled (§52)",
             )
 
         dup_threshold = getattr(config.discovery, "max_duplicate_rate_before_throttle",
@@ -389,6 +517,15 @@ class DiscoveryManager:
         cfg_max = getattr(config, "max_slots", 30)
         max_discovery = int(cfg_max * config.discovery.maximum_fraction)
         effective_slots = min(available_slots, max_discovery)
+
+        # Backpressure (§31): large downstream backlog reduces discovery slots.
+        backlog_cfg = getattr(config, "backlog", None)
+        backlog_target = getattr(backlog_cfg, "target", 50) if backlog_cfg else 50
+        backlog_high = getattr(backlog_cfg, "high_watermark", 100) if backlog_cfg else 100
+        if downstream_backlog >= backlog_high:
+            effective_slots = max(1, effective_slots // 4)
+        elif downstream_backlog >= backlog_target:
+            effective_slots = max(1, effective_slots // 2)
 
         # Ensure minimum floor
         effective_slots = max(effective_slots, config.discovery.minimum_slots)
