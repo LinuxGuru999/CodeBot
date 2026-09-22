@@ -259,11 +259,14 @@ def is_blocked_url(url: str) -> bool:
         host = (parsed.hostname or "").lower()
     except Exception:
         return True
-    for pattern in _BLOCKED_PATTERNS:
-        if host.startswith(pattern) or host == pattern.rstrip("."):
-            return True
     if not host:
         return True
+    # Normalize alternative IP encodings (decimal, hex, octal) before pattern matching
+    normalized = _normalize_alternative_ip(host)
+    check_host = normalized if normalized else host
+    for pattern in _BLOCKED_PATTERNS:
+        if check_host.startswith(pattern) or check_host == pattern.rstrip("."):
+            return True
     return False
 
 
@@ -395,18 +398,27 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 class _PinnedURLHandler(urllib.request.AbstractHTTPHandler):
     """Handler that forces connections to use pre-resolved IPs.
 
-    It extracts the pinned IP from the request's 'X-Pinned-IP' header
-    (which we inject internally) and uses the appropriate connection class.
+    It extracts the pinned IP from the request's '_pinned_ip' attribute
+    (injected by _safe_open_url) and uses the appropriate connection class.
+    To prevent leakage of internal infrastructure details, it also strips
+    the 'X-Pinned-IP' header from the request if present before sending.
     """
     # Lower handler_order than default HTTPHandler/HTTPSHandler (500)
     # ensures this handler processes requests before defaults, preventing
     # SSRF bypass via handler ordering.
     handler_order = 400
 
+    def _strip_pinned_ip_header(self, req: urllib.request.Request) -> None:
+        """Remove X-Pinned-IP header if present to prevent wire leakage."""
+        if 'X-Pinned-IP' in req.headers:
+            del req.headers['X-Pinned-IP']
+
     def http_open(self, req: urllib.request.Request) -> Any:
+        self._strip_pinned_ip_header(req)
         return self.do_open(_PinnedHTTPConnection, req, pinned_ip=getattr(req, '_pinned_ip', None))
 
     def https_open(self, req: urllib.request.Request) -> Any:
+        self._strip_pinned_ip_header(req)
         return self.do_open(
             _PinnedHTTPSConnection,
             req,
