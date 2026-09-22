@@ -263,7 +263,6 @@ class TestConditionalRequests:
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
              patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
              patch("codebot.control_server.heartbeat_age", return_value=10.0), \
              patch("codebot.control_server.eff_timeout", return_value=300), \
              patch("codebot.control_server.MODEL_PROFILES", {}), \
@@ -296,7 +295,6 @@ class TestConditionalRequests:
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
              patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
              patch("codebot.control_server.heartbeat_age", return_value=10.0), \
              patch("codebot.control_server.eff_timeout", return_value=300), \
              patch("codebot.control_server.MODEL_PROFILES", {}), \
@@ -326,7 +324,6 @@ class TestConditionalRequests:
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
              patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
              patch("codebot.control_server.heartbeat_age", return_value=10.0), \
              patch("codebot.control_server.eff_timeout", return_value=300), \
              patch("codebot.control_server.MODEL_PROFILES", {}), \
@@ -355,7 +352,6 @@ class TestConditionalRequests:
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]), \
              patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False), \
              patch("codebot.control_server.heartbeat_age", return_value=10.0), \
              patch("codebot.control_server.eff_timeout", return_value=300), \
              patch("codebot.control_server.MODEL_PROFILES", {}), \
@@ -435,8 +431,7 @@ class TestFailClosedSecurity:
     def test_auth_rejects_when_no_token_set(self):
         """When CONTROL_TOKEN is empty and no bypass, _auth must return False."""
         handler = self._make_handler("GET", "/bots")
-        with patch("codebot.control_server.CONTROL_TOKEN", ""), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+        with patch("codebot.control_server.CONTROL_TOKEN", ""):
             result = handler._auth()
         assert result is False
 
@@ -447,8 +442,7 @@ class TestFailClosedSecurity:
         protected_paths = ["/bots", "/bots/test-bot", "/state", "/scheduler/status"]
         for path in protected_paths:
             handler = self._make_handler("GET", path)
-            with patch("codebot.control_server.CONTROL_TOKEN", ""), \
-                 patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            with patch("codebot.control_server.CONTROL_TOKEN", ""):
                 result = handler._auth()
             assert result is False, f"Expected auth rejection for {path}"
 
@@ -457,8 +451,7 @@ class TestFailClosedSecurity:
         protected_paths = ["/bots/start", "/bots/stop", "/control/drain", "/control/update"]
         for path in protected_paths:
             handler = self._make_handler("POST", path)
-            with patch("codebot.control_server.CONTROL_TOKEN", ""), \
-                 patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+            with patch("codebot.control_server.CONTROL_TOKEN", ""):
                 result = handler._auth()
             assert result is False, f"Expected auth rejection for POST {path}"
 
@@ -493,33 +486,29 @@ class TestFailClosedSecurity:
         """CRITICAL log must be emitted when CONTROL_TOKEN is missing."""
         handler = self._make_handler("GET", "/bots")
         with caplog.at_level(logging.CRITICAL), \
-             patch("codebot.control_server.CONTROL_TOKEN", ""), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+             patch("codebot.control_server.CONTROL_TOKEN", ""):
             handler._auth()
         assert any("CONTROL_TOKEN is not set" in record.message for record in caplog.records)
         assert any(record.levelno >= logging.CRITICAL for record in caplog.records)
 
     def test_allow_unauthenticated_bypass(self):
-        """CONTROL_ALLOW_UNAUTHENTICATED=1 should permit access when token is unset."""
+        """CONTROL_ALLOW_UNAUTHENTICATED bypass removed — must remain fail-closed (401)."""
         handler = self._make_handler("GET", "/bots")
-        with patch("codebot.control_server.CONTROL_TOKEN", ""), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", True):
+        with patch("codebot.control_server.CONTROL_TOKEN", ""):
             result = handler._auth()
-        assert result is True
+        assert result is False
 
     def test_valid_token_accepted(self):
         """Valid Bearer token should be accepted."""
         handler = self._make_handler("GET", "/bots", token="my-secret-token")
-        with patch("codebot.control_server.CONTROL_TOKEN", "my-secret-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+        with patch("codebot.control_server.CONTROL_TOKEN", "my-secret-token"):
             result = handler._auth()
         assert result is True
 
     def test_invalid_token_rejected(self):
         """Invalid Bearer token should be rejected."""
         handler = self._make_handler("GET", "/bots", token="wrong-token")
-        with patch("codebot.control_server.CONTROL_TOKEN", "my-secret-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+        with patch("codebot.control_server.CONTROL_TOKEN", "my-secret-token"):
             result = handler._auth()
         assert result is False
 
@@ -538,8 +527,7 @@ class TestFailClosedSecurity:
         handler.request_version = "HTTP/1.1"
         handler.command = "GET"
 
-        with patch("codebot.control_server.CONTROL_TOKEN", "valid-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+        with patch("codebot.control_server.CONTROL_TOKEN", "valid-token"):
             ControlHandler.do_GET(handler)
 
         handler._json.assert_called_once()
@@ -561,8 +549,7 @@ class TestFailClosedSecurity:
         handler.request_version = "HTTP/1.1"
         handler.command = "GET"
 
-        with patch("codebot.control_server.CONTROL_TOKEN", "valid-token"), \
-             patch("codebot.control_server.CONTROL_ALLOW_UNAUTHENTICATED", False):
+        with patch("codebot.control_server.CONTROL_TOKEN", "valid-token"):
             ControlHandler.do_GET(handler)
 
         handler._json.assert_called_once()
