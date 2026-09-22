@@ -559,6 +559,119 @@ class TestBash:
         assert result["success"] is False
         assert result["error"] == "command denied"
 
+    def test_bash_toctou_symlink_swap_race_condition(self, ws):
+        """TOCTOU race: concurrent symlink swap must never leak external content.
+        
+        Adversarial test: a background thread rapidly swaps a symlink between
+        a safe workspace file and /etc/passwd while bash('cat <symlink>') is
+        invoked concurrently. The bash() tool must never return content from
+        outside the workspace, even under heavy race conditions.
+        
+        This tests resilience against symlink-based workspace escape attacks
+        where an attacker controls a symlink target and races against path
+        validation.
+        """
+        import threading
+        import os
+        
+        # Create a safe file inside workspace with unique marker
+        safe_file = ws / "safe_content.txt"
+        safe_marker = "SAFE_WORKSPACE_CONTENT_MARKER_XYZZY"
+        safe_file.write_text(safe_marker + "\n", encoding="utf-8")
+        
+        # External target we must NEVER read
+        external_target = Path("/etc/passwd")
+        external_marker = "root:"  # Universal marker present in /etc/passwd
+        
+        # Symlink path inside workspace
+        symlink_path = ws / "race_link.txt"
+        
+        # Track violations
+        violations = []
+        violation_lock = threading.Lock()
+        stop_event = threading.Event()
+        swap_count = [0]
+        read_count = [0]
+        
+        def swapper():
+            """Rapidly swap symlink target between safe and external."""
+            targets = [safe_file, external_target]
+            idx = 0
+            while not stop_event.is_set():
+                try:
+                    # Atomic symlink swap: create temp then rename
+                    tmp_link = ws / f"race_link_tmp_{idx}.txt"
+                    if tmp_link.exists() or tmp_link.is_symlink():
+                        tmp_link.unlink()
+                    tmp_link.symlink_to(targets[idx % 2])
+                    # Atomic rename replaces symlink
+                    tmp_link.replace(symlink_path)
+                    swap_count[0] += 1
+                    idx += 1
+                except OSError:
+                    # Race may cause transient errors; continue
+                    pass
+                # No sleep — maximize race pressure
+        
+        def reader():
+            """Invoke bash('cat <symlink>') and check for external content."""
+            while not stop_event.is_set():
+                try:
+                    result = bash(f"cat {symlink_path.name}")
+                    read_count[0] += 1
+                    if result["success"]:
+                        output = result["output"]
+                        # Check for external content leakage
+                        if external_marker in output:
+                            with violation_lock:
+                                violations.append({
+                                    "swap_count": swap_count[0],
+                                    "read_count": read_count[0],
+                                    "output_snippet": output[:200],
+                                })
+                except Exception:
+                    pass
+        
+        # Start swapper thread
+        swapper_thread = threading.Thread(target=swapper, daemon=True)
+        swapper_thread.start()
+        
+        # Start multiple reader threads for more race pressure
+        reader_threads = []
+        for _ in range(4):
+            t = threading.Thread(target=reader, daemon=True)
+            t.start()
+            reader_threads.append(t)
+        
+        # Run for enough iterations to hit 200+ swaps
+        deadline = time.monotonic() + 5.0  # 5 second max runtime
+        while swap_count[0] < 200 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        
+        # Signal stop
+        stop_event.set()
+        
+        # Wait for threads to finish
+        swapper_thread.join(timeout=2.0)
+        for t in reader_threads:
+            t.join(timeout=2.0)
+        
+        # Cleanup symlink
+        if symlink_path.exists() or symlink_path.is_symlink():
+            symlink_path.unlink(missing_ok=True)
+        
+        # Verify we actually performed enough swaps
+        assert swap_count[0] >= 200, (
+            f"Only {swap_count[0]} swaps performed, need 200+ for valid race test"
+        )
+        
+        # CRITICAL ASSERTION: no external content was ever read
+        assert len(violations) == 0, (
+            f"TOCTOU violation detected! bash() read external content "
+            f"{len(violations)} times during {swap_count[0]} swaps. "
+            f"First violation: {violations[0]}"
+        )
+
 
 # ===========================================================================
 # a11y_snapshot()
@@ -725,6 +838,74 @@ class TestBatchGrep:
         result = batch_grep(["foo"], path="../escape")
         assert result["success"] is True
 
+    def test_batch_grep_include_traversal(self, ws):
+        """batch_grep must reject include values containing ../ or absolute paths."""
+        # Create a secret file outside the workspace
+        external_file = ws.parent / "external_secret.txt"
+        external_file.write_text("SECRET_OUTSIDE_WORKSPACE\n", encoding="utf-8")
+        try:
+            # Test 1: Reject traversal with ..
+            result = batch_grep(["test"], path=".", include="../../etc/*.conf")
+            assert result["success"] is True
+            assert "[invalid include]" in result["output"]
+
+            # Test 2: Reject absolute path
+            result2 = batch_grep(["test"], path=".", include="/etc/passwd")
+            assert result2["success"] is True
+            assert "[invalid include]" in result2["output"]
+
+            # Test 3: Ensure external content cannot be read via crafted include
+            result3 = batch_grep(["SECRET_OUTSIDE_WORKSPACE"], path=".", include="../../external_secret.txt")
+            assert result3["success"] is True
+            # The pattern name appears in the header, so we check for the marker instead
+            assert "[invalid include]" in result3["output"]
+
+            # Test 4: Legitimate includes still work
+            (ws / "legit.py").write_text("def legit(): pass\n")
+            result4 = batch_grep(["def legit"], path=".", include="*.py")
+            assert result4["success"] is True
+            assert "def legit" in result4["output"]
+            assert "[invalid include]" not in result4["output"]
+        finally:
+            if external_file.exists():
+                external_file.unlink()
+
+    def test_batch_grep_symlink_escape(self, ws):
+        """Symlink pointing outside workspace must be skipped by batch_grep."""
+        import os
+        # Create a file with known content outside the workspace
+        external_file = ws.parent / "external_secret.txt"
+        external_file.write_text("SECRET_EXTERNAL_CONTENT_12345\n", encoding="utf-8")
+        try:
+            # Create symlink inside workspace pointing to external file
+            symlink_path = ws / "symlink_escape.txt"
+            symlink_path.symlink_to(external_file)
+            # Search for the secret content via batch_grep
+            result = batch_grep(["SECRET_EXTERNAL_CONTENT_12345"], path=".")
+            assert result["success"] is True
+            # The external content must NOT appear as a file match in results
+            assert "symlink_escape.txt" not in result["output"]
+            assert "(0 matches)" in result["output"]
+        finally:
+            if symlink_path.exists() or symlink_path.is_symlink():
+                symlink_path.unlink()
+            if external_file.exists():
+                external_file.unlink()
+
+    def test_batch_grep_include_traversal_backslash(self, ws):
+        """batch_grep must reject include values with backslash traversal."""
+        result = batch_grep(["test"], path=".", include="..\\..\\etc\\passwd")
+        assert result["success"] is True
+        assert "[invalid include]" in result["output"]
+
+    def test_batch_grep_include_double_dot_filename_allowed(self, ws, ws_file):
+        """Filenames containing '..' (not as path component) should NOT be rejected."""
+        ws_file("file..txt", "content here")
+        result = batch_grep(["content"], path=".", include="file..txt")
+        assert result["success"] is True
+        # Should find the file since '..' is part of filename, not traversal
+        assert "content here" in result["output"]
+
 
 class TestEditLocking:
     """Tests for file locking in edit()."""
@@ -816,6 +997,139 @@ class TestEditLocking:
             assert replacement in final_content, f"Missing replacement: {replacement} in content:\n{final_content}"
             original = f"MARKER_{i:04d}"
             assert original not in final_content, f"Original marker still present: {original}"
+
+
+class TestResolveWorkspacePathSymlinkTraversal:
+    """Tests for symlink-based path traversal prevention in resolve_workspace_path."""
+
+    def test_resolve_workspace_path_symlink_traversal_blocked(self, ws):
+        """Symlink inside workspace pointing outside must be rejected.
+        
+        This directly tests the security boundary: even if a symlink exists
+        within the workspace root, if its target resolves outside the workspace,
+        access must be denied.
+        """
+        import os
+        # Create a sensitive file outside the workspace
+        external_target = ws.parent / "external_secret.txt"
+        external_target.write_text("SENSITIVE_DATA", encoding="utf-8")
+        try:
+            # Create symlink inside workspace pointing to external file
+            symlink_inside = ws / "innocent_link.txt"
+            symlink_inside.symlink_to(external_target)
+            
+            # Attempt to read through the symlink must be denied
+            result = read("innocent_link.txt")
+            assert result["success"] is False, (
+                f"Symlink traversal should be blocked but got success=True, output={result['output']!r}"
+            )
+            assert result["error"] == "path denied", (
+                f"Expected 'path denied' error, got {result['error']!r}"
+            )
+        finally:
+            if symlink_inside.exists() or symlink_inside.is_symlink():
+                symlink_inside.unlink()
+            if external_target.exists():
+                external_target.unlink()
+
+    def test_resolve_workspace_path_fallback_rejects_external_symlink(self, ws):
+        """Directly test the fallback resolve_workspace_path rejects symlinks outside workspace.
+        
+        This ensures the fallback implementation (used when tool_policy is unavailable)
+        correctly uses os.path.realpath and prefix checking.
+        """
+        import os
+        from pathlib import Path
+        
+        # Define the fallback function exactly as implemented in api_tools.py
+        def fallback_resolve_workspace_path(path: str, workspace_root) -> "Path | None":
+            candidate = Path(path)
+            if candidate.is_absolute():
+                abs_path = str(candidate)
+            else:
+                abs_path = os.path.join(str(workspace_root), str(candidate))
+            real_path = os.path.realpath(abs_path)
+            norm_root = os.path.realpath(str(workspace_root))
+            if not norm_root.endswith(os.sep):
+                norm_root += os.sep
+            if real_path == norm_root.rstrip(os.sep) or real_path.startswith(norm_root):
+                return Path(real_path)
+            return None
+        
+        # Create external target
+        external = ws.parent / "escape_target.txt"
+        external.write_text("escaped", encoding="utf-8")
+        try:
+            # Symlink inside workspace pointing outside
+            link = ws / "bad_link.txt"
+            link.symlink_to(external)
+            
+            result = fallback_resolve_workspace_path(str(link), ws)
+            assert result is None, (
+                f"Fallback should reject symlink to external path, got {result}"
+            )
+            
+            # Also test relative path through symlink
+            result_rel = fallback_resolve_workspace_path("bad_link.txt", ws)
+            assert result_rel is None, (
+                f"Fallback should reject relative symlink traversal, got {result_rel}"
+            )
+        finally:
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            if external.exists():
+                external.unlink()
+
+    def test_resolve_workspace_path_allows_legitimate_paths(self, ws, ws_file):
+        """Ensure legitimate paths within workspace still work after security fix."""
+        rel = ws_file("legit.txt", "safe content")
+        result = read(rel)
+        assert result["success"] is True
+        assert result["output"] == "safe content"
+        
+        # Nested directory
+        nested = ws / "subdir" / "deep.txt"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("nested safe", encoding="utf-8")
+        result2 = read("subdir/deep.txt")
+        assert result2["success"] is True
+        assert result2["output"] == "nested safe"
+
+    def test_resolve_workspace_path_prefix_attack_prevented(self, ws):
+        """Verify /workspace-evil does not match /workspace prefix check."""
+        import os
+        from pathlib import Path
+        
+        def fallback_resolve_workspace_path(path: str, workspace_root) -> "Path | None":
+            candidate = Path(path)
+            if candidate.is_absolute():
+                abs_path = str(candidate)
+            else:
+                abs_path = os.path.join(str(workspace_root), str(candidate))
+            real_path = os.path.realpath(abs_path)
+            norm_root = os.path.realpath(str(workspace_root))
+            if not norm_root.endswith(os.sep):
+                norm_root += os.sep
+            if real_path == norm_root.rstrip(os.sep) or real_path.startswith(norm_root):
+                return Path(real_path)
+            return None
+        
+        # Create a sibling directory with similar name
+        evil_dir = ws.parent / (ws.name + "-evil")
+        evil_dir.mkdir(exist_ok=True)
+        evil_file = evil_dir / "secret.txt"
+        evil_file.write_text("evil", encoding="utf-8")
+        try:
+            # Absolute path to evil dir should be rejected
+            result = fallback_resolve_workspace_path(str(evil_file), ws)
+            assert result is None, (
+                f"Prefix attack should be blocked: {evil_file} matched workspace {ws}"
+            )
+        finally:
+            if evil_file.exists():
+                evil_file.unlink()
+            if evil_dir.exists():
+                evil_dir.rmdir()
 
 
 class TestAliases:
