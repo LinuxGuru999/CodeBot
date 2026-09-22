@@ -197,5 +197,87 @@ class TestApiRunnerBoundedIO(unittest.TestCase):
                 self.assertIn('API read deadline exceeded', str(ctx.exception))
 
 
+class TestPersistStreamCoverage(unittest.TestCase):
+    """Tests targeting specific uncovered lines in _persist_stream for 100% coverage."""
+
+    def test_tool_message_truncation_path(self):
+        """Cover lines 1439-1440: tool message content > 2000 chars triggers truncation."""
+        from pathlib import Path
+        from codebot.api_runner import _persist_stream
+        import tempfile
+
+        long_content = "x" * 2500
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "tool", "content": long_content, "tool_call_id": "tc_1"},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bots_dir = Path(tmpdir)
+            with patch("codebot.api_runner.BOTS_DIR", bots_dir), \
+                 patch("codebot.api_runner._log_context_assembly"):
+                _persist_stream(
+                    bot_name="test-bot",
+                    messages=messages,
+                    active_model="test-model",
+                    tool_iterations=1,
+                    exit_reason="done",
+                )
+
+            stream_file = bots_dir / "logs" / "test-bot.stream.json"
+            self.assertTrue(stream_file.exists(), "Stream file was not persisted")
+            with open(stream_file, "r") as f:
+                data = json.load(f)
+
+            tool_msgs = [m for m in data.get("messages", []) if m.get("role") == "tool"]
+            self.assertEqual(len(tool_msgs), 1)
+            self.assertIn("...[truncated]", tool_msgs[0]["content"])
+            self.assertLessEqual(len(tool_msgs[0]["content"]), 2020)
+
+    def test_tail_trim_while_loop_path(self):
+        """Cover lines 1464-1467: while loop trims tail when final serialized size > MAX_SIZE.
+        
+        This is a defensive safety net. We trigger it by patching json.dumps to return
+        an oversized payload on the first final serialization attempt.
+        """
+        from pathlib import Path
+        from codebot.api_runner import _persist_stream
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bots_dir = Path(tmpdir)
+            real_dumps = json.dumps
+            inflate_once = [True]
+
+            def fake_dumps(obj, **kw):
+                result = real_dumps(obj, **kw)
+                # Detect final payload serialization (has 'bot' and 'messages' keys)
+                if isinstance(obj, dict) and "bot" in obj and "messages" in obj and inflate_once[0]:
+                    inflate_once[0] = False
+                    # Return a string that exceeds MAX_SIZE to trigger the while loop
+                    return '{"bot":"t","model":"m","tool_iterations":1,"exit_reason":"d","persisted_at":0,"usage":{},"messages":[],"truncated":true,"pad":"' + 'x' * 600000 + '"}'
+                return result
+
+            with patch("codebot.api_runner.BOTS_DIR", bots_dir), \
+                 patch("codebot.api_runner._log_context_assembly"), \
+                 patch("codebot.api_runner.json.dumps", side_effect=fake_dumps):
+                _persist_stream(
+                    bot_name="test-bot",
+                    messages=[{"role": "user", "content": "hi"}],
+                    active_model="test-model",
+                    tool_iterations=1,
+                    exit_reason="done",
+                )
+
+            stream_file = bots_dir / "logs" / "test-bot.stream.json"
+            self.assertTrue(stream_file.exists(), "Stream file must exist after persist")
+            with open(stream_file, "r") as f:
+                body = f.read()
+            # The while loop should have trimmed the payload to <= MAX_SIZE
+            self.assertLessEqual(len(body.encode("utf-8")), 500_000)
+            data = json.loads(body)
+            self.assertTrue(data.get("truncated", False))
+
+
 if __name__ == "__main__":
     unittest.main()

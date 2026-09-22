@@ -161,6 +161,6 @@ class TestSecurityReviewerSpecific:
 
 
 class TestUxReviewerSpecific:
-    def test_ux_reviewer_prompt_missing(self):
-        with pytest.raises(FileNotFoundError):
-            load_role_prompt("ux_reviewer")
+    def test_ux_reviewer_prompt_exists_and_is_ticket_scoped(self):
+        prompt = load_role_prompt("ux_reviewer")
+        assert "reviews/{ticket_id}/ux_reviewer.json" in prompt

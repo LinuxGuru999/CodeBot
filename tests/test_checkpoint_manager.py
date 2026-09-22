@@ -107,7 +107,7 @@ class TestCheckpointRecovery:
         """If primary is corrupt JSON, fallback to .bak."""
         bot_name = "corrupt_bot"
         path = checkpoint_manager.checkpoint_path(bot_name)
-        bak_path = path.with_suffix(".checkpoint.bak")
+        bak_path = checkpoint_manager.checkpoint_backup_path(path)
         
         good_data = {"recovered": True}
         bad_data = "{ invalid json"
@@ -127,7 +127,7 @@ class TestCheckpointRecovery:
         """If JSON is not a dict (e.g., list), treat as corrupt and fallback."""
         bot_name = "list_bot"
         path = checkpoint_manager.checkpoint_path(bot_name)
-        bak_path = path.with_suffix(".checkpoint.bak")
+        bak_path = checkpoint_manager.checkpoint_backup_path(path)
         
         good_data = {"valid": "dict"}
         bad_data = ["not", "a", "dict"]
@@ -142,7 +142,7 @@ class TestCheckpointRecovery:
         """If both primary and backup are corrupt, return None."""
         bot_name = "double_corrupt_bot"
         path = checkpoint_manager.checkpoint_path(bot_name)
-        bak_path = path.with_suffix(".checkpoint.bak")
+        bak_path = checkpoint_manager.checkpoint_backup_path(path)
         
         path.write_text("{ broken")
         bak_path.write_text("{ also broken")
@@ -154,7 +154,7 @@ class TestCheckpointRecovery:
         """Successful read should update/create backup."""
         bot_name = "backup_bot"
         path = checkpoint_manager.checkpoint_path(bot_name)
-        bak_path = path.with_suffix(".checkpoint.bak")
+        bak_path = checkpoint_manager.checkpoint_backup_path(path)
         
         data = {"keep": "safe"}
         path.write_text(json.dumps(data))

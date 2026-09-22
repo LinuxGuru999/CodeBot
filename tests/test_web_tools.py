@@ -511,6 +511,16 @@ def test_alternative_ip_encoding_blocked():
     for url in string_blocked_urls:
         assert is_blocked_url(url) is True, f"is_blocked_url failed to block {url}"
 
+    # Verify is_blocked_url blocks alternative IP encodings (decimal, hex, octal)
+    alt_encoding_urls = [
+        ("http://2130706433/", "decimal 127.0.0.1"),
+        ("http://0x7f000001/", "hex 127.0.0.1"),
+        ("http://0177.0.0.1/", "octal 127.0.0.1"),
+        ("http://2852039166/", "decimal 169.254.169.254"),
+    ]
+    for url, description in alt_encoding_urls:
+        assert is_blocked_url(url) is True, f"is_blocked_url failed to block {description}: {url}"
+
     # Verify that alternative encodings are handled by _resolve_and_validate_host
     alt_encoding_hosts = ["2130706433", "0x7f000001", "2852039166", "0177.0.0.1"]
     for host in alt_encoding_hosts:
@@ -782,3 +792,33 @@ def test_safe_open_url_uses_pinned_connection():
                     "Must use _PinnedHTTPConnection for pinned IP resolution"
                 assert kwargs.get('pinned_ip') == '93.184.216.34', \
                     "Must pass pinned_ip to connection class"
+
+
+def test_no_x_pinned_ip_header_leakage():
+    """Verify X-Pinned-IP header is not present in outbound requests.
+
+    Regression test for CB-3990834-6542: ensures that internal pinning
+    infrastructure does not leak the resolved IP address to external servers
+    via HTTP headers.
+    """
+    import urllib.request
+    from unittest.mock import patch, MagicMock
+    from codebot.web_tools import _safe_open_url, _PinnedURLHandler
+
+    req = urllib.request.Request("http://example.com/")
+    # Simulate a scenario where the header might have been added by legacy code or error
+    req.add_header('X-Pinned-IP', '1.2.3.4')
+
+    with patch('codebot.web_tools._resolve_and_validate_host', return_value=('93.184.216.34', 80, socket.AF_INET)):
+        with patch.object(_PinnedURLHandler, 'do_open') as mock_do_open:
+            mock_response = MagicMock()
+            mock_do_open.return_value = mock_response
+
+            try:
+                _safe_open_url(req, timeout=5.0)
+            except Exception:
+                pass
+
+            # The handler should have stripped the header before do_open
+            assert 'X-Pinned-IP' not in req.headers, \
+                "X-Pinned-IP header must be stripped before sending request"

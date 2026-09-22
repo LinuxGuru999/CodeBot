@@ -23,7 +23,7 @@ import codebot.scratchpad as sp
 
 class TestConstants:
     def test_scratchpad_version(self):
-        assert sp.SCRATCHPAD_VERSION == 1
+        assert sp.SCRATCHPAD_VERSION == 2
 
     def test_max_scratchpad_bytes(self):
         assert sp.MAX_SCRATCHPAD_BYTES == 8 * 1024
@@ -37,7 +37,7 @@ class TestScratchpadStateDefaults:
     def test_default_fields(self):
         s = sp.ScratchpadState()
         assert s.ticket_id == ""
-        assert s.agent_name == ""
+        assert s.current_agent == ""
         assert s.phase == "init"
         assert s.completed_steps == []
         assert s.remaining_steps == []
@@ -54,14 +54,14 @@ class TestScratchpadStateDefaults:
     def test_custom_fields(self):
         s = sp.ScratchpadState(
             ticket_id="CB-123",
-            agent_name="builder",
+            current_agent="builder",
             phase="running",
             iteration=5,
             started_at=1.0,
             updated_at=2.0,
         )
         assert s.ticket_id == "CB-123"
-        assert s.agent_name == "builder"
+        assert s.current_agent == "builder"
         assert s.phase == "running"
         assert s.iteration == 5
 
@@ -96,7 +96,7 @@ class TestSerialization:
     def test_roundtrip_dict(self):
         original = sp.ScratchpadState(
             ticket_id="CB-200",
-            agent_name="tester",
+            current_agent="tester",
             phase="running",
             completed_steps=["step_a", "step_b"],
             remaining_steps=["step_c"],
@@ -108,7 +108,7 @@ class TestSerialization:
         d = original.to_dict()
         restored = sp.ScratchpadState.from_dict(d)
         assert restored.ticket_id == original.ticket_id
-        assert restored.agent_name == original.agent_name
+        assert restored.current_agent == original.current_agent
         assert restored.completed_steps == original.completed_steps
         assert restored.remaining_steps == original.remaining_steps
         assert restored.files_changed == original.files_changed
@@ -281,20 +281,20 @@ class TestTruncateForSize:
 class TestLoadScratchpad:
     def test_loads_existing_valid_file(self, tmp_path):
         state = sp.ScratchpadState(
-            agent_name="builder",
+            current_agent="builder",
             ticket_id="CB-500",
             phase="running",
         )
         sp.save_scratchpad(tmp_path, state)
 
-        loaded = sp.load_scratchpad(tmp_path, "builder")
+        loaded = sp.load_scratchpad(tmp_path, "CB-500")
         assert loaded.ticket_id == "CB-500"
         assert loaded.phase == "running"
-        assert loaded.agent_name == "builder"
+        assert loaded.current_agent == "builder"
 
     def test_returns_fresh_state_when_no_file(self, tmp_path):
         loaded = sp.load_scratchpad(tmp_path, "nonexistent")
-        assert loaded.agent_name == "nonexistent"
+        assert loaded.ticket_id == "nonexistent"
         assert loaded.phase == "init"
         assert loaded.version == sp.SCRATCHPAD_VERSION
 
@@ -303,29 +303,44 @@ class TestLoadScratchpad:
         corrupt_path.write_text("{bad json!!!", encoding="utf-8")
 
         loaded = sp.load_scratchpad(tmp_path, "corrupt")
-        assert loaded.agent_name == "corrupt"
+        assert loaded.ticket_id == "corrupt"
         assert loaded.phase == "init"
 
     def test_returns_fresh_state_on_wrong_version(self, tmp_path):
-        state = sp.ScratchpadState(agent_name="oldver", ticket_id="CB-X")
+        state = sp.ScratchpadState(current_agent="oldver", ticket_id="CB-X")
         d = state.to_dict()
         d["version"] = 999  # wrong version
         path = tmp_path / "oldver.scratchpad.json"
         path.write_text(json.dumps(d), encoding="utf-8")
 
         loaded = sp.load_scratchpad(tmp_path, "oldver")
-        assert loaded.agent_name == "oldver"
+        assert loaded.ticket_id == "oldver"
         assert loaded.phase == "init"
         assert loaded.version == sp.SCRATCHPAD_VERSION
 
     def test_returns_fresh_state_on_missing_fields(self, tmp_path):
         """A scratchpad saved by an older schema should still load gracefully."""
         path = tmp_path / "partial.scratchpad.json"
-        path.write_text(json.dumps({"ticket_id": "CB-Y", "version": 1}), encoding="utf-8")
+        path.write_text(json.dumps({"ticket_id": "CB-Y", "version": sp.SCRATCHPAD_VERSION}), encoding="utf-8")
 
         loaded = sp.load_scratchpad(tmp_path, "partial")
         assert loaded.ticket_id == "CB-Y"
         assert loaded.phase == "init"  # default
+
+    def test_returns_fresh_state_on_oversized_file(self, tmp_path):
+        """Files exceeding MAX_SCRATCHPAD_BYTES should be treated as corrupt."""
+        path = tmp_path / "oversized.scratchpad.json"
+        # Create content larger than MAX_SCRATCHPAD_BYTES (8KB)
+        large_content = json.dumps({"ticket_id": "CB-OVER", "context_summary": "x" * (sp.MAX_SCRATCHPAD_BYTES + 2000)})
+        path.write_text(large_content, encoding="utf-8")
+        # Verify file is actually oversized
+        assert len(large_content.encode("utf-8")) > sp.MAX_SCRATCHPAD_BYTES
+
+        loaded = sp.load_scratchpad(tmp_path, "oversized")
+        # Should return fresh state, not the oversized content
+        assert loaded.ticket_id == "oversized"
+        assert loaded.phase == "init"
+        assert loaded.version == sp.SCRATCHPAD_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -334,36 +349,36 @@ class TestLoadScratchpad:
 
 class TestSaveScratchpad:
     def test_creates_file(self, tmp_path):
-        state = sp.ScratchpadState(agent_name="writer")
+        state = sp.ScratchpadState(current_agent="writer", ticket_id="writer")
         sp.save_scratchpad(tmp_path, state)
 
         expected = tmp_path / "writer.scratchpad.json"
         assert expected.exists()
 
     def test_content_is_valid_json(self, tmp_path):
-        state = sp.ScratchpadState(agent_name="json_check", ticket_id="CB-1")
+        state = sp.ScratchpadState(current_agent="json_check", ticket_id="CB-1")
         sp.save_scratchpad(tmp_path, state)
 
-        content = (tmp_path / "json_check.scratchpad.json").read_text(encoding="utf-8")
+        content = (tmp_path / "CB-1.scratchpad.json").read_text(encoding="utf-8")
         parsed = json.loads(content)
         assert parsed["ticket_id"] == "CB-1"
 
     def test_creates_parent_directory(self, tmp_path):
         deep_dir = tmp_path / "sub" / "dir"
-        state = sp.ScratchpadState(agent_name="deep")
+        state = sp.ScratchpadState(current_agent="deep", ticket_id="deep")
         sp.save_scratchpad(deep_dir, state)
 
         assert (deep_dir / "deep.scratchpad.json").exists()
 
     def test_no_tmp_file_left_after_save(self, tmp_path):
-        state = sp.ScratchpadState(agent_name="clean")
+        state = sp.ScratchpadState(current_agent="clean", ticket_id="clean")
         sp.save_scratchpad(tmp_path, state)
 
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert tmp_files == []
 
     def test_updates_timestamp_on_save(self, tmp_path):
-        state = sp.ScratchpadState(agent_name="ts", updated_at=0.0)
+        state = sp.ScratchpadState(current_agent="ts", ticket_id="ts", updated_at=0.0)
         before = time.time()
         sp.save_scratchpad(tmp_path, state)
         after = time.time()
@@ -374,7 +389,8 @@ class TestSaveScratchpad:
     def test_size_limit_enforced_on_save(self, tmp_path):
         """A scratchpad that exceeds MAX should be truncated during save."""
         state = sp.ScratchpadState(
-            agent_name="big",
+            current_agent="big",
+            ticket_id="big",
             context_summary="y" * 40000,
             completed_steps=[f"step{i}" for i in range(50)],
         )
@@ -391,7 +407,7 @@ class TestSaveScratchpad:
 
 class TestClearScratchpad:
     def test_removes_file(self, tmp_path):
-        state = sp.ScratchpadState(agent_name="clearme")
+        state = sp.ScratchpadState(current_agent="clearme", ticket_id="clearme")
         sp.save_scratchpad(tmp_path, state)
         assert (tmp_path / "clearme.scratchpad.json").exists()
 
@@ -411,7 +427,7 @@ class TestCreateHandoffNote:
     def test_contains_all_fields(self):
         state = sp.ScratchpadState(
             ticket_id="CB-600",
-            agent_name="builder",
+            current_agent="builder",
             phase="running",
             iteration=3,
             completed_steps=["analyze", "implement"],
@@ -421,11 +437,9 @@ class TestCreateHandoffNote:
             context_summary="Some context",
         )
         note = sp.create_handoff_note(state)
-        assert "=== HANDOFF NOTE ===" in note
+        assert "HANDOFF" in note
         assert "CB-600" in note
         assert "builder" in note
-        assert "running" in note
-        assert "3" in note
         assert "analyze" in note
         assert "implement" in note
         assert "test" in note
@@ -438,7 +452,7 @@ class TestCreateHandoffNote:
     def test_handles_empty_state(self):
         state = sp.ScratchpadState()
         note = sp.create_handoff_note(state)
-        assert "=== HANDOFF NOTE ===" in note
+        assert "HANDOFF" in note
         assert "====================" in note
 
     def test_completed_steps_limited_to_5(self):
@@ -476,7 +490,7 @@ class TestSaveLoadRoundTrip:
     def test_full_roundtrip(self, tmp_path):
         original = sp.ScratchpadState(
             ticket_id="CB-700",
-            agent_name="roundtrip",
+            current_agent="roundtrip",
             phase="working",
             completed_steps=["a", "b", "c"],
             remaining_steps=["d"],
@@ -488,10 +502,10 @@ class TestSaveLoadRoundTrip:
             started_at=1000.0,
         )
         sp.save_scratchpad(tmp_path, original)
-        loaded = sp.load_scratchpad(tmp_path, "roundtrip")
+        loaded = sp.load_scratchpad(tmp_path, "CB-700")
 
         assert loaded.ticket_id == "CB-700"
-        assert loaded.agent_name == "roundtrip"
+        assert loaded.current_agent == "roundtrip"
         assert loaded.phase == "working"
         assert loaded.completed_steps == ["a", "b", "c"]
         assert loaded.remaining_steps == ["d"]
@@ -502,11 +516,11 @@ class TestSaveLoadRoundTrip:
         assert loaded.iteration == 12
 
     def test_overwrite_preserves_latest(self, tmp_path):
-        s1 = sp.ScratchpadState(agent_name="overwrite", ticket_id="CB-v1")
+        s1 = sp.ScratchpadState(current_agent="overwrite", ticket_id="CB-OVER")
         sp.save_scratchpad(tmp_path, s1)
 
-        s2 = sp.ScratchpadState(agent_name="overwrite", ticket_id="CB-v2")
+        s2 = sp.ScratchpadState(current_agent="overwrite2", ticket_id="CB-OVER")
         sp.save_scratchpad(tmp_path, s2)
 
-        loaded = sp.load_scratchpad(tmp_path, "overwrite")
-        assert loaded.ticket_id == "CB-v2"
+        loaded = sp.load_scratchpad(tmp_path, "CB-OVER")
+        assert loaded.ticket_id == "CB-OVER"

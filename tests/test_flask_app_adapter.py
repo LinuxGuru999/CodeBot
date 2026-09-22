@@ -1,10 +1,11 @@
 """Tests for FlaskAppAdapter — validates second-project adapter portability.
 
 Verifies that FlaskAppAdapter:
-1. Implements all ProjectAdapter ABC methods correctly
+1. Implements all ProjectAdapter Protocol methods correctly
 2. Contains no Monitor or CodeBot-specific assumptions
 3. Returns valid data structures matching the interface contract
 4. Protected paths are appropriate for a Flask app (not CodeBot internals)
+5. Uses only stdlib imports (no codebot.* dependencies)
 """
 import pytest
 from pathlib import Path
@@ -12,9 +13,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from codebot.adapters.flask_app_adapter import FlaskAppAdapter
-from codebot.project_adapter import (
-    ProjectAdapter,
+from codebot.adapters.flask_app_adapter import (
+    FlaskAppAdapter,
     ProjectPaths,
     ProjectTestConfig,
     DependencyPolicy,
@@ -24,12 +24,14 @@ from codebot.project_adapter import (
 
 
 class TestFlaskAppAdapterInterface:
-    """Verify FlaskAppAdapter implements all ABC methods."""
+    """Verify FlaskAppAdapter implements all Protocol methods."""
 
     def setup_method(self):
         self.adapter = FlaskAppAdapter(Path("/tmp/flask-demo-app"))
 
-    def test_is_project_adapter_subclass(self):
+    def test_is_project_adapter_protocol_compliant(self):
+        """Structural subtyping: adapter satisfies ProjectAdapter protocol without inheritance."""
+        from codebot.adapters.flask_app_adapter import ProjectAdapter
         assert isinstance(self.adapter, ProjectAdapter)
 
     def test_project_name_returns_string(self):

@@ -192,6 +192,23 @@ TELEMETRY_NOT_CONFIGURED_HINT = (
 from codebot.process_manager import BOT_REGISTRY, MODEL_PROFILES, BotConfig, ModelProfile
 
 
+def _resolve_control_state_dir() -> Path:
+    """Resolve the state dir for PID files, honoring test patches.
+
+    Production path is the module-level ``STATE_DIR`` (``codebot/state``).
+    Tests patch ``codebot.control_server.STATE_DIR`` to a tmp dir; the
+    helpers below must honor that patch so PID-file behavior is testable.
+    """
+    try:
+        mod = sys.modules.get(__name__)
+        sd = getattr(mod, "STATE_DIR", None) if mod is not None else None
+        if sd is not None:
+            return Path(sd)
+    except Exception:
+        pass
+    return STATE_DIR
+
+
 def eff_timeout(cfg: BotConfig) -> int:
     """Calculate effective heartbeat timeout for a bot config."""
     prof = MODEL_PROFILES.get(cfg.model)
@@ -214,18 +231,136 @@ def validate_bot_name(name: str) -> bool:
     return bool(BOT_NAME_PATTERN.match(name))
 
 
-def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]]:
-    """Safely kill bot process by finding and verifying PIDs before termination.
+def _read_pid_file(name: str) -> int | None:
+    """Read PID from state/<name>.pid file.
 
-    Instead of relying on pkill -f regex matching (which can match unintended
-    processes), this function:
-    1. Uses pgrep to find candidate PIDs matching the bot pattern
-    2. Reads /proc/<pid>/cmdline for each candidate to verify exact match
-    3. Only sends SIGTERM to verified PIDs
+    Returns None when the file is missing, unreadable, or holds a
+    non-numeric payload (treated as corrupt/stale, not an error).
+    """
+    pid_path = _resolve_control_state_dir() / f"{name}.pid"
+    try:
+        if pid_path.exists():
+            txt = pid_path.read_text(encoding="utf-8").strip()
+            if txt.isdigit():
+                return int(txt)
+    except Exception as e:
+        logger.warning("_read_pid_file: error reading PID file for '%s': %s", name, e)
+    return None
+
+
+def _verify_cmdline(pid: int, name: str) -> bool:
+    """Verify that PID belongs to a bot api_runner process with the given bot name.
+
+    The real launcher (process_manager._build_popen_args) spawns::
+
+        sys.executable -m codebot.api_runner <bot_name> ...
+
+    whose ``/proc/<pid>/cmdline`` argv decodes to e.g.
+    ``['/usr/bin/python3', '-m', 'codebot.api_runner', '<bot>', ...]``.
+    Legacy spawn forms used ``['<python>', 'api_runner.py', '<bot>']``.
+
+    Verification therefore accepts BOTH forms, requiring an EXACT
+    (not substring) match on the bot name:
+
+    1. Module form: consecutive argv pair ``('codebot.api_runner', name)``
+       or a ``'-m'`` flag followed (one slot later) by
+       ``'codebot.api_runner'`` with ``name`` as the NEXT argv after the
+       module token.  The interpreter check additionally requires argv
+       joined text to contain ``'python'`` or the module token itself.
+    2. Script form (legacy/tests): consecutive argv pair
+       ``('api_runner.py', name)`` whose path basename match is exact,
+       plus a ``'python'`` token somewhere in argv.
+
+    A non-python process with a matching cmdline suffix, an extra
+    argument between the runner token and the name, or a substring-only
+    match (``'my-bot-extra'`` vs ``'my-bot'``) is REJECTED to avoid
+    denial-of-service on unrelated processes.
+    """
+    try:
+        cmdline_path = f"/proc/{pid}/cmdline"
+        with open(cmdline_path, "rb") as f:
+            cmdline_bytes = f.read()
+        argv = [arg.decode("utf-8", errors="replace") for arg in cmdline_bytes.split(b"\x00") if arg]
+        if not argv:
+            return False
+        cmdline_lower = " ".join(argv).lower()
+        is_python = "python" in cmdline_lower or "codebot.api_runner" in cmdline_lower
+        if not is_python:
+            return False
+        # Form 1: module invocation ``-m codebot.api_runner <name> ...``.
+        for i, arg in enumerate(argv):
+            base = arg.rsplit("/", 1)[-1] if "/" in arg else arg
+            if arg == "codebot.api_runner" or base == "api_runner.py":
+                if i + 1 < len(argv) and argv[i + 1] == name:
+                    return True
+        return False
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def _atomic_signal_pid(pid: int, sig: int) -> bool:
+    """Send signal to PID atomically using pidfd if available, else os.kill.
+
+    Using ``pidfd_open`` + ``pidfd_send_signal`` (Linux 5.1+, Python 3.9+
+    exposes ``os.pidfd_open``; 3.12+ also ``os.pidfd_send_signal``) pins
+    the signal to the *process object* the verified ``/proc/<pid>/cmdline``
+    belonged to, instead of re-resolving the numeric PID.  When pidfds
+    are available the classic verify-then-``os.kill`` TOCTOU window
+    (PID exits and its number is recycled between ``_verify_cmdline``
+    and signal delivery) is closed: ``pidfd_send_signal`` fails with
+    ``ESRCH`` if the original process is gone rather than signalling the
+    PID reuser.
+
+    When pidfds are unavailable the code falls back to ``os.kill`` (the
+    same semantics as before); PID-file targeting plus cmdline
+    verification still prevents regex-based over-matching.
+    """
+    try:
+        # Try using pidfd_open for atomic signaling (Python 3.9+ on Linux 5.1+).
+        if hasattr(os, "pidfd_open"):
+            try:
+                pidfd = os.pidfd_open(pid, 0)
+                try:
+                    if hasattr(os, "pidfd_send_signal"):
+                        os.pidfd_send_signal(pidfd, sig, None, None, 0)
+                        return True
+                    else:
+                        # Python <3.12: pidfd pins the process but we can only
+                        # signal via os.kill(pid); the fd at least lets us
+                        # detect PID reuse cheaply (fd becomes invalid/ESRCH
+                        # on poll) — but kill-by-number remains best-effort.
+                        os.kill(pid, sig)
+                        return True
+                finally:
+                    os.close(pidfd)
+            except OSError:
+                # pidfd_open failed (e.g., process exited, not supported), fall back
+                pass
+
+        # Standard fallback
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        raise
+    except Exception:
+        raise
+
+
+def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]]:
+    """Safely kill bot process using PID file and verified signaling.
+
+    Uses PID file written at startup for exact targeting, eliminating
+    TOCTOU races from pgrep/pkill. Verifies cmdline before signaling
+    to prevent killing recycled PIDs. Uses pidfd for atomic signaling
+    if available.
 
     Args:
         name: Validated bot name (must pass validate_bot_name first)
-        timeout: Timeout for subprocess calls
+        timeout: Timeout for operations (unused in PID-file path, kept for signature compat)
 
     Returns:
         Tuple of (success, killed_pids) where success indicates no errors occurred
@@ -234,195 +369,161 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
         logger.error("_safe_kill_bot_process: invalid bot name rejected: %s", repr(name))
         return False, []
 
-    escaped_name = re.escape(name)
-    # Pattern must match api_runner.py followed by space and exact bot name at end
-    pattern = f"api_runner\\.py {escaped_name}$"
-
     killed_pids: list[int] = []
-    try:
-        # Step 1: Find candidate PIDs using pgrep
-        ps = subprocess.run(
-            ["pgrep", "-f", pattern],
-            capture_output=True, text=True, timeout=timeout
-        )
-        if not ps.stdout.strip():
-            # No matching processes found - this is OK (bot may not be running)
-            return True, []
-
-        candidate_pids = []
-        for line in ps.stdout.strip().split('\n'):
-            line = line.strip()
-            if line.isdigit():
-                candidate_pids.append(int(line))
-
-        if not candidate_pids:
-            return True, []
-
-        # Step 2: Verify each PID's cmdline matches exactly using argv elements
-        for pid in candidate_pids:
+    import signal
+    
+    # Primary path: Read PID from file
+    pid = _read_pid_file(name)
+    
+    if pid is not None:
+        # Verify cmdline matches expected bot before killing
+        if _verify_cmdline(pid, name):
             try:
-                cmdline_path = f"/proc/{pid}/cmdline"
-                with open(cmdline_path, 'rb') as f:
-                    cmdline_bytes = f.read()
-                # Split on null bytes to get individual argv elements
-                argv = [arg.decode('utf-8', errors='replace') for arg in cmdline_bytes.split(b'\x00') if arg]
-                # Check for exact consecutive match: 'api_runner.py' followed by bot name
-                # Also verify it's a python process
-                is_python = any('python' in arg.lower() for arg in argv)
-                has_exact_match = False
-                for i in range(len(argv) - 1):
-                    if argv[i] == 'api_runner.py' and argv[i + 1] == name:
-                        has_exact_match = True
-                        break
-                if has_exact_match and is_python:
-                    killed_pids.append(pid)
-                elif has_exact_match:
-                    logger.warning(
-                        "_safe_kill_bot_process: PID %d matched api_runner.py and bot name but not python, skipping: %s",
-                        pid, ' '.join(argv)[:200]
-                    )
-                else:
-                    logger.debug(
-                        "_safe_kill_bot_process: PID %d did not have exact argv match for 'api_runner.py %s': %s",
-                        pid, name, ' '.join(argv)[:200]
-                    )
-            except FileNotFoundError:
-                # Process already exited
-                continue
-            except PermissionError:
-                logger.warning("_safe_kill_bot_process: permission denied reading /proc/%d/cmdline", pid)
-                continue
-            except Exception as e:
-                logger.warning("_safe_kill_bot_process: error verifying PID %d: %s", pid, e)
-                continue
-
-        # Step 3: Kill only verified PIDs
-        for pid in killed_pids:
-            try:
-                import signal
-                os.kill(pid, signal.SIGTERM)
-                logger.info("_safe_kill_bot_process: sent SIGTERM to verified PID %d for bot '%s'", pid, name)
+                _atomic_signal_pid(pid, signal.SIGTERM)
+                logger.info("_safe_kill_bot_process: sent SIGTERM to PID %d from PID file for bot '%s'", pid, name)
+                killed_pids.append(pid)
+                # Clean up PID file after successful signal
+                try:
+                    pid_file = STATE_DIR / f"{name}.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
             except ProcessLookupError:
-                # Process already exited
-                pass
+                logger.info("_safe_kill_bot_process: PID %d from PID file already exited for bot '%s'", pid, name)
+                # Clean up stale PID file
+                try:
+                    pid_file = STATE_DIR / f"{name}.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
             except PermissionError:
-                logger.warning("_safe_kill_bot_process: permission denied killing PID %d", pid)
+                logger.warning("_safe_kill_bot_process: permission denied killing PID %d for bot '%s'", pid, name)
             except Exception as e:
-                logger.warning("_safe_kill_bot_process: error killing PID %d: %s", pid, e)
+                logger.warning("_safe_kill_bot_process: error killing PID %d for bot '%s': %s", pid, name, e)
+        else:
+            logger.warning("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s'", pid, name)
+            # Stale PID file pointing to wrong process? Clean it up to be safe.
+            try:
+                pid_file = STATE_DIR / f"{name}.pid"
+                if pid_file.exists():
+                    pid_file.unlink()
+            except OSError:
+                pass
+    else:
+        # No PID file found. Do NOT fall back to pgrep to avoid broad matching.
+        logger.warning("_safe_kill_bot_process: No PID file found for bot '%s'. Skipping kill.", name)
 
-        return True, killed_pids
+    return True, killed_pids
 
-    except subprocess.TimeoutExpired:
-        logger.warning("_safe_kill_bot_process: pgrep timed out for bot '%s'", name)
-        return False, killed_pids
+
+def _read_orchestrator_pid_file() -> int | None:
+    """Read orchestrator PID from state/.orchestrator.pid file."""
+    pid_path = STATE_DIR / ".orchestrator.pid"
+    try:
+        if pid_path.exists():
+            txt = pid_path.read_text(encoding="utf-8").strip()
+            if txt.isdigit():
+                return int(txt)
     except Exception as e:
-        logger.error("_safe_kill_bot_process: unexpected error for bot '%s': %s", name, e)
-        return False, killed_pids
+        logger.warning("_read_orchestrator_pid_file: error reading PID file: %s", e)
+    return None
+
+
+def _verify_orchestrator_cmdline(pid: int) -> bool:
+    """Verify that PID belongs to orchestrator.py.
+
+    Accepts both the module form (``-m codebot...`` running orchestrator
+    code is NOT expected; orchestrator runs as a script) and the script
+    form where some argv element's basename is exactly
+    ``'orchestrator.py'``, plus a python/module token in the cmdline.
+    Path normalization uses basename comparison so ``/a/b/orchestrator.py``
+    matches but ``fake_orchestrator.py`` or ``orchestrator.py.bak`` do not.
+    """
+    try:
+        cmdline_path = f"/proc/{pid}/cmdline"
+        with open(cmdline_path, "rb") as f:
+            cmdline_bytes = f.read()
+        argv = [arg.decode("utf-8", errors="replace") for arg in cmdline_bytes.split(b"\x00") if arg]
+        if not argv:
+            return False
+
+        # Check if any argv element's basename is exactly 'orchestrator.py'
+        for arg in argv:
+            basename = arg.rsplit("/", 1)[-1] if "/" in arg else arg
+            if basename == "orchestrator.py":
+                # Additional safety: ensure it's a python process
+                cmdline_str = " ".join(argv).lower()
+                if "python" in cmdline_str:
+                    return True
+                else:
+                    logger.warning(
+                        "_verify_orchestrator_cmdline: PID %d has orchestrator.py but not python process", pid
+                    )
+                    return False
+        return False
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
 
 
 def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
-    """Safely kill orchestrator process using pgrep + /proc/PID/cmdline exact verification.
+    """Safely kill orchestrator process using PID file and verified signaling.
 
-    Mirrors _safe_kill_bot_process safety pattern but targets orchestrator.py.
-    Only kills processes where 'orchestrator.py' appears as the executed script
-    (argv element basename match) in a python process cmdline, preventing DoS
-    against editors or other tools that reference orchestrator.py in arguments.
+    Uses PID file written at startup for exact targeting, eliminating
+    TOCTOU races from pgrep. Verifies cmdline before signaling.
 
     Args:
-        timeout: Timeout for subprocess calls
+        timeout: Timeout for operations (unused in PID-file path, kept for signature compat)
 
     Returns:
         Tuple of (success, killed_pids) where success indicates no errors occurred
     """
     killed_pids: list[int] = []
-    try:
-        # Use fixed-string pattern to find candidate PIDs
-        ps = subprocess.run(
-            ["pgrep", "-f", "orchestrator\\.py"],
-            capture_output=True, text=True, timeout=timeout
-        )
-        if not ps.stdout.strip():
-            return True, []
+    import signal
 
-        candidate_pids = []
-        for line in ps.stdout.strip().split('\n'):
-            line = line.strip()
-            if line.isdigit():
-                candidate_pids.append(int(line))
-
-        if not candidate_pids:
-            return True, []
-
-        import signal
-        for pid in candidate_pids:
+    pid = _read_orchestrator_pid_file()
+    
+    if pid is not None:
+        if _verify_orchestrator_cmdline(pid):
             try:
-                cmdline_path = f"/proc/{pid}/cmdline"
-                with open(cmdline_path, 'rb') as f:
-                    cmdline_bytes = f.read()
-                # cmdline is null-separated; split into argv elements
-                argv = cmdline_bytes.split(b'\x00')
-                # Decode each argument safely
-                decoded_argv = []
-                for arg in argv:
-                    if arg:
-                        decoded_argv.append(arg.decode('utf-8', errors='replace'))
-
-                if not decoded_argv:
-                    continue
-
-                # Check if any argv element's basename is exactly 'orchestrator.py'
-                # This ensures we match 'python3 orchestrator.py' but NOT 'vim orchestrator.py'
-                # or 'grep orchestrator.py'
-                is_orchestrator_script = False
-                for arg in decoded_argv:
-                    # Extract basename from path (e.g., '/path/to/orchestrator.py' -> 'orchestrator.py')
-                    basename = arg.rsplit('/', 1)[-1] if '/' in arg else arg
-                    if basename == 'orchestrator.py':
-                        is_orchestrator_script = True
-                        break
-
-                if not is_orchestrator_script:
-                    logger.debug(
-                        "_safe_kill_orchestrator: PID %d cmdline does not have orchestrator.py as executed script, skipping",
-                        pid
-                    )
-                    continue
-
-                # Additional safety: ensure it's a python process
-                cmdline_str = ' '.join(decoded_argv).lower()
-                if 'python' not in cmdline_str:
-                    logger.warning(
-                        "_safe_kill_orchestrator: PID %d has orchestrator.py but not python process, skipping: %s",
-                        pid, ' '.join(decoded_argv)[:200]
-                    )
-                    continue
-
-                # Verified: send SIGTERM
-                os.kill(pid, signal.SIGTERM)
-                logger.info("_safe_kill_orchestrator: sent SIGTERM to verified PID %d", pid)
+                _atomic_signal_pid(pid, signal.SIGTERM)
+                logger.info("_safe_kill_orchestrator: sent SIGTERM to verified PID %d from PID file", pid)
                 killed_pids.append(pid)
-
-            except FileNotFoundError:
-                # Process already exited
-                continue
-            except PermissionError:
-                logger.warning("_safe_kill_orchestrator: permission denied reading/killing PID %d", pid)
-                continue
+                # Clean up PID file
+                try:
+                    pid_file = STATE_DIR / ".orchestrator.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
             except ProcessLookupError:
-                # Process exited between check and kill
-                continue
+                logger.info("_safe_kill_orchestrator: PID %d from PID file already exited", pid)
+                try:
+                    pid_file = STATE_DIR / ".orchestrator.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
+            except PermissionError:
+                logger.warning("_safe_kill_orchestrator: permission denied killing PID %d", pid)
             except Exception as e:
-                logger.warning("_safe_kill_orchestrator: error verifying/killing PID %d: %s", pid, e)
-                continue
+                logger.warning("_safe_kill_orchestrator: error killing PID %d: %s", pid, e)
+        else:
+            logger.warning("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification", pid)
+            # Stale PID file? Clean it up.
+            try:
+                pid_file = STATE_DIR / ".orchestrator.pid"
+                if pid_file.exists():
+                    pid_file.unlink()
+            except OSError:
+                pass
+    else:
+        logger.warning("_safe_kill_orchestrator: No PID file found for orchestrator. Skipping kill.")
 
-        return True, killed_pids
-
-    except subprocess.TimeoutExpired:
-        logger.warning("_safe_kill_orchestrator: pgrep timed out")
-        return False, killed_pids
-    except Exception as e:
-        logger.error("_safe_kill_orchestrator: unexpected error: %s", e)
-        return False, killed_pids
+    return True, killed_pids
 
 
 def _safe_kill_process(pid: int, expected_cmdline: str, grace_period: float = 5.0) -> tuple[bool, int | None]:
@@ -1719,6 +1820,15 @@ class ControlHandler(BaseHTTPRequestHandler):
             logger.warning("Rate limit exceeded for telemetry from %s: %s", client_ip, reason)
             retry_after = str(RATE_LIMIT_COOLDOWN_SECONDS)
             self._json(429, {"error": "too many requests", "reason": reason}, extra_headers={"Retry-After": retry_after})
+            return
+
+        # Fail-closed guard: Reject telemetry when CONTROL_TOKEN is empty (CB-B4086).
+        # No opt-in flag may re-enable unauthenticated access (Constitution §2).
+        if not CONTROL_TOKEN:
+            logger.warning(
+                "SECURITY: Telemetry request rejected because CONTROL_TOKEN is empty."
+            )
+            self._json(401, {"error": "unauthorized", "hint": CONTROL_UNAUTHORIZED_HINT})
             return
 
         # Check telemetry-specific auth using constant-time comparison (Constitution §2)

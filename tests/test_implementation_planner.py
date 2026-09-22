@@ -4,7 +4,15 @@ import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from codebot.implementation_planner import generate_plan, PlanDepth, determine_plan_depth, PlanStore
+from codebot.implementation_planner import (
+    PlanDepth,
+    PlanStore,
+    PlanningTelemetry,
+    determine_plan_depth,
+    evidence_fingerprint,
+    generate_plan,
+    get_planning_budget,
+)
 
 class TestPlanDepth:
     def test_low_risk_summary(self):
@@ -51,6 +59,28 @@ class TestGeneratePlan:
         p2 = ImplementationPlan.from_dict(json.loads(raw))
         assert p2.ticket_id == "CB-5"
 
+    def test_low_risk_plan_has_a_lean_budget_and_fingerprint(self):
+        plan = generate_plan("CB-6", "low", ["a.py"], [], ["ok"])
+        assert plan.investigation_budget == {
+            "max_grep_calls": 1,
+            "max_read_calls": 0,
+            "max_glob_calls": 0,
+            "max_steps": 2,
+        }
+        assert plan.evidence_fingerprint
+        assert plan.fresh_verification_required
+
+
+class TestPlanningBudget:
+    def test_budget_scales_with_risk(self):
+        assert get_planning_budget("medium").max_read_calls == 1
+        assert get_planning_budget("critical").max_glob_calls == 1
+
+    def test_fingerprint_is_order_independent(self):
+        first = evidence_fingerprint("medium", ["b.py", "a.py"], ["B", "A"], ["two", "one"])
+        second = evidence_fingerprint("medium", ["a.py", "b.py"], ["A", "B"], ["one", "two"])
+        assert first == second
+
 class TestPlanStore:
     def test_save_and_load(self, tmp_path):
         store = PlanStore(tmp_path)
@@ -58,6 +88,7 @@ class TestPlanStore:
         store.save(plan)
         loaded = store.load("CB-1")
         assert loaded is not None
+        assert not isinstance(loaded, dict)
         assert loaded.ticket_id == "CB-1"
 
     def test_exists(self, tmp_path):
@@ -70,3 +101,26 @@ class TestPlanStore:
     def test_missing_returns_none(self, tmp_path):
         store = PlanStore(tmp_path)
         assert store.load("CB-missing") is None
+
+    def test_reuse_creates_a_new_plan_that_requires_fresh_verification(self, tmp_path):
+        store = PlanStore(tmp_path)
+        source = generate_plan("CB-source", "medium", ["a.py"], [], ["ok"])
+        store.save(source)
+        reused = store.reuse_for_ticket("CB-target", "medium", ["a.py"], [], ["ok"])
+        assert reused is not None
+        assert reused.ticket_id == "CB-target"
+        assert reused.evidence_reused
+        assert reused.reused_from_ticket_id == "CB-source"
+        assert reused.fresh_verification_required
+
+
+class TestPlanningTelemetry:
+    def test_summary_reports_duration_and_rework_rate(self, tmp_path):
+        telemetry = PlanningTelemetry(tmp_path)
+        telemetry.record("CB-1", "low", 2.0, "complete")
+        telemetry.record("CB-2", "high", 4.0, "rework", rework_count=1, evidence_reused=True)
+        assert telemetry.summary() == {
+            "plans": 2,
+            "average_duration_seconds": 3.0,
+            "rework_rate": 0.5,
+        }

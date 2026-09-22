@@ -125,7 +125,7 @@ class TestPauseResumeBotValidation(unittest.TestCase):
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
             with patch("codebot.control_server.STATE_DIR") as mock_state:
-                with patch("subprocess.run"):
+                with patch("codebot.control_server._safe_kill_bot_process", return_value=(True, [1234])):
                     handler = self._make_handler("POST", "/bots/valid_bot/pause")
                     responses = []
                     handler._json = lambda code, data: responses.append((code, data))
@@ -140,6 +140,10 @@ class TestPauseResumeBotValidation(unittest.TestCase):
                     self.assertTrue(len(responses) > 0)
                     status_code, body = responses[0]
                     self.assertEqual(status_code, 200, f"Expected 200 for valid bot, got {status_code}: {body}")
+                    self.assertTrue(body["ok"])
+                    self.assertEqual(body["paused"], "valid_bot")
+                    # Verify killed_pids is included in response
+                    self.assertIn("killed_pids", body)
 
     def test_resume_accepts_valid_bot(self):
         """Resume endpoint must accept bot names present in BOT_REGISTRY."""
@@ -234,6 +238,107 @@ class TestPauseResumeBotValidation(unittest.TestCase):
         status_code, body = responses[0]
         self.assertEqual(status_code, 404)
         self.assertIn("unknown bot", body.get("error", "").lower())
+
+    def test_pause_dry_run_returns_preview(self):
+        """Pause endpoint must return preview when dry_run is True."""
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "test_bot"
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            handler = self._make_handler("POST", "/bots/test_bot/pause", body={"dry_run": True})
+            responses = []
+            handler._json = lambda code, data, r=responses: r.append((code, data))
+            handler._auth = lambda: True
+            handler._read_json_body = lambda: ({"dry_run": True}, None, None)
+
+            ControlHandler.do_POST(handler)
+
+            self.assertTrue(len(responses) > 0)
+            status_code, body = responses[0]
+            self.assertEqual(status_code, 200)
+            self.assertTrue(body["ok"])
+            self.assertTrue(body["dry_run"])
+            self.assertIn("preview", body)
+            self.assertEqual(body["preview"]["action"], "pause")
+            self.assertEqual(body["preview"]["bot"], "test_bot")
+
+    def test_pause_requires_force_or_confirm(self):
+        """Pause endpoint must require force or confirm when not dry_run."""
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "test_bot"
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            handler = self._make_handler("POST", "/bots/test_bot/pause", body={})
+            responses = []
+            handler._json = lambda code, data, r=responses: r.append((code, data))
+            handler._auth = lambda: True
+            handler._read_json_body = lambda: ({}, None, None)
+
+            ControlHandler.do_POST(handler)
+
+            self.assertTrue(len(responses) > 0)
+            status_code, body = responses[0]
+            self.assertEqual(status_code, 400)
+            self.assertIn("destructive action", body.get("error", "").lower())
+
+    def test_pause_handles_safe_kill_failure_with_warning(self):
+        """Pause endpoint should still succeed even if _safe_kill_bot_process reports errors."""
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "test_bot"
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            with patch("codebot.control_server.STATE_DIR") as mock_state:
+                # Mock _safe_kill_bot_process to return failure
+                with patch("codebot.control_server._safe_kill_bot_process", return_value=(False, [])):
+                    handler = self._make_handler("POST", "/bots/test_bot/pause", body={"force": True})
+                    responses = []
+                    handler._json = lambda code, data, r=responses: r.append((code, data))
+                    handler._auth = lambda: True
+                    handler._read_json_body = lambda: ({"force": True}, None, None)
+
+                    mock_paused_file = MagicMock()
+                    mock_state.__truediv__ = MagicMock(return_value=mock_paused_file)
+
+                    ControlHandler.do_POST(handler)
+
+                    self.assertTrue(len(responses) > 0)
+                    status_code, body = responses[0]
+                    # Should still return 200 even if kill failed
+                    self.assertEqual(status_code, 200)
+                    self.assertTrue(body["ok"])
+
+    def test_pause_handles_exception_in_try_block(self):
+        """Pause endpoint should return 500 if an exception occurs during pause."""
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "test_bot"
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            with patch("codebot.control_server.STATE_DIR") as mock_state:
+                # Make write_text raise an exception
+                mock_paused_file = MagicMock()
+                mock_paused_file.write_text.side_effect = PermissionError("Access denied")
+                mock_state.__truediv__ = MagicMock(return_value=mock_paused_file)
+
+                handler = self._make_handler("POST", "/bots/test_bot/pause", body={"force": True})
+                responses = []
+                handler._json = lambda code, data, r=responses: r.append((code, data))
+                handler._auth = lambda: True
+                handler._read_json_body = lambda: ({"force": True}, None, None)
+
+                ControlHandler.do_POST(handler)
+
+                self.assertTrue(len(responses) > 0)
+                status_code, body = responses[0]
+                self.assertEqual(status_code, 500)
+                self.assertIn("Access denied", body.get("error", ""))
 
     @patch("codebot.control_server.BOT_REGISTRY", [])
     def test_pkill_not_called_with_unvalidated_input_resume(self):
@@ -497,6 +602,40 @@ class TestCommandInjectionPrevention(unittest.TestCase):
             self.assertEqual(status_code, 200)
             self.assertTrue(body["ok"])
 
+    def test_start_rejects_argument_like_names(self):
+        """Start endpoint must reject argument-like names not in BOT_REGISTRY.
+
+        Ticket: CB-666967-0D15 — Argument injection via unsanitized bot list.
+        Acceptance Criteria: test with crafted argument-like names confirms rejection.
+        """
+        from codebot.control_server import ControlHandler
+
+        # Names with shell/arg metachars are rejected by format validation (400);
+        # syntactically valid names not in the registry are rejected as unknown (400).
+        malicious_names = [
+            "--help",
+            "--config=/etc/passwd",
+            "--verbose",
+            "-c", "import os; os.system('rm -rf /')",
+        ]
+
+        for name in malicious_names:
+            handler = self._make_handler("POST", "/bots/start", body={"bots": [name]})
+            responses = []
+            handler._json = lambda code, data, r=responses: r.append((code, data))
+            handler._auth = lambda: True
+            handler._read_json_body = lambda: ({"bots": [name]}, None, None)
+
+            with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+                ControlHandler.do_POST(handler)
+                mock_popen.assert_not_called()
+
+            self.assertTrue(len(responses) > 0, f"Handler must respond for malicious name: {name}")
+            status_code, body = responses[0]
+            self.assertEqual(status_code, 400,
+                             f"Expected 400 for argument-like name '{name}', got {status_code}")
+            self.assertIn("bot", body.get("error", "").lower())
+
     def test_validate_bot_name_function(self):
         """Test the validate_bot_name function directly."""
         from codebot.control_server import validate_bot_name
@@ -519,6 +658,176 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         self.assertFalse(validate_bot_name(""))
         self.assertFalse(validate_bot_name(None))
         self.assertFalse(validate_bot_name(123))
+
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_rejects_unknown_bot_with_400(self):
+        """Start endpoint must return 400 for bot names not in BOT_REGISTRY.
+
+        Ticket: CB-C006C847037C — Validate bot names against BOT_REGISTRY before subprocess execution.
+        Acceptance Criteria: POST /bots/start with {"bots":["nonexistent"]} returns 400.
+        Unknown names return 400 (not 404) to prevent enumeration and argument injection.
+        """
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["nonexistent"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["nonexistent"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400, f"Expected 400 for unknown bot, got {status_code}")
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+
+class TestRestartBotValidation(unittest.TestCase):
+    """Verify that restart endpoint validates bot names against BOT_REGISTRY.
+
+    Ticket: CB-1017888-B58B — Arbitrary process kill via pkill with attacker-controlled bot name.
+    """
+
+    def _make_handler(self, method: str, path: str, body: dict | None = None):
+        """Create a mock request handler for testing."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = path
+        handler.command = method
+        handler.headers = {"Authorization": "Bearer test-token"}
+        if body is not None:
+            handler.rfile = BytesIO(json.dumps(body).encode())
+            handler.headers["Content-Length"] = str(len(json.dumps(body)))
+        else:
+            handler.rfile = BytesIO(b"")
+            handler.headers["Content-Length"] = "0"
+        return handler
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_restart_rejects_unknown_bot(self):
+        """Restart endpoint must return 404 for bot names not in BOT_REGISTRY."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/nonexistent_bot/restart")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": True}, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run, \
+             patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 404)
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_restart_rejects_regex_injection_dot_star(self):
+        """Restart endpoint must reject '.*' which could inject regex into pkill."""
+        from codebot.control_server import ControlHandler
+
+        # .* is invalid per validate_bot_name (contains '.')
+        handler = self._make_handler("POST", "/bots/.*/restart")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": True}, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_restart_rejects_process_killing_python3(self):
+        """Restart endpoint must reject 'python3' which could kill all python processes."""
+        from codebot.control_server import ControlHandler
+
+        # python3 is valid format but not in registry -> 404
+        handler = self._make_handler("POST", "/bots/python3/restart")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"force": True}, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 404)
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+    def test_restart_accepts_valid_bot(self):
+        """Restart endpoint must accept bot names present in BOT_REGISTRY.
+        
+        Updated for CB-1017888-B58B: Now uses _safe_kill_bot_process (pgrep + /proc verification)
+        instead of direct pkill. Test verifies the secure kill path is invoked.
+        """
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "valid_bot"
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
+            with patch("codebot.control_server.STATE_DIR"):
+                handler = self._make_handler("POST", "/bots/valid_bot/restart")
+                responses = []
+                handler._json = lambda code, data, r=responses: r.append((code, data))
+                handler._auth = lambda: True
+                handler._read_json_body = lambda: ({"force": True}, None, None)
+
+                with patch("codebot.control_server._safe_kill_bot_process", return_value=(True, [1234])) as mock_safe_kill, \
+                     patch("codebot.control_server.subprocess.Popen") as mock_popen:
+                    ControlHandler.do_POST(handler)
+                    # Verify safe kill was called with validated bot name
+                    mock_safe_kill.assert_called_once_with("valid_bot", timeout=5)
+                    mock_popen.assert_called_once()
+
+                self.assertTrue(len(responses) > 0)
+                status_code, body = responses[0]
+                self.assertEqual(status_code, 200)
+                self.assertTrue(body["ok"])
+
+    @patch("codebot.control_server.BOT_REGISTRY", [type("B", (), {"name": "test-bot"})()])
+    def test_restart_uses_safe_kill_with_escaped_pattern(self):
+        """Verify that _safe_kill_bot_process uses re.escape for pgrep pattern.
+        
+        Updated for CB-1017888-B58B: The secure implementation uses pgrep + /proc
+        verification instead of direct pkill. This test verifies re.escape is applied
+        in the pgrep pattern within _safe_kill_bot_process.
+        """
+        from codebot.control_server import ControlHandler, _safe_kill_bot_process
+        import re
+
+        # Verify _safe_kill_bot_process applies re.escape internally
+        with patch("codebot.control_server.subprocess.run") as mock_run:
+            # Mock pgrep returning no processes (clean exit)
+            mock_run.return_value = MagicMock(stdout="", returncode=1)
+            _safe_kill_bot_process("test-bot", timeout=3)
+            
+            # Verify pgrep was called with escaped pattern
+            mock_run.assert_called()
+            args = mock_run.call_args[0][0]
+            self.assertEqual(args[0], "pgrep")
+            self.assertEqual(args[1], "-f")
+            # Pattern must contain escaped bot name
+            pattern = args[2]
+            self.assertIn(re.escape("test-bot"), pattern)
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ class TestPlanningPrerequisiteEnforcement:
         advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="requires an implementation plan"):
-            store.transition(t.id, TicketState.IMPLEMENTING)
+            store.transition(t.id, TicketState.IMPLEMENTATION_READY)
 
     def test_high_risk_blocked_without_plan(self, tmp_path: Path) -> None:
         store = TicketStore(tmp_path / "tickets.json")
@@ -59,7 +59,7 @@ class TestPlanningPrerequisiteEnforcement:
         advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="requires an implementation plan"):
-            store.transition(t.id, TicketState.IMPLEMENTING)
+            store.transition(t.id, TicketState.IMPLEMENTATION_READY)
 
     def test_critical_risk_blocked_without_plan(self, tmp_path: Path) -> None:
         store = TicketStore(tmp_path / "tickets.json")
@@ -72,7 +72,7 @@ class TestPlanningPrerequisiteEnforcement:
         advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="requires an implementation plan"):
-            store.transition(t.id, TicketState.IMPLEMENTING)
+            store.transition(t.id, TicketState.IMPLEMENTATION_READY)
 
     def test_low_risk_allowed_without_plan(self, tmp_path: Path) -> None:
         store = TicketStore(tmp_path / "tickets.json")
@@ -84,7 +84,7 @@ class TestPlanningPrerequisiteEnforcement:
         store.add(t)
         advance_to_ready(store, t.id)
 
-        # Low risk should bypass planning requirement
+        store.transition(t.id, TicketState.IMPLEMENTATION_READY)
         updated = store.transition(t.id, TicketState.IMPLEMENTING)
         assert updated.state == TicketState.IMPLEMENTING
 
@@ -109,7 +109,7 @@ class TestPlanningPrerequisiteEnforcement:
         plan_store = PlanStore(tmp_path)
         plan_store.save(plan)
 
-        # Now transition should succeed
+        store.transition(t.id, TicketState.IMPLEMENTATION_READY)
         updated = store.transition(t.id, TicketState.IMPLEMENTING)
         assert updated.state == TicketState.IMPLEMENTING
 
@@ -124,7 +124,7 @@ class TestPlanningPrerequisiteEnforcement:
         advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="risk=high"):
-            store.transition(t.id, TicketState.IMPLEMENTING)
+            store.transition(t.id, TicketState.IMPLEMENTATION_READY)
 
     def test_error_message_suggests_planning(self, tmp_path: Path) -> None:
         store = TicketStore(tmp_path / "tickets.json")
@@ -137,7 +137,7 @@ class TestPlanningPrerequisiteEnforcement:
         advance_to_ready(store, t.id)
 
         with pytest.raises(ValueError, match="PLANNING"):
-            store.transition(t.id, TicketState.IMPLEMENTING)
+            store.transition(t.id, TicketState.IMPLEMENTATION_READY)
 
     def test_non_implementing_transitions_unaffected(self, tmp_path: Path) -> None:
         """READY -> DEFERRED should still work regardless of plan status."""
@@ -177,7 +177,7 @@ class TestRiskThresholdConfigurable:
             store.add(t)
             advance_to_ready(store, t.id)
 
-            # With threshold at HIGH, MEDIUM risk should pass
+            store.transition(t.id, TicketState.IMPLEMENTATION_READY)
             updated = store.transition(t.id, TicketState.IMPLEMENTING)
             assert updated.state == TicketState.IMPLEMENTING
         finally:

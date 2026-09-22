@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from codebot.file_lock import flock, LOCK_EX, LOCK_UN, LOCK_NB, LOCK_SH
+from codebot.locks import _FLOCK_AVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -322,12 +323,12 @@ class TestConcurrentAccessThreads:
         for t in threads:
             t.join(timeout=10)
 
-        # At most 1 thread should hold the lock at any time (on systems with
-        # working flock). On platforms where flock is a no-op (unsupported),
-        # max_concurrent could be higher — that's expected and tested elsewhere.
-        assert max_concurrent <= 1 or not hasattr(os, "flock"), (
-            f"Expected at most 1 concurrent lock holder, got {max_concurrent}"
-        )
+        if _FLOCK_AVAILABLE:
+            assert max_concurrent <= 1, (
+                f"Expected at most 1 concurrent lock holder, got {max_concurrent}"
+            )
+        else:
+            pytest.skip("flock not available on this platform")
 
     def test_toctOU_write_integrity_under_contention(self, tmp_path):
         """Concurrent lock-then-write must not lose increments (TOCTOU check).

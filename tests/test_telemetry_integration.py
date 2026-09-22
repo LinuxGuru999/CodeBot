@@ -26,13 +26,14 @@ def _make_control_handler(
     body: bytes = b"",
 ) -> object:
     """Create a control_server.Handler instance with mocked request."""
-    from codebot.control_server import Handler
+    from codebot.control_server import ControlHandler as Handler
 
     handler = object.__new__(Handler)
     handler.path = path  # type: ignore[attr-defined]
     handler.headers = headers or {}  # type: ignore[attr-defined]
     handler.rfile = BytesIO(body)  # type: ignore[attr-defined]
     handler.wfile = BytesIO()  # type: ignore[attr-defined]
+    handler.client_address = ("127.0.0.1", 12345)  # type: ignore[attr-defined]
     handler.connection = MagicMock()  # type: ignore[attr-defined]
     handler.command = method  # type: ignore[attr-defined]
 

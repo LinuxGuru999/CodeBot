@@ -17,7 +17,7 @@ import pytest
 
 # Import the modules under test
 from codebot.gatekeeper import Gatekeeper
-from codebot.quality_gate import QualityGatePolicy, GateResult, run_quality_gates
+from codebot.quality_gate import QualityGatePolicy, GateResult, run_quality_gates, GateEvaluation
 from codebot.ticket_engine import TicketStore, TicketState
 
 
@@ -80,51 +80,60 @@ class TestGatekeeperBlocking:
         """Verify that if quality gates fail, ticket does NOT transition to COMPLETE."""
         gk = Gatekeeper(state_dir=temp_state_dir)
         
-        # Mock run_quality_gates to return failure
-        with patch('codebot.gatekeeper.run_quality_gates') as mock_run:
-            # Return (passed=False, evaluations=[...])
-            mock_eval = MagicMock()
-            mock_eval.gate_name = "unit_tests"
-            mock_eval.result = GateResult.FAIL
-            mock_run.return_value = (False, [mock_eval])
+        # Create a proper GateEvaluation object
+        eval_fail = GateEvaluation(
+            gate_name="unit_tests",
+            result=GateResult.FAIL,
+            command="pytest",
+            output="failed",
+            duration_ms=10.0,
+            passed=False,
+            required=True
+        )
 
+        # Mock run_quality_gates_with_cache to return failure
+        with patch('codebot.quality_gate.run_quality_gates_with_cache') as mock_run:
+            mock_run.return_value = (False, [eval_fail])
+            
             result = gk.verify_ticket(
                 ticket_id="CB-TEST-001",
                 ticket_class="bug",
                 changed_files=["codebot/example.py"],
-                rework_count=0
+                rework_count=0,
+                store=mock_ticket_store
             )
 
-            # Assert decision is REWORK
-            assert result["decision"] == "REWORK"
-            assert result["passed"] is False
+        # Assert decision is REWORK
+        assert result["decision"] == "REWORK"
+        assert result["passed"] is False
 
-            # Verify ticket state in store is now REWORK, not COMPLETE
-            updated_ticket = mock_ticket_store.get("CB-TEST-001")
-            assert updated_ticket.state == TicketState.REWORK
+        # Verify ticket state in store is now REWORK, not COMPLETE
+        updated_ticket = mock_ticket_store.get("CB-TEST-001")
+        assert updated_ticket.state == TicketState.REWORK
 
     def test_allows_complete_on_gate_success(self, temp_state_dir, mock_ticket_store):
         """Verify that if quality gates pass, ticket transitions to COMPLETE."""
         gk = Gatekeeper(state_dir=temp_state_dir)
 
-        # Mock run_quality_gates to return success
-        with patch('codebot.gatekeeper.run_quality_gates') as mock_run:
+        # Mock run_quality_gates_with_cache to return success
+        with patch('codebot.quality_gate.run_quality_gates_with_cache') as mock_run:
             mock_run.return_value = (True, [])
-
+            
             result = gk.verify_ticket(
                 ticket_id="CB-TEST-001",
                 ticket_class="bug",
                 changed_files=["codebot/example.py"],
-                rework_count=0
+                rework_count=0,
+                store=mock_ticket_store
             )
 
-            # Assert decision is COMPLETE
-            assert result["decision"] == "COMPLETE"
-            assert result["passed"] is True
+        # Assert decision is COMPLETE
+        assert result["decision"] == "COMPLETE"
+        assert result["passed"] is True
 
-            # Verify ticket state in store is now COMPLETE
-            updated_ticket = mock_ticket_store.get("CB-TEST-001")
-            assert updated_ticket.state == TicketState.COMPLETE
+        # Verify ticket state in store is now COMPLETE
+        updated_ticket = mock_ticket_store.get("CB-TEST-001")
+        assert updated_ticket.state == TicketState.COMPLETE
 
 
 class TestConditionalGates:
@@ -151,20 +160,6 @@ class TestConditionalGates:
         gate_names = [ev.gate_name for ev in evaluations]
         assert "security_review" in gate_names, "Security ticket should trigger security_review gate"
 
-        # Scenario 2: File path suggests security boundary (e.g., web_tools.py)
-        passed, evaluations = run_quality_gates(
-            policy=policy,
-            workspace=temp_workspace,
-            ticket_class="bug",
-            changed_files=["codebot/web_tools.py"],
-            test_dirs="tests/"
-        )
-        
-        # Note: Current logic checks ticket_class primarily, but let's ensure file-based detection works if implemented
-        # For now, we verify the ticket_class path. If file-based detection is required by ticket, it must be added.
-        # The ticket acceptance criteria says "Security boundary tickets require security_review gate".
-        # Let's assume ticket_class='security' is the primary trigger.
-
     def test_data_migration_triggers_migration_and_rollback_tests(self, temp_workspace):
         """Data migration tickets should trigger migration_test and rollback_test."""
         policy = QualityGatePolicy.default()
@@ -172,9 +167,9 @@ class TestConditionalGates:
         passed, evaluations = run_quality_gates(
             policy=policy,
             workspace=temp_workspace,
-            ticket_class="feature", # Could be feature or bug, but conditions matter
-            changed_files=["codebot/store.py"], # Heuristic: 'store' in filename
-            conditions=["data_migration"], # Explicit condition
+            ticket_class="feature",
+            changed_files=["codebot/store.py"],
+            conditions=["data_migration"],
             test_dirs="tests/"
         )
 
@@ -190,7 +185,7 @@ class TestConditionalGates:
             policy=policy,
             workspace=temp_workspace,
             ticket_class="feature",
-            changed_files=["codebot/api_router.py"], # Heuristic: 'api' or 'router' in filename
+            changed_files=["codebot/api_router.py"],
             conditions=["api_change"],
             test_dirs="tests/"
         )
@@ -209,7 +204,6 @@ class TestGateFailureDetection:
 
     def test_failing_pytest_detected_as_fail(self, temp_workspace):
         """If pytest fails, gate result should be FAIL."""
-        # Create a test file that fails
         test_file = temp_workspace / "tests"
         test_file.mkdir()
         (test_file / "test_fail.py").write_text("def test_always_fails():\n    assert False\n")
@@ -224,7 +218,6 @@ class TestGateFailureDetection:
             test_dirs="tests/test_fail.py"
         )
 
-        # Find the unit_tests evaluation
         test_evals = [ev for ev in evaluations if ev.gate_name == "unit_tests"]
         assert len(test_evals) == 1
         assert test_evals[0].result == GateResult.FAIL, f"Expected FAIL, got {test_evals[0].result}. Output: {test_evals[0].output}"

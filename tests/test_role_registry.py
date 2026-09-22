@@ -166,8 +166,7 @@ class TestRoleCounts:
         assert len(CONTROL_ROLES) >= 3
 
     def test_total_role_count(self):
-        """Total roles should be 31 (9 discovery + 6 implementation + 8 review + 6 control + 2 planning)."""
-        assert len(ALL_ROLES) == 31
+        assert len(ALL_ROLES) == 32
 
     def test_planning_role_exists(self):
         assert len(PLANNING_ROLES) >= 1

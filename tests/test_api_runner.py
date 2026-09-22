@@ -46,6 +46,8 @@ from codebot.api_runner import (
     _flush_cost_accumulator,
     _cost_accumulator,
     _init_cost_accumulator,
+    _record_cost_attribution,
+    _resolve_cost_state_dir,
     HIGH_RISK_TOKEN_MANIFESTS,
 )
 import codebot.api_runner as _api_runner_module
@@ -1172,6 +1174,76 @@ class TestPersistStreamStress:
         assert len(payload["messages"]) == 2
         assert payload.get("truncated") is True  # stream_truncated set due to skipped messages
 
+    def test_persist_stream_file_write_failure_logged(self, tmp_path, caplog):
+        """Cover the except (OSError, ValueError, TypeError) path in _persist_stream (lines ~1583-1584).
+
+        When the file write operations (mkdir, write_text, replace) fail with
+        OSError/ValueError/TypeError, the function logs a warning and returns
+        without crashing.
+        """
+        import codebot.api_runner as ar
+        import logging
+        from unittest.mock import patch
+
+        bot_name = "write-fail-bot"
+        messages = [{"role": "user", "content": "hello"}]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Patch Path.write_text to raise OSError, simulating disk full or permission error
+        original_write_text = None
+        def failing_write_text(*args, **kwargs):
+            raise OSError("Simulated disk write failure")
+
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             caplog.at_level(logging.WARNING):
+            # Patch the Path method that writes the file
+            with patch("pathlib.Path.write_text", side_effect=failing_write_text):
+                ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        # Verify warning was logged about the failure
+        assert any("_persist_stream failed" in record.message for record in caplog.records), \
+            f"Expected warning about persist_stream failure. Records: {[r.message for r in caplog.records]}"
+
+    def test_persist_stream_usage_none_handled(self, tmp_path):
+        """Cover the usage=None path (line ~1467) where usage_dict becomes empty dict."""
+        import codebot.api_runner as ar
+
+        bot_name = "usage-none-bot"
+        messages = [{"role": "user", "content": "hello"}]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed", usage=None)
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists()
+        payload = json.loads(stream_path.read_text(encoding="utf-8"))
+        # usage should be an empty dict when None is passed
+        assert payload.get("usage") == {}
+
+    def test_persist_stream_tool_truncation_logs_context(self, tmp_path, caplog):
+        """Cover the _log_context_assembly path when truncated_count > 0."""
+        import codebot.api_runner as ar
+        import logging
+
+        bot_name = "tool-trunc-bot"
+        # Create a tool message with content > 2000 chars to trigger truncation
+        large_content = "x" * 3000
+        messages = [{"role": "tool", "content": large_content, "tool_call_id": "call_1"}]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             caplog.at_level(logging.INFO):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists()
+        payload = json.loads(stream_path.read_text(encoding="utf-8"))
+        # Verify tool content was truncated
+        assert len(payload["messages"][0]["content"]) <= 2016
+        # Verify truncated flag is set
+        assert payload.get("truncated") is True
+
 
 class TestCostTracking:
     """Tests for economics/cost tracking integration in _flush_cost_accumulator.
@@ -1608,3 +1680,102 @@ class TestCostTracking:
         # All threads must complete without exception
         assert len(errors) == 0, f"Concurrent flush failed: {errors}"
         assert len(completed) == 4, f"Expected 4 completions, got {len(completed)}"
+
+    def test_record_cost_attribution_logs_correct_format(self, caplog):
+        """Verify _record_cost_attribution emits structured log record.
+
+        AC2: bot/ticket attribution rides alongside record_usage via logger.
+        """
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="codebot.api_runner"):
+            _record_cost_attribution(
+                bot_name="test-bot",
+                ticket_id="CB-TEST-123",
+                model="gpt-4",
+                prompt_tokens=100,
+                completion_tokens=50,
+            )
+
+        assert any(
+            "cost_attribution" in r.message
+            and "test-bot" in r.message
+            and "CB-TEST-123" in r.message
+            and "gpt-4" in r.message
+            and "prompt=100" in r.message
+            and "completion=50" in r.message
+            for r in caplog.records
+        ), "Expected cost_attribution log with all fields"
+
+    def test_record_cost_attribution_fail_open_never_raises(self, caplog):
+        """Verify _record_cost_attribution never raises even on logger failure."""
+        import logging
+
+        # Even with logger configured, this should not raise
+        with caplog.at_level(logging.INFO, logger="codebot.api_runner"):
+            try:
+                _record_cost_attribution(
+                    bot_name="bot",
+                    ticket_id="CB-T",
+                    model="m",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                )
+            except Exception as e:
+                pytest.fail(f"_record_cost_attribution raised unexpectedly: {e}")
+
+    def test_resolve_cost_state_dir_uses_adapter_when_available(self, tmp_path):
+        """Adapter state dir takes precedence over heartbeat/ckpt parents."""
+        adapter_state = tmp_path / "adapter-state"
+        adapter_state.mkdir()
+        
+        mock_adapter = MagicMock()
+        mock_adapter.paths.return_value.state_dir = adapter_state
+        
+        with patch.object(_api_runner_module, '_adapter_instance', mock_adapter):
+            result = _resolve_cost_state_dir(heartbeat_file="", ckpt_file="")
+            assert result == adapter_state
+
+    def test_resolve_cost_state_dir_fallback_to_heartbeat_parent(self, tmp_path):
+        """When adapter unavailable, use heartbeat file parent if named 'state'."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        hb = state_dir / "bot.heartbeat"
+        
+        with patch.object(_api_runner_module, '_adapter_instance', None):
+            result = _resolve_cost_state_dir(heartbeat_file=str(hb), ckpt_file="")
+            assert result == state_dir
+
+    def test_resolve_cost_state_dir_detects_state_by_siblings(self, tmp_path):
+        """Parent with .heartbeat/.json siblings is detected as state dir."""
+        state_dir = tmp_path / "runtime-state"
+        state_dir.mkdir()
+        (state_dir / "other.heartbeat").touch()
+        
+        hb = state_dir / "bot.heartbeat"
+        
+        with patch.object(_api_runner_module, '_adapter_instance', None):
+            result = _resolve_cost_state_dir(heartbeat_file=str(hb), ckpt_file="")
+            assert result == state_dir
+
+    def test_resolve_cost_state_dir_ancestor_named_state(self, tmp_path):
+        """Ancestor directory named 'state' is preferred."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        nested = state_dir / "subdir"
+        nested.mkdir()
+        hb = nested / "bot.heartbeat"
+        
+        with patch.object(_api_runner_module, '_adapter_instance', None):
+            result = _resolve_cost_state_dir(heartbeat_file=str(hb), ckpt_file="")
+            assert result == state_dir
+
+    def test_resolve_cost_state_dir_last_resort_cwd_state(self, tmp_path):
+        """When no valid candidate, falls back to cwd/.codebot/state."""
+        fake_hb = tmp_path / "fake" / "hb"
+        fake_hb.parent.mkdir()
+        
+        with patch.object(_api_runner_module, '_adapter_instance', None), \
+             patch.object(_api_runner_module, 'Path.cwd', return_value=tmp_path):
+            result = _resolve_cost_state_dir(heartbeat_file=str(fake_hb), ckpt_file="")
+            assert result == tmp_path / ".codebot" / "state"

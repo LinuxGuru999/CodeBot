@@ -141,10 +141,17 @@ class TestCreateTicketFromSignal:
             assert "ticket_id" in result
             assert result["ticket_id"].startswith("CB-")
 
-            stored = json.loads(tickets_path.read_text())
-            assert len(stored["tickets"]) == 1
-            assert stored["tickets"][0]["state"] == "DISCOVERED"
-            assert "production_telemetry" in stored["tickets"][0]["source"]
+            # Verify via TicketStore (handles WAL + main JSON) rather than raw file read
+            from codebot.ticket_engine import TicketStore
+            verify = TicketStore(tickets_path)
+            try:
+                assert verify.count() == 1
+                t = verify.get(result["ticket_id"])
+                assert t is not None
+                assert t.state.value == "DISCOVERED"
+                assert "production_telemetry" in t.source
+            finally:
+                verify.close()
 
     def test_performance_signal_maps_to_performance_class(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -158,8 +165,14 @@ class TestCreateTicketFromSignal:
             result = _create_ticket_from_signal(signal, state_dir)
             assert result["success"] is True
 
-            stored = json.loads(tickets_path.read_text())
-            assert stored["tickets"][0]["ticket_class"] == "performance"
+            from codebot.ticket_engine import TicketStore
+            verify = TicketStore(tickets_path)
+            try:
+                t = verify.get(result["ticket_id"])
+                assert t is not None
+                assert t.ticket_class.value == "performance"
+            finally:
+                verify.close()
 
     def test_security_event_maps_to_security_class(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -173,8 +186,14 @@ class TestCreateTicketFromSignal:
             result = _create_ticket_from_signal(signal, state_dir)
             assert result["success"] is True
 
-            stored = json.loads(tickets_path.read_text())
-            assert stored["tickets"][0]["ticket_class"] == "security"
+            from codebot.ticket_engine import TicketStore
+            verify = TicketStore(tickets_path)
+            try:
+                t = verify.get(result["ticket_id"])
+                assert t is not None
+                assert t.ticket_class.value == "security"
+            finally:
+                verify.close()
 
     def test_duplicate_signal_returns_duplicate_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -208,8 +227,14 @@ class TestCreateTicketFromSignal:
             result = _create_ticket_from_signal(signal, state_dir)
             assert result["success"] is True
 
-            stored = json.loads(tickets_path.read_text())
-            assert "libc" in stored["tickets"][0]["problem_statement"]
+            from codebot.ticket_engine import TicketStore
+            verify = TicketStore(tickets_path)
+            try:
+                t = verify.get(result["ticket_id"])
+                assert t is not None
+                assert "libc" in t.problem_statement
+            finally:
+                verify.close()
 
 
 def _make_handler(
@@ -344,3 +369,361 @@ class TestTelemetryHandlerAuth:
         assert header_dict.get("X-Content-Type-Options") == "nosniff"
         assert header_dict.get("X-Frame-Options") == "DENY"
         assert header_dict.get("Referrer-Policy") == "no-referrer"
+
+    def test_telemetry_handler_uses_hmac_compare_digest(self) -> None:
+        """Source-inspection test to enforce hmac.compare_digest usage and prevent regression."""
+        from pathlib import Path
+
+        # Read codebot/telemetry.py source
+        telemetry_path = Path(__file__).parent.parent / "codebot" / "telemetry.py"
+        source = telemetry_path.read_text(encoding="utf-8")
+
+        # Extract the _auth method body
+        auth_start = source.find("def _auth(self)")
+        assert auth_start != -1, "_auth method not found in telemetry.py"
+
+        # Find the end of the method (next def or end of class)
+        auth_body_end = source.find("\n    def ", auth_start + 1)
+        if auth_body_end == -1:
+            auth_body_end = source.find("\n\nclass ", auth_start + 1)
+        if auth_body_end == -1:
+            auth_body_end = len(source)
+        auth_body = source[auth_start:auth_body_end]
+
+        # Assert that hmac.compare_digest is used
+        assert "hmac.compare_digest" in auth_body, (
+            "TelemetryHandler._auth must use hmac.compare_digest for constant-time comparison"
+        )
+
+        # Assert that == is not used for comparing auth/token material
+        # Check that there is no '==' operator in the _auth method body
+        assert "==" not in auth_body, (
+            "TelemetryHandler._auth must not use '==' operator for token comparison; use hmac.compare_digest instead"
+        )
+
+
+class TestCreateTicketFromSignalErrors:
+    """Tests for error paths in _create_ticket_from_signal."""
+
+    def test_import_error_returns_failure(self) -> None:
+        """Test when ticket_engine cannot be imported."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            signal = {"signal_type": "error", "summary": "test"}
+            import builtins as _builtins
+            import sys as _sys2
+            orig_te = _sys2.modules.get("codebot.ticket_engine")
+            if "codebot.ticket_engine" in _sys2.modules:
+                del _sys2.modules["codebot.ticket_engine"]
+
+            original_import = _builtins.__import__
+
+            def fake_import(name, *args, **kwargs):
+                if name == "codebot.ticket_engine" or name.startswith("codebot.ticket_engine."):
+                    raise ImportError(f"Mocked import error for {name}")
+                return original_import(name, *args, **kwargs)
+
+            try:
+                with patch("builtins.__import__", side_effect=fake_import):
+                    result = _create_ticket_from_signal(signal, state_dir)
+                    assert result["success"] is False
+                    assert "ticket_engine unavailable" in result["error"]
+            finally:
+                if orig_te is not None:
+                    sys.modules["codebot.ticket_engine"] = orig_te
+                elif "codebot.ticket_engine" in sys.modules:
+                    del sys.modules["codebot.ticket_engine"]
+
+    def test_create_ticket_value_error_returns_failure(self) -> None:
+        """Test when create_ticket raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            signal = {"signal_type": "error", "summary": "test"}
+
+            with patch("codebot.ticket_engine.create_ticket", side_effect=ValueError("Invalid ticket data")):
+                result = _create_ticket_from_signal(signal, state_dir)
+                assert result["success"] is False
+                assert "Invalid ticket data" in result["error"]
+
+    def test_store_exception_returns_failure(self) -> None:
+        """Test when TicketStore.add or flush raises an exception."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            tickets_path = state_dir / "tickets.json"
+            tickets_path.write_text(json.dumps({
+                "schema_version": "2.0", "updated_at": 0, "tickets": []
+            }))
+
+            signal = {"signal_type": "error", "summary": "test"}
+
+            # Mock TicketStore to raise an exception on add — patch where it is imported from
+            with patch("codebot.ticket_engine.TicketStore") as mock_store_class:
+                mock_store_instance = MagicMock()
+                mock_store_instance.add.side_effect = Exception("DB Error")
+                mock_store_class.return_value = mock_store_instance
+
+                result = _create_ticket_from_signal(signal, state_dir)
+                assert result["success"] is False
+                assert "store failed" in result["error"]
+
+
+class TestTelemetryHandlerPostErrors:
+    """Tests for error paths in TelemetryHandler.do_POST."""
+
+    def test_invalid_content_length_returns_400(self) -> None:
+        """Test when Content-Length is not an integer."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            handler = _make_handler(
+                "POST", "/telemetry",
+                headers={
+                    "Authorization": "Bearer tok",
+                    "Content-Length": "not-an-int",
+                }
+            )
+            handler.do_POST()
+            assert handler._response_code == 400  # type: ignore[attr-defined]
+
+    def test_negative_content_length_returns_400(self) -> None:
+        """Test when Content-Length is negative."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            handler = _make_handler(
+                "POST", "/telemetry",
+                headers={
+                    "Authorization": "Bearer tok",
+                    "Content-Length": "-1",
+                }
+            )
+            handler.do_POST()
+            assert handler._response_code == 400  # type: ignore[attr-defined]
+
+    def test_read_timeout_returns_408(self) -> None:
+        """Test when reading the request body times out."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            handler = _make_handler(
+                "POST", "/telemetry",
+                headers={
+                    "Authorization": "Bearer tok",
+                    "Content-Length": "10",
+                }
+            )
+            # Mock rfile.read to raise TimeoutError
+            handler.rfile = MagicMock()
+            handler.rfile.read.side_effect = TimeoutError("Read timed out")
+            
+            handler.do_POST()
+            assert handler._response_code == 408  # type: ignore[attr-defined]
+
+    def test_os_error_on_read_returns_408(self) -> None:
+        """Test when reading the request body raises OSError."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            handler = _make_handler(
+                "POST", "/telemetry",
+                headers={
+                    "Authorization": "Bearer tok",
+                    "Content-Length": "10",
+                }
+            )
+            # Mock rfile.read to raise OSError
+            handler.rfile = MagicMock()
+            handler.rfile.read.side_effect = OSError("Connection reset")
+            
+            handler.do_POST()
+            assert handler._response_code == 408  # type: ignore[attr-defined]
+
+    def test_get_unknown_path_returns_404(self) -> None:
+        """Test GET on unknown path returns 404."""
+        handler = _make_handler("GET", "/unknown")
+        handler.do_GET()
+        assert handler._response_code == 404  # type: ignore[attr-defined]
+
+    def test_post_invalid_signal_returns_400(self) -> None:
+        """Test POST with invalid signal body returns 400."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            body = json.dumps({"signal_type": "invalid", "summary": "test"}).encode()
+            handler = _make_handler(
+                "POST", "/telemetry",
+                headers={
+                    "Authorization": "Bearer tok",
+                    "Content-Length": str(len(body)),
+                },
+                body=body,
+            )
+            handler.do_POST()
+            assert handler._response_code == 400  # type: ignore[attr-defined]
+
+    def test_post_ticket_creation_fails_returns_500(self) -> None:
+        """Test POST when ticket creation fails returns 500."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            with patch("codebot.ticket_engine.create_ticket", side_effect=ValueError("Invalid")):
+                body = json.dumps({"signal_type": "error", "summary": "test"}).encode()
+                handler = _make_handler(
+                    "POST", "/telemetry",
+                    headers={
+                        "Authorization": "Bearer tok",
+                        "Content-Length": str(len(body)),
+                    },
+                    body=body,
+                )
+                handler.do_POST()
+                assert handler._response_code == 500  # type: ignore[attr-defined]
+
+    def test_post_store_close_exception_suppressed(self) -> None:
+        """Test that store.close exception in finally block is suppressed."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            with patch("codebot.ticket_engine.TicketStore") as mock_store_class:
+                mock_store_instance = MagicMock()
+                mock_store_instance.add.return_value = MagicMock(id="CB-TEST", state=MagicMock(value="DISCOVERED"))
+                mock_store_instance.flush.return_value = None
+                mock_store_instance.close.side_effect = Exception("close failed")
+                mock_store_class.return_value = mock_store_instance
+
+                body = json.dumps({"signal_type": "error", "summary": "test"}).encode()
+                handler = _make_handler(
+                    "POST", "/telemetry",
+                    headers={
+                        "Authorization": "Bearer tok",
+                        "Content-Length": str(len(body)),
+                    },
+                    body=body,
+                )
+                handler.do_POST()
+                # Should succeed despite close failing
+                assert handler._response_code == 201  # type: ignore[attr-defined]
+
+
+class TestTelemetryHandlerLogMessage:
+    """Tests for log_message method."""
+
+    def test_log_message_calls_logger(self) -> None:
+        """Test that log_message calls logger.debug."""
+        with patch("codebot.telemetry.logger") as mock_logger:
+            handler = _make_handler("GET", "/telemetry/health")
+            handler.log_message("test message %s", "arg")
+            mock_logger.debug.assert_called_once_with("test message %s", "arg")
+
+
+class TestDetectAnomalies:
+    """Tests for detect_anomalies function."""
+
+    def test_empty_signals_returns_empty(self) -> None:
+        from codebot.telemetry import detect_anomalies
+        result = detect_anomalies([], 10.0)
+        assert result == []
+
+    def test_zero_baseline_returns_empty(self) -> None:
+        from codebot.telemetry import detect_anomalies
+        signals = [{"signal_type": "error"}]
+        result = detect_anomalies(signals, 0.0)
+        assert result == []
+
+    def test_negative_baseline_returns_empty(self) -> None:
+        from codebot.telemetry import detect_anomalies
+        signals = [{"signal_type": "error"}]
+        result = detect_anomalies(signals, -1.0)
+        assert result == []
+
+    def test_no_anomaly_detected(self) -> None:
+        from codebot.telemetry import detect_anomalies
+        signals = [
+            {"signal_type": "error"},
+            {"signal_type": "error"},
+        ]
+        baseline = 10.0
+        result = detect_anomalies(signals, baseline)
+        assert result == []
+
+    def test_anomaly_detected(self) -> None:
+        from codebot.telemetry import detect_anomalies
+        # Baseline 10, threshold 30 (3x). Send 30 errors.
+        signals = [{"signal_type": "error"} for _ in range(30)]
+        baseline = 10.0
+        result = detect_anomalies(signals, baseline)
+        assert len(result) == 1
+        assert result[0]["type"] == "error_spike"
+        assert result[0]["count"] == 30
+        assert result[0]["baseline_rate"] == 10.0
+
+    def test_multiple_anomalies_detected(self) -> None:
+        from codebot.telemetry import detect_anomalies
+        signals = [
+            {"signal_type": "error"},
+            {"signal_type": "error"},
+            {"signal_type": "error"},
+            {"signal_type": "crash_report"},
+            {"signal_type": "crash_report"},
+            {"signal_type": "crash_report"},
+        ]
+        baseline = 1.0
+        result = detect_anomalies(signals, baseline)
+        assert len(result) == 2
+        types = {r["type"] for r in result}
+        assert "error_spike" in types
+        assert "crash_report_spike" in types
+
+    def test_non_string_signal_type_ignored(self) -> None:
+        from codebot.telemetry import detect_anomalies
+        signals = [
+            {"signal_type": 123},  # Invalid type
+            {"signal_type": "error"},
+        ]
+        baseline = 0.1
+        result = detect_anomalies(signals, baseline)
+        # Only "error" should be counted. 1 count vs threshold 0.3. 
+        # Threshold is max(3.0, 0.1*3) = 3.0. 1 < 3.0, so no anomaly.
+        assert result == []
+
+
+class TestTelemetryHandlerAuthDirect:
+    """Direct tests for _auth method to ensure line coverage."""
+
+    def test_auth_returns_false_when_token_empty(self) -> None:
+        """Test _auth returns False when TELEMETRY_TOKEN is empty."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", ""):
+            handler = _make_handler("POST", "/telemetry")
+            # Call _auth directly
+            result = handler._auth()
+            assert result is False
+
+    def test_auth_returns_false_when_token_unset(self) -> None:
+        """Test _auth returns False when TELEMETRY_TOKEN is unset (None-like)."""
+        # TELEMETRY_TOKEN defaults to "" if env var missing, so patching to "" covers it.
+        # This test is redundant but ensures the line is hit in a different context
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", ""):
+            handler = _make_handler("POST", "/telemetry", headers={"Authorization": "Bearer anything"})
+            result = handler._auth()
+            assert result is False
+
+
+class TestTelemetryHandlerPostEdgeCases:
+    """Additional edge case tests for do_POST."""
+
+    def test_unicode_decode_error_returns_400(self) -> None:
+        """Test when request body has invalid UTF-8."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            # Invalid UTF-8 bytes
+            body = b'\xff\xfe{"signal_type": "error"}'
+            handler = _make_handler(
+                "POST", "/telemetry",
+                headers={
+                    "Authorization": "Bearer tok",
+                    "Content-Length": str(len(body)),
+                },
+                body=body,
+            )
+            handler.do_POST()
+            assert handler._response_code == 400  # type: ignore[attr-defined]
+
+    def test_valid_json_but_invalid_signal_returns_400(self) -> None:
+        """Test when JSON is valid but signal validation fails."""
+        with patch("codebot.telemetry.TELEMETRY_TOKEN", "tok"):
+            body = json.dumps({"signal_type": "invalid_type", "summary": "test"}).encode()
+            handler = _make_handler(
+                "POST", "/telemetry",
+                headers={
+                    "Authorization": "Bearer tok",
+                    "Content-Length": str(len(body)),
+                },
+                body=body,
+            )
+            handler.do_POST()
+            assert handler._response_code == 400  # type: ignore[attr-defined]

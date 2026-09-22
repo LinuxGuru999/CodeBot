@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from codebot.adaptive_rate_limiter import ModelRateState, QueuedRequest, AdaptiveRateLimiter
+from codebot.adaptive_rate_limiter import ModelRateState, AdaptiveRateLimiter
+try:
+    from codebot.adaptive_rate_limiter import QueuedRequest
+except ImportError:
+    # Fallback: QueuedRequest is now defined in adaptive_rate_limiter.py itself
+    pass
 
 
 # ===========================================================================

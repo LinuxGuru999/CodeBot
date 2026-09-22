@@ -19,6 +19,7 @@ from codebot.rl_engine import (
     DEFAULT_Q_VALUES,
     REWARD_HISTORY_MAX,
     SCHEMA_VERSION,
+    award_ticket_completion_rewards,
     choose_pattern,
     decay_epsilon,
     ensure_bot,
@@ -29,6 +30,7 @@ from codebot.rl_engine import (
     save_rl_state,
     update_q_value,
 )
+from codebot.lifecycle_packet import LifecyclePacketStore
 
 
 class TestConstants:
@@ -333,6 +335,18 @@ class TestRecordEventReward:
         record_event_reward(state, "bot1", 0.65, 65, 0)
         assert state["bots"]["bot1"]["consecutive_successes"] == 0
         assert state["bots"]["bot1"]["consecutive_failures"] == 0
+
+    def test_ticket_completion_rewards_each_participant_once(self, tmp_path):
+        packets = LifecyclePacketStore(tmp_path)
+        packets.record_participants("CB-1", ["implementer", "reviewer", "implementer"])
+
+        assert award_ticket_completion_rewards(tmp_path, "CB-1") == ["implementer", "reviewer"]
+        assert award_ticket_completion_rewards(tmp_path, "CB-1") == []
+
+        state = load_rl_state(tmp_path / "rl_state.json")
+        assert state["bots"]["implementer"]["total_runs"] == 1
+        assert state["bots"]["reviewer"]["total_runs"] == 1
+        assert state["global"]["total_events"] == 2
 
 
 class TestIsSelfTarget:

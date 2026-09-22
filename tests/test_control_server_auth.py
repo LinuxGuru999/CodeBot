@@ -170,13 +170,18 @@ class TestSecurityHeaders(unittest.TestCase):
                        "control_server.py must set no-referrer value")
 
     def test_fail_closed_in_production_code(self):
-        """Verify that the production _auth() method fails closed when token is empty."""
+        """Verify that the production _auth() method fails closed when token is empty.
+
+        Ticket CB-B40869760C5B822FAE354B36F80BC9FF: the
+        CONTROL_ALLOW_UNAUTHENTICATED bypass was REMOVED. _auth() must
+        unconditionally return False when CONTROL_TOKEN is empty — no opt-in
+        flag may re-enable unauthenticated access.
+        """
         import pathlib
         cs_path = pathlib.Path(__file__).parent.parent / "codebot" / "control_server.py"
         source = cs_path.read_text()
 
-        # The _auth method should NOT unconditionally return True when token is empty.
-        # It may return True only inside a CONTROL_ALLOW_UNAUTHENTICATED guard.
+        # The _auth method must fail closed: empty token -> return False.
         auth_start = source.find("def _auth(self)")
         self.assertNotEqual(auth_start, -1, "_auth method not found in control_server.py")
 
@@ -188,22 +193,21 @@ class TestSecurityHeaders(unittest.TestCase):
             auth_body_end = len(source)
         auth_body = source[auth_start:auth_body_end]
 
-        # Must have fail-closed path: return False when no token and no opt-in
+        # Must have fail-closed path: return False when no token
         self.assertIn("return False", auth_body,
                        "control_server.py _auth() must return False when CONTROL_TOKEN is empty")
 
-        # Must require explicit opt-in flag for unauthenticated access
-        self.assertIn("CONTROL_ALLOW_UNAUTHENTICATED", auth_body,
-                       "control_server.py _auth() must check CONTROL_ALLOW_UNAUTHENTICATED before allowing unauthenticated access")
+        # The CONTROL_ALLOW_UNAUTHENTICATED bypass must be REMOVED from _auth():
+        # no opt-in flag may re-enable unauthenticated access to any endpoint
+        # (destructive or read-only). CB-B4086 acceptance criterion #2.
+        self.assertNotIn("CONTROL_ALLOW_UNAUTHENTICATED", auth_body,
+                       "control_server.py _auth() must NOT contain CONTROL_ALLOW_UNAUTHENTICATED bypass")
+        self.assertNotIn("ALLOW_UNAUTHENTICATED", auth_body,
+                       "control_server.py _auth() must NOT contain any unauthenticated bypass")
 
-        # The default path when token is unset must be return False, not return True
-        # Verify that 'return True' only appears after the CONTROL_ALLOW_UNAUTHENTICATED check
-        allow_idx = auth_body.find("CONTROL_ALLOW_UNAUTHENTICATED")
-        true_idx = auth_body.find("return True")
+        # The empty-token branch must unconditionally reject (no `return True`
+        # reachable when CONTROL_TOKEN is empty).
         false_idx = auth_body.find("return False")
-        if true_idx != -1:
-            self.assertGreater(true_idx, allow_idx,
-                               "return True must only appear inside CONTROL_ALLOW_UNAUTHENTICATED guard")
         self.assertNotEqual(false_idx, -1,
                             "_auth() must have a return False path for missing token")
 
@@ -221,15 +225,14 @@ class TestSecurityHeaders(unittest.TestCase):
 class TestUnauthenticatedRejection(unittest.TestCase):
     """Integration tests for fail-closed behavior when CONTROL_TOKEN is unset.
 
-    Ticket: CB-9254911-94D6
+    Ticket: CB-B40869760C5B822FAE354B36F80BC9FF
     Verifies that the control server rejects all authenticated endpoints
-    when CONTROL_TOKEN is not set, unless CONTROL_ALLOW_UNAUTHENTICATED=1.
+    when CONTROL_TOKEN is not set. The CONTROL_ALLOW_UNAUTHENTICATED bypass has been removed.
     """
 
     def setUp(self):
         """Save original environment values."""
         self.original_control_token = os.environ.get("CONTROL_TOKEN", "")
-        self.original_allow_unauth = os.environ.get("CONTROL_ALLOW_UNAUTHENTICATED", "")
 
     def tearDown(self):
         """Restore original environment values."""
@@ -237,11 +240,6 @@ class TestUnauthenticatedRejection(unittest.TestCase):
             os.environ["CONTROL_TOKEN"] = self.original_control_token
         elif "CONTROL_TOKEN" in os.environ:
             del os.environ["CONTROL_TOKEN"]
-
-        if self.original_allow_unauth:
-            os.environ["CONTROL_ALLOW_UNAUTHENTICATED"] = self.original_allow_unauth
-        elif "CONTROL_ALLOW_UNAUTHENTICATED" in os.environ:
-            del os.environ["CONTROL_ALLOW_UNAUTHENTICATED"]
 
         # Reload the module to pick up new environment variables
         import codebot.control_server as cs
@@ -252,8 +250,6 @@ class TestUnauthenticatedRejection(unittest.TestCase):
         """Server rejects all authenticated endpoints with 401 when CONTROL_TOKEN is empty."""
         # Set CONTROL_TOKEN to empty and reload module
         os.environ["CONTROL_TOKEN"] = ""
-        if "CONTROL_ALLOW_UNAUTHENTICATED" in os.environ:
-            del os.environ["CONTROL_ALLOW_UNAUTHENTICATED"]
 
         import codebot.control_server as cs
         import importlib
@@ -288,34 +284,6 @@ class TestUnauthenticatedRejection(unittest.TestCase):
             # Verify _auth returns False (fail-closed)
             self.assertFalse(result, "_auth() must return False when CONTROL_TOKEN is empty")
 
-    def test_auth_allows_when_control_allow_unauthenticated_set(self):
-        """Server allows unauthenticated access when CONTROL_ALLOW_UNAUTHENTICATED=1."""
-        # Set CONTROL_TOKEN to empty but allow unauthenticated
-        os.environ["CONTROL_TOKEN"] = ""
-        os.environ["CONTROL_ALLOW_UNAUTHENTICATED"] = "1"
-
-        import codebot.control_server as cs
-        import importlib
-        importlib.reload(cs)
-
-        from unittest.mock import MagicMock, patch
-        from http.server import BaseHTTPRequestHandler
-
-        mock_request = MagicMock()
-        mock_request.makefile.return_value = BytesIO(b"")
-        mock_client_address = ("127.0.0.1", 12345)
-
-        with patch.object(BaseHTTPRequestHandler, '__init__', return_value=None):
-            handler = cs.ControlHandler(mock_request, mock_client_address, None)
-            handler.headers = {}
-            handler.client_address = mock_client_address
-
-            # Call _auth - should return True when CONTROL_ALLOW_UNAUTHENTICATED=1
-            result = handler._auth()
-
-            # Verify _auth returns True (opt-in unauthenticated mode)
-            self.assertTrue(result, "_auth() must return True when CONTROL_ALLOW_UNAUTHENTICATED=1")
-
     def test_startup_warning_logged_when_no_token(self):
         """Startup warning is logged when CONTROL_TOKEN is not configured."""
         import logging
@@ -331,8 +299,6 @@ class TestUnauthenticatedRejection(unittest.TestCase):
 
         # Set CONTROL_TOKEN to empty
         os.environ["CONTROL_TOKEN"] = ""
-        if "CONTROL_ALLOW_UNAUTHENTICATED" in os.environ:
-            del os.environ["CONTROL_ALLOW_UNAUTHENTICATED"]
 
         import codebot.control_server as cs
         import importlib
@@ -440,6 +406,79 @@ class TestTimingSafeComparison(unittest.TestCase):
                     # Make sure it's not inside a comment
                     if not stripped.startswith("#"):
                         self.fail(f"Line {i} uses == for potential token comparison: {stripped}")
+
+
+class TestTelemetryAuthBypassFix(unittest.TestCase):
+    """Verify telemetry endpoint respects fail-closed policy when CONTROL_TOKEN is empty.
+
+    Ticket: CB-B30A27B81D697DA358F82DA04940B527
+    Ensures that even with a valid TELEMETRY_TOKEN, requests are rejected if CONTROL_TOKEN is unset.
+    """
+
+    def setUp(self):
+        """Save original environment values."""
+        self.original_control_token = os.environ.get("CONTROL_TOKEN", "")
+        self.original_telemetry_token = os.environ.get("CODEBOT_TELEMETRY_TOKEN", "")
+        self.original_allow_unauth = os.environ.get("CONTROL_ALLOW_UNAUTHENTICATED", "")
+
+    def tearDown(self):
+        """Restore original environment values."""
+        if self.original_control_token:
+            os.environ["CONTROL_TOKEN"] = self.original_control_token
+        elif "CONTROL_TOKEN" in os.environ:
+            del os.environ["CONTROL_TOKEN"]
+
+        if self.original_telemetry_token:
+            os.environ["CODEBOT_TELEMETRY_TOKEN"] = self.original_telemetry_token
+        elif "CODEBOT_TELEMETRY_TOKEN" in os.environ:
+            del os.environ["CODEBOT_TELEMETRY_TOKEN"]
+
+        if self.original_allow_unauth:
+            os.environ["CONTROL_ALLOW_UNAUTHENTICATED"] = self.original_allow_unauth
+        elif "CONTROL_ALLOW_UNAUTHENTICATED" in os.environ:
+            del os.environ["CONTROL_ALLOW_UNAUTHENTICATED"]
+
+        # Reload module to pick up env changes
+        import codebot.control_server as cs
+        import importlib
+        importlib.reload(cs)
+
+    def test_telemetry_rejected_when_control_token_empty_even_if_telemetry_token_set(self):
+        """POST /telemetry must return 401 when CONTROL_TOKEN is empty, even if TELEMETRY_TOKEN is valid."""
+        # Set env vars: CONTROL_TOKEN empty, TELEMETRY_TOKEN set
+        os.environ["CONTROL_TOKEN"] = ""
+        os.environ["CODEBOT_TELEMETRY_TOKEN"] = "valid-telemetry-token"
+        os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
+
+        import codebot.control_server as cs
+        import importlib
+        importlib.reload(cs)
+
+        from unittest.mock import MagicMock, patch
+        from http.server import BaseHTTPRequestHandler
+        from io import BytesIO
+
+        mock_request = MagicMock()
+        mock_request.makefile.return_value = BytesIO(b"")
+        mock_client_address = ("127.0.0.1", 12345)
+
+        with patch.object(BaseHTTPRequestHandler, '__init__', return_value=None):
+            handler = cs.ControlHandler(mock_request, mock_client_address, None)
+            handler.headers = {"Authorization": "Bearer valid-telemetry-token"}
+            handler.client_address = mock_client_address
+
+            captured_response = {}
+            def mock_json(code, obj, extra_headers=None):
+                captured_response['code'] = code
+                captured_response['obj'] = obj
+            handler._json = mock_json
+
+            # Call _handle_telemetry with a minimal valid body
+            handler._handle_telemetry({"signal_type": "test", "data": {}})
+
+            self.assertEqual(captured_response.get('code'), 401,
+                             "Telemetry endpoint must return 401 when CONTROL_TOKEN is empty")
+            self.assertIn("unauthorized", captured_response.get('obj', {}).get('error', '').lower())
 
 
 class TestRateLimiterUnit(unittest.TestCase):

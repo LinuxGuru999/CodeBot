@@ -13,13 +13,12 @@ from codebot.dispatch_service import (
     transition_ticket_on_error,
     batch_read_bot_statuses,
 )
+from codebot.ticket_dispatcher import IMPLEMENTATION_ROLE_ORDER
 from codebot.ticket_engine import TicketState, TicketClass, Severity, RiskLevel, create_ticket, TicketStore
 from codebot.process_manager import BotConfig, BotState
 
 
 class TestTransitionTicketOnError:
-    """Test that error exits transition tickets back to READY."""
-
     def _make_bot(self, ticket_id: str = "") -> BotState:
         config = BotConfig("test_bot", "prompt.md", 600, 1200, "default")
         bot = BotState(config=config)
@@ -27,50 +26,34 @@ class TestTransitionTicketOnError:
             bot._assigned_ticket_id = ticket_id
         return bot
 
-    def test_error_exit_transitions_to_ready(self, tmp_path):
-        """Error exit (exit_code != 0 and != 3) should transition ticket to READY."""
-        store_path = tmp_path / "tickets.json"
-        store = TicketStore(store_path)
-
-        # Create a ticket in IMPLEMENTING state
+    def test_implementer_error_returns_ticket_to_rework(self, tmp_path):
+        store = TicketStore(tmp_path / "tickets.json")
         t = create_ticket(
             title="Test bug",
             ticket_class=TicketClass.BUG,
             severity=Severity.MEDIUM,
             source="test",
-            evidence="evidence",
+            evidence="implementation-error-evidence",
             problem_statement="problem",
             desired_state="desired",
             acceptance_criteria=["ac"],
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.IMPLEMENTING)
-        store.flush()
-
-        # Verify ticket is in IMPLEMENTING
-        assert store.get(t.id).state == TicketState.IMPLEMENTING
-
-        # Create a bot with the ticket assigned
+        store.transition(t.id, TicketState.GOAL)
+        store.transition(t.id, TicketState.DECOMP)
+        store.transition(t.id, TicketState.PLANNING)
+        store.transition(t.id, TicketState.IMPLEMENT)
         bot = self._make_bot(t.id)
-        bots = {"test_bot": bot}
-
-        # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
-        transition_ticket_on_error(bot, bots, exit_code=1, store=store)
-
-        # Verify ticket transitioned to READY
+        transition_ticket_on_error(bot, {"test_bot": bot}, exit_code=1, store=store)
         updated = store.get(t.id)
-        assert updated.state == TicketState.READY, f"Expected READY, got {updated.state}"
-
-        # Verify assigned_ticket_id is cleared
+        assert updated is not None
+        assert updated.state == TicketState.REWORK
         assert bot._assigned_ticket_id == ""
         store.close()
 
     def test_error_exit_different_codes(self, tmp_path):
-        """Various error exit codes should all transition to READY."""
         for exit_code in [1, 2, 4, 127, 255]:
             store_path = tmp_path / "tickets.json"
             # Remove previous file if exists from prior iteration
@@ -90,20 +73,16 @@ class TestTransitionTicketOnError:
                 risk=RiskLevel.LOW,
             )
             store.add(t)
-            store.transition(t.id, TicketState.VALIDATING)
             store.transition(t.id, TicketState.TRIAGED)
-            store.transition(t.id, TicketState.READY)
-            store.transition(t.id, TicketState.IMPLEMENTING)
-            store.flush()
-
+            store.transition(t.id, TicketState.GOAL)
+            store.transition(t.id, TicketState.DECOMP)
+            store.transition(t.id, TicketState.PLANNING)
+            store.transition(t.id, TicketState.IMPLEMENT)
             bot = self._make_bot(t.id)
-            bots = {"test_bot": bot}
-
-            # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
-            transition_ticket_on_error(bot, bots, exit_code=exit_code, store=store)
-
+            transition_ticket_on_error(bot, {"test_bot": bot}, exit_code=exit_code, store=store)
             updated = store.get(t.id)
-            assert updated.state == TicketState.READY, f"Exit code {exit_code}: expected READY, got {updated.state}"
+            assert updated is not None
+            assert updated.state == TicketState.REWORK
             store.close()
 
     def test_error_exit_no_assigned_ticket(self, tmp_path):
@@ -164,11 +143,11 @@ class TestTransitionTicketOnError:
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.IMPLEMENTING)
-        store.flush()
+        store.transition(t.id, TicketState.GOAL)
+        store.transition(t.id, TicketState.DECOMP)
+        store.transition(t.id, TicketState.PLANNING)
+        store.transition(t.id, TicketState.IMPLEMENT)
 
         # Create a claim file
         claims_dir = tmp_path / "claims"
@@ -198,8 +177,8 @@ class TestTransitionTicketOnSuccess:
             bot._assigned_ticket_id = ticket_id
         return bot
 
-    def test_implementer_success_transitions_to_reviewing(self, tmp_path):
-        """Implementer success should transition ticket to REVIEWING."""
+    def test_implementer_success_requires_every_role_before_review(self, tmp_path):
+        """A ticket enters review only after every implementation role approves."""
         store_path = tmp_path / "tickets.json"
         store = TicketStore(store_path)
 
@@ -215,20 +194,56 @@ class TestTransitionTicketOnSuccess:
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.IMPLEMENTING)
-        store.flush()
+        store.transition(t.id, TicketState.GOAL)
+        store.transition(t.id, TicketState.DECOMP)
+        store.transition(t.id, TicketState.PLANNING)
+        store.transition(t.id, TicketState.IMPLEMENT)
 
-        bot = self._make_bot(t.id, name="general_implementer")
-        bots = {"general_implementer": bot}
+        for role in IMPLEMENTATION_ROLE_ORDER[:-1]:
+            bot = self._make_bot(t.id, name=role)
+            transition_ticket_on_success(bot, {role: bot}, store=store)
+            updated = store.get(t.id)
+            assert updated is not None
+            assert updated.state == TicketState.IMPLEMENT
+            assert updated.implementation_approvals[-1] == role
 
-        # Pass store directly (single-instance-per-tick API from CB-9165641-2750)
-        transition_ticket_on_success(bot, bots, store=store)
+        last_role = IMPLEMENTATION_ROLE_ORDER[-1]
+        bot = self._make_bot(t.id, name=last_role)
+        transition_ticket_on_success(bot, {last_role: bot}, store=store)
 
         updated = store.get(t.id)
-        assert updated.state == TicketState.REVIEWING
+        assert updated is not None
+        assert updated.state == TicketState.REVIEW
+        assert updated.implementation_approvals == list(IMPLEMENTATION_ROLE_ORDER)
+        store.close()
+
+    def test_planner_success_moves_ticket_to_implement(self, tmp_path):
+        """PLANNING tickets enter IMPLEMENT only after planner completion."""
+        store = TicketStore(tmp_path / "tickets.json")
+        ticket = create_ticket(
+            title="Test bug",
+            ticket_class=TicketClass.BUG,
+            severity=Severity.LOW,
+            source="test",
+            evidence="planner-evidence",
+            problem_statement="problem",
+            desired_state="desired",
+            acceptance_criteria=["ac"],
+            risk=RiskLevel.LOW,
+        )
+        store.add(ticket)
+        store.transition(ticket.id, TicketState.TRIAGED)
+        store.transition(ticket.id, TicketState.GOAL)
+        store.transition(ticket.id, TicketState.DECOMP)
+        store.transition(ticket.id, TicketState.PLANNING)
+
+        bot = self._make_bot(ticket.id, name="planner")
+        transition_ticket_on_success(bot, {"planner": bot}, store=store)
+
+        updated = store.get(ticket.id)
+        assert updated is not None
+        assert updated.state == TicketState.IMPLEMENT
         store.close()
 
     def test_reviewer_success_does_not_transition_prematurely(self, tmp_path):
@@ -251,6 +266,7 @@ class TestTransitionTicketOnSuccess:
         store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
         store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.IMPLEMENTATION_READY)
         store.transition(t.id, TicketState.IMPLEMENTING)
         store.transition(t.id, TicketState.REVIEWING)
         store.flush()

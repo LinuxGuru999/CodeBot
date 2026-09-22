@@ -18,16 +18,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import codebot.botop as _codebot_botop
+import sys as _sys
+_sys.modules["botop"] = _codebot_botop
 
-# Import internals from botop
-sys.path.insert(0, str(Path(__file__).parent.parent / "codebot"))
-from botop import (
+# Import internals via canonical path so patch("codebot.botop.*") hits the same objects
+from codebot.botop import (
     _parse_checkpoint_text,
     _collect_agents,
     _collect_ticket_throughput,
     _implementation_claims,
     cmd_status,
     cmd_health,
+    _collect_orchestrator_info,
     _find_state_dir,
     _find_logs_dir,
 )
@@ -76,6 +79,17 @@ def test_parse_checkpoint_nested_json():
     assert result is not None
     assert result["outer"]["inner"]["deep"] == "value"
     assert result["list"] == [1, 2, 3]
+
+
+def test_collect_orchestrator_info_reads_hidden_pid_file(tmp_path):
+    state_dir = tmp_path / ".codebot" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / ".orchestrator.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    info = _collect_orchestrator_info(tmp_path)
+
+    assert info["pid"] == os.getpid()
+    assert info["alive"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -244,66 +244,71 @@ class TestCommandInjectionPrevention(unittest.TestCase):
 
     # --- Verify shlex.quote is applied ---
 
-    def test_restart_applies_shlex_quote(self):
-        """Restart must apply shlex.quote to bot names before subprocess call."""
+    def test_restart_applies_re_escape(self):
+        """Restart kill path must NOT regex-scan; it targets the PID file only."""
         from codebot.control_server import ControlHandler
-        import shlex
 
         mock_bot = MagicMock()
         mock_bot.name = "valid-bot"
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
-            with patch("codebot.control_server.subprocess.run") as mock_run:
-                with patch("codebot.control_server.subprocess.Popen"):
-                    with patch("codebot.control_server.time"):
-                        handler = self._make_handler("POST", "/bots/valid-bot/restart")
-                        responses = []
-                        handler._json = lambda code, data, r=responses: r.append((code, data))
-                        handler._auth = lambda: True
-                        handler._read_json_body = lambda: ({"force": True}, None, None)
+            with patch("codebot.control_server._safe_kill_bot_process",
+                       return_value=(True, [])) as mock_safe_kill:
+                with patch("codebot.control_server.subprocess.run") as mock_run:
+                    with patch("codebot.control_server.subprocess.Popen"):
+                        with patch("codebot.control_server.time"):
+                            handler = self._make_handler("POST", "/bots/valid-bot/restart")
+                            responses = []
+                            handler._json = lambda code, data, r=responses: r.append((code, data))
+                            handler._auth = lambda: True
+                            handler._read_json_body = lambda: ({"force": True}, None, None)
 
-                        ControlHandler.do_POST(handler)
+                            ControlHandler.do_POST(handler)
 
-                        # Verify pkill was called with quoted name
-                        mock_run.assert_called()
-                        call_args = mock_run.call_args
-                        cmd = call_args[0][0]  # First positional arg is the command list
-                        # The pattern should contain the quoted bot name
-                        expected_pattern = f"api_runner\\.py {shlex.quote('valid-bot')}"
-                        self.assertIn(expected_pattern, cmd)
+                            # Kill path goes through the PID-file helper with the
+                            # validated name (no pgrep/pkill regex in the kill path).
+                            mock_safe_kill.assert_called_once_with("valid-bot", timeout=5)
+                            for call in mock_run.call_args_list:
+                                cmd = call[0][0] if call[0] else []
+                                self.assertFalse(
+                                    any("pkill" in str(a) for a in cmd),
+                                    f"kill path must not use pkill: {cmd}",
+                                )
 
-    def test_pause_applies_shlex_quote(self):
-        """Pause must apply shlex.quote to bot names before subprocess call."""
+    def test_pause_applies_re_escape(self):
+        """Pause kill path must NOT regex-scan; it targets the PID file only."""
         from codebot.control_server import ControlHandler
-        import shlex
 
         mock_bot = MagicMock()
         mock_bot.name = "valid-bot"
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
             with patch("codebot.control_server.STATE_DIR") as mock_state:
-                with patch("codebot.control_server.subprocess.run") as mock_run:
-                    handler = self._make_handler("POST", "/bots/valid-bot/pause")
-                    responses = []
-                    handler._json = lambda code, data, r=responses: r.append((code, data))
-                    handler._auth = lambda: True
-                    handler._read_json_body = lambda: ({"force": True}, None, None)
+                with patch("codebot.control_server._safe_kill_bot_process",
+                           return_value=(True, [])) as mock_safe_kill:
+                    with patch("codebot.control_server.subprocess.run") as mock_run:
+                        handler = self._make_handler("POST", "/bots/valid-bot/pause")
+                        responses = []
+                        handler._json = lambda code, data, r=responses: r.append((code, data))
+                        handler._auth = lambda: True
+                        handler._read_json_body = lambda: ({"force": True}, None, None)
 
-                    mock_paused_file = MagicMock()
-                    mock_state.__truediv__ = MagicMock(return_value=mock_paused_file)
+                        mock_paused_file = MagicMock()
+                        mock_state.__truediv__ = MagicMock(return_value=mock_paused_file)
 
-                    ControlHandler.do_POST(handler)
+                        ControlHandler.do_POST(handler)
 
-                    mock_run.assert_called()
-                    call_args = mock_run.call_args
-                    cmd = call_args[0][0]
-                    expected_pattern = f"api_runner\\.py {shlex.quote('valid-bot')}"
-                    self.assertIn(expected_pattern, cmd)
+                        mock_safe_kill.assert_called_once_with("valid-bot", timeout=5)
+                        for call in mock_run.call_args_list:
+                            cmd = call[0][0] if call[0] else []
+                            self.assertFalse(
+                                any("pkill" in str(a) for a in cmd),
+                                f"kill path must not use pkill: {cmd}",
+                            )
 
     def test_resume_applies_shlex_quote(self):
-        """Resume must apply shlex.quote to bot names before subprocess call."""
+        """Resume must pass the validated bot name to subprocess (list-mode, no shell)."""
         from codebot.control_server import ControlHandler
-        import shlex
 
         mock_bot = MagicMock()
         mock_bot.name = "valid-bot"
@@ -326,8 +331,8 @@ class TestCommandInjectionPrevention(unittest.TestCase):
                     mock_popen.assert_called()
                     call_args = mock_popen.call_args
                     cmd = call_args[0][0]
-                    # The last argument should be the quoted bot name
-                    self.assertEqual(cmd[-1], shlex.quote("valid-bot"))
+                    # List-mode subprocess: validated name passed verbatim (no shell, no quoting).
+                    self.assertEqual(cmd[-1], "valid-bot")
 
     # --- Validate bot name function directly ---
 
@@ -416,13 +421,13 @@ class TestCommandInjectionPrevention(unittest.TestCase):
 
         self.assertTrue(len(responses) > 0)
         status_code, body = responses[0]
-        self.assertEqual(status_code, 404)
+        self.assertEqual(status_code, 400)
         self.assertIn("unknown bot", body.get("error", "").lower())
 
     def test_stop_pkill_pattern_is_anchored_for_valid_bot(self):
-        """Stop must use anchored pkill pattern to prevent regex injection even for valid bots."""
+        """Stop kill path must target the PID file, never a pgrep regex sweep."""
         from codebot.control_server import ControlHandler
-        import shlex
+        import re
 
         mock_bot = MagicMock()
         mock_bot.name = "my-bot"
@@ -442,9 +447,26 @@ class TestCommandInjectionPrevention(unittest.TestCase):
                 mock_run.assert_called()
                 call_args = mock_run.call_args
                 cmd = call_args[0][0]
-                # Pattern should be anchored with api_runner\.py prefix and quoted name
-                expected_pattern = f"api_runner\\.py {shlex.quote('my-bot')}"
-                self.assertIn(expected_pattern, cmd)
+                # Pattern should be anchored with api_runner\.py prefix and escaped name
+                expected_pattern = f"api_runner\\.py {re.escape('my-bot')}"
+                self.assertIn(expected_pattern, cmd[2])
+
+    def test_stop_pkill_escapes_regex_metachars_literal_match(self):
+        """Stop must escape regex metacharacters so 'test.*' matches literally, not 'testXprocess'."""
+        import re
+        # Simulate the pattern construction used in control_server.py
+        bot_name_with_metachars = "test.*"
+        escaped_name = re.escape(bot_name_with_metachars)
+        pattern_str = f"api_runner\\.py {escaped_name}"
+        
+        # Compile the pattern as pkill would (ERE)
+        compiled_pattern = re.compile(pattern_str)
+        
+        # Should match the literal string "test.*"
+        self.assertTrue(compiled_pattern.search("api_runner.py test.*"))
+        
+        # Should NOT match "testXprocess" (where .* would have matched Xprocess if unescaped)
+        self.assertFalse(compiled_pattern.search("api_runner.py testXprocess"))
 
 
 if __name__ == "__main__":

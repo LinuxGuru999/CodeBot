@@ -17,7 +17,23 @@ from codebot.process_manager import (
     _clear_process_count_cache,
     batch_read_heartbeats,
     read_heartbeat,
+    _is_queued,
+    _count_queued_bots,
 )
+from codebot.dispatch_service import batch_read_bot_states
+
+
+def test_corrupt_checkpoint_preserves_last_good_backup(tmp_path, monkeypatch):
+    monkeypatch.setattr("codebot.process_manager._resolve_state_dir", lambda: tmp_path)
+    primary = tmp_path / "reviewer.checkpoint.json"
+    backup = tmp_path / "reviewer.checkpoint.bak"
+    primary.write_text("{not json", encoding="utf-8")
+    backup.write_text('{"processed_ids": ["CB-good"]}', encoding="utf-8")
+
+    from codebot.process_manager import read_checkpoint
+
+    assert read_checkpoint("reviewer") == {"processed_ids": ["CB-good"]}
+    assert backup.read_text(encoding="utf-8") == '{"processed_ids": ["CB-good"]}'
 def test_count_api_runner_processes_matches_module_invocation():
     _clear_process_count_cache()
     completed = MagicMock(returncode=0, stdout="101\n102\n")

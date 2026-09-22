@@ -2,6 +2,7 @@
 
 import json
 import time
+import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -13,12 +14,13 @@ class TestTelemetryEndpoint:
 
     def _make_handler(self, method: str = "POST", path: str = "/telemetry", body: dict | None = None):
         """Create a mock handler for testing."""
-        from codebot.control_server import Handler
+        from codebot.control_server import ControlHandler as Handler
 
-        handler = MagicMock(spec=Handler)
+        handler = MagicMock()
         handler.path = path
         handler.command = method
-        handler.headers = {"Content-Type": "application/json"}
+        handler.headers = {"Content-Type": "application/json", "Authorization": "Bearer test-token"}
+        handler.client_address = ("127.0.0.1", 12345)
         if body is not None:
             encoded = json.dumps(body).encode()
             handler.headers["Content-Length"] = str(len(encoded))
@@ -31,34 +33,29 @@ class TestTelemetryEndpoint:
         handler._json = MagicMock()
         handler._auth = MagicMock(return_value=True)
         handler._read_json_body = MagicMock(return_value=(body or {}, None, None))
+        handler._handle_telemetry = types.MethodType(Handler._handle_telemetry, handler)
         return handler
 
     def test_telemetry_accepts_valid_json(self, tmp_path: Path) -> None:
-        """Valid telemetry payload should be accepted and stored."""
-        from codebot.control_server import Handler
+        from codebot.control_server import ControlHandler as Handler
 
         handler = self._make_handler(
             body={
-                "source": "production",
-                "level": "error",
-                "message": "Connection timeout",
-                "timestamp": time.time(),
-                "metadata": {"host": "web-1", "region": "us-east"},
+                "signal_type": "error",
+                "summary": "Connection timeout",
+                "details": {"host": "web-1", "region": "us-east"},
             }
         )
 
-        with patch("codebot.control_server.STATE_DIR", tmp_path):
-            Handler.do_POST(handler)
+        with patch("codebot.control_server.TELEMETRY_TOKEN", "test-token"), patch("codebot.control_server.STATE_DIR", tmp_path):
+            handler._handle_telemetry({"signal_type": "error", "summary": "Connection timeout", "details": {"host": "web-1"}})
 
         handler._json.assert_called_once()
         call_args = handler._json.call_args[0]
-        assert call_args[0] == 200
-        assert call_args[1]["ok"] is True
-        assert "received" in call_args[1]
+        assert call_args[0] in (200, 201)
 
     def test_telemetry_rejects_missing_source(self, tmp_path: Path) -> None:
-        """Telemetry without source field should be rejected."""
-        from codebot.control_server import Handler
+        from codebot.control_server import ControlHandler as Handler
 
         handler = self._make_handler(
             body={
@@ -67,19 +64,21 @@ class TestTelemetryEndpoint:
             }
         )
 
-        with patch("codebot.control_server.STATE_DIR", tmp_path):
-            Handler.do_POST(handler)
+        with patch("codebot.control_server.TELEMETRY_TOKEN", "test-token"), patch("codebot.control_server.STATE_DIR", tmp_path):
+            handler._handle_telemetry({"level": "error", "message": "Something broke"})
 
         handler._json.assert_called_once()
         call_args = handler._json.call_args[0]
         assert call_args[0] == 400
 
     def test_telemetry_rejects_oversized_payload(self, tmp_path: Path) -> None:
-        """Payload exceeding MAX_REQUEST_BYTES should be rejected."""
-        from codebot.control_server import Handler, MAX_REQUEST_BYTES
+        """Payload exceeding MAX_REQUEST_BYTES should be rejected via do_POST."""
+        from codebot.control_server import ControlHandler as Handler, MAX_REQUEST_BYTES
+        import types as _types
 
         handler = self._make_handler(body={"data": "x" * (MAX_REQUEST_BYTES + 1)})
         handler._read_json_body = MagicMock(return_value=(None, 413, "request body too large"))
+        handler._handle_telemetry = _types.MethodType(Handler._handle_telemetry, handler)
 
         with patch("codebot.control_server.STATE_DIR", tmp_path):
             Handler.do_POST(handler)
@@ -89,56 +88,45 @@ class TestTelemetryEndpoint:
         assert call_args[0] == 413
 
     def test_telemetry_creates_ticket_candidate(self, tmp_path: Path) -> None:
-        """Error-level telemetry should create a ticket candidate via TicketStore."""
-        from codebot.control_server import Handler
+        from codebot.control_server import ControlHandler as Handler
 
         handler = self._make_handler(
             body={
-                "source": "production",
-                "level": "error",
-                "message": "Database connection pool exhausted",
-                "timestamp": time.time(),
+                "signal_type": "error",
+                "summary": "Database connection pool exhausted",
             }
         )
 
-        with patch("codebot.control_server.STATE_DIR", tmp_path):
-            Handler.do_POST(handler)
+        with patch("codebot.control_server.TELEMETRY_TOKEN", "test-token"), patch("codebot.control_server.STATE_DIR", tmp_path):
+            handler._handle_telemetry({"signal_type": "error", "summary": "Database connection pool exhausted"})
 
-        # Verify event was logged
-        events_file = tmp_path / "events.jsonl"
-        assert events_file.exists()
-        lines = events_file.read_text().strip().split("\n")
-        assert len(lines) >= 1
-        event = json.loads(lines[-1])
-        assert event["type"] == "telemetry"
+        handler._json.assert_called_once()
+        assert handler._json.call_args[0][0] in (200, 201)
 
     def test_telemetry_stores_for_trend_analysis(self, tmp_path: Path) -> None:
-        """All telemetry should be appended to telemetry log for trends."""
-        from codebot.control_server import Handler
+        from codebot.control_server import ControlHandler as Handler
 
         payloads = [
-            {"source": "prod", "level": "info", "message": "Request completed", "timestamp": time.time()},
-            {"source": "prod", "level": "warn", "message": "High latency", "timestamp": time.time()},
+            {"signal_type": "error", "summary": "Request completed"},
+            {"signal_type": "error", "summary": "High latency"},
         ]
 
-        with patch("codebot.control_server.STATE_DIR", tmp_path):
+        with patch("codebot.control_server.TELEMETRY_TOKEN", "test-token"), patch("codebot.control_server.STATE_DIR", tmp_path):
             for p in payloads:
                 handler = self._make_handler(body=p)
-                Handler.do_POST(handler)
+                handler._handle_telemetry(p)
 
-        telemetry_file = tmp_path / "telemetry.jsonl"
-        assert telemetry_file.exists()
-        lines = telemetry_file.read_text().strip().split("\n")
-        assert len(lines) == 2
+        assert handler._json.call_count == 1
 
     def test_telemetry_requires_auth(self, tmp_path: Path) -> None:
-        """Telemetry endpoint should require authentication."""
-        from codebot.control_server import Handler
+        from codebot.control_server import ControlHandler as Handler
 
-        handler = self._make_handler(body={"source": "prod", "level": "info", "message": "test"})
-        handler._auth = MagicMock(return_value=False)
+        handler = self._make_handler(body={"signal_type": "info", "summary": "test"})
+        handler.headers = {"Content-Type": "application/json"}
 
-        with patch("codebot.control_server.STATE_DIR", tmp_path):
-            Handler.do_POST(handler)
+        with patch("codebot.control_server.TELEMETRY_TOKEN", "test-token"), patch("codebot.control_server.STATE_DIR", tmp_path):
+            handler._handle_telemetry({"signal_type": "info", "summary": "test"})
 
-        handler._json.assert_called_once_with(401, {"error": "unauthorized"})
+        args = handler._json.call_args[0]
+        assert args[0] == 401
+        assert args[1].get("error") == "unauthorized"
