@@ -402,7 +402,11 @@ class TestAutoCommitGatekeeperFailClosed:
                 assert "git add" not in cmd, f"git add should not execute when gatekeeper import fails: {cmd}"
 
     def test_gatekeeper_exception_blocks_commit(self, tmp_path, capsys):
-        """When gatekeeper raises an exception, commit must be blocked."""
+        """When gatekeeper raises an exception, commit must be blocked.
+
+        Verifies fail-closed behavior: _auto_commit returns False,
+        the log contains 'blocking commit', and no git commands execute.
+        """
         adapter = self._make_adapter(tmp_path)
         (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
         (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
@@ -1094,38 +1098,43 @@ class TestPersistStreamStress:
         assert '"truncated"' in raw, "truncated key must appear in serialized JSON"
         assert len(payload["messages"]) < len(messages)
 
-    def test_persist_stream_reserialize_without_while_loop(self, tmp_path):
+    def test_persist_stream_reserialize_via_skip_truncation(self, tmp_path, caplog):
         """Cover lines 1560-1561: re-serialization when truncated flag added post-guard.
 
-        Must trigger stream_truncated via accumulation break WITHOUT triggering
-        the while tail-trim loop. We achieve this by using many tiny messages
-        where the per-entry +1 comma overestimate accumulates enough slack
-        that the final serialized payload stays under MAX_SIZE despite the
-        break occurring.
+        Trigger stream_truncated=True via skipped non-mapping messages (NOT via
+        size break). The final payload is small (<MAX_SIZE), so the while loop
+        doesn't execute. The truncated flag is added after initial serialization,
+        forcing the re-serialization path at lines 1560-1561.
         """
         import codebot.api_runner as ar
+        import logging
 
-        bot_name = "reserialize-no-while-bot"
-        # Tiny messages: {"role":"user","content":"x"} ≈ 30 bytes each
-        # With +1 overestimate per entry, 5000 msgs give ~5KB slack
-        # 500KB / 30 ≈ 16666 messages would fit, but we want to break near limit
-        # Use ~17000 messages to ensure break happens with slack remaining
-        msg_content = "x"
-        messages = [{"role": "user", "content": msg_content} for _ in range(17000)]
+        bot_name = "reserialize-skip-bot"
+        # Mix valid messages with non-mapping entries that trigger skip + stream_truncated
+        messages = [
+            {"role": "user", "content": "valid1"},
+            "not-a-dict",           # triggers TypeError -> stream_truncated=True
+            {"role": "assistant", "content": "valid2"},
+            [1, 2, 3],              # triggers TypeError -> stream_truncated=True
+            {"role": "user", "content": "valid3"},
+        ]
         (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
 
-        with patch.object(ar, "BOTS_DIR", tmp_path):
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             caplog.at_level(logging.WARNING):
             ar._persist_stream(bot_name, messages, "m", 1, "completed")
 
         stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
         assert stream_path.exists()
         raw = stream_path.read_text(encoding="utf-8")
-        file_size = len(raw.encode("utf-8"))
-        assert file_size <= 500_000, f"File {file_size} exceeds 500KB"
         payload = json.loads(raw)
+        # stream_truncated was set by skips, so truncated flag must be present
         assert payload.get("truncated") is True
         assert '"truncated"' in raw
-        assert len(payload["messages"]) < len(messages)
+        # Only 3 valid dict messages persisted
+        assert len(payload["messages"]) == 3
+        # File is tiny — well under MAX_SIZE, proving while loop didn't run
+        assert len(raw.encode("utf-8")) < 1000
 
     def test_persist_stream_non_mapping_message_skipped_with_warning(self, tmp_path, caplog):
         """Cover the except (TypeError, ValueError) path for non-mapping messages (lines 1487-1494).
