@@ -223,6 +223,28 @@ def _hard_wrap_ansi(text: str, max_width: int) -> list[str]:
 # Safe readers
 # ---------------------------------------------------------------------------
 
+# Tasklog tail-read window (64KB) — bounded to <100KB per CB-E05F acceptance
+_TASKLOG_TAIL_BYTES = 65536
+
+
+def _tasklog_tail_line_count(tasklog_path: Path) -> int | None:
+    """Return newline count from last _TASKLOG_TAIL_BYTES of tasklog file.
+
+    Opens in binary mode, seeks to max(0, size - window), reads at most
+    window bytes, counts raw byte newlines (0x0A). Returns None on any error.
+    """
+    try:
+        with open(tasklog_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            offset = max(0, size - _TASKLOG_TAIL_BYTES)
+            f.seek(offset)
+            data = f.read(_TASKLOG_TAIL_BYTES)
+        return data.count(b"\n")
+    except Exception:
+        return None
+
+
 def _read_text_safe(p: Path, limit: int = 1_000_000) -> str | None:
     try:
         if not p.exists():
@@ -471,23 +493,21 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         log_size = None
         tasklog_lines = None
         try:
-            if log_path.exists():
-                log_age = now - log_path.stat().st_mtime
-                log_size = log_path.stat().st_size
-            if tasklog_path.exists():
-                st = tasklog_path.stat()
-                tasklog_age = now - st.st_mtime
-                # Bounded line count: read only last 64KB to avoid loading multi-MB tasklogs (<100KB cap)
-                try:
-                    size = st.st_size
-                    window = 65536  # 64KB cap per CB-E05F acceptance (<100KB)
-                    offset = max(0, size - window)
-                    with open(tasklog_path, "rb") as f:
-                        f.seek(offset)
-                        data = f.read(window)
-                    tasklog_lines = data.decode("utf-8", errors="ignore").count("\n")
-                except Exception:
-                    pass
+            try:
+                st = log_path.stat()
+                log_age = now - st.st_mtime
+                log_size = st.st_size
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            # Bounded tail line count (64KB window) + mtime; None when missing.
+            try:
+                st2 = tasklog_path.stat()
+                tasklog_age = now - st2.st_mtime
+            except (FileNotFoundError, OSError):
+                pass
+            tasklog_lines = _tasklog_tail_line_count(tasklog_path) if tasklog_path.exists() else None
         except Exception:
             pass
 
@@ -495,7 +515,7 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         # so try to read from status? but status doesn't have model; fallback to mission or log header not needed
         # try to infer from checkpoint or scratch? not reliable; leave blank and let live show "-"
         model = ""
-        # attempt to read from state dir's bot_metrics or rl_state later; leave for throughput section
+        # attempt to read from state dir's bot_metrics later; leave for throughput section
         # also try mission file first line?
         if mission_path.exists():
             try:
@@ -553,7 +573,7 @@ def _collect_tickets(project_root: Path) -> tuple[Any | None, dict | None, list[
     # try TicketStore if available
     try:
         from codebot.ticket_engine import TicketStore
-        store = TicketStore(tickets_file)
+        store = TicketStore(tickets_file, start_background_workers=False)
         summary = store.summary()
         # collect all tickets via internal dict if accessible
         tickets = list(getattr(store, "_tickets", {}).values()) if hasattr(store, "_tickets") else []
@@ -562,7 +582,7 @@ def _collect_tickets(project_root: Path) -> tuple[Any | None, dict | None, list[
             raw = _read_json_safe(tickets_file)
             if isinstance(raw, dict) and isinstance(raw.get("tickets"), list):
                 tickets = raw["tickets"]
-        return store, summary, tickets
+        return None, summary, tickets
     except Exception:
         raw = _read_json_safe(tickets_file)
         if isinstance(raw, dict):
