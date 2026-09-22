@@ -27,6 +27,7 @@ Invariants
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import logging
@@ -34,12 +35,48 @@ import math
 import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+
+@contextlib.contextmanager
+def _sigchld_dfl():
+    """Temporarily restore SIGCHLD to SIG_DFL if it is SIG_IGN.
+
+    On Linux, SIGCHLD == SIG_IGN causes the kernel to auto-reap children
+    and discard their exit status, so ``waitpid``/``subprocess`` always
+    reports 0 (spurious PASS).  The orchestrator sets SIG_IGN to avoid
+    zombies; gate evaluation must not inherit that disposition.  Only the
+    main thread may change signal handlers, so this is a no-op in workers
+    — callers must enter the context in the main thread before dispatching.
+    """
+    old = None
+    changed = False
+    if hasattr(signal, "SIGCHLD"):
+        try:
+            if threading.current_thread() is threading.main_thread():
+                cur = signal.getsignal(signal.SIGCHLD)
+                if cur == signal.SIG_IGN:
+                    old = cur
+                    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+                    changed = True
+        except (ValueError, OSError):
+            old = None
+            changed = False
+    try:
+        yield
+    finally:
+        if changed:
+            try:
+                signal.signal(signal.SIGCHLD, old)  # type: ignore[arg-type]
+            except (ValueError, OSError):
+                pass
 
 
 class GateResult(str, Enum):
@@ -204,20 +241,21 @@ class QualityGatePolicy:
             ],
             conditional={
                 "security_boundary": [
-                    {"name": "security_review", "command": "echo 'requires manual review'"},
+                    {"name": "security_review_verdict", "command": "python3 scripts/gate_checks.py reviewer_verdict {ticket_id} security_reviewer {state_dir}"},
+                    {"name": "adversarial_test", "command": "python3 -m pytest -q -k security {test_dirs}"},
                 ],
                 "api_change": [
-                    {"name": "contract_tests", "command": "python3 -m pytest -q -k contract"},
+                    {"name": "contract_tests", "command": "python3 -m pytest -q -k contract {test_dirs}"},
                 ],
                 "data_migration": [
-                    {"name": "migration_test", "command": "python3 -m pytest -q -k migration"},
-                    {"name": "rollback_test", "command": "python3 -m pytest -q -k rollback"},
+                    {"name": "migration_test", "command": "python3 -m pytest -q -k migration {test_dirs}"},
+                    {"name": "rollback_test", "command": "python3 -m pytest -q -k rollback {test_dirs}"},
                 ],
                 "performance_sensitive": [
-                    {"name": "benchmark", "command": "python3 -m pytest -q -k benchmark"},
+                    {"name": "benchmark", "command": "python3 -m pytest -q -k benchmark {test_dirs}"},
                 ],
                 "documentation_impact": [
-                    {"name": "documentation_review", "command": "echo 'docs updated'"},
+                    {"name": "documentation_review", "command": "python3 scripts/gate_checks.py docs_changed {changed_files}"},
                 ],
             },
         )
@@ -235,43 +273,44 @@ def load_policy(policy_path: Path | None = None) -> QualityGatePolicy:
 
 
 def _parse_simple_yaml(text: str) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    current_key = ""
-    current_list: list[Any] | None = None
-    current_item: dict[str, str] | None = None
+    result: dict[str, Any] = {"required": [], "conditional": {}}
+    section = ""
+    condition = ""
+    current_gate: dict[str, str] | None = None
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if not line.startswith(" ") and not line.startswith("\t"):
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
             key, _, val = stripped.partition(":")
-            key = key.strip()
-            val = val.strip()
+            section = key.strip()
+            condition = ""
+            current_gate = None
             if val:
-                result[key] = val
-            else:
-                result[key] = []
-                current_key = key
-                current_list = result[key]
-                current_item = None
+                result[section] = val.strip().strip('"').strip("'")
+            elif section == "required":
+                result[section] = []
+            elif section == "conditional":
+                result[section] = {}
+            continue
+        if section == "conditional" and indent == 2 and stripped.endswith(":"):
+            condition = stripped[:-1].strip()
+            result["conditional"][condition] = []
+            current_gate = None
             continue
         if stripped.startswith("- "):
             item_text = stripped[2:].strip()
-            current_item = {}
-            if current_list is not None:
-                current_list.append(current_item)
-            if ":" in item_text:
-                k, _, v = item_text.partition(":")
-                current_item[k.strip()] = v.strip().strip('"').strip("'")
-            else:
-                if current_list is not None:
-                    current_list.pop()
-                    current_list.append(item_text)
-                    current_item = None
+            key, _, value = item_text.partition(":")
+            current_gate = {key.strip(): value.strip().strip('"').strip("'")}
+            if section == "required":
+                result["required"].append(current_gate)
+            elif section == "conditional" and condition:
+                result["conditional"][condition].append(current_gate)
             continue
-        if ":" in stripped and current_item is not None:
+        if ":" in stripped and current_gate is not None:
             k, _, v = stripped.partition(":")
-            current_item[k.strip()] = v.strip().strip('"').strip("'")
+            current_gate[k.strip()] = v.strip().strip('"').strip("'")
     return result
 
 
@@ -281,36 +320,52 @@ def evaluate_gate(
     file_context: str = "",
     test_dirs: str = "",
     timeout: int = 120,
+    ticket_id: str = "",
+    state_dir: str = "",
+    changed_files: str = "",
 ) -> GateEvaluation:
     name = gate.get("name", "unknown")
+    is_required = gate.get("required", "true")
+    if isinstance(is_required, bool):
+        required = is_required
+    else:
+        required = str(is_required).lower() not in ("false", "no", "0")
     command_template = gate.get("command", "true")
-    command = command_template.replace("{file}", file_context).replace("{test_dirs}", test_dirs)
+    command = (
+        command_template
+        .replace("{file}", file_context)
+        .replace("{test_dirs}", test_dirs)
+        .replace("{ticket_id}", ticket_id)
+        .replace("{state_dir}", state_dir)
+        .replace("{changed_files}", changed_files)
+    )
     start = time.monotonic()
     try:
         argv = shlex.split(command) if isinstance(command, str) else command
-        proc = subprocess.run(
-            argv,
-            shell=False,
-            cwd=str(workspace),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        with _sigchld_dfl():
+            proc = subprocess.run(
+                argv,
+                shell=False,
+                cwd=str(workspace),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         duration = time.monotonic() - start
         output = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0:
-            return GateEvaluation(name, GateResult.PASS, command, output[:2000], duration, True)
-        return GateEvaluation(name, GateResult.FAIL, command, output[:2000], duration, False, True,
+            return GateEvaluation(name, GateResult.PASS, command, output[:2000], duration, True, required)
+        return GateEvaluation(name, GateResult.FAIL, command, output[:2000], duration, False, required,
                               f"exit code {proc.returncode}")
     except subprocess.TimeoutExpired:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, True, "timeout")
+        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, required, "timeout")
     except FileNotFoundError:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, True, "command not found")
+        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, required, "command not found")
     except Exception as e:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, True, str(e)[:500])
+        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, required, str(e)[:500])
 
 
 _GATE_PASS_CACHE = "gate_pass_cache.json"
@@ -319,17 +374,34 @@ _GATE_PASS_TTL_SECONDS = 24 * 3600
 
 def _hash_files(workspace: Path, files: list[str]) -> str:
     digest = hashlib.sha256()
+    try:
+        workspace_resolved = workspace.resolve()
+    except OSError:
+        workspace_resolved = workspace
     for rel in sorted(files):
         p = workspace / rel
-        digest.update(rel.encode("utf-8") + b"\x00")
+        # Validate path is within workspace and exists.
+        # Invalid/missing files are skipped entirely to ensure deterministic
+        # hashing regardless of sort order of invalid entries.
         try:
-            with open(p, "rb") as f:
+            candidate = p.resolve()
+            try:
+                is_inside = candidate.is_relative_to(workspace_resolved)
+            except (ValueError, AttributeError):
+                try:
+                    candidate.relative_to(workspace_resolved)
+                    is_inside = True
+                except ValueError:
+                    is_inside = False
+            if not is_inside or not candidate.exists():
+                continue
+            with open(candidate, "rb") as f:
+                digest.update(rel.encode("utf-8") + b"\x00")
                 for chunk in iter(lambda: f.read(65536), b""):
                     digest.update(chunk)
-        except OSError:
-            digest.update(b"<missing>\x00")
+                digest.update(b"\x00")
+        except (OSError, ValueError):
             continue
-        digest.update(b"\x00")
     return digest.hexdigest()
 
 
@@ -567,6 +639,7 @@ def run_quality_gates_with_cache(
 
     passed, evaluations = run_quality_gates(
         policy, workspace, ticket_class, changed_files, test_dirs, conditions,
+        ticket_id=ticket_id, state_dir=str(state_dir),
     )
     if passed and changed_files:
         cache = _load_pass_cache(state_dir)
@@ -593,6 +666,8 @@ def run_quality_gates(
     changed_files: list[str] | None = None,
     test_dirs: str = "tests/",
     conditions: list[str] | None = None,
+    ticket_id: str = "",
+    state_dir: str = "",
 ) -> tuple[bool, list[GateEvaluation]]:
     evaluations: list[GateEvaluation] = []
 
@@ -600,7 +675,8 @@ def run_quality_gates(
         f for f in (changed_files or [])
         if f.endswith(".py") and not f.startswith("tests/")
     ]
-    file_ctx = " ".join(python_files[:5]) if python_files else ""
+    file_ctx = " ".join(shlex.quote(f) for f in python_files[:5]) if python_files else ""
+    changed_files_str = " ".join(shlex.quote(f) for f in (changed_files or []))
 
     scoped_test_dirs = test_dirs
     if changed_files:
@@ -614,7 +690,7 @@ def run_quality_gates(
                 if (workspace / candidate).exists():
                     test_modules.add(candidate)
         if test_modules:
-            scoped_test_dirs = " ".join(sorted(test_modules)[:5])
+            scoped_test_dirs = " ".join(shlex.quote(t) for t in sorted(test_modules)[:5])
 
     gates_to_run: list[dict[str, str]] = []
     for gate in policy.required:
@@ -633,27 +709,51 @@ def run_quality_gates(
             active_conditions.add("api_change")
         if any("migration" in f.lower() or "store" in f.lower() for f in changed_files):
             active_conditions.add("data_migration")
+        auth_keywords = ("auth", "login", "session", "token", "credential", "password", "oauth")
+        if any(kw in f.lower() for f in changed_files for kw in auth_keywords):
+            active_conditions.add("auth_security_review")
+        perf_keywords = ("benchmark", "perf", "profile", "timing")
+        if any(kw in f.lower() for f in changed_files for kw in perf_keywords):
+            active_conditions.add("performance_sensitive")
+        doc_keywords = ("doc", "readme", "changelog", "adr")
+        if any(kw in f.lower() for f in changed_files for kw in doc_keywords):
+            active_conditions.add("documentation_impact")
+        frontend_keywords = ("template", "static", "css", "html", "component", "view")
+        if any(kw in f.lower() for f in changed_files for kw in frontend_keywords):
+            active_conditions.add("frontend_change")
 
     for condition in active_conditions:
         for gate in policy.conditional.get(condition, []):
             gates_to_run.append(gate)
 
+    def _eval(gate: dict[str, str]) -> GateEvaluation:
+        return evaluate_gate(
+            gate,
+            workspace=workspace,
+            file_context=file_ctx,
+            test_dirs=scoped_test_dirs,
+            ticket_id=ticket_id,
+            state_dir=state_dir,
+            changed_files=changed_files_str,
+        )
+
     if len(gates_to_run) > 1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(gates_to_run), 4)) as executor:
-            futures = {
-                executor.submit(evaluate_gate, gate, workspace, file_ctx, scoped_test_dirs): gate
-                for gate in gates_to_run
-            }
-            evaluations = []
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                evaluations.append(result)
-            evaluations.sort(key=lambda ev: ev.gate_name)
+        # Ensure SIGCHLD is DFL in main thread so children reaped with correct exit codes
+        with _sigchld_dfl():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(gates_to_run), 4)) as executor:
+                futures = {
+                    executor.submit(_eval, gate): gate
+                    for gate in gates_to_run
+                }
+                evaluations = []
+                for future in concurrent.futures.as_completed(futures):
+                    result = future.result()
+                    evaluations.append(result)
+                evaluations.sort(key=lambda ev: ev.gate_name)
     else:
-        evaluations = [
-            evaluate_gate(g, workspace, file_ctx, scoped_test_dirs)
-            for g in gates_to_run
-        ]
+        # Also wrap single-gate case for consistency
+        with _sigchld_dfl():
+            evaluations = [_eval(g) for g in gates_to_run]
 
     all_passed = all(
         ev.passed for ev in evaluations if ev.required
@@ -981,25 +1081,45 @@ def check_gate_alerts(
     return alerts
 
 
+# Bounded tail read: seek from end and read at most this many bytes.
+_MAX_JSONL_BYTES = 1_048_576  # 1 MiB
+
+
 def _load_jsonl_records(state_dir: Path) -> list[dict[str, Any]]:
-    """Read gate_results.jsonl fail-open per line, bounded to _MAX_JSONL_LINES."""
+    """Read gate_results.jsonl fail-open per line, bounded tail read.
+
+    Uses streaming line-by-line reading with a byte counter to avoid
+    allocating the entire bounded chunk as a single string in memory.
+    """
     path = state_dir / "gate_results.jsonl"
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
     try:
-        text = path.read_text(encoding="utf-8")
-        lines = text.strip().split("\n")
-        # Use only the last _MAX_JSONL_LINES for bounded reads
-        tail = lines[-_MAX_JSONL_LINES:] if len(lines) > _MAX_JSONL_LINES else lines
-        for line in tail:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue  # skip corrupt lines
+        size = path.stat().st_size
+        read_size = min(size, _MAX_JSONL_BYTES)
+        bytes_read = 0
+        with open(path, "rb") as f:
+            if size > read_size:
+                f.seek(-read_size, os.SEEK_END)
+                # Drop partial first line (since we may have started mid-line)
+                discarded = f.readline()
+                bytes_read += len(discarded)
+            # Stream line-by-line with byte budget enforcement
+            for raw_line in f:
+                bytes_read += len(raw_line)
+                if bytes_read > _MAX_JSONL_BYTES:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue  # skip corrupt lines
+        # Ensure we return at most _MAX_JSONL_LINES records (newest last)
+        if len(records) > _MAX_JSONL_LINES:
+            records = records[-_MAX_JSONL_LINES:]
     except OSError:
         pass
     return records
