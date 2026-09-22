@@ -189,15 +189,17 @@ def is_draining():
 
 from codebot.alignment_coordinator import write_alignment_event
 from codebot.alignment_service import (
-    run_alignment_pipeline, run_alignment_pipeline_for_all, set_project_adapter as _align_set_project_adapter,
+    run_alignment_pipeline, run_alignment_pipeline_for_all,
 )
+try:
+    from codebot.alignment_service import set_project_adapter as _align_set_project_adapter
+except ImportError:
+    _align_set_project_adapter = None  # type: ignore[assignment]
 from codebot.rl_engine import set_project_adapter as _rl_set_project_adapter
 from codebot.ticket_dispatcher import (
-    spawn_demand_agents, dispatch_decompose_agents,
-    dispatch_planning_agents, advance_reviewed_tickets,
-    gatekeeper_verify_tickets, route_ready_tickets,
-    process_rework_tickets, recover_deferred_tickets,
-    _sweep_orphan_claims,
+    clear_ticket_store_cache, get_ticket_store,
+    _sweep_orphan_claims, advance_reviewed_tickets, process_deferred_gates,
+    process_rework_tickets,
     TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER,
 )
 from codebot.dispatch_service import (
@@ -228,8 +230,6 @@ from codebot.orchestrator_services import (
     is_restart_budget_exceeded as _svc_is_restart_budget_exceeded,
     is_error_disabled as _svc_is_error_disabled,
 )
-from codebot.health_check import check_all_bots
-
 # Paths are resolved dynamically via get_paths() or __getattr__.
 # No module-level _paths cache; state_manager.get_paths() is the single source.
 
@@ -294,6 +294,7 @@ __all__ = [
     "_manifest_error_disabled", "is_restart_budget_exceeded", "is_error_disabled",
     "batch_read_heartbeats", "WORKER_POOL",
     "get_prompt_gateway", "set_prompt_gateway", "clear_prompt_gateway",
+    "get_ticket_store", "clear_ticket_store_cache",
 ]
 
 
@@ -390,8 +391,6 @@ def _handle_stuck_bots(bots: dict[str, BotState], now: float, hb_cache: dict) ->
     _hcl_handle_stuck_bots(bots, now, hb_cache, restart_bot)
 
 def _init_tick() -> None:
-    """Delegates to health_check_loop.init_tick which uses QueueManager and adapter.queue_depth()."""
-    # QueueManager adapter.queue_depth() — real implementation in health_check_loop.init_tick
     return _hcl_init_tick()
 
 
@@ -416,6 +415,24 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     _hcl_handle_stuck_bots(bots, now, heartbeat_cache, restart_bot)
     log_bot_statuses(bots, preloaded_statuses=status_cache)
     _hcl_run_dispatchers(bots, start_bot, stop_bot, update_bot_state, skip_route_tids=error_recovered_tids, store=tick_store)
+    try:
+        advanced = advance_reviewed_tickets(bots, store=tick_store)
+        if advanced:
+            logger.info("advance_reviewed_tickets processed %d tickets", advanced)
+    except Exception as e:
+        logger.debug("advance_reviewed_tickets failed: %s", e)
+    try:
+        gated = process_deferred_gates(store=tick_store)
+        if gated:
+            logger.info("process_deferred_gates completed %d tickets", gated)
+    except Exception as e:
+        logger.debug("process_deferred_gates failed: %s", e)
+    try:
+        rework_cleaned = process_rework_tickets(bots, store=tick_store)
+        if rework_cleaned:
+            logger.info("process_rework_tickets cleaned %d stale claims", rework_cleaned)
+    except Exception as e:
+        logger.debug("process_rework_tickets failed: %s", e)
     _hcl_start_eligible_bots(bots, now, start_bot, store=tick_store)
     flush_tick_store(tick_store)
 
@@ -446,6 +463,46 @@ def _handle_cli_commands(args: Any, bots: dict[str, BotState]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Scheduler V2 — unconditional dispatch
+# ---------------------------------------------------------------------------
+_v2_scheduler: Any = None
+
+
+def _v2_get_scheduler(state_dir: Path | None = None) -> Any | None:
+    global _v2_scheduler
+    if _v2_scheduler is not None:
+        return _v2_scheduler
+    from codebot.scheduler_v2.dispatcher import Scheduler as V2Scheduler
+    try:
+        from codebot.ticket_dispatcher import WORKER_MODEL_CYCLE
+        model_pool = list(dict.fromkeys(WORKER_MODEL_CYCLE))
+    except ImportError:
+        model_pool = ["qwen-3.5-plus"]
+
+    _v2_scheduler = V2Scheduler(
+        max_slots=GATEWAY_MAX_CONCURRENT,
+        state_dir=state_dir or get_paths().state_dir,
+        model_pool=model_pool,
+        stagger_seconds=1.0,
+    )
+    return _v2_scheduler
+
+
+def _v2_count_active() -> int:
+    if _v2_scheduler is not None:
+        try:
+            return _v2_scheduler.gate.count_active()
+        except Exception:
+            pass
+    return 0
+
+
+def _v2_check_all_bots(bots: dict[str, BotState]) -> None:
+    _v2_get_scheduler()
+    check_all_bots(bots)
+
+
+# ---------------------------------------------------------------------------
 # Runtime — delegates to orchestrator_runtime module
 # ---------------------------------------------------------------------------
 from codebot.orchestrator_runtime import (
@@ -458,28 +515,23 @@ from codebot.orchestrator_runtime import (
 def main() -> None:
     """Entry point: parse args, build bot state, run or dispatch."""
     args = _parse_args()
-    registry = load_bot_registry()
+    adapter = _rt_bootstrap_adapter(logger, get_paths)
+    registry = load_bot_registry(adapter)
     bots = build_bots(registry)
 
     if _handle_cli_commands(args, bots):
         return
-
-    adapter = _rt_bootstrap_adapter(logger, get_paths)
-    if adapter:
-        registry = load_bot_registry(adapter)
-        bots = build_bots(registry)
 
     _rt_setup_shutdown_handlers(bots, stop_bot)
 
     if not is_draining():
         for b in bots.values():
             b._assigned_ticket_id = ""
-        apply_agent_availability(bots, stop_fn=stop_bot, update_state_fn=update_bot_state)
         logger.info(f"Overture: pipeline {get_pipeline_state()}")
 
     _rt_run_main_loop(
         bots, args.check_interval,
-        check_all_bots_fn=check_all_bots,
+        check_all_bots_fn=_v2_check_all_bots,
         stop_bot_fn=stop_bot,
         run_alignment_pipeline_for_all_fn=run_alignment_pipeline_for_all,
     )
