@@ -935,8 +935,9 @@ class TestEmptyControlTokenRejection:
     @classmethod
     def setup_class(cls):
         """Start a real control server with empty CONTROL_TOKEN."""
-        # Remove CONTROL_TOKEN to trigger fail-closed mode
-        cls.original_token = os.environ.pop("CONTROL_TOKEN", None)
+        # Save originals then force empty CONTROL_TOKEN to trigger fail-closed mode
+        cls.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_TOKEN"] = ""
         # Also remove CONTROL_ALLOW_UNAUTHENTICATED to prevent bypass of fail-closed logic
         cls.original_allow_unauth = os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
 
