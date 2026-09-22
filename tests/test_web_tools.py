@@ -71,6 +71,18 @@ def test_pinned_http_connection_no_pinned_ip_fails():
         conn.connect()
 
 
+def test_pinned_http_connection_invalid_ip_literal_fails():
+    """Test that _PinnedHTTPConnection rejects non-IP pinned_ip values.
+    
+    Ensures that hostnames or malformed strings cannot be passed as pinned_ip,
+    which would bypass SSRF protections by allowing DNS resolution at connect time.
+    """
+    conn = _PinnedHTTPConnection(host="example.com", port=80, pinned_ip="evil.example.com")
+    
+    with pytest.raises(ValueError, match="pinned_ip must be a valid IP address"):
+        conn.connect()
+
+
 def test_secure_ssl_context_enforces_cert_validation():
     """Verify that the module-level SSL context requires certificate validation."""
     assert _SECURE_SSL_CONTEXT.verify_mode == ssl.CERT_REQUIRED
@@ -467,16 +479,14 @@ def test_alternative_ip_encoding_blocked():
     naive string-based blocklists. This test verifies that:
     1. _resolve_and_validate_host rejects decimal IPs (e.g., 2130706433 = 127.0.0.1)
     2. _resolve_and_validate_host rejects hex IPs (e.g., 0x7f000001 = 127.0.0.1)
-    3. is_blocked_url blocks URLs containing these alternative encodings
+    3. _resolve_and_validate_host rejects octal IPs (e.g., 0177.0.0.1 = 127.0.0.1)
+    4. is_blocked_url blocks URLs containing these alternative encodings
 
-    Python's ipaddress.ip_address() parses these formats, so our validation
-    must correctly identify them as blocked.
+    Python's ipaddress.ip_address() parses decimal and hex integer strings,
+    but dotted-octal and some other forms may fall through to DNS.
+    The implementation now normalizes these encodings before validation.
     """
     # Test cases: (input_host, description)
-    # Decimal encoding of 127.0.0.1
-    # Hex encoding of 127.0.0.1
-    # Octal encoding of 127.0.0.1 (0177.0.0.1)
-    # Decimal encoding of 169.254.169.254
     adversarial_inputs = [
         ("2130706433", "decimal 127.0.0.1"),
         ("0x7f000001", "hex 127.0.0.1"),
@@ -485,24 +495,12 @@ def test_alternative_ip_encoding_blocked():
     ]
 
     for host_input, description in adversarial_inputs:
-        # _resolve_and_validate_host should raise ValueError for blocked IPs
-        # Note: ipaddress.ip_address() accepts decimal and hex integers as strings
-        # but octal dotted notation may be parsed differently. We test all paths.
-        try:
-            # Try direct IP parsing path first
-            with pytest.raises(ValueError, match="blocked IP"):
-                _resolve_and_validate_host(host_input, 80)
-        except Exception:
-            # If the format isn't parsed as IP by ipaddress module,
-            # it falls through to DNS resolution which will fail.
-            # That's also acceptable - the key is it doesn't connect.
-            pass
+        # _resolve_and_validate_host MUST raise ValueError for blocked IPs.
+        # No bare except allowed — if it doesn't raise, the test fails immediately.
+        with pytest.raises(ValueError, match=r"resolves to blocked IP|blocked"):
+            _resolve_and_validate_host(host_input, 80)
 
     # Verify is_blocked_url catches standard string patterns.
-    # Note: is_blocked_url is a fast-path string filter and does NOT normalize
-    # decimal/hex IP encodings. The authoritative SSRF guard is
-    # _resolve_and_validate_host (tested above), which uses ipaddress.ip_address()
-    # to correctly parse and block all alternative encodings.
     string_blocked_urls = [
         "http://127.0.0.1/",
         "http://169.254.169.254/",
@@ -514,13 +512,34 @@ def test_alternative_ip_encoding_blocked():
         assert is_blocked_url(url) is True, f"is_blocked_url failed to block {url}"
 
     # Verify that alternative encodings are handled by _resolve_and_validate_host
-    # (the actual connection-time guard), not necessarily by is_blocked_url.
-    # This satisfies Constitution §3: adversarial inputs are blocked at the
-    # security boundary (_resolve_and_validate_host).
-    alt_encoding_hosts = ["2130706433", "0x7f000001", "2852039166"]
+    alt_encoding_hosts = ["2130706433", "0x7f000001", "2852039166", "0177.0.0.1"]
     for host in alt_encoding_hosts:
-        with pytest.raises(ValueError, match="blocked IP"):
+        with pytest.raises(ValueError, match=r"resolves to blocked IP|blocked"):
             _resolve_and_validate_host(host, 80)
+
+
+def test_blocked_ip_invalid_returns_true():
+    """Adversarial: _is_blocked_ip fail-safe returns True for invalid IP strings.
+
+    Constitution §3 requires fail-closed SSRF guards: any unparseable input
+    must be treated as blocked rather than allowed. Verifies that garbage,
+    empty, whitespace-only, and out-of-range inputs all return True.
+    """
+    # Arrange: import inside test to keep module import list stable
+    from codebot.web_tools import _is_blocked_ip
+
+    # Act + Assert: every invalid input must be treated as blocked
+    invalid_inputs = [
+        "not-an-ip",
+        "",
+        "   ",
+        "999.999.999.999",
+        "256.256.256.256",
+        "abc::def::ghi",
+        "....",
+    ]
+    for bad_ip in invalid_inputs:
+        assert _is_blocked_ip(bad_ip) is True, f"_is_blocked_ip({bad_ip!r}) must be True"
 
 
 # =============================================================================

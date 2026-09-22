@@ -75,21 +75,98 @@ class BlockedIPError(ValueError):
     pass
 
 
+def _normalize_alternative_ip(host: str) -> str | None:
+    """Normalize alternative IP encodings (decimal, hex, octal) to standard dotted-decimal.
+
+    Attackers may use non-standard encodings to bypass string-based blocklists.
+    This function detects and converts:
+    - Decimal integers (e.g., "2130706433" -> "127.0.0.1")
+    - Hex integers (e.g., "0x7f000001" -> "127.0.0.1")
+    - Dotted octal/hex mix (e.g., "0177.0.0.1" -> "127.0.0.1")
+    
+    Returns the normalized IP string if recognized as an alternative encoding,
+    otherwise None.
+    """
+    # Check for hex prefix
+    if host.startswith("0x") or host.startswith("0X"):
+        try:
+            val = int(host, 16)
+            return str(ipaddress.ip_address(val))
+        except (ValueError, OverflowError):
+            return None
+
+    # Check for pure decimal integer (no dots, no hex prefix)
+    if "." not in host and not host.startswith("0x") and not host.startswith("0X"):
+        try:
+            val = int(host)
+            # Ensure it looks like an IP integer (32-bit range for IPv4)
+            if 0 <= val <= 0xFFFFFFFF:
+                return str(ipaddress.ip_address(val))
+        except ValueError:
+            pass
+        return None
+
+    # Check for dotted notation with potential octal/hex parts
+    if "." in host:
+        parts = host.split(".")
+        if len(parts) == 4:
+            normalized_parts = []
+            is_alternative = False
+            for part in parts:
+                if not part:
+                    return None
+                # Check for octal (leading zero) or hex (0x)
+                if part.startswith("0x") or part.startswith("0X"):
+                    try:
+                        normalized_parts.append(str(int(part, 16)))
+                        is_alternative = True
+                    except ValueError:
+                        return None
+                elif part.startswith("0") and len(part) > 1:
+                    # Octal interpretation
+                    try:
+                        normalized_parts.append(str(int(part, 8)))
+                        is_alternative = True
+                    except ValueError:
+                        return None
+                else:
+                    normalized_parts.append(part)
+            
+            if is_alternative:
+                try:
+                    # Validate the resulting IP
+                    addr = ipaddress.ip_address(".".join(normalized_parts))
+                    return str(addr)
+                except ValueError:
+                    return None
+    
+    return None
+
+
 def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """Parse host as an IP literal without using exceptions for control flow.
 
     Returns the parsed address if *host* is a valid IPv4/IPv6 literal,
     otherwise None (caller proceeds to DNS resolution).
 
-    Only this helper uses try/except around ipaddress.ip_address; callers
-    branch on the Optional return value instead of catching ValueError,
-    so security decisions never depend on exception-message matching or
-    on the ordering of ``except BlockedIPError`` vs ``except ValueError``.
+    Handles standard dotted-decimal, IPv6, and alternative encodings
+    (decimal, hex, octal) via normalization.
     """
+    # First, try standard parsing
     try:
         return ipaddress.ip_address(host)
     except ValueError:
-        return None
+        pass
+
+    # Try normalizing alternative encodings
+    normalized = _normalize_alternative_ip(host)
+    if normalized:
+        try:
+            return ipaddress.ip_address(normalized)
+        except ValueError:
+            pass
+            
+    return None
 
 
 def _is_blocked_ip(ip_str: str) -> bool:
@@ -254,10 +331,16 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         """Connect to the pinned IP instead of resolving the hostname.
         
         Raises:
-            ValueError: If pinned_ip is not provided, preventing fallback to DNS resolution.
+            ValueError: If pinned_ip is missing, empty, whitespace-only, or not a valid IP literal.
         """
         if not self._pinned_ip:
             raise ValueError("Pinned IP is required for secure connection; refusing to resolve hostname")
+        
+        # Validate that pinned_ip is actually an IP address, never a hostname
+        try:
+            ipaddress.ip_address(self._pinned_ip)
+        except ValueError as e:
+            raise ValueError(f"pinned_ip must be a valid IP address, got: {self._pinned_ip!r}") from e
         
         # Connect directly to the validated IP
         self.sock = socket.create_connection(
