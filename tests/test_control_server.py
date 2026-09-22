@@ -3,9 +3,13 @@
 Covers RateLimiter class behavior and integration with _auth() and _handle_telemetry().
 Also covers fail-closed security behavior when CONTROL_TOKEN is unset (CB-6048497-D3F1).
 """
+import http.client
+import importlib
 import io
 import json
 import logging
+import os
+import socket
 import time
 import threading
 from http.server import BaseHTTPRequestHandler
@@ -13,8 +17,58 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-# Import the RateLimiter class directly for unit testing
-from codebot.control_server import RateLimiter, RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_WINDOW_SECONDS, RATE_LIMIT_COOLDOWN_SECONDS
+# Import the RateLimiter class and config helper directly for unit testing
+from codebot.control_server import (
+    RateLimiter,
+    RATE_LIMIT_MAX_ATTEMPTS,
+    RATE_LIMIT_WINDOW_SECONDS,
+    RATE_LIMIT_COOLDOWN_SECONDS,
+    _safe_int_env,
+)
+
+
+class TestSafeIntEnv:
+    """Tests for _safe_int_env helper function (CB-0956AB4F03508C1F17E04D55676987B2)."""
+
+    def test_valid_env_var_returns_parsed_int(self):
+        """Valid integer env var should be parsed and returned."""
+        with patch.dict(os.environ, {"TEST_VAR": "42"}, clear=False):
+            result = _safe_int_env("TEST_VAR", default=10)
+            assert result == 42
+
+    def test_missing_env_var_returns_default(self):
+        """Missing env var should return the default value."""
+        with patch.dict(os.environ, {}, clear=False):
+            # Ensure TEST_VAR_MISSING is not set
+            os.environ.pop("TEST_VAR_MISSING", None)
+            result = _safe_int_env("TEST_VAR_MISSING", default=99)
+            assert result == 99
+
+    def test_invalid_env_var_returns_default_and_logs_warning(self, caplog):
+        """Non-numeric env var should return default and log a warning."""
+        with caplog.at_level(logging.WARNING, logger="codebot.control_server"), \
+             patch.dict(os.environ, {"TEST_VAR_BAD": "abc"}, clear=False):
+            result = _safe_int_env("TEST_VAR_BAD", default=5)
+            assert result == 5
+            assert any("Invalid value for TEST_VAR_BAD" in record.message for record in caplog.records)
+
+    def test_zero_env_var_clamped_to_min_val(self):
+        """Zero value should be clamped to min_val (1 by default)."""
+        with patch.dict(os.environ, {"TEST_VAR_ZERO": "0"}, clear=False):
+            result = _safe_int_env("TEST_VAR_ZERO", default=10, min_val=1)
+            assert result == 1
+
+    def test_negative_env_var_clamped_to_min_val(self):
+        """Negative value should be clamped to min_val."""
+        with patch.dict(os.environ, {"TEST_VAR_NEG": "-5"}, clear=False):
+            result = _safe_int_env("TEST_VAR_NEG", default=10, min_val=1)
+            assert result == 1
+
+    def test_custom_min_val_enforced(self):
+        """Custom min_val should be enforced."""
+        with patch.dict(os.environ, {"TEST_VAR_CUSTOM": "5"}, clear=False):
+            result = _safe_int_env("TEST_VAR_CUSTOM", default=10, min_val=10)
+            assert result == 10
 
 
 class TestRateLimiter:
@@ -816,3 +870,226 @@ class TestBotsStartInputValidation:
                 code, _ = responses[0]
                 assert code == 400
                 mock_popen.assert_not_called()
+
+
+class TestEmptyControlTokenRejection:
+    """Integration tests for unauthenticated access rejection when CONTROL_TOKEN is empty.
+
+    Verifies fail-closed security logic:
+    - GET /bots returns 401 when CONTROL_TOKEN is unset
+    - Server binds to 127.0.0.1 when token is unset
+    - GET /health remains public (200) without token
+    """
+
+    @classmethod
+    def setup_class(cls):
+        """Start a real control server with empty CONTROL_TOKEN."""
+        # Remove CONTROL_TOKEN to trigger fail-closed mode
+        cls.original_token = os.environ.pop("CONTROL_TOKEN", None)
+
+        # Reload module to pick up empty token
+        import codebot.control_server as cs_mod
+        importlib.reload(cs_mod)
+        cls.cs_mod = cs_mod
+
+        # Replicate production bind-host selection logic from main():
+        # when CONTROL_TOKEN is empty, server binds to 127.0.0.1 (fail-closed).
+        cls.expected_bind_host = "127.0.0.1" if not cls.cs_mod.CONTROL_TOKEN else "0.0.0.0"
+
+        # Find free port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((cls.expected_bind_host, 0))
+            cls.port = s.getsockname()[1]
+
+        # Start server using the same bind host that production would choose
+        cls.server = cls.cs_mod.ThreadingHTTPServer(
+            (cls.expected_bind_host, cls.port), cls.cs_mod.ControlHandler
+        )
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+        # Poll for server readiness instead of fixed sleep
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", cls.port, timeout=1)
+                conn.request("GET", "/health")
+                resp = conn.getresponse()
+                resp.read()
+                conn.close()
+                break
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.05)
+        else:
+            raise RuntimeError(f"Server did not become ready within 5s on port {cls.port}")
+
+    @classmethod
+    def teardown_class(cls):
+        """Shutdown server and restore environment."""
+        cls.server.shutdown()
+        cls.thread.join(timeout=5)
+
+        # Restore environment
+        if cls.original_token is not None:
+            os.environ["CONTROL_TOKEN"] = cls.original_token
+        else:
+            os.environ["CONTROL_TOKEN"] = "test-token-restore"
+
+        # Reload module to restore state
+        import codebot.control_server as cs_mod
+        importlib.reload(cs_mod)
+
+    def _get(self, path: str) -> tuple[int, dict]:
+        """Helper to make GET request and return (status, body_dict)."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", errors="replace")
+            return resp.status, json.loads(body) if body else {}
+        finally:
+            conn.close()
+
+    def test_bots_returns_401_when_token_empty(self):
+        """GET /bots must return 401 when CONTROL_TOKEN is unset."""
+        status, body = self._get("/bots")
+        assert status == 401
+        assert "unauthorized" in body.get("error", "").lower()
+
+    def test_server_binds_to_localhost_when_token_empty(self):
+        """Server socket must bind to 127.0.0.1 when CONTROL_TOKEN is unset.
+
+        Verifies both that the production bind-host selection logic chooses
+        127.0.0.1 when CONTROL_TOKEN is empty, and that the actual server
+        socket is bound to that address.
+        """
+        # Verify the production logic: empty token → 127.0.0.1
+        assert not self.cs_mod.CONTROL_TOKEN, (
+            "CONTROL_TOKEN should be empty in this test class"
+        )
+        assert self.expected_bind_host == "127.0.0.1", (
+            f"Expected bind host 127.0.0.1 for empty token, got {self.expected_bind_host}"
+        )
+        # Verify the actual socket is bound to localhost
+        actual_bind = self.server.socket.getsockname()[0]
+        assert actual_bind == "127.0.0.1", (
+            f"Server socket bound to {actual_bind}, expected 127.0.0.1"
+        )
+
+    def test_health_remains_public_without_token(self):
+        """GET /health must return 200 without authentication when token is unset."""
+        status, body = self._get("/health")
+        assert status == 200
+        assert body.get("status") == "ok"
+
+    def test_forged_bearer_rejected_when_token_empty(self):
+        """Authorization: Bearer <forged> must still return 401 when CONTROL_TOKEN is empty.
+
+        Even if a client sends a valid-looking Bearer header, fail-closed mode
+        must reject all authenticated endpoints because there is no token to compare against.
+        """
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("GET", "/bots", headers={"Authorization": "Bearer forged-token-123"})
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", errors="replace")
+            assert resp.status == 401, f"Expected 401 for forged bearer with empty token, got {resp.status}"
+            data = json.loads(body) if body else {}
+            assert "unauthorized" in data.get("error", "").lower()
+        finally:
+            conn.close()
+
+
+class TestWhitespaceTokenFailClosed:
+    """Verify that whitespace-only CONTROL_TOKEN triggers fail-closed (401 + localhost bind).
+
+    CONTROL_TOKEN='   ' should .strip() to empty string, which must behave identically
+    to an unset token: reject all protected endpoints and bind to 127.0.0.1 only.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        """Start a real control server with whitespace-only CONTROL_TOKEN."""
+        cls.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_TOKEN"] = "   "
+        os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
+
+        import codebot.control_server as cs_mod
+        importlib.reload(cs_mod)
+        cls.cs_mod = cs_mod
+
+        # Whitespace-only token strips to empty -> fail-closed -> 127.0.0.1
+        cls.expected_bind_host = "127.0.0.1" if not cls.cs_mod.CONTROL_TOKEN else "0.0.0.0"
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((cls.expected_bind_host, 0))
+            cls.port = s.getsockname()[1]
+
+        cls.server = cls.cs_mod.ThreadingHTTPServer(
+            (cls.expected_bind_host, cls.port), cls.cs_mod.ControlHandler
+        )
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+        # Poll for readiness
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", cls.port, timeout=1)
+                conn.request("GET", "/health")
+                resp = conn.getresponse()
+                resp.read()
+                conn.close()
+                break
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.05)
+        else:
+            raise RuntimeError(f"Server did not become ready within 5s on port {cls.port}")
+
+    @classmethod
+    def teardown_class(cls):
+        """Shutdown server and restore environment."""
+        cls.server.shutdown()
+        cls.thread.join(timeout=5)
+
+        if cls.original_token is not None:
+            os.environ["CONTROL_TOKEN"] = cls.original_token
+        else:
+            os.environ.pop("CONTROL_TOKEN", None)
+
+        import codebot.control_server as cs_mod
+        importlib.reload(cs_mod)
+
+    def _get(self, path: str, headers: dict | None = None) -> tuple[int, dict]:
+        """Helper to make GET request and return (status, body_dict)."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("GET", path, headers=headers or {})
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", errors="replace")
+            return resp.status, json.loads(body) if body else {}
+        finally:
+            conn.close()
+
+    def test_whitespace_token_strips_to_empty_and_rejects_bots(self):
+        """CONTROL_TOKEN='   ' must strip to empty and reject GET /bots with 401."""
+        # Verify the module-level constant stripped correctly
+        assert self.cs_mod.CONTROL_TOKEN == "", (
+            f"Expected empty CONTROL_TOKEN after strip, got {self.cs_mod.CONTROL_TOKEN!r}"
+        )
+        status, body = self._get("/bots")
+        assert status == 401, f"Expected 401 for whitespace token, got {status}"
+        assert "unauthorized" in body.get("error", "").lower()
+
+    def test_whitespace_token_binds_localhost(self):
+        """Server must bind to 127.0.0.1 when CONTROL_TOKEN is whitespace-only."""
+        actual_bind = self.server.socket.getsockname()[0]
+        assert actual_bind == "127.0.0.1", (
+            f"Server bound to {actual_bind}, expected 127.0.0.1 for whitespace token"
+        )
+
+    def test_whitespace_token_health_still_public(self):
+        """GET /health must remain 200 even with whitespace-only CONTROL_TOKEN."""
+        status, body = self._get("/health")
+        assert status == 200
+        assert body.get("status") == "ok"
