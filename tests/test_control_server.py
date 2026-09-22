@@ -894,6 +894,8 @@ class TestEmptyControlTokenRejection:
         """Start a real control server with empty CONTROL_TOKEN."""
         # Remove CONTROL_TOKEN to trigger fail-closed mode
         cls.original_token = os.environ.pop("CONTROL_TOKEN", None)
+        # Also remove CONTROL_ALLOW_UNAUTHENTICATED to prevent bypass of fail-closed logic
+        cls.original_allow_unauth = os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
 
         # Reload module to pick up empty token
         import codebot.control_server as cs_mod
@@ -942,6 +944,11 @@ class TestEmptyControlTokenRejection:
             os.environ["CONTROL_TOKEN"] = cls.original_token
         else:
             os.environ.pop("CONTROL_TOKEN", None)
+
+        if cls.original_allow_unauth is not None:
+            os.environ["CONTROL_ALLOW_UNAUTHENTICATED"] = cls.original_allow_unauth
+        else:
+            os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
 
         # Reload module to restore state
         import codebot.control_server as cs_mod
@@ -1301,3 +1308,295 @@ class TestMalformedConfigResilience:
             assert cs.RATE_LIMIT_MAX_ATTEMPTS == 5
             assert cs.RATE_LIMIT_WINDOW_SECONDS == 60
             assert cs.RATE_LIMIT_COOLDOWN_SECONDS == 300
+
+    def test_all_malformed_rate_limit_env_vars_simultaneously(self):
+        """Integration test: patches os.environ with invalid values for all rate limit env vars,
+        uses importlib.reload() to re-import control_server, asserts no exception is raised,
+        and verifies RateLimiter instances are created with safe default values.
+        This proves the DoS vector is actually mitigated in practice (CB-0956AB4F03508C1F17E04D55676987B2).
+        """
+        import importlib
+        import codebot.control_server as cs
+
+        # Patch all rate limit env vars with invalid/dangerous values simultaneously
+        with patch.dict(os.environ, {
+            "RATE_LIMIT_MAX_ATTEMPTS": "0",       # Should clamp to 1
+            "RATE_LIMIT_WINDOW_SECONDS": "-100",  # Should clamp to 1
+            "RATE_LIMIT_COOLDOWN_SECONDS": "abc", # Should fallback to 300
+            "CONTROL_TOKEN": "test-token"
+        }, clear=False):
+            # Reload module to pick up new env vars - this must not crash
+            importlib.reload(cs)
+
+            # Verify safe defaults/clamping were applied
+            assert cs.RATE_LIMIT_MAX_ATTEMPTS == 1, f"Expected 1, got {cs.RATE_LIMIT_MAX_ATTEMPTS}"
+            assert cs.RATE_LIMIT_WINDOW_SECONDS == 1, f"Expected 1, got {cs.RATE_LIMIT_WINDOW_SECONDS}"
+            assert cs.RATE_LIMIT_COOLDOWN_SECONDS == 300, f"Expected 300, got {cs.RATE_LIMIT_COOLDOWN_SECONDS}"
+
+            # Verify RateLimiter can be instantiated and used without error
+            limiter = cs.RateLimiter()
+            allowed, reason = limiter.is_allowed("1.2.3.4")
+            assert allowed is True
+            limiter.record_failure("1.2.3.4")
+            # With max_attempts=1, next check should be blocked
+            allowed, reason = limiter.is_allowed("1.2.3.4")
+            assert allowed is False
+            assert "rate limit exceeded" in reason
+
+
+class TestSchedulerStatus:
+    """Tests for scheduler_status() function coverage."""
+
+    def test_scheduler_status_returns_dict(self):
+        """scheduler_status() should return a dict with expected keys."""
+        from codebot.control_server import scheduler_status
+        result = scheduler_status()
+        assert isinstance(result, dict)
+        assert "version" in result
+        assert "budget_state" in result
+        assert "drain" in result
+        assert "dead_letter_count" in result
+        assert "paused_count" in result
+        assert "disabled_count" in result
+
+    def test_scheduler_status_handles_import_error_gracefully(self):
+        """scheduler_status() should handle ImportError gracefully."""
+        from codebot.control_server import scheduler_status
+        with patch("codebot.control_server.STATE_DIR", Path("/nonexistent/path")):
+            result = scheduler_status()
+            assert isinstance(result, dict)
+            assert result["version"] == 1
+
+
+class TestSafeKillFunctions:
+    """Tests for _safe_kill_bot_process and _safe_kill_orchestrator coverage."""
+
+    def test_safe_kill_bot_process_invalid_name(self):
+        """_safe_kill_bot_process should reject invalid bot names."""
+        from codebot.control_server import _safe_kill_bot_process
+        success, pids = _safe_kill_bot_process("invalid/name!")
+        assert success is False
+        assert pids == []
+
+    def test_safe_kill_bot_process_no_pid_file(self, tmp_path: Path):
+        """_safe_kill_bot_process should handle missing PID file gracefully."""
+        from codebot.control_server import _safe_kill_bot_process, STATE_DIR
+        with patch.object(__import__('codebot.control_server', fromlist=['STATE_DIR']), 'STATE_DIR', tmp_path):
+            success, pids = _safe_kill_bot_process("nonexistent-bot")
+            assert success is True
+            assert pids == []
+
+    def test_safe_kill_orchestrator_no_pid_file(self, tmp_path: Path):
+        """_safe_kill_orchestrator should handle missing PID file gracefully."""
+        from codebot.control_server import _safe_kill_orchestrator, STATE_DIR
+        with patch.object(__import__('codebot.control_server', fromlist=['STATE_DIR']), 'STATE_DIR', tmp_path):
+            success, pids = _safe_kill_orchestrator()
+            assert success is True
+            assert pids == []
+
+
+class TestRetryDeadLetter:
+    """Tests for retry_dead_letter() function coverage."""
+
+    def test_retry_dead_letter_handles_import_error(self):
+        """retry_dead_letter() should handle ImportError gracefully."""
+        from codebot.control_server import retry_dead_letter
+        result = retry_dead_letter("Q-123")
+        assert isinstance(result, dict)
+        assert "status" in result
+
+
+class TestHandleTelemetry:
+    """Tests for _handle_telemetry() method coverage."""
+
+    def _make_telemetry_handler(self, body: dict):
+        """Create a mock ControlHandler for testing _handle_telemetry."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler.path = "/telemetry"
+        return handler
+
+    def test_handle_telemetry_missing_module(self):
+        """_handle_telemetry should handle ImportError gracefully."""
+        from codebot.control_server import ControlHandler
+        handler = self._make_telemetry_handler({})
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.TELEMETRY_TOKEN", ""):
+            # Simulate ImportError by patching the import inside the method
+            with patch("builtins.__import__", side_effect=ImportError("mocked")):
+                ControlHandler._handle_telemetry(handler, {})
+                handler._json.assert_called_once()
+                call_args = handler._json.call_args
+                assert call_args[0][0] == 500
+
+    def test_handle_telemetry_validation_failure(self):
+        """_handle_telemetry should return 400 on validation failure."""
+        from codebot.control_server import ControlHandler
+        handler = self._make_telemetry_handler({})
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.TELEMETRY_TOKEN", ""):
+            with patch("codebot.telemetry._validate_signal", return_value=(False, "bad signal")):
+                ControlHandler._handle_telemetry(handler, {})
+                handler._json.assert_called_once()
+                call_args = handler._json.call_args
+                assert call_args[0][0] == 400
+
+
+class TestDoGetBranches:
+    """Tests for uncovered branches in do_GET."""
+
+    def test_get_scheduler_events_with_type_filter(self):
+        """GET /scheduler/events?type=foo should filter events."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/scheduler/events?type=test-type"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = ControlHandler._auth.__get__(handler, ControlHandler)
+        handler.rfile = io.BytesIO(b"")
+        handler.wfile = io.BytesIO()
+
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.event_log.read_events", return_value=[{"type": "test-type", "ts": 1, "data": {}}]), \
+             patch("codebot.event_log.sanitize_data", return_value={}):
+            ControlHandler.do_GET(handler)
+            handler._json.assert_called_once()
+            call_args = handler._json.call_args
+            assert call_args[0][0] == 200
+            payload = call_args[0][1]
+            assert "events" in payload
+
+    def test_get_scheduler_events_invalid_limit(self):
+        """GET /scheduler/events?limit=abc should return 400."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/scheduler/events?limit=abc"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = ControlHandler._auth.__get__(handler, ControlHandler)
+        handler.rfile = io.BytesIO(b"")
+        handler.wfile = io.BytesIO()
+
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"):
+            ControlHandler.do_GET(handler)
+            handler._json.assert_called_once()
+            call_args = handler._json.call_args
+            assert call_args[0][0] == 400
+
+    def test_get_bot_logs_invalid_lines(self):
+        """GET /bots/foo/logs?lines=abc should return 400."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/bots/test-bot/logs?lines=abc"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = ControlHandler._auth.__get__(handler, ControlHandler)
+        handler.rfile = io.BytesIO(b"")
+        handler.wfile = io.BytesIO()
+
+        mock_cfg = MagicMock()
+        mock_cfg.name = "test-bot"
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]):
+            ControlHandler.do_GET(handler)
+            handler._json.assert_called_once()
+            call_args = handler._json.call_args
+            assert call_args[0][0] == 400
+
+    def test_get_gates_metrics_import_error(self):
+        """GET /gates/metrics should handle ImportError gracefully."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/gates/metrics"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = ControlHandler._auth.__get__(handler, ControlHandler)
+        handler.rfile = io.BytesIO(b"")
+        handler.wfile = io.BytesIO()
+
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("builtins.__import__", side_effect=ImportError("mocked")):
+            ControlHandler.do_GET(handler)
+            handler._json.assert_called_once()
+            call_args = handler._json.call_args
+            assert call_args[0][0] == 200
+
+
+class TestDoPostBranches:
+    """Tests for uncovered branches in do_POST."""
+
+    def test_post_bots_restart_dry_run(self):
+        """POST /bots/foo/restart with dry_run=true should return preview."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/bots/test-bot/restart"
+        handler.command = "POST"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = lambda: True
+        handler._read_json_body = MagicMock(return_value=({"dry_run": True}, None, None))
+        handler.rfile = io.BytesIO(b'{"dry_run": true}')
+        handler.wfile = io.BytesIO()
+
+        mock_cfg = MagicMock()
+        mock_cfg.name = "test-bot"
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]):
+            ControlHandler.do_POST(handler)
+            handler._json.assert_called_once()
+            call_args = handler._json.call_args
+            assert call_args[0][0] == 200
+            assert call_args[0][1]["dry_run"] is True
+
+    def test_post_bots_pause_dry_run(self):
+        """POST /bots/foo/pause with dry_run=true should return preview."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/bots/test-bot/pause"
+        handler.command = "POST"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = lambda: True
+        handler._read_json_body = MagicMock(return_value=({"dry_run": True}, None, None))
+        handler.rfile = io.BytesIO(b'{"dry_run": true}')
+        handler.wfile = io.BytesIO()
+
+        mock_cfg = MagicMock()
+        mock_cfg.name = "test-bot"
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]):
+            ControlHandler.do_POST(handler)
+            handler._json.assert_called_once()
+            call_args = handler._json.call_args
+            assert call_args[0][0] == 200
+            assert call_args[0][1]["dry_run"] is True
+
+    def test_post_control_update_exception(self):
+        """POST /control/update should handle exceptions gracefully."""
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = "/control/update"
+        handler.command = "POST"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = lambda: True
+        handler._read_json_body = MagicMock(return_value=({"force": True}, None, None))
+        handler.rfile = io.BytesIO(b'{"force": true}')
+        handler.wfile = io.BytesIO()
+
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.subprocess.run", side_effect=Exception("mocked error")):
+            ControlHandler.do_POST(handler)
+            handler._json.assert_called_once()
+            call_args = handler._json.call_args
+            assert call_args[0][0] == 500
