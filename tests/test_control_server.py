@@ -1451,6 +1451,7 @@ class TestDoGetBranches:
     def test_get_scheduler_events_with_type_filter(self):
         """GET /scheduler/events?type=foo should filter events."""
         from codebot.control_server import ControlHandler
+        import codebot.event_log as event_log_mod
         handler = MagicMock(spec=ControlHandler)
         handler.path = "/scheduler/events?type=test-type"
         handler.client_address = ("127.0.0.1", 12345)
@@ -1461,8 +1462,8 @@ class TestDoGetBranches:
         handler.wfile = io.BytesIO()
 
         with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.event_log.read_events", return_value=[{"type": "test-type", "ts": 1, "data": {}}]), \
-             patch("codebot.event_log.sanitize_data", return_value={}):
+             patch.object(event_log_mod, "read_events", return_value=[{"type": "test-type", "ts": 1, "data": {}}]), \
+             patch.object(event_log_mod, "sanitize_data", return_value={}):
             ControlHandler.do_GET(handler)
             handler._json.assert_called_once()
             call_args = handler._json.call_args
