@@ -1099,8 +1099,12 @@ class TestWhitespaceTokenFailClosed:
     @classmethod
     def teardown_class(cls):
         """Shutdown server and restore environment."""
-        cls.server.shutdown()
+        try:
+            cls.server.shutdown()
+        finally:
+            cls.server.server_close()
         cls.thread.join(timeout=5)
+        assert not cls.thread.is_alive(), "server thread leaked after teardown"
 
         if cls.original_token is not None:
             os.environ["CONTROL_TOKEN"] = cls.original_token
@@ -1195,8 +1199,12 @@ class TestLocalhostBindingWithEmptyToken:
     @classmethod
     def teardown_class(cls):
         """Shutdown server and restore environment."""
-        cls.server.shutdown()
+        try:
+            cls.server.shutdown()
+        finally:
+            cls.server.server_close()
         cls.thread.join(timeout=5)
+        assert not cls.thread.is_alive(), "server thread leaked after teardown"
 
         # Restore environment
         if cls.original_token is not None:
@@ -1409,7 +1417,21 @@ class TestMalformedConfigResilience:
 
     Verifies that the control server initializes without crashing when
     environment variables contain malformed or dangerous values.
+
+    Isolation: each test restores the module to its pre-test state on exit
+    (env vars + importlib.reload) so RATE_LIMIT/CONTROL_TOKEN globals do not
+    leak into following tests (e.g. TestMainBindHostFailClosed).
     """
+
+    def teardown_method(self):
+        """Restore env-driven module globals after each reload test."""
+        for key, value in _ORIGINAL_ENV.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        import codebot.control_server as _cs
+        importlib.reload(_cs)
 
     def test_malformed_port_env_does_not_crash(self):
         """Server must handle non-numeric PORT env var gracefully."""
