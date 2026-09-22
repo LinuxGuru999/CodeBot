@@ -507,7 +507,7 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
                 tasklog_age = now - st2.st_mtime
             except (FileNotFoundError, OSError):
                 pass
-            tasklog_lines = _tasklog_tail_line_count(tasklog_path) if tasklog_path.exists() else None
+            tasklog_lines = _tasklog_tail_line_count(tasklog_path)
         except Exception:
             pass
 
