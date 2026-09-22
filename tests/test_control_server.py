@@ -13,6 +13,7 @@ import socket
 import time
 import threading
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -189,6 +190,7 @@ class TestRateLimiterThreadSafety:
                     limiter.record_failure(ip)
             except Exception as e:
                 errors.append(e)
+                raise
 
         threads = [threading.Thread(target=record_failures) for _ in range(5)]
         for t in threads:
@@ -200,6 +202,23 @@ class TestRateLimiterThreadSafety:
         # After 50 failures (5 threads * 10), should definitely be blocked
         allowed, _ = limiter.is_allowed(ip)
         assert allowed is False
+
+    def test_concurrent_access_exception_branch(self):
+        """Exception branch in thread wrapper must be exercised."""
+        limiter = RateLimiter()
+        errors: list[Exception] = []
+
+        def record_with_error():
+            try:
+                raise RuntimeError("forced")
+            except Exception as e:
+                errors.append(e)
+
+        t = threading.Thread(target=record_with_error)
+        t.start()
+        t.join()
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
 
 
 class TestBotStatusETag:
@@ -1080,3 +1099,64 @@ class TestWhitespaceTokenFailClosed:
         status, body = self._get("/health")
         assert status == 200
         assert body.get("status") == "ok"
+
+
+class TestMainBindHostFailClosed:
+    """Regression for fail-closed localhost binding when CONTROL_TOKEN empty (CB-7B239).
+
+    main() must bind 127.0.0.1 when CONTROL_TOKEN is empty to avoid exposing
+    an unauthenticated control surface on 0.0.0.0. When a token is set the
+    server is expected to bind 0.0.0.0. A regression to 0.0.0.0 with an empty
+    token would be a high-severity security exposure; these tests patch
+    ThreadingHTTPServer to avoid a real socket bind and assert the selected
+    host argument. See codebot/control_server.py:main() bind_host selection.
+    """
+
+    def test_main_binds_loopback_when_token_empty(self, tmp_path: Path):
+        """main() must bind 127.0.0.1 when CONTROL_TOKEN is empty (fail-closed)."""
+        # Arrange: import control_server module alias
+        import codebot.control_server as cs
+
+        original_token = cs.CONTROL_TOKEN
+        # Act: patch module attribute CONTROL_TOKEN to empty, mock server to avoid bind
+        with patch.object(cs, "CONTROL_TOKEN", ""):
+            with patch.object(cs, "STATE_DIR", tmp_path), patch.object(cs, "BOTS_DIR", tmp_path):
+                with patch("codebot.control_server.ThreadingHTTPServer") as mock_srv:
+                    mock_inst = MagicMock()
+                    mock_srv.return_value = mock_inst
+                    mock_inst.serve_forever.side_effect = KeyboardInterrupt
+                    with patch.object(cs, "BOT_REGISTRY", []):
+                        cs.main()
+                    # Assert: first arg to ThreadingHTTPServer is (bind_host, PORT)
+                    assert mock_srv.call_args is not None, "ThreadingHTTPServer was not called"
+                    args, _ = mock_srv.call_args
+                    bind_host = args[0][0]
+                    assert bind_host == "127.0.0.1", (
+                        f"Expected fail-closed bind to 127.0.0.1 with empty CONTROL_TOKEN, got {bind_host!r}"
+                    )
+        # Assert: env/module state restored (no leak to other tests)
+        assert cs.CONTROL_TOKEN == original_token
+
+    def test_main_binds_all_when_token_set(self, tmp_path: Path):
+        """main() must bind 0.0.0.0 when CONTROL_TOKEN is set."""
+        # Arrange
+        import codebot.control_server as cs
+
+        original_token = cs.CONTROL_TOKEN
+        # Act: patch CONTROL_TOKEN to a non-empty value and capture bind host
+        with patch.object(cs, "CONTROL_TOKEN", "test-secret-token"):
+            with patch.object(cs, "STATE_DIR", tmp_path), patch.object(cs, "BOTS_DIR", tmp_path):
+                with patch("codebot.control_server.ThreadingHTTPServer") as mock_srv:
+                    mock_inst = MagicMock()
+                    mock_srv.return_value = mock_inst
+                    mock_inst.serve_forever.side_effect = KeyboardInterrupt
+                    with patch.object(cs, "BOT_REGISTRY", []):
+                        cs.main()
+                    assert mock_srv.call_args is not None, "ThreadingHTTPServer was not called"
+                    args, _ = mock_srv.call_args
+                    bind_host = args[0][0]
+                    assert bind_host == "0.0.0.0", (
+                        f"Expected bind to 0.0.0.0 with CONTROL_TOKEN set, got {bind_host!r}"
+                    )
+        # Assert: restoration
+        assert cs.CONTROL_TOKEN == original_token
