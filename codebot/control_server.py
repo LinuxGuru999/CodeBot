@@ -110,6 +110,21 @@ class RateLimiter:
         # ip -> cooldown until timestamp (blocked) (bounded OrderedDict for LRU eviction)
         self._blocked_until: OrderedDict[str, float] = OrderedDict()
 
+    def _evict_if_needed(self) -> None:
+        """Evict oldest entries if tracking capacity is exceeded."""
+        while len(self._failures) > self._max_tracked_ips:
+            # popitem(last=False) removes the oldest inserted item (LRU)
+            oldest_ip, _ = self._failures.popitem(last=False)
+            self._blocked_until.pop(oldest_ip, None)
+
+    def _touch_ip(self, client_ip: str) -> None:
+        """Move IP to end of OrderedDict (most recently used) and evict if needed."""
+        if client_ip in self._failures:
+            self._failures.move_to_end(client_ip)
+        if client_ip in self._blocked_until:
+            self._blocked_until.move_to_end(client_ip)
+        self._evict_if_needed()
+
     def is_allowed(self, client_ip: str) -> tuple[bool, str | None]:
         """Check if request from client_ip is allowed.
 
@@ -127,9 +142,13 @@ class RateLimiter:
                     del self._blocked_until[client_ip]
                     self._failures[client_ip] = []
 
+            # Ensure IP is tracked (insert if new) and move to end (LRU update)
+            if client_ip not in self._failures:
+                self._failures[client_ip] = []
+            self._touch_ip(client_ip)
+
             # Clean old failures outside the window
             cutoff = now - RATE_LIMIT_WINDOW_SECONDS
-            self._failures.setdefault(client_ip, [])
             self._failures[client_ip] = [
                 ts for ts in self._failures[client_ip] if ts > cutoff
             ]
@@ -138,6 +157,7 @@ class RateLimiter:
             if len(self._failures[client_ip]) >= RATE_LIMIT_MAX_ATTEMPTS:
                 # Enter cooldown
                 self._blocked_until[client_ip] = now + RATE_LIMIT_COOLDOWN_SECONDS
+                self._blocked_until.move_to_end(client_ip)
                 return (
                     False,
                     f"rate limit exceeded ({RATE_LIMIT_MAX_ATTEMPTS} attempts in {RATE_LIMIT_WINDOW_SECONDS}s); blocked for {RATE_LIMIT_COOLDOWN_SECONDS}s (try again later)",
@@ -149,7 +169,10 @@ class RateLimiter:
         """Record a failed authentication attempt for client_ip."""
         now = time.time()
         with self._lock:
-            self._failures.setdefault(client_ip, []).append(now)
+            if client_ip not in self._failures:
+                self._failures[client_ip] = []
+            self._failures[client_ip].append(now)
+            self._touch_ip(client_ip)
 
 
 # Global rate limiter instance for authenticated endpoints
@@ -309,124 +332,135 @@ def _read_pid_file(name: str) -> int | None:
     return None
 
 
+def _read_proc_cmdline_via_pidfd(pidfd: int) -> list[str] | None:
+    """Read /proc/<pid>/cmdline using a pidfd to avoid PID-recycling races.
+
+    Opens ``/proc/self/fd/<pidfd>/cmdline`` which follows the pidfd's
+    pinned process reference rather than the numeric PID.  Returns the
+    decoded argv list, or ``None`` on any error (process gone, permission
+    denied, etc.).
+    """
+    try:
+        proc_fd_path = f"/proc/self/fd/{pidfd}/cmdline"
+        with open(proc_fd_path, "rb") as f:
+            raw = f.read()
+        if not raw:
+            return []
+        return [arg.decode("utf-8", errors="replace") for arg in raw.split(b"\x00") if arg]
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return None
+    except OSError:
+        return None
+    except Exception:
+        return None
+
+
+def _verify_cmdline_from_argv(argv: list[str], name: str) -> bool:
+    """Check whether *argv* matches a bot api_runner invocation for *name*.
+
+    Accepts both the modern ``-m codebot.api_runner <name>`` form and the
+    legacy ``api_runner.py <name>`` script form.  Requires an EXACT argv
+    element match for the bot name (substring matches are rejected).
+    """
+    if not argv:
+        return False
+    cmdline_lower = " ".join(argv).lower()
+    is_python = "python" in cmdline_lower or "codebot.api_runner" in cmdline_lower
+    if not is_python:
+        return False
+    for i, arg in enumerate(argv):
+        base = arg.rsplit("/", 1)[-1] if "/" in arg else arg
+        if arg == "codebot.api_runner" or base == "api_runner.py":
+            if i + 1 < len(argv) and argv[i + 1] == name:
+                return True
+    return False
+
+
 def _verify_cmdline(pid: int, name: str) -> bool:
     """Verify that PID belongs to a bot api_runner process with the given bot name.
 
-    The real launcher (process_manager._build_popen_args) spawns::
+    DEPRECATED for security-critical paths: this function reads
+    ``/proc/<pid>/cmdline`` by numeric PID and is subject to a TOCTOU
+    race if the PID is recycled between the read and any subsequent
+    signal.  Prefer :func:`_verify_and_signal_pidfd` which opens a pidfd
+    first and verifies through the pinned descriptor.
 
-        sys.executable -m codebot.api_runner <bot_name> ...
-
-    whose ``/proc/<pid>/cmdline`` argv decodes to e.g.
-    ``['/usr/bin/python3', '-m', 'codebot.api_runner', '<bot>', ...]``.
-    Legacy spawn forms used ``['<python>', 'api_runner.py', '<bot>']``.
-
-    Verification therefore accepts BOTH forms, requiring an EXACT
-    (not substring) match on the bot name:
-
-    1. Module form: consecutive argv pair ``('codebot.api_runner', name)``
-       or a ``'-m'`` flag followed (one slot later) by
-       ``'codebot.api_runner'`` with ``name`` as the NEXT argv after the
-       module token.  The interpreter check additionally requires argv
-       joined text to contain ``'python'`` or the module token itself.
-    2. Script form (legacy/tests): consecutive argv pair
-       ``('api_runner.py', name)`` whose path basename match is exact,
-       plus a ``'python'`` token somewhere in argv.
-
-    A non-python process with a matching cmdline suffix, an extra
-    argument between the runner token and the name, or a substring-only
-    match (``'my-bot-extra'`` vs ``'my-bot'``) is REJECTED to avoid
-    denial-of-service on unrelated processes.
+    Kept for backward compatibility (e.g. status probes) but MUST NOT be
+    used in kill paths.
     """
     try:
         cmdline_path = f"/proc/{pid}/cmdline"
         with open(cmdline_path, "rb") as f:
             cmdline_bytes = f.read()
         argv = [arg.decode("utf-8", errors="replace") for arg in cmdline_bytes.split(b"\x00") if arg]
-        if not argv:
-            return False
-        cmdline_lower = " ".join(argv).lower()
-        is_python = "python" in cmdline_lower or "codebot.api_runner" in cmdline_lower
-        if not is_python:
-            return False
-        # Form 1: module invocation ``-m codebot.api_runner <name> ...``.
-        for i, arg in enumerate(argv):
-            base = arg.rsplit("/", 1)[-1] if "/" in arg else arg
-            if arg == "codebot.api_runner" or base == "api_runner.py":
-                if i + 1 < len(argv) and argv[i + 1] == name:
-                    return True
-        return False
+        return _verify_cmdline_from_argv(argv, name)
     except FileNotFoundError:
         return False
     except Exception:
         return False
 
 
-def _atomic_signal_pid(
+def _verify_and_signal_pidfd(
     pid: int,
+    name: str,
     sig: int,
-) -> bool:
-    """Send signal to PID atomically using pidfd.
+) -> tuple[bool, bool]:
+    """Atomically verify cmdline and signal a bot process via pidfd.
 
-    Using ``pidfd_open`` + ``pidfd_send_signal`` (Linux 5.1+, Python 3.9+
-    exposes ``os.pidfd_open``; 3.12+ also ``os.pidfd_send_signal``) pins
-    the signal to the *process object* the verified ``/proc/<pid>/cmdline``
-    belonged to, instead of re-resolving the numeric PID.  This closes
-    the classic verify-then-``os.kill`` TOCTOU window where a PID could
-    be recycled between cmdline verification and signal delivery.
+    Opens a pidfd (pinning the process object), reads cmdline through
+    ``/proc/self/fd/<pidfd>/cmdline`` (so verification is bound to the
+    pinned process, not the numeric PID), and sends *sig* via
+    ``pidfd_send_signal``.  This eliminates the TOCTOU race where a PID
+    could be recycled between verification and signaling.
 
-    Returns ``True`` only when the signal was delivered via pidfd.
-    Returns ``False`` when pidfd is unavailable (kernel/seccomp without
-    pidfd support, ``pidfd_send_signal`` returns ENOSYS/EOPNOTSUPP, or
-    ``pidfd_open`` fails) or when the process exited (ESRCH surfaced as
-    ``ProcessLookupError`` on Python 3.12+ or as ``OSError`` errno 3 on
-    older runtimes).  Every ``False`` means *no signal was delivered*:
-    callers fail closed (safe failure, process may still be running, PID
-    file preserved) and NEVER fall back to ``os.kill``, whose numeric-PID
-    re-resolution re-opens the exact TOCTOU race pidfd exists to close.
+    Returns ``(signal_sent, verified)``:
+    - ``signal_sent`` is True only when the signal was actually delivered.
+    - ``verified`` is True when the cmdline matched *name* (even if the
+      signal could not be delivered because pidfd support is missing).
 
-    Raises ``PermissionError`` or ``OSError`` for unrecoverable errors
-    (EPERM, EINVAL, etc.) that indicate a problem other than PID reuse.
+    Callers should treat ``signal_sent=False, verified=True`` as a
+    "safe-fail" scenario: the right process was identified but the kernel
+    refused the pidfd signal (e.g. seccomp).  Do NOT fall back to
+    ``os.kill``.
     """
-    # Fail closed: if pidfd_open is not available, do NOT fall back to os.kill.
-    # os.kill has an inherent TOCTOU race with PID recycling that cannot be
-    # eliminated without kernel-level pidfd support.
     if not hasattr(os, "pidfd_open"):
-        return False
+        # No pidfd support at all – cannot guarantee atomicity.
+        # Return (False, False) so caller does NOT delete PID file.
+        return False, False
 
     try:
         pidfd = os.pidfd_open(pid, 0)
     except ProcessLookupError:
-        # Process already exited
-        return False
+        return False, False
     except PermissionError:
         raise
     except OSError:
-        # pidfd_open failed (seccomp, kernel without pidfd, etc.)
-        return False
+        return False, False
 
     try:
+        argv = _read_proc_cmdline_via_pidfd(pidfd)
+        if argv is None:
+            # Process vanished or unreadable
+            return False, False
+        verified = _verify_cmdline_from_argv(argv, name)
+        if not verified:
+            return False, False
+
+        # Now signal through the pinned pidfd
         if hasattr(os, "pidfd_send_signal"):
             try:
                 os.pidfd_send_signal(pidfd, sig, None, None, 0)
-                return True
+                return True, True
             except ProcessLookupError:
-                # ESRCH: process exited between verification and signaling.
-                # Nothing was signaled; report safe non-delivery.
-                return False
+                return False, True
             except PermissionError:
                 raise
             except OSError as e:
-                # Fail closed on sandbox/kernel gaps: ENOSYS (38) means the
-                # kernel lacks pidfd_send_signal; EOPNOTSUPP (95) means
-                # seccomp/sandbox blocked it. ESRCH (3) surfaced as plain
-                # OSError on some runtimes means the process is gone.
-                # In all three cases no signal was delivered -> return False
-                # so callers take the safe-failure path (no PID file cleanup).
                 if e.errno in (3, 38, 95):
-                    return False
+                    return False, True
                 raise
         else:
-            # Python <3.12: Use ctypes to call pidfd_send_signal syscall directly.
+            # Python <3.12 ctypes fallback
             try:
                 import ctypes
                 import ctypes.util
@@ -435,47 +469,46 @@ def _atomic_signal_pid(
                 if not libc_path:
                     raise OSError("Cannot find libc")
                 libc = ctypes.CDLL(libc_path, use_errno=True)
-
-                # SYS_pidfd_send_signal = 427 on x86_64 and aarch64 Linux
                 SYS_pidfd_send_signal = 427
-
                 libc.syscall.argtypes = [
-                    ctypes.c_long,    # syscall number
-                    ctypes.c_int,     # pidfd
-                    ctypes.c_int,     # sig
-                    ctypes.c_void_p,  # info (NULL)
-                    ctypes.c_uint,    # flags
+                    ctypes.c_long, ctypes.c_int, ctypes.c_int,
+                    ctypes.c_void_p, ctypes.c_uint,
                 ]
                 libc.syscall.restype = ctypes.c_int
-
-                ret = libc.syscall(
-                    SYS_pidfd_send_signal,
-                    pidfd,
-                    sig,
-                    None,  # NULL info pointer
-                    0,     # flags
-                )
+                ret = libc.syscall(SYS_pidfd_send_signal, pidfd, sig, None, 0)
                 if ret == 0:
-                    return True
-                else:
-                    errno_val = ctypes.get_errno()
-                    if errno_val == 3:  # ESRCH - process gone
-                        return False
-                    elif errno_val == 95:  # EOPNOTSUPP
-                        return False
-                    elif errno_val == 22:  # EINVAL
-                        raise OSError(errno_val, "Invalid argument to pidfd_send_signal")
-                    elif errno_val == 1:  # EPERM
-                        raise PermissionError(os.strerror(errno_val))
-                    else:
-                        raise OSError(errno_val, os.strerror(errno_val))
+                    return True, True
+                errno_val = ctypes.get_errno()
+                if errno_val in (3, 95):
+                    return False, True
+                if errno_val == 22:
+                    raise OSError(errno_val, "Invalid argument to pidfd_send_signal")
+                if errno_val == 1:
+                    raise PermissionError(os.strerror(errno_val))
+                raise OSError(errno_val, os.strerror(errno_val))
             except (OSError, PermissionError):
                 raise
             except Exception:
-                # Any unexpected error in ctypes path → fail closed
-                return False
+                return False, True
     finally:
-        os.close(pidfd)
+        try:
+            os.close(pidfd)
+        except OSError:
+            pass
+
+
+def _atomic_signal_pid(
+    pid: int,
+    sig: int,
+) -> bool:
+    """Send signal to PID atomically using pidfd.
+
+    DEPRECATED: use :func:`_verify_and_signal_pidfd` which combines
+    verification and signaling in one atomic step.  This wrapper remains
+    for backward compatibility but does NOT perform verification.
+    """
+    sent, _ = _verify_and_signal_pidfd(pid, "__unused__", sig)
+    return sent
 
 
 def _wait_for_exit_and_cleanup(pid: int, name: str) -> None:
@@ -576,10 +609,31 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
                 logger.warning("_safe_kill_bot_process: error killing PID %d for bot '%s': %s", pid, name, e)
                 killed_pids.append(pid)
         else:
-            logger.warning("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s' - NOT deleting PID file to prevent DoS race", pid, name)
-            # DO NOT delete PID file on verification failure. An attacker could create
-            # a fake PID file pointing to a legitimate process; deleting it on failed
-            # verification enables denial-of-service. Only delete after confirmed exit.
+            # Cmdline mismatch may be transient (e.g. during execve the
+            # /proc/PID/cmdline window can be momentarily empty). Only clean
+            # up the PID file after confirming the process is truly gone via
+            # /proc existence. If /proc/{pid} still exists, the bot process
+            # may still be alive -> preserve the PID file so the bot remains
+            # manageable (prevents DoS via orphaned processes, CB-388D0).
+            try:
+                _proc_alive = os.path.exists(f"/proc/{pid}")
+            except Exception:
+                # Fail closed: on any error checking /proc, preserve PID file.
+                _proc_alive = True
+            if _proc_alive:
+                logger.warning("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s' - NOT deleting PID file to prevent DoS race", pid, name)
+                logger.debug("_safe_kill_bot_process: PID %d still present in /proc; retaining PID file for bot '%s'", pid, name)
+                # DO NOT delete PID file while process may still be running.
+                # An attacker could otherwise trigger a kill during a transient
+                # execve window to orphan the running bot process.
+            else:
+                logger.info("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s' and /proc/%d is gone - cleaning up stale PID file", pid, name, pid)
+                try:
+                    pid_file = _resolve_control_state_dir() / f"{name}.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
     else:
         # No PID file found. Do NOT fall back to pgrep to avoid broad matching.
         logger.warning("_safe_kill_bot_process: No PID file found for bot '%s'. Skipping kill.", name)
@@ -714,10 +768,24 @@ def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
                 logger.warning("_safe_kill_orchestrator: error killing PID %d: %s", pid, e)
                 killed_pids.append(pid)
         else:
-            logger.warning("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification - NOT deleting PID file to prevent DoS race", pid)
-            # DO NOT delete PID file on verification failure. An attacker could create
-            # a fake PID file pointing to a legitimate process; deleting it on failed
-            # verification enables denial-of-service. Only delete after confirmed exit.
+            # Same transient-execve guard as _safe_kill_bot_process (CB-388D0):
+            # only delete the PID file after confirming /proc/{pid} is gone.
+            try:
+                _orch_alive = os.path.exists(f"/proc/{pid}")
+            except Exception:
+                _orch_alive = True
+            if _orch_alive:
+                logger.warning("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification - NOT deleting PID file to prevent DoS race", pid)
+                logger.debug("_safe_kill_orchestrator: PID %d still present in /proc; retaining PID file", pid)
+                # DO NOT delete PID file while process may still be running.
+            else:
+                logger.info("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification and /proc/%d is gone - cleaning up stale PID file", pid, pid)
+                try:
+                    pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
     else:
         logger.warning("_safe_kill_orchestrator: No PID file found for orchestrator. Skipping kill.")
 
