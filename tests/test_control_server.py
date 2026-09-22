@@ -937,11 +937,11 @@ class TestEmptyControlTokenRejection:
         cls.server.shutdown()
         cls.thread.join(timeout=5)
 
-        # Restore environment
+        # Restore environment exactly to pre-test state to avoid pollution
         if cls.original_token is not None:
             os.environ["CONTROL_TOKEN"] = cls.original_token
         else:
-            os.environ["CONTROL_TOKEN"] = "test-token-restore"
+            os.environ.pop("CONTROL_TOKEN", None)
 
         # Reload module to restore state
         import codebot.control_server as cs_mod
@@ -1112,24 +1112,29 @@ class TestMainBindHostFailClosed:
         import codebot.control_server as cs
 
         original_token = cs.CONTROL_TOKEN
-        # Act: patch module attribute CONTROL_TOKEN to empty, mock server to avoid bind
-        with patch.object(cs, "CONTROL_TOKEN", ""):
-            with patch.object(cs, "STATE_DIR", tmp_path), patch.object(cs, "BOTS_DIR", tmp_path):
-                with patch("codebot.control_server.ThreadingHTTPServer") as mock_srv:
-                    mock_inst = MagicMock()
-                    mock_srv.return_value = mock_inst
-                    mock_inst.serve_forever.side_effect = KeyboardInterrupt
-                    with patch.object(cs, "BOT_REGISTRY", []):
-                        cs.main()
-                    # Assert: first arg to ThreadingHTTPServer is (bind_host, PORT)
-                    assert mock_srv.call_args is not None, "ThreadingHTTPServer was not called"
-                    args, _ = mock_srv.call_args
-                    bind_host = args[0][0]
-                    assert bind_host == "127.0.0.1", (
-                        f"Expected fail-closed bind to 127.0.0.1 with empty CONTROL_TOKEN, got {bind_host!r}"
-                    )
+        original_env = os.environ.get("CONTROL_TOKEN")
+        # Act: patch BOTH os.environ and the module attribute so the test stays
+        # valid whether main() reads the module global (current impl) or
+        # os.environ directly (future refactor). Both sources agree on empty.
+        with patch.dict(os.environ, {"CONTROL_TOKEN": ""}):
+            with patch.object(cs, "CONTROL_TOKEN", ""):
+                with patch.object(cs, "STATE_DIR", tmp_path), patch.object(cs, "BOTS_DIR", tmp_path):
+                    with patch("codebot.control_server.ThreadingHTTPServer") as mock_srv:
+                        mock_inst = MagicMock()
+                        mock_srv.return_value = mock_inst
+                        mock_inst.serve_forever.side_effect = KeyboardInterrupt
+                        with patch.object(cs, "BOT_REGISTRY", []):
+                            cs.main()
+                        # Assert: first arg to ThreadingHTTPServer is (bind_host, PORT)
+                        assert mock_srv.call_args is not None, "ThreadingHTTPServer was not called"
+                        args, _ = mock_srv.call_args
+                        bind_host = args[0][0]
+                        assert bind_host == "127.0.0.1", (
+                            f"Expected fail-closed bind to 127.0.0.1 with empty CONTROL_TOKEN, got {bind_host!r}"
+                        )
         # Assert: env/module state restored (no leak to other tests)
         assert cs.CONTROL_TOKEN == original_token
+        assert os.environ.get("CONTROL_TOKEN") == original_env
 
     def test_main_binds_all_when_token_set(self, tmp_path: Path):
         """main() must bind 0.0.0.0 when CONTROL_TOKEN is set."""
@@ -1137,23 +1142,62 @@ class TestMainBindHostFailClosed:
         import codebot.control_server as cs
 
         original_token = cs.CONTROL_TOKEN
-        # Act: patch CONTROL_TOKEN to a non-empty value and capture bind host
-        with patch.object(cs, "CONTROL_TOKEN", "test-secret-token"):
-            with patch.object(cs, "STATE_DIR", tmp_path), patch.object(cs, "BOTS_DIR", tmp_path):
-                with patch("codebot.control_server.ThreadingHTTPServer") as mock_srv:
-                    mock_inst = MagicMock()
-                    mock_srv.return_value = mock_inst
-                    mock_inst.serve_forever.side_effect = KeyboardInterrupt
-                    with patch.object(cs, "BOT_REGISTRY", []):
-                        cs.main()
-                    assert mock_srv.call_args is not None, "ThreadingHTTPServer was not called"
-                    args, _ = mock_srv.call_args
-                    bind_host = args[0][0]
-                    assert bind_host == "0.0.0.0", (
-                        f"Expected bind to 0.0.0.0 with CONTROL_TOKEN set, got {bind_host!r}"
-                    )
+        original_env = os.environ.get("CONTROL_TOKEN")
+        # Act: patch BOTH os.environ and the module attribute so both sources
+        # agree on a non-empty token regardless of how main() reads it.
+        with patch.dict(os.environ, {"CONTROL_TOKEN": "test-secret-token"}):
+            with patch.object(cs, "CONTROL_TOKEN", "test-secret-token"):
+                with patch.object(cs, "STATE_DIR", tmp_path), patch.object(cs, "BOTS_DIR", tmp_path):
+                    with patch("codebot.control_server.ThreadingHTTPServer") as mock_srv:
+                        mock_inst = MagicMock()
+                        mock_srv.return_value = mock_inst
+                        mock_inst.serve_forever.side_effect = KeyboardInterrupt
+                        with patch.object(cs, "BOT_REGISTRY", []):
+                            cs.main()
+                        assert mock_srv.call_args is not None, "ThreadingHTTPServer was not called"
+                        args, _ = mock_srv.call_args
+                        bind_host = args[0][0]
+                        assert bind_host == "0.0.0.0", (
+                            f"Expected bind to 0.0.0.0 with CONTROL_TOKEN set, got {bind_host!r}"
+                        )
         # Assert: restoration
         assert cs.CONTROL_TOKEN == original_token
+        assert os.environ.get("CONTROL_TOKEN") == original_env
+
+    def test_main_binds_loopback_when_token_whitespace_only(self, tmp_path: Path):
+        """main() must bind 127.0.0.1 when CONTROL_TOKEN is whitespace-only.
+
+        Production strips CONTROL_TOKEN at import
+        (``os.environ.get("CONTROL_TOKEN", "").strip()``), so a whitespace-only
+        env value normalizes to ``""`` (fail-closed). Patch env to whitespace
+        and the module attr to its stripped value so both sources agree with
+        real import behavior; a refactor that reads os.environ without
+        stripping would bind 0.0.0.0 and fail this test.
+        """
+        # Arrange
+        import codebot.control_server as cs
+
+        original_token = cs.CONTROL_TOKEN
+        original_env = os.environ.get("CONTROL_TOKEN")
+        # Act
+        with patch.dict(os.environ, {"CONTROL_TOKEN": "   "}):
+            with patch.object(cs, "CONTROL_TOKEN", ""):
+                with patch.object(cs, "STATE_DIR", tmp_path), patch.object(cs, "BOTS_DIR", tmp_path):
+                    with patch("codebot.control_server.ThreadingHTTPServer") as mock_srv:
+                        mock_inst = MagicMock()
+                        mock_srv.return_value = mock_inst
+                        mock_inst.serve_forever.side_effect = KeyboardInterrupt
+                        with patch.object(cs, "BOT_REGISTRY", []):
+                            cs.main()
+                        assert mock_srv.call_args is not None, "ThreadingHTTPServer was not called"
+                        args, _ = mock_srv.call_args
+                        bind_host = args[0][0]
+                        assert bind_host == "127.0.0.1", (
+                            f"Expected fail-closed bind to 127.0.0.1 with whitespace CONTROL_TOKEN, got {bind_host!r}"
+                        )
+        # Assert: restoration
+        assert cs.CONTROL_TOKEN == original_token
+        assert os.environ.get("CONTROL_TOKEN") == original_env
 
 
 class TestMalformedConfigResilience:
