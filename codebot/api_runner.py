@@ -1529,7 +1529,7 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
             "messages": bounded,
         }
 
-        if stream_truncated:
+        if stream_truncated or truncated_count > 0:
             payload["truncated"] = True
 
         body = json.dumps(payload, ensure_ascii=False)
@@ -1553,13 +1553,11 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
             }
             body = json.dumps(payload, ensure_ascii=False)
             final_size = len(body)
-        if stream_truncated:
-            payload["truncated"] = True
-            if final_size <= MAX_SIZE:
-                # Re-serialize only if flag was added after the guard loop
-                if '"truncated"' not in body:
-                    body = json.dumps(payload, ensure_ascii=False)
-                    final_size = len(body)
+        # Note: truncated flag is already included in body from either:
+        # 1. Pre-serialization addition (line ~1531) when stream_truncated was set
+        #    during accumulation/skip or tool-content truncation
+        # 2. While-loop rebuild which includes truncated:True in payload
+        # No additional re-serialization needed here.
         
         # For logging, we use cumulative_size as an approximation of input size processed
         # original_total_size is no longer calculated to avoid O(N) pre-computation
