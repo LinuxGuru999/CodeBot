@@ -143,8 +143,13 @@ class RateLimiter:
             self._failures[client_ip].append(now)
 
 
-# Global rate limiter instance
+# Global rate limiter instance for authenticated endpoints
 _rate_limiter = RateLimiter()
+
+# Separate rate limiter for /health endpoint to isolate it from auth-failure brute-force.
+# This prevents an attacker from triggering rate limits via failed auth attempts that
+# would block /health checks (causing orchestrator restart loops).
+_health_rate_limiter = RateLimiter()
 
 BOTS_DIR = Path(__file__).resolve().parent
 STATE_DIR = BOTS_DIR / "state"
