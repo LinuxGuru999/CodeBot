@@ -477,15 +477,15 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
             if tasklog_path.exists():
                 st = tasklog_path.stat()
                 tasklog_age = now - st.st_mtime
-                # Bounded line count: read only last 100KB to avoid loading multi-MB tasklogs
+                # Bounded line count: read only last 64KB to avoid loading multi-MB tasklogs (<100KB cap)
                 try:
                     size = st.st_size
-                    window = 102400  # 100KB cap per acceptance criteria
+                    window = 65536  # 64KB cap per CB-E05F acceptance (<100KB)
                     offset = max(0, size - window)
                     with open(tasklog_path, "rb") as f:
                         f.seek(offset)
                         data = f.read(window)
-                    tasklog_lines = data.count(b"\n")
+                    tasklog_lines = data.decode("utf-8", errors="ignore").count("\n")
                 except Exception:
                     pass
         except Exception:
