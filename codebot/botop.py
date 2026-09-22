@@ -475,12 +475,17 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
                 log_age = now - log_path.stat().st_mtime
                 log_size = log_path.stat().st_size
             if tasklog_path.exists():
-                tasklog_age = now - tasklog_path.stat().st_mtime
-                # quick line count capped at reading tail? we approximate via read
+                st = tasklog_path.stat()
+                tasklog_age = now - st.st_mtime
+                # Bounded line count: read only last 100KB to avoid loading multi-MB tasklogs
                 try:
-                    # bounded line count
-                    txt = tasklog_path.read_text(encoding="utf-8", errors="ignore")
-                    tasklog_lines = txt.count("\n")
+                    size = st.st_size
+                    window = 102400  # 100KB cap per acceptance criteria
+                    offset = max(0, size - window)
+                    with open(tasklog_path, "rb") as f:
+                        f.seek(offset)
+                        data = f.read(window)
+                    tasklog_lines = data.count(b"\n")
                 except Exception:
                     pass
         except Exception:
@@ -580,12 +585,20 @@ def _collect_claims(project_root: Path) -> list[dict[str, Any]]:
     now = time.time()
     for cf in sorted(claims_dir.glob("*.json")):
         try:
-            data = json.loads(cf.read_text(encoding="utf-8", errors="ignore"))
+            raw = cf.read_text(encoding="utf-8", errors="ignore").strip()
+            try:
+                data = json.loads(raw)
+            except Exception:
+                try:
+                    data = ast.literal_eval(raw)
+                    if not isinstance(data, dict):
+                        data = {}
+                except Exception:
+                    data = {}
             if not isinstance(data, dict):
                 data = {}
-            # claims from orchestrator use ticket_id/bot/at/class ; older botop expected worker/at
             ticket_id = data.get("ticket_id") or data.get("id") or cf.stem.split(".")[0]
-            worker = data.get("bot") or data.get("worker") or data.get("owner") or "?"
+            worker = data.get("bot") or data.get("worker") or data.get("agent") or data.get("owner") or "?"
             at = data.get("at") or data.get("claimed_at") or data.get("ts") or 0
             try:
                 at_f = float(at)
@@ -659,7 +672,17 @@ def _collect_orchestrator_info(project_root: Path) -> dict[str, Any]:
     state_dir = _find_state_dir(project_root)
     now = time.time()
     info: dict[str, Any] = {}
-    pid_path = state_dir / "orchestrator.pid"
+    pid_path = next(
+        (
+            candidate
+            for candidate in (
+                state_dir / ".orchestrator.pid",
+                state_dir / "orchestrator.pid",
+            )
+            if candidate.exists()
+        ),
+        state_dir / ".orchestrator.pid",
+    )
     try:
         if pid_path.exists():
             txt = pid_path.read_text(encoding="utf-8", errors="ignore").strip().split()
@@ -850,7 +873,7 @@ def _collect_findings_state(project_root: Path) -> list[dict]:
 
 def _collect_gatekeeper_state(project_root: Path) -> list[dict]:
     state_dir = _find_state_dir(project_root)
-    for cand in [state_dir / "gatekeeper_log.jsonl", Path(__file__).parent / "state" / "gatekeeper_log.jsonl"]:
+    for cand in [state_dir / "gate_results.jsonl", Path(__file__).parent / "state" / "gate_results.jsonl"]:
         if cand.exists():
             try:
                 lines = cand.read_text(encoding="utf-8", errors="ignore").splitlines()[-10:]
@@ -925,18 +948,22 @@ def _severity_color(sev: str, enabled: bool) -> str:
 
 def _state_color(st: str, enabled: bool) -> str:
     cols = {
-        "IMPLEMENTING": "yellow", "REVIEWING": "cyan", "VERIFYING": "blue",
-        "COMPLETE": "green", "READY": "green", "PLANNING": "magenta",
-        "REWORK": "red", "BLOCKED": "red", "DISCOVERED": "gray",
-        "TRIAGED": "cyan", "VALIDATING": "yellow", "DEFERRED": "gray",
-        "REJECTED": "red", "DUPLICATE": "gray",
+        "DISCOVERED": "gray", "TRIAGED": "cyan", "GOAL": "blue",
+        "DECOMP": "blue", "PLANNING": "magenta", "IMPLEMENT": "yellow",
+        "REVIEW": "cyan", "COMPLETE": "green", "REWORK": "red",
+        "DEFERRED": "gray", "LATER": "yellow", "NEVER": "red",
+        "REJECTED": "red", "DUPLICATE": "gray", "NOT_ACTIONABLE": "gray",
+        "RESOLVED": "green", "SUPERSEDED": "gray", "CANCELLED": "red",
+        "BLOCKED": "red",
     }
     symbols = {
-        "IMPLEMENTING": "\u2699", "REVIEWING": "\U0001f441", "VERIFYING": "\U0001f50d",
-        "COMPLETE": "\u2713", "READY": "\u2713", "PLANNING": "\U0001f4dd",
-        "REWORK": "\u21bb", "BLOCKED": "\u26d4", "DISCOVERED": "\U0001f50e",
-        "TRIAGED": "\U0001f4cb", "VALIDATING": "\u2705", "DEFERRED": "\u23f2",
-        "REJECTED": "\u2717", "DUPLICATE": "\u267b",
+        "DISCOVERED": "\U0001f50e", "TRIAGED": "\U0001f4cb", "GOAL": "\U0001f9ed",
+        "DECOMP": "\u2699", "PLANNING": "\U0001f4dd", "IMPLEMENT": "\u2699",
+        "REVIEW": "\U0001f441", "COMPLETE": "\u2713", "REWORK": "\u21bb",
+        "DEFERRED": "\u23f2", "LATER": "\u23f8", "NEVER": "\u2717",
+        "REJECTED": "\u2717", "DUPLICATE": "\u267b", "NOT_ACTIONABLE": "\u26d4",
+        "RESOLVED": "\u2713", "SUPERSEDED": "\u2192", "CANCELLED": "\u2717",
+        "BLOCKED": "\u26d4",
     }
     upper = st.upper()
     sym = symbols.get(upper, "")
@@ -1017,9 +1044,28 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
             hb_c = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("?", "gray", enabled)
             model = (a["model"] or "-")[:20]
             print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb_c, 8, 'right')} {pid_s:>7s} {iter_s:>5s} {task:<20s} {model:<20s}")
-    # summary
+    try:
+        from codebot.scheduler_config import MAX_CONCURRENT_AGENTS as _max_slots
+        max_slots_val = _max_slots
+    except Exception:
+        max_slots_val = 55
+    active_slots = len([a for a in agents if a.get("bucket") in ("RUNNING", "STARTING")])
+    print(f"\nConcurrency: {active_slots}/{max_slots_val}  Spawn queue: {len([a for a in agents if a.get('bucket') == 'STARTING'])} starting")
+    try:
+        _, _summary, _tickets = _collect_tickets(project_root)
+        if _summary:
+            buckets = {
+                "IMPLEMENT": _summary.get("IMPLEMENT", 0),
+                "REVIEW": _summary.get("REVIEW", 0),
+                "PLANNING": _summary.get("PLANNING", 0),
+                "DECOMP": _summary.get("DECOMP", 0),
+                "TRIAGE": _summary.get("TRIAGED", 0),
+            }
+            print("Buckets: " + "  ".join(f"{k} actionable={v}" for k, v in buckets.items()))
+    except Exception:
+        pass
     cnt = Counter(a["bucket"] for a in agents)
-    print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","WAITING","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
+    print(f"Agents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","WAITING","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
     running = [a for a in agents if a["bucket"]=="RUNNING"]
     if running:
         print(f"Running PIDs: " + ", ".join(f"{a['name']}:{a['pid']}" for a in running[:10] if a["pid"]))
@@ -1219,7 +1265,7 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
     print(_c(f"Tickets — total {total}", "bold", enabled))
     if summary:
         # colored state table
-        ordered_states = ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]
+        ordered_states = ["DISCOVERED","TRIAGED","GOAL","DECOMP","PLANNING","IMPLEMENT","REVIEW","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE","LATER","NEVER"]
         present = [s for s in ordered_states if summary.get(s)]
         # also include unexpected
         for k in summary:
@@ -1294,7 +1340,14 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
     filtered = tickets
     if state_filter:
         sf = state_filter.upper()
-        filtered = [t for t in tickets if _ticket_state(t).upper() == sf]
+        if sf in ("IMPLEMENTATION", "IMPLEMENT"):
+            filtered = [t for t in tickets if _ticket_state(t).upper() == "IMPLEMENT"]
+        elif sf in ("REVIEW",):
+            filtered = [t for t in tickets if _ticket_state(t).upper() == "REVIEW"]
+        elif sf in ("DECOMP",):
+            filtered = [t for t in tickets if _ticket_state(t).upper() == "DECOMP"]
+        else:
+            filtered = [t for t in tickets if _ticket_state(t).upper() == sf]
 
     if state_filter:
         print(f"\n{state_filter.upper()} tickets ({len(filtered)}):")
@@ -1304,18 +1357,34 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             rw_s = f" R{rw}" if rw else ""
             print(f"  [{_ansi_pad(_severity_color(sev, enabled), 10)}] {_ticket_id(t):<18s}{rw_s} {_ticket_title(t)}")
     else:
-        pipeline = ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE"]
-        side_states = ["REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]
+        pipeline = ["DISCOVERED","TRIAGED","GOAL","DECOMP","PLANNING","IMPLEMENT","REVIEW","COMPLETE"]
+        side_states = ["REWORK","DEFERRED","LATER","NEVER","REJECTED","DUPLICATE","NOT_ACTIONABLE","RESOLVED","SUPERSEDED","CANCELLED"]
+
+        def _merged_tickets(group: str) -> list[Any]:
+            if group == "IMPLEMENT":
+                return [t for t in tickets if _ticket_state(t).upper() == "IMPLEMENT"]
+            if group == "REVIEW":
+                return [t for t in tickets if _ticket_state(t).upper() == "REVIEW"]
+            if group == "DECOMP":
+                return [t for t in tickets if _ticket_state(t).upper() == "DECOMP"]
+            return [t for t in tickets if _ticket_state(t).upper() == group]
+
+        def _breakdown(group: str) -> str:
+            if group == "IMPLEMENT":
+                ready = sum(1 for t in tickets if _ticket_state(t).upper() in ("IMPLEMENT", "IMPLEMENTING"))
+                return f" (active {ready})" if ready else ""
+            return ""
 
         def _show_state(st: str) -> None:
-            subset = [t for t in tickets if _ticket_state(t).upper() == st]
+            subset = _merged_tickets(st)
             count = len(subset)
             indicator = _c("●", "green", enabled) if count > 0 else _c("○", "gray", enabled)
-            print(f"\n{indicator} {st} ({count}):")
+            label = f"{st} ({count}){_breakdown(st)}"
+            print(f"\n{indicator} {label}:")
             if count == 0:
                 print("  (empty)")
                 return
-            if st == "READY":
+            if st in ("GOAL", "TRIAGED"):
                 sev_order = {"critical":0,"high":1,"medium":2,"low":3}
                 subset = sorted(subset, key=lambda x: sev_order.get(_ticket_sev(x).lower(), 99))
             for t in subset[:limit]:
@@ -1337,6 +1406,231 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             _show_state(st)
 
     return 0
+
+
+def cmd_failures(project_root: Path, json_out: bool = False, limit: int = 50, state_filter: str | None = None) -> int:
+    store, summary, tickets = _collect_tickets(project_root)
+    if not tickets:
+        print("No ticket store found")
+        return 0
+    enabled = _supports_color()
+
+    def _tid(t: Any) -> str:
+        if isinstance(t, dict): return str(t.get("id", ""))
+        return str(getattr(t, "id", ""))
+    def _tstate(t: Any) -> str:
+        if isinstance(t, dict): return str(t.get("state", ""))
+        try:
+            v = getattr(t, "state", "")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception: return ""
+    def _tsev(t: Any) -> str:
+        if isinstance(t, dict): return str(t.get("severity", ""))
+        try:
+            v = getattr(t, "severity", "")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception: return ""
+    def _tclass(t: Any) -> str:
+        if isinstance(t, dict): return str(t.get("ticket_class", ""))
+        try:
+            v = getattr(t, "ticket_class", "")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception: return ""
+    def _trework(t: Any) -> int:
+        if isinstance(t, dict): return int(t.get("rework_count", 0) or 0)
+        try: return int(getattr(t, "rework_count", 0) or 0)
+        except Exception: return 0
+    def _tattempts(t: Any) -> int:
+        if isinstance(t, dict): return int(t.get("attempts", 0) or 0)
+        try: return int(getattr(t, "attempts", 0) or 0)
+        except Exception: return 0
+    def _ttitle(t: Any) -> str:
+        if isinstance(t, dict): return str(t.get("title", ""))[:60]
+        return str(getattr(t, "title", ""))[:60]
+    def _tage(t: Any) -> float:
+        if isinstance(t, dict): updated = t.get("updated_at", 0)
+        else:
+            try: updated = getattr(t, "updated_at", 0)
+            except Exception: updated = 0
+        if not updated: return 0.0
+        return (time.time() - updated) / 3600
+
+    failed = [t for t in tickets if _tstate(t).upper() in FAILURE_STATES]
+    if state_filter:
+        sf = state_filter.upper()
+        failed = [t for t in failed if _tstate(t).upper() == sf]
+
+    by_state: Counter = Counter(_tstate(t).upper() for t in failed)
+    by_class: Counter = Counter(_tclass(t) for t in failed)
+
+    sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    failed.sort(key=lambda t: (sev_order.get(_tsev(t).lower(), 99), -_trework(t)))
+
+    if json_out:
+        out = []
+        for t in failed[:limit]:
+            out.append({
+                "id": _tid(t), "state": _tstate(t), "class": _tclass(t),
+                "severity": _tsev(t), "reworks": _trework(t), "attempts": _tattempts(t),
+                "age_h": round(_tage(t), 1), "title": _ttitle(t),
+            })
+        print(json.dumps({"total_failed": len(failed), "by_state": dict(by_state), "by_class": dict(by_class), "tickets": out}, indent=2, default=str))
+        return 0
+
+    print(_c(f"Failed Tickets — {len(failed)} total", "bold", enabled))
+    state_line = "  ".join(f"{_c(s, 'red', enabled)}={c}" for s, c in by_state.most_common())
+    print(f"By state: {state_line}")
+    class_line = "  ".join(f"{s}={c}" for s, c in by_class.most_common(5))
+    print(f"By class: {class_line}")
+    print(f"\nDiagnose: python3 scripts/track_lifecycle.py --view failures [--class-filter X]")
+    print(f"          python3 scripts/diagnose_tickets.py --state-dir .codebot/state\n")
+
+    hdr = f"{'TICKET':<38} {'STATE':<14} {'CLASS':<14} {'SEV':<10} {'RW':>3} {'ATT':>4} {'AGE':>7} TITLE"
+    print(hdr)
+    print("-" * min(len(hdr) + 40, 140))
+    for t in failed[:limit]:
+        age_h = _tage(t)
+        age_s = f"{age_h:.0f}h" if age_h < 48 else f"{age_h/24:.0f}d"
+        rw = _trework(t)
+        att = _tattempts(t)
+        sev = _tsev(t)
+        state = _tstate(t).upper()
+        color = "red" if state in ("REWORK", "BLOCKED") else "yellow" if state == "DEFERRED" else "gray"
+        print(f"{_tid(t):<38} {_c(state, color, enabled):<14} {_tclass(t):<14} {_severity_color(sev, enabled):<10} {rw:>3} {att:>4} {age_s:>7} {_ttitle(t)}")
+
+    if len(failed) > limit:
+        print(f"\n... +{len(failed) - limit} more (use --limit {limit * 2})")
+    return 0
+
+
+FAILURE_STATES = frozenset({
+    "REWORK", "REJECTED", "DEFERRED", "DUPLICATE",
+    "BLOCKED", "NOT_ACTIONABLE", "NEVER",
+})
+
+
+def cmd_failures(project_root: Path, json_out: bool = False, limit: int = 50, state_filter: str | None = None) -> int:
+    store, summary, tickets = _collect_tickets(project_root)
+    if not tickets:
+        print("No ticket store found")
+        return 0
+    enabled = _supports_color()
+
+    def _tid(t: Any) -> str:
+        return str(t.get("id", "")) if isinstance(t, dict) else str(getattr(t, "id", ""))
+
+    def _tstate(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("state", ""))
+        try:
+            v = getattr(t, "state", "")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception:
+            return ""
+
+    def _tclass(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("ticket_class", "?"))
+        try:
+            v = getattr(t, "ticket_class", "?")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception:
+            return "?"
+
+    def _tsev(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("severity", "?"))
+        try:
+            v = getattr(t, "severity", "?")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception:
+            return "?"
+
+    def _trework(t: Any) -> int:
+        if isinstance(t, dict):
+            return int(t.get("rework_count", 0) or 0)
+        try:
+            return int(getattr(t, "rework_count", 0) or 0)
+        except Exception:
+            return 0
+
+    def _tattempts(t: Any) -> int:
+        if isinstance(t, dict):
+            return int(t.get("attempts", 0) or 0)
+        try:
+            return int(getattr(t, "attempts", 0) or 0)
+        except Exception:
+            return 0
+
+    def _ttitle(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("title", ""))[:60]
+        return str(getattr(t, "title", ""))[:60]
+
+    def _tupdated(t: Any) -> float:
+        if isinstance(t, dict):
+            return float(t.get("updated_at", 0) or 0)
+        try:
+            return float(getattr(t, "updated_at", 0) or 0)
+        except Exception:
+            return 0.0
+
+    watch = {state_filter.upper()} if state_filter else FAILURE_STATES
+    failed = [t for t in tickets if _tstate(t).upper() in watch]
+    failed.sort(key=lambda t: (-_trework(t), _tupdated(t)))
+
+    by_state: Counter = Counter(_tstate(t).upper() for t in failed)
+    by_class: Counter = Counter(_tclass(t) for t in failed)
+
+    if json_out:
+        out = []
+        for t in failed[:limit]:
+            out.append({
+                "ticket_id": _tid(t),
+                "state": _tstate(t),
+                "class": _tclass(t),
+                "severity": _tsev(t),
+                "reworks": _trework(t),
+                "attempts": _tattempts(t),
+                "title": _ttitle(t),
+            })
+        print(json.dumps({
+            "total_failed": len(failed),
+            "by_state": dict(by_state.most_common()),
+            "by_class": dict(by_class.most_common()),
+            "tickets": out,
+        }, indent=2, default=str))
+        return 0
+
+    print(_c(f"Failed Tickets — {len(failed)} total", "bold", enabled))
+    state_line = "  ".join(
+        f"{_c(s, 'red', enabled)}={by_state[s]}" for s in sorted(by_state.keys())
+    )
+    print(f"By state: {state_line}")
+    class_line = "  ".join(f"{k}={v}" for k, v in by_class.most_common(6))
+    print(f"By class: {class_line}")
+    print(f"\nDiagnose: python3 scripts/track_lifecycle.py --view failures")
+    print(f"          python3 scripts/diagnose_tickets.py")
+    print()
+
+    hdr = f"{'TICKET':<38} {'STATE':<16} {'CLASS':<14} {'SEV':<9} {'RW':>3} {'ATT':>4}  TITLE"
+    print(hdr)
+    print("-" * len(hdr))
+    for t in failed[:limit]:
+        tid = _tid(t)
+        st = _tstate(t)
+        tc = _tclass(t)
+        sv = _tsev(t)
+        rw = _trework(t)
+        att = _tattempts(t)
+        title = _ttitle(t)
+        st_colored = _c(st, "red", enabled) if st in ("REWORK", "REJECTED", "NEVER") else _c(st, "yellow", enabled)
+        print(f"{tid:<38} {_ansi_pad(st_colored, 16)} {tc:<14} {sv:<9} {rw:>3} {att:>4}  {title}")
+
+    if len(failed) > limit:
+        print(f"\n... +{len(failed) - limit} more (use --limit {limit * 2})")
+
+    return 1 if failed else 0
 
 
 def cmd_throughput(project_root: Path, json_out: bool = False) -> int:
@@ -1406,6 +1700,33 @@ def cmd_throughput(project_root: Path, json_out: bool = False) -> int:
     leases = _collect_leases(project_root)
     if leases is not None:
         print(f"Leases: active {len(leases.get('leases',{}))}  dead_letters {len(leases.get('dead_letters',[]))}  attempts tracked {len(leases.get('attempts',{}))}")
+    return 0
+
+
+def cmd_lifecycle(project_root: Path, json_out: bool = False) -> int:
+    from codebot.review_metrics import build_lifecycle_report, load_lifecycle_events
+    state_dir = _find_state_dir(project_root)
+    events = load_lifecycle_events(state_dir)
+    report = build_lifecycle_report(events)
+    if json_out:
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    enabled = _supports_color()
+    print(_c("Lifecycle", "bold", enabled))
+    print(f"Transitions: total {report.get('total_transitions', 0)}  active {report.get('active_tickets', 0)}  terminal {report.get('terminal_tickets', 0)}")
+    per_stage = report.get("per_stage", {}) or {}
+    if per_stage:
+        print(f"{'Stage':<16s} {'Enters':>7s} {'Avg queue age':>14s}")
+        print("-" * 42)
+        for stage in sorted(per_stage):
+            row = per_stage[stage] or {}
+            print(f"{stage:<16s} {int(row.get('enter_count', 0)):>7d} {float(row.get('avg_queue_age_seconds', 0.0)):>13.3f}s")
+    else:
+        print("No lifecycle events")
+    avg_cycle = report.get("avg_cycle_time_seconds", 0.0)
+    rework_rate = report.get("rework_rate", 0.0)
+    rework_count = report.get("rework_count", 0)
+    print(f"Avg cycle time: {avg_cycle}s  rework {rework_rate * 100:.1f}% ({rework_count})")
     return 0
 
 
@@ -1576,7 +1897,7 @@ def cmd_deadletters(project_root: Path, json_out: bool = False) -> int:
 def cmd_gatekeeper(project_root: Path, json_out: bool = False) -> int:
     gk = _collect_gatekeeper_state(project_root)
     if not gk:
-        print("No gatekeeper_log.jsonl")
+        print("No gate_results.jsonl")
         return 0
     if json_out:
         print(json.dumps(gk, indent=2, default=str))
@@ -1673,9 +1994,9 @@ def cmd_health(project_root: Path, json_out: bool = False) -> int:
     if thr["total"]:
         print(f"flow: 24h +{thr['throughput_24h']}  7d +{thr['throughput_7d']}  avg age {thr['avg_age_h']}h  rework {thr['rework_rate']*100:.1f}%")
     # next ready peek
-    ready = [t for t in tickets if (t.get("state") if isinstance(t, dict) else getattr(t,"state","").value if hasattr(getattr(t,"state",""),"value") else getattr(t,"state","")) == "READY"] if tickets and isinstance(tickets[0], dict) else [t for t in tickets if str(getattr(t,"state","")).upper()=="READY"]
+    ready = [t for t in tickets if _tstate(t).upper() in ("GOAL", "TRIAGED")] if tickets else []
     if ready:
-        print(f"  ready queue peek: {[ (t.get('id') if isinstance(t, dict) else getattr(t,'id','')) for t in ready[:3]]}")
+        print(f"  actionable queue peek: {[ (t.get('id') if isinstance(t, dict) else getattr(t,'id','')) for t in ready[:3]]}")
 
     # Claims/Leases
     print(_c("\n─ Claims / Leases ─", "bold", enabled))
@@ -1884,11 +2205,18 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
                 return v.value if hasattr(v,"value") else str(v)
             except Exception:
                 return ""
-        for st_key in ["READY","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE"]:
-            subset = [t for t in tickets if _tstate(t).upper()==st_key]
+        for st_key in ["TRIAGED","GOAL","DECOMP","PLANNING","IMPLEMENT","REVIEW","COMPLETE"]:
+            if st_key == "IMPLEMENT":
+                subset = [t for t in tickets if _tstate(t).upper() in ("IMPLEMENT", "IMPLEMENTING", "IMPLEMENTATION_READY")]
+            elif st_key == "REVIEW":
+                subset = [t for t in tickets if _tstate(t).upper() in ("REVIEW", "REVIEWING")]
+            elif st_key == "DECOMP":
+                subset = [t for t in tickets if _tstate(t).upper() in ("DECOMP", "DECOMPOSE")]
+            else:
+                subset = [t for t in tickets if _tstate(t).upper()==st_key]
             if subset:
                 sev_order = {"critical":0,"high":1,"medium":2,"low":3}
-                if st_key=="READY":
+                if st_key in ("GOAL", "TRIAGED"):
                     subset = sorted(subset, key=lambda x: sev_order.get(_tsev(x).lower(),99))
                 lines.append(f"│ {st_key} ({len(subset)}):")
                 for t in subset[:3]:
@@ -1902,7 +2230,7 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     return "\n".join(lines)
 
 
-def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both", no_clear: bool = False, limit: int = 15, offset: int = 0) -> int:
+def cmd_live(project_root: Path, interval: float = 3.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both", no_clear: bool = False, limit: int = 15, offset: int = 0) -> int:
     """Live dashboard with view switching (1=agents, 2=tickets, 3=both)."""
     if json_out:
         # single snapshot as json
@@ -2008,7 +2336,7 @@ def cmd_term(project_root: Path, no_color: bool = False) -> int:
 
     print(_c(f"\n══ CodeBot Interactive Terminal — {project_root.name} ══", "bold", enabled))
     print(_c("Type 'help' for commands, 'live' for dashboard, 'quit' to exit.", "dim", enabled))
-    print(_c("Commands: status [verbose/json], tickets [ready/implementing/...], claims, throughput, metrics, budget, events, findings, leases, deadletters, gatekeeper, health/doctor, logs <agent> [--follow], restart/pause/resume <agent>, drain/clear-drain, live [--once], clear", "dim", enabled))
+    print(_c("Commands: status [verbose/json], tickets [ready/implementing/...], claims, throughput, metrics, budget, events, findings, leases, deadletters, gatekeeper, lifecycle, health/doctor, logs <agent> [--follow], restart/pause/resume <agent>, drain/clear-drain, live [--once], clear", "dim", enabled))
     print(f"state: {_find_state_dir(project_root)}  logs: {_find_logs_dir(project_root)}\n")
 
     def _help():
@@ -2024,6 +2352,7 @@ botop term — interactive
   findings [--limit N] [--json]
   leases / deadletters [--json]
   gatekeeper [--json]
+  lifecycle [--json]                   ticket lifecycle analytics
   health / doctor [--json]            full diagnostics
   logs <agent> [--lines N] [--follow]
   restart <agent>   pause <agent>   resume <agent>
@@ -2087,7 +2416,7 @@ botop term — interactive
         # dispatch
         try:
             if cmd in ("live", "watch", "top", "dash"):
-                iv = 1.0
+                iv = 3.0
                 once = False
                 jout = False
                 nc = no_color
@@ -2134,7 +2463,7 @@ botop term — interactive
                     try: lim = int(args[args.index("--limit")+1])
                     except: pass
                 # allow `tickets ready` shorthand
-                known_states = {"ready","implementing","reviewing","complete","discovered","rework","blocked","planning","verifying","triaged","deferred","rejected","duplicate","validating"}
+                known_states = {"ready","implementation","implementation_ready","implementing","reviewing","complete","discovered","rework","blocked","planning","verifying","triaged","deferred","rejected","duplicate","validating"}
                 for a in args:
                     if a.lower() in known_states:
                         st_filter = a
@@ -2143,6 +2472,17 @@ botop term — interactive
                     try: st_filter = args[args.index("--state")+1]
                     except: pass
                 cmd_tickets(project_root, json_out=jout, limit=lim, state_filter=st_filter)
+            elif cmd == "failures":
+                jout = "--json" in args
+                lim = 50
+                st_filter = None
+                if "--limit" in args:
+                    try: lim = int(args[args.index("--limit")+1])
+                    except: pass
+                if "--state" in args:
+                    try: st_filter = args[args.index("--state")+1]
+                    except: pass
+                cmd_failures(project_root, json_out=jout, limit=lim, state_filter=st_filter)
             elif cmd == "claims":
                 jout = "--json" in args
                 cmd_claims(project_root, json_out=jout)
@@ -2182,6 +2522,9 @@ botop term — interactive
             elif cmd in ("gatekeeper", "gates"):
                 jout = "--json" in args
                 cmd_gatekeeper(project_root, json_out=jout)
+            elif cmd == "lifecycle":
+                jout = "--json" in args
+                cmd_lifecycle(project_root, json_out=jout)
             elif cmd in ("health", "doctor", "diagnostics", "diag"):
                 jout = "--json" in args
                 cmd_health(project_root, json_out=jout)
@@ -2256,7 +2599,7 @@ def main() -> None:
         epilog="examples:\n"
                "  python -m codebot.botop status\n"
                "  python -m codebot.botop tickets --state READY\n"
-               "  python -m codebot.botop live --interval 1\n"
+               "  python -m codebot.botop live --interval 3\n"
                "  python -m codebot.botop term\n"
                "  python -m codebot.botop logs scheduler --follow\n"
                "  python -m codebot.botop health\n",
@@ -2280,6 +2623,12 @@ def main() -> None:
     p_tickets.add_argument("--json", action="store_true", help="JSON output")
     p_tickets.add_argument("--limit", type=int, default=15, help="Max tickets per state")
     p_tickets.add_argument("--state", type=str, default=None, help="Filter by state (READY, IMPLEMENTING, etc)")
+
+    # failures
+    p_fail = sub.add_parser("failures", help="Show tickets in failure states (REWORK, REJECTED, DEFERRED, DUPLICATE, BLOCKED)")
+    p_fail.add_argument("--json", action="store_true", help="JSON output")
+    p_fail.add_argument("--limit", type=int, default=50, help="Max tickets to display")
+    p_fail.add_argument("--state", type=str, default=None, help="Filter by specific failure state")
 
     # throughput
     p_thr = sub.add_parser("throughput", help="Show throughput metrics")
@@ -2319,6 +2668,10 @@ def main() -> None:
     p_gk = sub.add_parser("gatekeeper", help="Show gatekeeper log")
     p_gk.add_argument("--json", action="store_true", help="JSON output")
 
+    # lifecycle
+    p_lc = sub.add_parser("lifecycle", help="Show ticket lifecycle analytics")
+    p_lc.add_argument("--json", action="store_true", help="JSON output")
+
     # health / doctor / diagnostics (aliases)
     p_health = sub.add_parser("health", help="Show full diagnostics")
     p_health.add_argument("--json", action="store_true", help="JSON output")
@@ -2353,7 +2706,7 @@ def main() -> None:
 
     # live dashboard
     p_live = sub.add_parser("live", help="Live dashboard (auto-refresh)")
-    p_live.add_argument("--interval", type=float, default=1.0, help="Refresh seconds")
+    p_live.add_argument("--interval", type=float, default=3.0, help="Refresh seconds")
     p_live.add_argument("--once", action="store_true", help="Single snapshot, no loop")
     p_live.add_argument("--json", action="store_true", help="JSON snapshot, no UI")
     p_live.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
@@ -2364,7 +2717,7 @@ def main() -> None:
     p_live.add_argument("--view", choices=["both", "agents", "tickets"], default="both", help="Initial view (or use 1/2/3 keys to toggle)")
     for alias in ("watch", "top", "dash", "dashboard"):
         pa = sub.add_parser(alias, help=f"Alias for live")
-        pa.add_argument("--interval", type=float, default=1.0, help="Refresh seconds")
+        pa.add_argument("--interval", type=float, default=3.0, help="Refresh seconds")
         pa.add_argument("--once", action="store_true", help="Single snapshot")
         pa.add_argument("--json", action="store_true", help="JSON snapshot")
         pa.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
@@ -2420,6 +2773,8 @@ def main() -> None:
         sys.exit(cmd_claims(project_root, json_out=getattr(args, "json", False)))
     elif cmd == "tickets":
         sys.exit(cmd_tickets(project_root, json_out=getattr(args, "json", False), limit=getattr(args, "limit", 15), state_filter=getattr(args, "state", None)))
+    elif cmd == "failures":
+        sys.exit(cmd_failures(project_root, json_out=getattr(args, "json", False), limit=getattr(args, "limit", 50), state_filter=getattr(args, "state", None)))
     elif cmd == "throughput":
         sys.exit(cmd_throughput(project_root, json_out=getattr(args, "json", False)))
     elif cmd == "metrics":
@@ -2436,10 +2791,12 @@ def main() -> None:
         sys.exit(cmd_deadletters(project_root, json_out=getattr(args, "json", False)))
     elif cmd == "gatekeeper":
         sys.exit(cmd_gatekeeper(project_root, json_out=getattr(args, "json", False)))
+    elif cmd == "lifecycle":
+        sys.exit(cmd_lifecycle(project_root, json_out=getattr(args, "json", False)))
     elif cmd in ("health", "doctor", "diagnostics", "diag"):
         sys.exit(cmd_health(project_root, json_out=getattr(args, "json", False)))
     elif cmd in ("live", "watch", "top", "dash", "dashboard"):
-        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 1.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both"), no_clear=getattr(args, "no_clear", False), limit=getattr(args, "limit", 15), offset=getattr(args, "offset", 0)))
+        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 3.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both"), no_clear=getattr(args, "no_clear", False), limit=getattr(args, "limit", 15), offset=getattr(args, "offset", 0)))
     elif cmd in ("term", "terminal", "shell", "repl", "interactive"):
         sys.exit(cmd_term(project_root, no_color=getattr(args, "no_color", False)))
     else:
