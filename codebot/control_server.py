@@ -1211,7 +1211,8 @@ class ControlHandler(BaseHTTPRequestHandler):
         # But enforce rate limiting to prevent abuse (Constitution §2).
         if path in ("/health", "/api/health"):
             client_ip = self.client_address[0] if self.client_address else "unknown"
-            allowed, reason = _rate_limiter.is_allowed(client_ip)
+            # Use separate rate limiter to isolate health checks from auth brute-force
+            allowed, reason = _health_rate_limiter.is_allowed(client_ip)
             if not allowed:
                 logger.warning("Rate limit exceeded for /health from %s: %s", client_ip, reason)
                 retry_after = str(RATE_LIMIT_COOLDOWN_SECONDS)
