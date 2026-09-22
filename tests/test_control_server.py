@@ -950,15 +950,12 @@ class TestEmptyControlTokenRejection:
         # when CONTROL_TOKEN is empty, server binds to 127.0.0.1 (fail-closed).
         cls.expected_bind_host = "127.0.0.1" if not cls.cs_mod.CONTROL_TOKEN else "0.0.0.0"
 
-        # Find free port
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((cls.expected_bind_host, 0))
-            cls.port = s.getsockname()[1]
-
-        # Start server using the same bind host that production would choose
+        # Bind directly on port 0 (OS-assigned) to avoid TOCTOU race between
+        # finding a free port and server bind (reviewer finding #2).
         cls.server = cls.cs_mod.ThreadingHTTPServer(
-            (cls.expected_bind_host, cls.port), cls.cs_mod.ControlHandler
+            (cls.expected_bind_host, 0), cls.cs_mod.ControlHandler
         )
+        cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
 
@@ -1072,13 +1069,11 @@ class TestWhitespaceTokenFailClosed:
         # Whitespace-only token strips to empty -> fail-closed -> 127.0.0.1
         cls.expected_bind_host = "127.0.0.1" if not cls.cs_mod.CONTROL_TOKEN else "0.0.0.0"
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((cls.expected_bind_host, 0))
-            cls.port = s.getsockname()[1]
-
+        # Bind directly on port 0 (OS-assigned) to avoid TOCTOU race.
         cls.server = cls.cs_mod.ThreadingHTTPServer(
-            (cls.expected_bind_host, cls.port), cls.cs_mod.ControlHandler
+            (cls.expected_bind_host, 0), cls.cs_mod.ControlHandler
         )
+        cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
 
@@ -1170,15 +1165,11 @@ class TestLocalhostBindingWithEmptyToken:
         # Fail-closed: empty token means bind to 127.0.0.1
         cls.expected_bind_host = "127.0.0.1"
 
-        # Find free port on localhost
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((cls.expected_bind_host, 0))
-            cls.port = s.getsockname()[1]
-
-        # Start server bound to localhost
+        # Bind directly on port 0 (OS-assigned) to avoid TOCTOU race.
         cls.server = cls.cs_mod.ThreadingHTTPServer(
-            (cls.expected_bind_host, cls.port), cls.cs_mod.ControlHandler
+            (cls.expected_bind_host, 0), cls.cs_mod.ControlHandler
         )
+        cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
 
