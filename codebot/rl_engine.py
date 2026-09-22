@@ -42,6 +42,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from codebot.lifecycle_packet import LifecyclePacketStore
+
+from codebot.lifecycle_packet import LifecyclePacketStore
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -362,7 +366,7 @@ def reward_from_score(
 def _metrics_signals(bot: str, bots_dir: Path | None = None) -> dict[str, Any]:
     try:
         bd = bots_dir or BOTS_DIR
-        snap_path = bd / "state" / "bot_metrics.json"
+        snap_path = STATE_DIR / "bot_metrics.json"
         if not snap_path.exists():
             return {}
         snap = json.loads(snap_path.read_text(encoding="utf-8", errors="ignore"))
@@ -427,15 +431,15 @@ def _check_output_exists(bot_name: str, bots_dir: Path | None = None) -> int:
         "test_coverage": [docs / "optimization" / "test-coverage.md"],
         "code_quality": [docs / "optimization" / "code-quality.md"],
         "dependency": [docs / "optimization" / "dependencies.md"],
-        "gitsync": [bd / "state" / "gitsync.checkpoint.json"],
-        "github_issues": [bd / "state" / "github_issues.checkpoint.json"],
+        "gitsync": [STATE_DIR / "gitsync.checkpoint.json"],
+        "github_issues": [STATE_DIR / "github_issues.checkpoint.json"],
         "build": [docs / "build-gate.md"],
         "e2e_smoke": [docs / "optimization" / "e2e-smoke.md"],
         "security_auditor": [docs / "optimization"],
         "release": [docs / "release"],
-        "prompt_opt": [bd / "state" / "rsi_strategy.json"],
-        "goal_steering": [bd / "state" / "goal_scratchpad.json"],
-        "alignment": [bd / "state" / "alignment_scores.json"],
+        "prompt_opt": [STATE_DIR / "rsi_strategy.json"],
+        "goal_steering": [STATE_DIR / "goal_scratchpad.json"],
+        "alignment": [STATE_DIR / "alignment_scores.json"],
     }
     candidates = expected.get(bot_name, [])
     if not candidates:
@@ -944,3 +948,29 @@ def write_trigger(
     target = triggers_dir / f"{bot_name}.evolve.json"
     _write_json_atomic(target, payload)
     return target
+
+
+def award_ticket_completion_rewards(state_dir: Path | str, ticket_id: str) -> list[str]:
+    """Award completion rewards to all participants of a ticket exactly once.
+
+    Returns the list of roles that were awarded, or [] if already awarded.
+    """
+    store = LifecyclePacketStore(state_dir)
+    if not store.mark_completion_rewards_recorded(ticket_id):
+        return []
+
+    participants = store.participants(ticket_id)
+    if not participants:
+        return []
+
+    rl_path = Path(state_dir) / "rl_state.json"
+    state = load_rl_state(rl_path)
+    awarded = []
+    for role in participants:
+        bs = ensure_bot(state, role)
+        # Record a neutral/successful event for completion
+        record_event_reward(state, role, reward=0.5, score=50, exit_code=0, exit_reason="completed")
+        awarded.append(role)
+
+    save_rl_state(state, rl_path)
+    return awarded
