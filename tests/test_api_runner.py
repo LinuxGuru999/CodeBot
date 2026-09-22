@@ -1064,7 +1064,7 @@ class TestPersistStreamStress:
         assert len(payload["messages"]) < len(messages), "Messages must be trimmed"
 
     def test_persist_stream_reserialize_when_truncated_flag_added_post_guard(self, tmp_path):
-        """Cover the re-serialization path (lines ~1564-1567).
+        """Cover the re-serialization path (lines ~1560-1561).
 
         When stream_truncated is True from the accumulation break (not the
         while loop), the truncated flag is added AFTER the initial body
@@ -1093,6 +1093,79 @@ class TestPersistStreamStress:
         assert payload.get("truncated") is True
         assert '"truncated"' in raw, "truncated key must appear in serialized JSON"
         assert len(payload["messages"]) < len(messages)
+
+    def test_persist_stream_reserialize_without_while_loop(self, tmp_path):
+        """Cover lines 1560-1561: re-serialization when truncated flag added post-guard.
+
+        Must trigger stream_truncated via accumulation break WITHOUT triggering
+        the while tail-trim loop. This requires the final serialized payload
+        (without truncated flag) to be <= MAX_SIZE even though accumulation broke.
+        Use messages where per-entry size estimate is accurate and structural
+        overhead is minimal.
+        """
+        import codebot.api_runner as ar
+
+        bot_name = "reserialize-no-while-bot"
+        # Use larger messages so fewer fit, reducing structural overhead ratio.
+        # Each message ~1000 bytes. ~490 messages should approach 500KB.
+        # The break will happen, but final payload should stay under 500KB
+        # because per-entry estimate includes +1 for comma which overestimates
+        # slightly for the last entry.
+        msg_content = "x" * 950
+        messages = [{"role": "user", "content": msg_content} for _ in range(600)]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists()
+        raw = stream_path.read_text(encoding="utf-8")
+        file_size = len(raw.encode("utf-8"))
+        assert file_size <= 500_000, f"File {file_size} exceeds 500KB"
+        payload = json.loads(raw)
+        assert payload.get("truncated") is True
+        assert '"truncated"' in raw
+        assert len(payload["messages"]) < len(messages)
+        # Verify we didn't enter the while loop by checking that message count
+        # is close to what cumulative tracking would allow (not heavily trimmed)
+        assert len(payload["messages"]) > 400, "Should have many messages if while loop didn't trim"
+
+    def test_persist_stream_non_mapping_message_skipped_with_warning(self, tmp_path, caplog):
+        """Cover the except (TypeError, ValueError) path for non-mapping messages (lines 1487-1494).
+
+        When a message is not a mapping (e.g., a string or list), dict(m) raises
+        TypeError and the message is skipped with a warning log.
+        """
+        import codebot.api_runner as ar
+        import logging
+
+        bot_name = "non-mapping-bot"
+        # Mix of valid messages and non-mapping entries
+        messages = [
+            {"role": "user", "content": "valid message"},
+            "this is a string, not a dict",  # Will cause TypeError in dict(m)
+            ["this", "is", "a", "list"],      # Will also cause TypeError
+            42,                                # Integer - TypeError
+            {"role": "assistant", "content": "another valid"},
+        ]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             caplog.at_level(logging.WARNING):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        # Verify warnings were logged for non-mapping messages
+        warning_msgs = [r.message for r in caplog.records if "skipped non-mapping" in r.message]
+        assert len(warning_msgs) >= 3, f"Expected at least 3 non-mapping warnings, got {len(warning_msgs)}: {warning_msgs}"
+
+        # Verify stream file was created with only valid messages
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists()
+        payload = json.loads(stream_path.read_text(encoding="utf-8"))
+        # Only the 2 valid dict messages should be persisted
+        assert len(payload["messages"]) == 2
+        assert payload.get("truncated") is True  # stream_truncated set due to skipped messages
 
 
 class TestCostTracking:
