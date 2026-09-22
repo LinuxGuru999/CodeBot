@@ -90,6 +90,7 @@ def _safe_int_env(key: str, default: int, min_val: int = 1) -> int:
 RATE_LIMIT_MAX_ATTEMPTS = _safe_int_env("RATE_LIMIT_MAX_ATTEMPTS", 5, 1)
 RATE_LIMIT_WINDOW_SECONDS = _safe_int_env("RATE_LIMIT_WINDOW_SECONDS", 60, 1)
 RATE_LIMIT_COOLDOWN_SECONDS = _safe_int_env("RATE_LIMIT_COOLDOWN_SECONDS", 300, 1)
+MAX_TRACKED_IPS = _safe_int_env("MAX_TRACKED_IPS", 10000, 100)
 
 
 class RateLimiter:
