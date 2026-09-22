@@ -1625,10 +1625,21 @@ class TestHandleTelemetry:
         """_handle_telemetry should handle ImportError gracefully."""
         from codebot.control_server import ControlHandler
         handler = self._make_telemetry_handler({})
+        # Authenticate with matching TELEMETRY_TOKEN so we reach the import branch.
         with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.control_server.TELEMETRY_TOKEN", ""):
-            # Simulate ImportError by patching the import inside the method
-            with patch("builtins.__import__", side_effect=ImportError("mocked")):
+             patch("codebot.control_server.TELEMETRY_TOKEN", "test-token"):
+            # Simulate ImportError by patching the import inside the method.
+            # Use wraps on the real __import__ so only telemetry/event_log
+            # imports fail; patch() machinery itself keeps working.
+            import builtins
+            real_import = builtins.__import__
+
+            def _failing_import(name, *args, **kwargs):
+                if name in ("codebot.telemetry", "codebot.event_log"):
+                    raise ImportError("mocked")
+                return real_import(name, *args, **kwargs)
+
+            with patch("builtins.__import__", side_effect=_failing_import):
                 ControlHandler._handle_telemetry(handler, {})
                 handler._json.assert_called_once()
                 call_args = handler._json.call_args
@@ -1638,8 +1649,9 @@ class TestHandleTelemetry:
         """_handle_telemetry should return 400 on validation failure."""
         from codebot.control_server import ControlHandler
         handler = self._make_telemetry_handler({})
+        # Authenticate with matching TELEMETRY_TOKEN so we reach validation.
         with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.control_server.TELEMETRY_TOKEN", ""):
+             patch("codebot.control_server.TELEMETRY_TOKEN", "test-token"):
             with patch("codebot.telemetry._validate_signal", return_value=(False, "bad signal")):
                 ControlHandler._handle_telemetry(handler, {})
                 handler._json.assert_called_once()
