@@ -976,9 +976,13 @@ class TestEmptyControlTokenRejection:
 
     @classmethod
     def teardown_class(cls):
-        """Shutdown server and restore environment."""
-        cls.server.shutdown()
+        """Shutdown server and restore environment (reviewer finding #3: isolation)."""
+        try:
+            cls.server.shutdown()
+        finally:
+            cls.server.server_close()
         cls.thread.join(timeout=5)
+        assert not cls.thread.is_alive(), "server thread leaked after teardown"
 
         # Restore environment exactly to pre-test state to avoid pollution
         if cls.original_token is not None:
