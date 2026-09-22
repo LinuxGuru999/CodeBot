@@ -1772,10 +1772,11 @@ class TestCostTracking:
 
     def test_resolve_cost_state_dir_last_resort_cwd_state(self, tmp_path):
         """When no valid candidate, falls back to cwd/.codebot/state."""
-        fake_hb = tmp_path / "fake" / "hb"
-        fake_hb.parent.mkdir()
-        
+        fake_hb = tmp_path / "nonexistent_xyz_123" / "hb"
+        # Ensure parent does NOT exist so both resolve loops fall through to cwd fallback
+        assert not fake_hb.parent.exists()
+
         with patch.object(_api_runner_module, '_adapter_instance', None), \
-             patch.object(_api_runner_module, 'Path.cwd', return_value=tmp_path):
+             patch('codebot.api_runner.Path.cwd', return_value=tmp_path):
             result = _resolve_cost_state_dir(heartbeat_file=str(fake_hb), ckpt_file="")
             assert result == tmp_path / ".codebot" / "state"
