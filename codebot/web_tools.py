@@ -17,9 +17,8 @@ looking up authoritative references.
 
 Invariants
 ----------
-- stdlib-only baseline (urllib.request, urllib.parse, html.parser, re); optionally
-  uses beautifulsoup4 + lxml for robust HTML parsing when installed, otherwise falls
-  back to regex-based extraction -- no required third-party runtime dependencies
+- stdlib-only baseline (urllib.request, urllib.parse, html.parser, re); uses
+  regex-based extraction exclusively -- no third-party runtime dependencies
   (see docs/adr/005-web-tools-html-parsing-strategy.md)
 - All I/O bounded: search response capped at 500KB, fetch at 1MB
 - Timeouts enforced: 15s for search, 30s for fetch
@@ -38,6 +37,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from html import unescape as html_unescape
 from html.parser import HTMLParser
 from typing import Any
 
@@ -54,6 +54,7 @@ MAX_OUTPUT_CHARS = 8_000
 _SECURE_SSL_CONTEXT = ssl.create_default_context()
 _SECURE_SSL_CONTEXT.check_hostname = True
 _SECURE_SSL_CONTEXT.verify_mode = ssl.CERT_REQUIRED
+_SECURE_SSL_CONTEXT.load_default_certs()
 
 _BLOCKED_PATTERNS = (
     "127.0.0.", "localhost", "::1", "169.254.",
@@ -62,6 +63,33 @@ _BLOCKED_PATTERNS = (
     "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
     "172.30.", "172.31.", "192.168.",
 )
+
+
+class BlockedIPError(ValueError):
+    """Raised when host resolves to SSRF-blocked IP.
+
+    Subclass of ValueError for backwards compatibility with existing
+    `except ValueError` handlers in callers like _safe_open_url and
+    _SSRFRedirectHandler.redirect_request.
+    """
+    pass
+
+
+def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse host as an IP literal without using exceptions for control flow.
+
+    Returns the parsed address if *host* is a valid IPv4/IPv6 literal,
+    otherwise None (caller proceeds to DNS resolution).
+
+    Only this helper uses try/except around ipaddress.ip_address; callers
+    branch on the Optional return value instead of catching ValueError,
+    so security decisions never depend on exception-message matching or
+    on the ordering of ``except BlockedIPError`` vs ``except ValueError``.
+    """
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
 
 
 def _is_blocked_ip(ip_str: str) -> bool:
@@ -111,19 +139,21 @@ def _resolve_and_validate_host(host: str, port: int) -> tuple[str, int, int]:
         Tuple of (resolved_ip, port, address_family).
 
     Raises:
-        ValueError: If DNS resolution fails or resolved IP is blocked.
+        BlockedIPError: If resolved IP is blocked (SSRF protection).
+        ValueError: If DNS resolution fails or host is invalid.
     """
-    # Check if host is already an IP address
-    try:
-        addr = ipaddress.ip_address(host)
+    # Check if host is already an IP address. Branch on the Optional
+    # return value instead of using exceptions for control flow: if the
+    # helper returns None the host is not an IP literal and we fall
+    # through to DNS resolution. Blocked literals raise the distinct
+    # BlockedIPError type (a ValueError subclass) -- never matched via
+    # substring checks on str(e), so message refactors cannot bypass SSRF.
+    addr = _parse_ip_literal(host)
+    if addr is not None:
         if _is_blocked_ip(str(addr)):
-            raise ValueError(f"resolves to blocked IP: {host}")
+            raise BlockedIPError(f"resolves to blocked IP: {host}")
         family = socket.AF_INET6 if isinstance(addr, ipaddress.IPv6Address) else socket.AF_INET
         return (str(addr), port, family)
-    except ValueError as e:
-        if "blocked IP" in str(e):
-            raise
-        # Not an IP address, proceed with DNS resolution
 
     # Resolve hostname via DNS
     try:
@@ -139,7 +169,7 @@ def _resolve_and_validate_host(host: str, port: int) -> tuple[str, int, int]:
         family, socktype, proto, canonname, sockaddr = info
         resolved_ip = sockaddr[0]
         if _is_blocked_ip(resolved_ip):
-            raise ValueError(f"{host} resolves to blocked IP: {resolved_ip}")
+            raise BlockedIPError(f"{host} resolves to blocked IP: {resolved_ip}")
 
     # Return first valid resolution
     family, socktype, proto, canonname, sockaddr = infos[0]
@@ -241,6 +271,8 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
                  source_address: tuple[str, int] | None = None,
                  pinned_ip: str | None = None,
                  context: ssl.SSLContext | None = None):
+        if context is None:
+            context = _SECURE_SSL_CONTEXT
         super().__init__(
             host,
             port=port,
@@ -283,6 +315,11 @@ class _PinnedURLHandler(urllib.request.AbstractHTTPHandler):
     It extracts the pinned IP from the request's 'X-Pinned-IP' header
     (which we inject internally) and uses the appropriate connection class.
     """
+    # Lower handler_order than default HTTPHandler/HTTPSHandler (500)
+    # ensures this handler processes requests before defaults, preventing
+    # SSRF bypass via handler ordering.
+    handler_order = 400
+
     def http_open(self, req: urllib.request.Request) -> Any:
         return self.do_open(_PinnedHTTPConnection, req, pinned_ip=getattr(req, '_pinned_ip', None))
 
@@ -521,11 +558,50 @@ def web_fetch(url: str, max_bytes: int = MAX_FETCH_BYTES) -> dict[str, Any]:
     return {"success": True, "output": text, "error": None}
 
 
-def extract_text_from_html(html: str) -> str:
-    """Extract readable text from HTML.
+class _FallbackStripper(HTMLParser):
+    """Stdlib HTMLParser that strips script/style/nav/footer/header/aside content.
 
-    Attempts to use beautifulsoup4 (with lxml parser) or lxml directly for robust parsing
-    of malformed HTML. Falls back to stdlib regex-based parsing if neither is available.
+    Handles malformed or unclosed tags by tracking skip depth; content inside
+    an unclosed skip-tag is discarded until parser.close().
+    """
+
+    SKIP_TAGS = frozenset({"script", "style", "nav", "footer", "header", "aside"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._skip_depth = 0
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() in self.SKIP_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self.SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            self._parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._skip_depth == 0:
+            self._parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if self._skip_depth == 0:
+            self._parts.append(f"&#{name};")
+
+    def get_text(self) -> str:
+        return "".join(self._parts)
+
+
+def extract_text_from_html(html: str) -> str:
+    """Extract readable text from HTML using stdlib HTMLParser.
+
+    Uses a custom HTMLParser subclass to robustly strip script/style and other
+    non-content tags, including malformed or unclosed variants that defeat
+    naive regex approaches.
 
     Args:
         html: Raw HTML string.
@@ -533,61 +609,23 @@ def extract_text_from_html(html: str) -> str:
     Returns:
         Extracted plain text.
     """
-    # Try beautifulsoup4 first (preferred for robustness)
+    stripper = _FallbackStripper()
     try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "lxml")
-        # Remove script and style elements
-        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            script.decompose()
-        text = soup.get_text(separator="\n")
-        # Clean up whitespace similar to fallback
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        lines = [line.strip() for line in text.splitlines()]
-        lines = [line for line in lines if line]
-        return '\n'.join(lines)
-    except ImportError:
-        pass
+        stripper.feed(html)
+        stripper.close()
+    except Exception:
+        # Fail open to empty rather than leaking raw HTML/script content
+        return ""
 
-    # Try lxml directly if bs4 failed but lxml is present (less likely if bs4 isn't there, but possible)
-    doc = None
-    try:
-        from lxml import etree, html as lh
-        doc = lh.fromstring(html.encode('utf-8'))
-        # Remove unwanted tags
-        for tag in ["script", "style", "nav", "footer", "header", "aside"]:
-            for element in doc.xpath(f".//{tag}"):
-                parent = element.getparent()
-                if parent is not None:
-                    parent.remove(element)
-        text = etree.tostring(doc, method='text', encoding='unicode')
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        lines = [line.strip() for line in text.splitlines()]
-        lines = [line for line in lines if line]
-        return '\n'.join(lines)
-    except ImportError:
-        pass
-    finally:
-        # Explicitly free the document tree to prevent memory leaks on large inputs
-        # or if an exception occurred during processing.
-        if doc is not None:
-            del doc
+    text = stripper.get_text()
 
-    # Fallback to stdlib regex-based parsing
-    for tag in ("script", "style", "nav", "footer", "header", "aside"):
-        html = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
-    html = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
-    html = re.sub(r'</p>', '\n\n', html, flags=re.IGNORECASE)
-    html = re.sub(r'</h[1-6]>', '\n\n', html, flags=re.IGNORECASE)
-    html = re.sub(r'</li>', '\n', html, flags=re.IGNORECASE)
-    html = re.sub(r'<[^>]+>', ' ', html)
-    html = re.sub(r'&nbsp;', ' ', html)
-    html = re.sub(r'&amp;', '&', html)
-    html = re.sub(r'&lt;', '<', html)
-    html = re.sub(r'&gt;', '>', html)
-    html = re.sub(r'&#\d+;', '', html)
-    html = re.sub(r'[ \t]+', ' ', html)
-    lines = [line.strip() for line in html.splitlines()]
+    # Normalize whitespace and decode common entities post-strip
+    # Decode all HTML entities (named + numeric) via stdlib html.unescape.
+    # This replaces manual regex substitutions and correctly handles &#65; -> 'A'
+    # instead of stripping numeric refs to empty string.
+    text = html_unescape(text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    lines = [line.strip() for line in text.splitlines()]
     lines = [line for line in lines if line]
     return '\n'.join(lines)
 
