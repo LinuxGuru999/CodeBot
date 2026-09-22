@@ -463,13 +463,8 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
                 if signal_sent:
                     logger.info("_safe_kill_bot_process: sent SIGTERM to PID %d from PID file for bot '%s'", pid, name)
                     killed_pids.append(pid)
-                    # Clean up PID file after successful signal
-                    try:
-                        pid_file = _resolve_control_state_dir() / f"{name}.pid"
-                        if pid_file.exists():
-                            pid_file.unlink()
-                    except OSError:
-                        pass
+                    # Poll for process exit before deleting PID file (Feedback #49)
+                    _wait_for_exit_and_cleanup(pid, name)
                 else:
                     # pidfd signaling unavailable - fail closed, do NOT clean up PID file
                     # The process may still be running; operator must investigate
