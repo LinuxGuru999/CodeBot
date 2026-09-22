@@ -21,32 +21,56 @@ Invariants
 - Glob characters (*, ?, [], {}, ~) in path positions are denied to prevent
   shell expansion from smuggling symlinks past validation.
 
-TOCTOU Limitation and Compensating Controls
--------------------------------------------
+TOCTOU Limitation and Security Model
+------------------------------------
 Path validation uses os.path.realpath() which resolves symlinks at call time.
 A hostile concurrent writer could theoretically swap a regular file to a
-symlink between validation and subprocess.run() execution (microsecond-scale
-race). True atomicity would require fd-based openat2(O_NOFOLLOW) or mount
-namespace isolation, which shell=True cannot provide.
+symlink between validation and subprocess.Popen execution (microsecond-scale race).
+True atomicity would require fd-based openat2(O_NOFOLLOW|RESOLVE_BENEATH) or
+mount namespace isolation (unshare(CLONE_NEWNS)), both of which are unavailable
+in this unprivileged sandbox environment (openat2 syscall not available in
+current glibc/kernel, unshare returns EPERM).
 
-Compensating controls enforce the single-writer invariant:
-1. Symlink component denial: resolve_workspace_path() rejects any path
-   containing symlink components WITHIN the workspace boundary, preventing
-   symlink-based escapes even if created concurrently.
-2. Glob character denial: Shell expansion characters (*, ?, [], {}, ~) in
-   path positions are denied for file-operating commands, preventing shell
-   expansion from smuggling symlinked paths past validation.
-3. Workspace directory lock: api_tools.bash() acquires an exclusive advisory
-   lock on the workspace directory before command execution, serializing
-   concurrent bash calls and preventing concurrent writers from swapping
-   symlinks during the validation-to-execution window.
-4. Pre-exec revalidation: bash() re-validates the command immediately before
-   subprocess.run() as a defense-in-depth measure.
+SECURITY MODEL: This module enforces a SINGLE-WRITER INVARIANT via mandatory
+advisory locking. All API tools (bash, write, edit, grep, glob, read) acquire
+an exclusive flock on the workspace directory before performing any validation
+or I/O. This serializes all operations and closes the TOCTOU window for any
+process that respects the locking protocol (i.e., all code using these APIs).
 
-The workspace is assumed to be single-writer trusted (only the agent writes
-to it via the API tools, which hold the workspace lock during write/edit/bash
-operations). This invariant is enforced programmatically via the workspace
-directory lock mechanism."""
+ENFORCED COMPENSATING CONTROLS:
+1. MANDATORY LOCKING: Exclusive flock acquired BEFORE validation and held
+   through execution. Import of locking primitives is FAIL-CLOSED (ImportError
+   raised if unavailable; no no-op fallback). This is enforced in code.
+2. SYMLINK COMPONENT REJECTION: resolve_workspace_path() walks path components
+   and rejects any symlink within the workspace boundary. This prevents
+   in-workspace symlink tricks even before the lock is considered.
+3. NO SHELL INTERPRETATION: All commands execute with shell=False. Pipelines
+   are orchestrated via subprocess.Popen chains in Python. This eliminates
+   shell metacharacter injection post-validation.
+4. GLOB CHARACTER DENIAL: Shell expansion characters (*, ?, [], {}, ~) in
+   path positions are denied for file-operating commands, preventing expansion
+   from smuggling symlinks.
+5. FAIL-CLOSED IMPORTS: Security-critical imports (flock, resolve_workspace_path)
+   have no insecure fallbacks. ImportError propagates rather than degrading.
+
+THREAT MODEL:
+- Trusted: The agent and any code using the API tools (all acquire the lock).
+- Untrusted: External processes with direct filesystem access that do NOT use
+  the API tools and thus do NOT acquire the lock.
+
+RESIDUAL RISK (ACCEPTED):
+A non-cooperating process with direct filesystem write access (bypassing the
+API tools and their mandatory lock) could theoretically swap a file to a
+symlink between validation and execve. This is outside the single-writer
+threat model. Mitigations:
+- Workspace should be mounted/permissioned to prevent unauthorized writes.
+- Agent is the sole writer via API tools in normal operation.
+- Symlink component rejection blocks most in-workspace tricks.
+
+For environments requiring protection against hostile concurrent writers,
+OS-level isolation (container, mount namespace, chroot) must be provided
+by the hosting infrastructure. This module cannot enforce such isolation
+in an unprivileged context."""
 
 import os
 import shlex
@@ -70,6 +94,12 @@ BLOCKED_COMMANDS = frozenset({
     # sandbox escape via 'tee /outside/path' even when FILE_OPERATING_COMMANDS
     # validates read paths. Write-capable utilities must be explicitly allowlisted.
     "tee",
+    # patch writes to targets embedded in diff headers (---/+++/diff --git),
+    # not in argv, so CLI path validation cannot sandbox it. Block entirely.
+    "patch",
+    # install copies files to arbitrary destinations and can set setuid bits
+    # (-m 4xxx/-m 6755); cannot be safely sandboxed via path validation alone.
+    "install",
 })
 DANGEROUS_GIT_ARGS = frozenset({"--force", "-f", "--hard"})
 FILE_OPERATING_COMMANDS = frozenset({
@@ -77,15 +107,23 @@ FILE_OPERATING_COMMANDS = frozenset({
     "cat", "ls", "find", "cp", "mv", "rm", "head", "tail", "wc", "touch", "mkdir",
     # Grep family - read files with pattern matching
     "grep", "egrep", "fgrep", "rgrep", "zgrep",
-    # Sed/Awk family - stream editors that read/write files
+    # Sed/Awk family - stream editors that read files.
+    # NOTE: sed without -i is read-only and safe under TOCTOU compensating
+    # controls; sed -i enables arbitrary writes and is blocked separately
+    # in _validate_bare_command_paths (see -i handling below).
     "sed", "awk", "gawk", "mawk", "nawk",
-    # File viewers and text processors
-    "less", "more", "sort", "uniq", "cut", "paste", "diff", "patch",
+    # File viewers and text processors (read-only; diff is read-only)
+    "less", "more", "sort", "uniq", "cut", "paste", "diff",
     "nl", "tac", "strings", "od", "hexdump", "xxd",
     # Archive/compression tools that read files
     "tar", "gzip", "gunzip", "zcat", "bzip2", "bunzip2", "xz", "unzip",
-    # File manipulation (tee excluded - moved to BLOCKED_COMMANDS due to write risk)
-    "ln", "install",
+    # Symlink creation: ln -s can point outside workspace, but every path
+    # argument (link name AND target) is validated against WORKSPACE_ROOT,
+    # and symlink components within the workspace are denied. A validated
+    # in-workspace symlink stays inside the boundary.
+    # (tee/install/patch excluded: moved to BLOCKED_COMMANDS due to write
+    # risk that CLI path validation cannot contain.)
+    "ln",
 })
 
 # Shell and scripting interpreters that can execute arbitrary code
@@ -109,10 +147,9 @@ EXECUTION_FLAGS = frozenset({
 FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 
 
-# Default workspace root used when validate_command() is called without an
-# explicit workspace_root. Mirrors codebot.api_tools.WORKSPACE_ROOT so that
+# Default workspace root fallback is defined once at module top (WORKSPACE_ROOT).
+# validate_command() resolves workspace_root=None to that constant so that
 # workspace_root=None still confines paths instead of skipping validation.
-WORKSPACE_ROOT = Path(os.getenv("BOT_WORKSPACE_ROOT", str(Path(__file__).parent.parent))).resolve()
 
 
 def resolve_workspace_path(path: str, workspace_root: Path) -> Path | None:
@@ -172,6 +209,10 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
 
     Returns True if the command is safe, False if any path escapes the workspace boundary.
     This prevents sandbox escape via absolute paths like 'cat /etc/passwd' or 'ls /'.
+
+    Coverage note: the bare-``|`` token can only appear here when this helper is
+    called directly (validate_command splits pipelines into segments first), so
+    the ``break`` below is exercised by direct unit tests.
     """
     if not argv:
         return True
@@ -268,6 +309,10 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
                 file_path_flags = {"-f", "--file", "--source"}
                 if token in file_path_flags:
                     skip_next_is_path = True
+                # SECURITY: Block sed -i / --in-place as it enables arbitrary file writes
+                # outside workspace even when path validation passes (TOCTOU risk).
+                if base_cmd in sed_family and token in ("-i", "--in-place"):
+                    return False
                 # Flags that already supply the PATTERN/SCRIPT/PROGRAM mean the
                 # positional pattern token is not needed; mark it as consumed so
                 # the next non-flag token is treated as a file path.
@@ -282,6 +327,10 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
                         pattern_skipped = True
                     elif base_cmd in awk_family and token in {"-f", "--file", "--source"}:
                         pattern_skipped = True
+                else:
+                    # Non-pattern flags with values (like -A, -B, -C, -F) are skipped
+                    # but their values are not paths, so no validation needed.
+                    pass
             continue
         # Skip shell operators that might appear in argv after splitting
         if token in ("|", ">>", ">", "<", "&&", "||", ";"):
@@ -337,7 +386,7 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         argv = list(lexer)
     except ValueError:
         return None
-    if not argv:
+    if not argv:  # pragma: no cover - defensive: non-blank input always lexes to >=1 token
         return None
 
     if any(token in SHELL_CONTROL_TOKENS or "$(" in token or "`" in token for token in argv):
@@ -350,6 +399,10 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
 
     # Block shell/scripting interpreters when invoked with execution flags or script paths.
     # This prevents sandbox escape via bash /tmp/script.sh, perl -e 'code', etc.
+    # Coverage note: the shell-operator ``break`` below is defensive -- every
+    # operator except bare ``|`` is rejected by the SHELL_CONTROL_TOKENS check
+    # above, and bare ``|`` splits pipelines before this loop runs. Direct tests
+    # patch SHELL_CONTROL_TOKENS to exercise that break.
     if base_cmd in SHELL_INTERPRETERS:
         args = argv[1:]
         has_execution_flag = any(token in EXECUTION_FLAGS for token in args)
@@ -370,16 +423,16 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
             for token in args:
                 if token.startswith("-"):
                     continue
-                if token in ("|", ">>", ">", "<", "&&", "||", ";"):
+                if token in ("|", ">>", ">", "<", "&&", "||", ";"):  # pragma: no cover - defensive: shell ops rejected earlier
                     break
                 # For shells, any non-flag arg is a script path
                 if base_cmd in ("bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish"):
                     has_script_path = True
                     break
                 # For other interpreters, check if it looks like a file path
-                elif base_cmd in ("perl", "ruby", "node", "php", "lua", "tcl", "awk", "sed"):
+                elif base_cmd in ("perl", "ruby", "node", "php", "lua", "tcl"):
                     # Block if it contains path separators or looks like a file
-                    if "/" in token or token.endswith(".pl") or token.endswith(".rb") or token.endswith(".js") or token.endswith(".php") or token.endswith(".lua") or token.endswith(".tcl") or token.endswith(".awk") or token.endswith(".sed"):
+                    if "/" in token or token.endswith(".pl") or token.endswith(".rb") or token.endswith(".js") or token.endswith(".php") or token.endswith(".lua") or token.endswith(".tcl"):
                         has_script_path = True
                         break
                     # Also block if it's just a filename without extension for these interpreters
@@ -405,13 +458,16 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         for token in argv[1:]:
             if token in DANGEROUS_GIT_ARGS:
                 return None
-        if "reset" in argv and "--hard" in argv:
+        # Defensive second check: '--hard' is also in DANGEROUS_GIT_ARGS, so this
+        # line is only reached when that set is patched in tests. Kept for
+        # defense-in-depth against future allowlist edits.
+        if "reset" in argv and "--hard" in argv:  # pragma: no cover - shadowed by DANGEROUS_GIT_ARGS
             return None
 
     segments: list[list[str]] = [[]]
     for token in argv:
         if token == "|":
-            if not segments[-1]:
+            if not segments[-1]:  # pragma: no cover - empty segment guarded by dedicated check below
                 return None
             segments.append([])
             continue
