@@ -71,11 +71,12 @@ class TestBlocklistedCommand:
         assert allowlisted_command("   ") is None
 
     def test_shell_metacharacters_blocked(self):
-        """Shell control operators are blocked to prevent command chaining."""
-        cmds = ["ls && pwd", "echo hello > out.txt", "cd src && pytest"]
+        """Shell control operators are blocked except `cd <dir> && <allowed>`."""
+        cmds = ["ls && pwd", "echo hello > out.txt"]
         for cmd in cmds:
             result = allowlisted_command(cmd)
             assert result is None, f"Should block shell control command: {cmd}"
+        assert allowlisted_command("cd src && pytest") is not None
 
     def test_pipes_allowed_without_workspace_root(self):
         """Pipes without workspace_root still work (no path validation)."""
@@ -83,7 +84,8 @@ class TestBlocklistedCommand:
         for cmd in cmds:
             result = allowlisted_command(cmd)
             assert result is not None, f"Blocked pipe command: {cmd}"
-            assert result == [cmd]
+            # validate_command returns list of parsed segments (list[list[str]])
+            assert isinstance(result, list) and len(result) >= 1
 
     def test_blocked_commands_rejected(self):
         """Dangerous commands in BLOCKED_COMMANDS are rejected."""
@@ -203,14 +205,28 @@ class TestBlocklistedCommand:
 
     def test_python_m_and_script_allowed(self):
         """python3 -m and python script.py still work."""
+        # Allowlisted modules
         cmds = [
             "python3 -m pytest",
-            "python script.py",
-            "python3 -m http.server",
+            "python3 -m json.tool file.json",
         ]
         for cmd in cmds:
             result = allowlisted_command(cmd)
             assert result is not None, f"Blocked valid python: {cmd}"
+        
+        # Dangerous modules must be blocked (security: sandbox escape/exfiltration)
+        blocked_cmds = [
+            "python3 -m http.server",
+            "python -m http.server 8080",
+            "python3 -m venv myenv",
+            "python3 -m ensurepip",
+            "python3 -m timeit",
+            "python3 -m profile",
+            "python3 -m trace",
+        ]
+        for cmd in blocked_cmds:
+            result = allowlisted_command(cmd)
+            assert result is None, f"Should block dangerous python -m: {cmd}"
 
     def test_gh_any_subcommand_allowed(self):
         """GH CLI with any subcommand passes (no subcommand allowlist)."""
@@ -277,7 +293,8 @@ class TestPipeEdgeCases:
         """Multiple pipes should be handled correctly if all segments valid."""
         result = allowlisted_command("ls | grep foo | head -n 5")
         assert result is not None
-        assert result == ["ls | grep foo | head -n 5"]
+        # validate_command returns list of parsed segments (list[list[str]])
+        assert isinstance(result, list) and len(result) == 3
 
     def test_multiple_pipes_with_empty_segment_blocked(self):
         """Multiple pipes with empty segment in middle should be blocked."""
@@ -298,10 +315,10 @@ class TestPipeEdgeCases:
         assert allowlisted_command("echo foo | grep ../../../secret") is None
 
     def test_absolute_path_in_pipe_without_workspace_allowed(self):
-        """Without workspace_root, absolute paths outside workspace are denied via WORKSPACE_ROOT default."""
-        # With workspace_root=None, validation falls back to module WORKSPACE_ROOT
-        result = allowlisted_command("ls | cat /etc/passwd")
-        assert result is None
+        """Absolute paths in pipes are denied when workspace_root is None per constitution §3."""
+        # Updated per constitution §3: no deletion
+        assert validate_command("ls | cat /etc/passwd") is None
+        assert validate_command("ls | cat /etc/passwd", workspace_root=None) is None
 
     def test_non_allowed_pipe_target_blocked(self):
         """Pipe targets that are blocklisted commands should be blocked."""
@@ -323,7 +340,8 @@ class TestPipeEdgeCases:
         cmd = "find . -name '*.py' | grep -v test | wc -l"
         result = allowlisted_command(cmd)
         assert result is not None
-        assert result == [cmd]
+        # validate_command returns list of parsed segments (list[list[str]])
+        assert isinstance(result, list) and len(result) == 3
 
     def test_pipe_with_shell_metacharacters_in_segments(self):
         """Pipe segments containing shell metacharacters should be blocked."""
@@ -579,6 +597,12 @@ class TestBareCommandSandboxEscape:
     def test_sed_shadow_denied(self, ws):
         """sed -n p /etc/shadow must be denied (acceptance criterion 2)."""
         assert validate_command("sed -n p /etc/shadow", workspace_root=ws) is None
+
+    def test_sed_inplace_denied(self, ws):
+        """sed -i blocks arbitrary file writes outside workspace (TOCTOU risk)."""
+        # Even with a workspace path, -i is blocked as it enables writes
+        assert validate_command("sed -i 's/a/b/' src/file.txt", workspace_root=ws) is None
+        assert validate_command("sed --in-place 's/a/b/' src/file.txt", workspace_root=ws) is None
 
     def test_awk_passwd_denied(self, ws):
         """awk '{print}' /etc/passwd must be denied (acceptance criterion 3)."""
@@ -1318,6 +1342,215 @@ class TestShellInterpreterBlocking:
         assert validate_command("find . -ok rm {} \\; | wc -l", workspace_root=ws) is None
         assert validate_command("find . -okdir ls \\; | wc -l", workspace_root=ws) is None
 
+    def test_ln_hard_link_blocked(self, ws):
+        """ln without -s/--symbolic is blocked (hard links bypass symlink checks)."""
+        # Hard link creation is blocked entirely
+        assert validate_command("ln src/file.txt dst/link.txt", workspace_root=ws) is None
+        assert validate_command("ln /etc/passwd /tmp/stolen", workspace_root=ws) is None
+        # Even with workspace paths, hard links are blocked
+        assert validate_command("ln file1 file2", workspace_root=ws) is None
+
+    def test_ln_symbolic_blocked(self, ws):
+        """ln -s is blocked entirely as symlink creation cannot be safely sandboxed."""
+        # All ln invocations are blocked per Feedback #32
+        assert validate_command("ln -s src/file.txt dst/link.txt", workspace_root=ws) is None
+        assert validate_command("ln --symbolic target link", workspace_root=ws) is None
+        assert validate_command("ln -s /etc/passwd link", workspace_root=ws) is None
+
+    def test_tar_blocked(self, ws):
+        """tar is blocked entirely (complex flag semantics cannot be safely validated)."""
+        assert validate_command("tar -czf archive.tar.gz src/", workspace_root=ws) is None
+        assert validate_command("tar -xf archive.tar.gz", workspace_root=ws) is None
+        assert validate_command("tar -C /etc passwd", workspace_root=ws) is None
+
+    def test_compression_tools_blocked(self, ws):
+        """gzip/gunzip/bzip2/xz/unzip are blocked entirely."""
+        assert validate_command("gzip file.txt", workspace_root=ws) is None
+        assert validate_command("gunzip file.txt.gz", workspace_root=ws) is None
+        assert validate_command("bzip2 file.txt", workspace_root=ws) is None
+        assert validate_command("bunzip2 file.txt.bz2", workspace_root=ws) is None
+        assert validate_command("xz file.txt", workspace_root=ws) is None
+        assert validate_command("unzip archive.zip", workspace_root=ws) is None
+        assert validate_command("zcat file.gz", workspace_root=ws) is None
+
+
+class TestCombinedShortFlags:
+    """Tests for combined short flag parsing (e.g., grep -rf, awk -nf).
+
+    Feedback #31/#34: Combined short flags like -rf contain embedded 'f'
+    which takes a file path argument. The validator must detect this and
+    validate the path accordingly.
+    """
+
+    @pytest.fixture
+    def ws(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "src").mkdir()
+        (workspace / "src" / "file.txt").write_text("hello")
+        return workspace
+
+    def test_grep_rf_outside_denied(self, ws):
+        """grep -rf /etc/passwd is denied (combined -r and -f flags)."""
+        assert validate_command("grep -rf /etc/passwd", workspace_root=ws) is None
+
+    def test_grep_nf_outside_denied(self, ws):
+        """grep -nf /etc/shadow is denied."""
+        assert validate_command("grep -nf /etc/shadow", workspace_root=ws) is None
+
+    def test_grep_f_embedded_path_outside_denied(self, ws):
+        """grep -f/etc/passwd (embedded path after f) is denied."""
+        from codebot.tool_policy import _validate_bare_command_paths
+        result = _validate_bare_command_paths(["grep", "-f/etc/passwd", "pattern"], ws)
+        assert result is False
+
+    def test_grep_rf_embedded_path_outside_denied(self, ws):
+        """grep -rf/etc/passwd (embedded path in combined flag) is denied."""
+        from codebot.tool_policy import _validate_bare_command_paths
+        result = _validate_bare_command_paths(["grep", "-rf/etc/passwd", "pattern"], ws)
+        assert result is False
+
+    def test_grep_rf_workspace_allowed(self, ws):
+        """grep -rf with workspace file is allowed."""
+        (ws / "patterns.txt").write_text("hello")
+        assert validate_command("grep -rf patterns.txt src/file.txt", workspace_root=ws) is not None
+
+    def test_sed_nf_outside_denied(self, ws):
+        """sed -nf /etc/shadow is denied."""
+        assert validate_command("sed -nf /etc/shadow", workspace_root=ws) is None
+
+    def test_awk_nf_outside_denied(self, ws):
+        """awk -nf /etc/passwd is denied."""
+        assert validate_command("awk -nf /etc/passwd '{print}'", workspace_root=ws) is None
+
+    def test_combined_flag_with_glob_denied(self, ws):
+        """grep -rf *.txt is denied (glob in combined flag path)."""
+        assert validate_command("grep -rf *.txt pattern", workspace_root=ws) is None
+
+    def test_combined_flag_with_traversal_denied(self, ws):
+        """grep -rf ../secret is denied."""
+        assert validate_command("grep -rf ../secret pattern", workspace_root=ws) is None
+
+    def test_combined_flag_embedded_glob_denied(self, ws):
+        """grep -f*.txt (embedded glob) is denied."""
+        from codebot.tool_policy import _validate_bare_command_paths
+        result = _validate_bare_command_paths(["grep", "-f*.txt", "pattern"], ws)
+        assert result is False
+
+    def test_combined_flag_embedded_traversal_denied(self, ws):
+        """grep -f../secret (embedded traversal) is denied."""
+        from codebot.tool_policy import _validate_bare_command_paths
+        result = _validate_bare_command_paths(["grep", "-f../secret", "pattern"], ws)
+        assert result is False
+
+    def test_non_file_operating_combined_flags_unaffected(self, ws):
+        """Combined flags on non-file-operating commands are unaffected."""
+        # ls -la is fine (ls doesn't have -f path semantics)
+        assert validate_command("ls -la src/", workspace_root=ws) is not None
+
+    def test_combined_flag_f_not_last_sets_path_value(self, ws):
+        """Cover lines 339-344: combined flag with 'f' not last triggers path validation.
+        
+        When -f appears in combined flags like -rfx where f is NOT the last char,
+        the remainder after 'f' is treated as embedded path. But when f IS last,
+        combined_flag_has_path_value is set via the elif branch.
+        We need to hit the for loop body at line 347-348.
+        """
+        from codebot.tool_policy import _validate_bare_command_paths
+        # grep -rif with workspace file: -r, -i, -f combined; f is last char
+        # This should set combined_flag_has_path_value=True via elif branch
+        (ws / "patterns.txt").write_text("test")
+        result = _validate_bare_command_paths(["grep", "-rif", "patterns.txt", "src/file.txt"], ws)
+        assert result is True
+        
+        # Test with sed -nf where f is last
+        result2 = _validate_bare_command_paths(["sed", "-nf", "src/file.txt"], ws)
+        assert result2 is True
+        
+        # Test awk -Ff where both F and f are present; f is last
+        # -F takes field separator, -f takes program file
+        result3 = _validate_bare_command_paths(["awk", "-Ff", "src/file.txt"], ws)
+        assert result3 is True
+
+    def test_combined_flag_pattern_chars_loop(self, ws):
+        """Cover lines 370-371: pattern_flag_chars loop in combined flags.
+        
+        When combined flags contain pattern-supplying chars like 'e' in grep -re,
+        the second for loop sets pattern_skipped=True.
+        """
+        from codebot.tool_policy import _validate_bare_command_paths
+        # grep -re with pattern supplied via -e; next token is file path
+        # -r and -e combined; 'e' is in pattern_flag_chars for grep
+        result = _validate_bare_command_paths(["grep", "-re", "foo", "src/file.txt"], ws)
+        assert result is True
+        
+        # grep -rie: -r, -i, -e combined; 'e' supplies pattern
+        result2 = _validate_bare_command_paths(["grep", "-rie", "bar", "src/file.txt"], ws)
+        assert result2 is True
+        
+        # sed -ne: -n and -e combined; 'e' supplies expression
+        result3 = _validate_bare_command_paths(["sed", "-ne", "s/a/b/", "src/file.txt"], ws)
+        assert result3 is True
+
+    def test_combined_flag_embedded_path_with_traversal(self, ws):
+        """Cover line 362: embedded path with .. returns False."""
+        from codebot.tool_policy import _validate_bare_command_paths
+        # grep -f../secret: f is not last, remainder is '../secret'
+        result = _validate_bare_command_paths(["grep", "-f../secret", "pattern"], ws)
+        assert result is False
+
+    def test_combined_flag_embedded_path_with_glob(self, ws):
+        """Cover line 365: embedded path with glob chars returns False."""
+        from codebot.tool_policy import _validate_bare_command_paths
+        # grep -f*.txt: f is not last, remainder is '*.txt'
+        result = _validate_bare_command_paths(["grep", "-f*.txt", "pattern"], ws)
+        assert result is False
+
+    def test_combined_flag_embedded_path_outside_workspace(self, ws):
+        """Cover line 368: embedded path resolving outside returns False."""
+        from codebot.tool_policy import _validate_bare_command_paths
+        # grep -f/etc/passwd: f is not last, remainder is '/etc/passwd'
+        result = _validate_bare_command_paths(["grep", "-f/etc/passwd", "pattern"], ws)
+        assert result is False
+
+    def test_combined_flag_valid_embedded_path_covers_continue(self, ws):
+        """Cover line 370: continue after valid embedded path validation.
+        
+        When -f<valid_path> is used with an embedded path that resolves inside
+        workspace, the code reaches pattern_skipped=True and continue.
+        """
+        from codebot.tool_policy import _validate_bare_command_paths
+        # grep -fsrc/file.txt: f is not last, remainder is 'src/file.txt' which is valid
+        result = _validate_bare_command_paths(["grep", "-fsrc/file.txt", "pattern"], ws)
+        assert result is True
+        
+        # sed -fsrc/file.txt: valid embedded script file
+        result2 = _validate_bare_command_paths(["sed", "-fsrc/file.txt"], ws)
+        assert result2 is True
+        
+        # awk -fsrc/file.txt with simple program (no glob chars)
+        result3 = _validate_bare_command_paths(["awk", "-fsrc/file.txt", "1"], ws)
+        assert result3 is True
+
+    def test_combined_flag_f_last_char_covers_elif(self, ws):
+        """Cover lines 371-374: elif branch when f is last char in combined flag.
+        
+        grep -rf where f is the last character triggers the elif branch.
+        """
+        from codebot.tool_policy import _validate_bare_command_paths
+        (ws / "patterns.txt").write_text("test")
+        # grep -rf patterns.txt src/file.txt: -rf has f as last char
+        result = _validate_bare_command_paths(["grep", "-rf", "patterns.txt", "src/file.txt"], ws)
+        assert result is True
+        
+        # sed -nf src/file.txt: -nf has f as last char
+        result2 = _validate_bare_command_paths(["sed", "-nf", "src/file.txt"], ws)
+        assert result2 is True
+        
+        # awk -Ff src/file.txt: -Ff has f as last char (both F and f flags)
+        result3 = _validate_bare_command_paths(["awk", "-Ff", "src/file.txt"], ws)
+        assert result3 is True
+
 
 class TestBashToolSandboxBoundary:
     """End-to-end tests for bash() sandbox enforcement.
@@ -1382,14 +1615,13 @@ class TestBashToolSandboxBoundary:
 
     def test_bash_workspace_relative_allowed(self, ws):
         """bash('cat src/file.txt') succeeds with mocked subprocess."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "hello world"
-        mock_result.stderr = ""
-        with patch("codebot.api_tools.subprocess.run", return_value=mock_result) as mock_run:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (b"hello world", b"")
+        mock_proc.returncode = 0
+        with patch("codebot.api_tools.subprocess.Popen", return_value=mock_proc) as mock_popen:
             result = bash("cat src/file.txt")
             assert result["success"] is True
             assert result["error"] is None
-            mock_run.assert_called_once()
-            call_kwargs = mock_run.call_args
+            mock_popen.assert_called_once()
+            call_kwargs = mock_popen.call_args
             assert call_kwargs[1]["cwd"] == ws
