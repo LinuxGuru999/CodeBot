@@ -1591,13 +1591,13 @@ class TestDoPostBranches:
         handler.headers = {"Authorization": "Bearer test-token"}
         handler._json = MagicMock()
         handler._auth = lambda: True
-        handler._read_json_body = MagicMock(return_value=({"force": True}, None, None))
+        # Exception during _read_json_body parsing returns (None, 400, error_msg)
+        handler._read_json_body = MagicMock(return_value=(None, 400, "mocked error"))
         handler.rfile = io.BytesIO(b'{"force": true}')
         handler.wfile = io.BytesIO()
 
-        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
-             patch("codebot.control_server.subprocess.run", side_effect=Exception("mocked error")):
+        with patch("codebot.control_server.CONTROL_TOKEN", "test-token"):
             ControlHandler.do_POST(handler)
             handler._json.assert_called_once()
             call_args = handler._json.call_args
-            assert call_args[0][0] == 500
+            assert call_args[0][0] == 400
