@@ -965,21 +965,13 @@ class TestEmptyControlTokenRejection:
     def test_server_binds_to_localhost_when_token_empty(self):
         """Server socket must bind to 127.0.0.1 when CONTROL_TOKEN is unset.
 
-        Verifies both that the production bind-host selection logic chooses
-        127.0.0.1 when CONTROL_TOKEN is empty, and that the actual server
-        socket is bound to that address.
+        Verifies the actual production server socket binds to 127.0.0.1
+        (fail-closed mode) by inspecting the live socket, not test setup.
         """
-        # Verify the production logic: empty token → 127.0.0.1
-        assert not self.cs_mod.CONTROL_TOKEN, (
-            "CONTROL_TOKEN should be empty in this test class"
-        )
-        assert self.expected_bind_host == "127.0.0.1", (
-            f"Expected bind host 127.0.0.1 for empty token, got {self.expected_bind_host}"
-        )
-        # Verify the actual socket is bound to localhost
+        # Verify the actual socket is bound to localhost (production behavior)
         actual_bind = self.server.socket.getsockname()[0]
         assert actual_bind == "127.0.0.1", (
-            f"Server socket bound to {actual_bind}, expected 127.0.0.1"
+            f"Server socket bound to {actual_bind}, expected 127.0.0.1 (fail-closed)"
         )
 
     def test_health_remains_public_without_token(self):
