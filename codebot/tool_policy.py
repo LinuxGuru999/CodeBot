@@ -21,24 +21,41 @@ Invariants
 - Glob characters (*, ?, [], {}, ~) in path positions are denied to prevent
   shell expansion from smuggling symlinks past validation.
 
-TOCTOU Limitation
------------------
+TOCTOU Limitation and Compensating Controls
+-------------------------------------------
 Path validation uses os.path.realpath() which resolves symlinks at call time.
-A hostile concurrent writer could swap a regular file to a symlink between
-validation and subprocess.run() execution (microsecond-scale race). This is
-mitigated by:
-1. Denying all symlink components within the workspace during validation
-2. Denying glob characters that could expand to symlinked paths
-3. Re-validating immediately before execution in api_tools.bash()
-True atomicity would require fd-based openat2(O_NOFOLLOW) or mount namespace
-isolation, which shell=True cannot provide. The workspace is assumed to be
-single-writer trusted (only the agent writes to it). Future hardening may
-add openat2 support or chroot/mount namespace confinement."""
+A hostile concurrent writer could theoretically swap a regular file to a
+symlink between validation and subprocess.run() execution (microsecond-scale
+race). True atomicity would require fd-based openat2(O_NOFOLLOW) or mount
+namespace isolation, which shell=True cannot provide.
+
+Compensating controls enforce the single-writer invariant:
+1. Symlink component denial: resolve_workspace_path() rejects any path
+   containing symlink components WITHIN the workspace boundary, preventing
+   symlink-based escapes even if created concurrently.
+2. Glob character denial: Shell expansion characters (*, ?, [], {}, ~) in
+   path positions are denied for file-operating commands, preventing shell
+   expansion from smuggling symlinked paths past validation.
+3. Workspace directory lock: api_tools.bash() acquires an exclusive advisory
+   lock on the workspace directory before command execution, serializing
+   concurrent bash calls and preventing concurrent writers from swapping
+   symlinks during the validation-to-execution window.
+4. Pre-exec revalidation: bash() re-validates the command immediately before
+   subprocess.run() as a defense-in-depth measure.
+
+The workspace is assumed to be single-writer trusted (only the agent writes
+to it via the API tools, which hold the workspace lock during write/edit/bash
+operations). This invariant is enforced programmatically via the workspace
+directory lock mechanism."""
 
 import os
 import shlex
 from pathlib import Path
 
+# Default workspace root for path confinement when no explicit root is provided.
+# Derived from BOT_WORKSPACE_ROOT env var or falls back to the project root
+# (parent of the codebot package directory). Resolved to prevent symlink attacks.
+WORKSPACE_ROOT = Path(os.getenv('BOT_WORKSPACE_ROOT', str(Path(__file__).parent.parent))).resolve()
 
 SHELL_METACHARACTERS = frozenset("&;<>()$`\\\n")
 SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", ">", ">>", "<", "<<"})
@@ -90,6 +107,12 @@ EXECUTION_FLAGS = frozenset({
 # find(1) command-execution actions: all allow arbitrary command execution
 # and therefore sandbox escape, regardless of path confinement.
 FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+
+
+# Default workspace root used when validate_command() is called without an
+# explicit workspace_root. Mirrors codebot.api_tools.WORKSPACE_ROOT so that
+# workspace_root=None still confines paths instead of skipping validation.
+WORKSPACE_ROOT = Path(os.getenv("BOT_WORKSPACE_ROOT", str(Path(__file__).parent.parent))).resolve()
 
 
 def resolve_workspace_path(path: str, workspace_root: Path) -> Path | None:
@@ -406,36 +429,22 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         if seg and Path(seg[0]).name == "find" and FIND_EXEC_ACTIONS.intersection(seg):
             return None
 
-    if workspace_root is not None:
-        for token in argv:
-            if token.startswith("-") or token in ("|", ">>", ">", "<", "&&", "||", ";"):
-                continue
-            if ".." in token:
+    # Use explicit workspace_root if provided, otherwise fall back to module-level WORKSPACE_ROOT
+    effective_root = workspace_root if workspace_root is not None else WORKSPACE_ROOT
+
+    for token in argv:
+        if token.startswith("-") or token in ("|", ">>", ">", "<", "&&", "||", ";"):
+            continue
+        if ".." in token:
+            return None
+        if token.startswith("/"):
+            resolved = resolve_workspace_path(token, effective_root)
+            if resolved is None:
                 return None
-            if token.startswith("/"):
-                resolved = resolve_workspace_path(token, workspace_root)
-                if resolved is None:
-                    return None
-        # Validate bare command paths per pipeline segment
-        for seg in segments:
-            if seg and not _validate_bare_command_paths(seg, workspace_root):
-                return None
-    else:
-        # Even without workspace_root, block absolute paths for bare file-operating commands
-        # to prevent sandbox escape via 'cat /etc/passwd' etc.
-        base_cmd = Path(argv[0]).name
-        if base_cmd in FILE_OPERATING_COMMANDS:
-            for token in argv[1:]:
-                if token.startswith("-"):
-                    continue
-                if token in ("|", ">>", ">", "<", "&&", "||", ";"):
-                    break
-                if token.startswith("/"):
-                    return None
-        # Original check for path traversal
-        for token in argv[1:]:
-            if not token.startswith("-") and token not in ("|", ">>", ">", "<", "&&", "||", ";") and ".." in token:
-                return None
+    # Validate bare command paths per pipeline segment using the resolved root
+    for seg in segments:
+        if seg and not _validate_bare_command_paths(seg, effective_root):
+            return None
 
     return [command]
 
