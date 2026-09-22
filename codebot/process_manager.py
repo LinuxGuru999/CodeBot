@@ -41,8 +41,45 @@ from codebot.health_monitor import (
 )
 from codebot.model_manager import model_profile, ModelProfile, MODEL_PROFILES
 from codebot.state_manager import get_paths
+from codebot.scheduler_config import MAX_CONCURRENT_AGENTS
+from codebot.dispatch_service import batch_read_bot_states
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Bot Registry — lazy-loaded to avoid circular import with orchestrator_services
+# ---------------------------------------------------------------------------
+_BOT_REGISTRY_CACHE: list | None = None
+
+
+def _load_bot_registry_lazy() -> list:
+    """Load bot registry from orchestrator_services (lazy to avoid circular import)."""
+    global _BOT_REGISTRY_CACHE
+    if _BOT_REGISTRY_CACHE is None:
+        try:
+            from codebot.orchestrator_services import load_bot_registry as _svc_load
+            _BOT_REGISTRY_CACHE = _svc_load()
+        except Exception as e:
+            logger.warning("Failed to load BOT_REGISTRY from orchestrator_services: %s", e)
+            _BOT_REGISTRY_CACHE = []
+    return _BOT_REGISTRY_CACHE
+
+
+class _BotRegistryProxy(list):
+    """List proxy that lazy-loads BOT_REGISTRY on first access."""
+    def __iter__(self):
+        return iter(_load_bot_registry_lazy())
+    def __len__(self):
+        return len(_load_bot_registry_lazy())
+    def __getitem__(self, idx):
+        return _load_bot_registry_lazy()[idx]
+    def __contains__(self, item):
+        return item in _load_bot_registry_lazy()
+    def __bool__(self):
+        return bool(_load_bot_registry_lazy())
+
+
+BOT_REGISTRY: list = _BotRegistryProxy()
 
 
 def _resolve_state_dir() -> Path:
@@ -289,6 +326,7 @@ class BotState:
     prompt_mtime: float = 0.0
     last_prompt_mtime: float = 0.0
     last_code_mtimes: dict[str, float] = field(default_factory=dict)
+    status: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +448,7 @@ def clear_prompt_gateway() -> None:
 
 # Backward-compatible aliases delegating to gateway when available,
 # falling back to env vars. Kept for external callers (orchestrator, health_check).
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "55"))
+GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", str(MAX_CONCURRENT_AGENTS)))
 GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "25"))
 
 _last_spawn_time: float = 0.0
@@ -506,10 +544,9 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
 
     if now - _last_spawn_time < _SPAWN_STAGGER_SECONDS:
         gap = now - _last_spawn_time
-        worker_gap = _SPAWN_STAGGER_SECONDS
         if bot_name and bot_name.startswith("worker-"):
-            if gap < worker_gap:
-                return False, f"gap {gap:.0f}s<{worker_gap}s (worker)"
+            if gap < _SPAWN_STAGGER_SECONDS:
+                return False, f"gap {gap:.0f}s<{_SPAWN_STAGGER_SECONDS}s (worker)"
         elif gap < GATEWAY_MIN_SPAWN_GAP:
             return False, f"gap {gap:.0f}s<{GATEWAY_MIN_SPAWN_GAP}s"
 
@@ -563,6 +600,7 @@ def _prompt_read_lock(path: Path) -> Iterator[None]:
 
 
 def update_bot_state(bot: BotState, status: str) -> None:
+    bot.status = status
     state_file = _resolve_state_dir() / f"{bot.config.name}.state.json"
     try:
         with _state_write_lock(bot.config.name):
@@ -608,57 +646,120 @@ def _load_json_file(path: Path) -> tuple[dict | None, str]:
         return None, ""
 
 
-def _discard_and_read_backup(p: Path, bak: Path) -> dict | None:
-    """Move corrupt p to bak, then try reading bak. Returns dict or None."""
+CHECKPOINT_MAX_BYTES = 4096
+
+
+def checkpoint_backup_path(path: Path) -> Path:
+    if path.suffix == ".json":
+        return path.with_name(f"{path.stem}.checkpoint.bak")
+    return Path(f"{path}.bak")
+
+
+def validate_checkpoint_payload(data: object) -> dict | None:
+    if not isinstance(data, dict):
+        return None
+    bot = data.get("bot", "")
+    if bot is not None and not isinstance(bot, str):
+        return None
+    updated_at = data.get("updated_at", 0)
+    if updated_at is not None:
+        try:
+            float(updated_at)
+        except (TypeError, ValueError):
+            return None
     try:
-        p.rename(bak)
+        if len(json.dumps(data).encode("utf-8")) > CHECKPOINT_MAX_BYTES:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return data
+
+
+def write_platform_checkpoint(bot_name: str, payload: dict) -> Path | None:
+    if not isinstance(payload, dict):
+        return None
+    data = dict(payload)
+    data.setdefault("bot", bot_name)
+    try:
+        data.setdefault("updated_at", __import__("time").time())
+    except Exception:
+        data.setdefault("updated_at", 0.0)
+    validated = validate_checkpoint_payload(data)
+    if validated is None:
+        return None
+    path = checkpoint_path(bot_name)
+    try:
+        _write_json_atomic(path, validated)
+    except OSError:
+        return None
+    backup = checkpoint_backup_path(path)
+    try:
+        backup.write_text(json.dumps(validated, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return path
+
+
+def _quarantine_checkpoint(path: Path, reason: str) -> None:
+    try:
+        quarantine_dir = path.parent / "checkpoint_quarantine"
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        target = quarantine_dir / f"{path.stem}-{int(__import__('time').time())}-{reason}.json"
+        path.replace(target)
     except OSError:
         try:
-            p.unlink()
+            path.unlink()
         except OSError:
             pass
-    if not bak.exists():
-        return None
-    data, _ = _load_json_file(bak)
-    return data if isinstance(data, dict) else None
+
+
+def _discard_and_read_backup(p: Path, bak: Path) -> dict | None:
+    _quarantine_checkpoint(p, "corrupt")
+    for candidate in (bak, p.with_suffix(".bak"), Path(f"{p}.bak")):
+        try:
+            if not candidate.exists():
+                continue
+            data, _ = _load_json_file(candidate)
+            if isinstance(data, dict) and validate_checkpoint_payload(data) is not None:
+                return data
+        except OSError:
+            continue
+    return None
 
 
 def read_checkpoint(bot_name: str) -> dict | None:
     p = checkpoint_path(bot_name)
-    bak = p.with_suffix(".bak") if p.suffix == ".json" else Path(str(p) + ".bak")
+    bak = checkpoint_backup_path(p)
 
-    # Main file missing — try backup
     if not p.exists():
         if bak.exists():
             data, _ = _load_json_file(bak)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and validate_checkpoint_payload(data) is not None:
                 logger.info(f"Restored last-good checkpoint for '{bot_name}' from .bak")
                 return data
         return None
 
-    # Read and parse main file
     data, raw = _load_json_file(p)
     if data is None and not raw:
-        # File exists but couldn't read at all
         if not p.exists():
-            # _load_json_file might have failed mid-read
             return _discard_and_read_backup(p, bak) if p.exists() else None
     if data is None:
         logger.warning(f"Checkpoint corrupt for '{bot_name}' — falling back to .bak")
         return _discard_and_read_backup(p, bak)
 
-    if not isinstance(data, dict):
-        logger.warning(f"Checkpoint for '{bot_name}' is not a JSON object — falling back to .bak")
+    validated = validate_checkpoint_payload(data)
+    if validated is None:
+        logger.warning(f"Checkpoint for '{bot_name}' failed validation — falling back to .bak")
         return _discard_and_read_backup(p, bak)
 
-    # Check size and backup good copy
-    if len(raw.encode("utf-8")) > 4096:
-        logger.warning(f"Checkpoint for '{bot_name}' exceeds 4KB — truncating")
+    if len(raw.encode("utf-8")) > CHECKPOINT_MAX_BYTES:
+        logger.warning(f"Checkpoint for '{bot_name}' exceeds 4KB — quarantining")
+        return _discard_and_read_backup(p, bak)
     try:
         bak.write_text(raw, encoding="utf-8")
     except OSError:
         pass
-    return data
+    return validated
 
 
 # ---------------------------------------------------------------------------
@@ -806,6 +907,7 @@ def _build_popen_args(bot: BotState, heartbeat_file: Path,
 
 def _update_bot_after_launch(bot: BotState, state_data: dict) -> None:
     """Update bot state fields after successful subprocess launch."""
+    _clear_process_count_cache()
     bot.last_heartbeat = time.time()
     bot.last_log_mtime = time.time()
     bot.next_run_at = time.time() + bot.config.interval_seconds
@@ -1002,14 +1104,39 @@ def restart_bot(bot: BotState, reason: str = "stuck",
     return start_bot(bot, bots=bots)
 
 
-def _is_queued(bot: BotState) -> bool:
-    state_file = _resolve_state_dir() / f"{bot.config.name}.state.json"
-    try:
-        if state_file.exists():
-            return json.loads(state_file.read_text()).get("status") == "queued"
-    except Exception:
-        pass
-    return False
+def _is_queued(bot: BotState, cached_states: dict[str, dict | None] | None = None) -> bool:
+    """Check if bot is in queued status using in-memory cache only.
+
+    Args:
+        bot: BotState instance.
+        cached_states: Ignored; retained for backward compatibility.
+
+    Returns:
+        True if bot.status == "queued", False otherwise.
+    """
+    return bot.status == "queued"
+
+
+def _count_queued_bots(bots: dict[str, BotState], cached_states: dict[str, dict | None] | None = None) -> int:
+    """Count how many bots are in queued status.
+
+    Args:
+        bots: Dict mapping bot name to BotState.
+        cached_states: Optional preloaded .state.json data from batch_read_bot_states().
+            If provided, avoids per-bot disk reads entirely.
+
+    Returns:
+        Number of bots with status="queued".
+    """
+    if cached_states is not None:
+        return sum(1 for name in bots if cached_states.get(name, {}).get("status") == "queued")
+
+    # Fallback: read each bot's state file (N+1 I/O pattern - avoid in hot paths)
+    count = 0
+    for bot in bots.values():
+        if _is_queued(bot):
+            count += 1
+    return count
 
 
 def _get_code_mtimes() -> dict[str, float]:
