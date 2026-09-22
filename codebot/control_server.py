@@ -503,9 +503,25 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
 
 
 def _read_orchestrator_pid_file() -> int | None:
-    """Read orchestrator PID from state/.orchestrator.pid file."""
+    """Read orchestrator PID from state/.orchestrator.pid file with security verification.
+
+    Verifies file ownership and permissions to prevent PID spoofing attacks.
+    Returns None when the file is missing, unreadable, insecure, or holds a
+    non-numeric payload.
+    """
     pid_path = _resolve_control_state_dir() / ".orchestrator.pid"
     try:
+        # Security check: verify file permissions and ownership before trusting content
+        stat_info = os.stat(pid_path)
+        # Check permissions are exactly 0o600 (owner read/write only)
+        if stat_info.st_mode & 0o777 != 0o600:
+            logger.warning("_read_orchestrator_pid_file: insecure permissions on PID file: %o", stat_info.st_mode & 0o777)
+            return None
+        # Check ownership matches current user (prevent other users from spoofing PIDs)
+        if stat_info.st_uid != os.getuid():
+            logger.warning("_read_orchestrator_pid_file: PID file owned by uid %d, expected %d", stat_info.st_uid, os.getuid())
+            return None
+
         txt = pid_path.read_text(encoding="utf-8").strip()
         if txt.isdigit():
             return int(txt)
