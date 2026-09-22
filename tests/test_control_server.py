@@ -2,6 +2,7 @@
 
 Covers RateLimiter class behavior and integration with _auth() and _handle_telemetry().
 Also covers fail-closed security behavior when CONTROL_TOKEN is unset (CB-6048497-D3F1).
+Includes integration test for malformed config resilience (CB-0956AB4F03508C1F17E04D55676987B2).
 """
 import http.client
 import importlib
@@ -10,11 +11,12 @@ import json
 import logging
 import os
 import socket
+import sys
 import time
 import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 
 import pytest
 
@@ -1152,3 +1154,106 @@ class TestMainBindHostFailClosed:
                     )
         # Assert: restoration
         assert cs.CONTROL_TOKEN == original_token
+
+
+class TestMalformedConfigResilience:
+    """Integration tests for malformed config/env input resilience (CB-0956AB4F03508C1F17E04D55676987B2).
+
+    Verifies that the control server initializes without crashing when
+    environment variables contain malformed or dangerous values.
+    """
+
+    def test_malformed_port_env_does_not_crash(self):
+        """Server must handle non-numeric PORT env var gracefully."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {"PORT": "not_a_number", "CONTROL_TOKEN": "test"}, clear=False):
+            # Reload module to pick up new env vars
+            importlib.reload(cs)
+            # If we got here, it didn't crash on import/module-level execution
+            assert cs.PORT == 8081  # Should fallback to default
+
+    def test_zero_port_env_clamped_to_default(self):
+        """Server must handle PORT=0 by falling back to default."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {"PORT": "0", "CONTROL_TOKEN": "test"}, clear=False):
+            importlib.reload(cs)
+            assert cs.PORT == 8081
+
+    def test_negative_port_env_clamped_to_default(self):
+        """Server must handle negative PORT by falling back to default."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {"PORT": "-1", "CONTROL_TOKEN": "test"}, clear=False):
+            importlib.reload(cs)
+            assert cs.PORT == 8081
+
+    def test_huge_port_env_clamped_to_default(self):
+        """Server must handle PORT > 65535 by falling back to default."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {"PORT": "99999", "CONTROL_TOKEN": "test"}, clear=False):
+            importlib.reload(cs)
+            assert cs.PORT == 8081
+
+    def test_malformed_rate_limit_env_does_not_crash(self):
+        """Server must handle non-numeric rate limit env vars gracefully."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {
+            "RATE_LIMIT_MAX_ATTEMPTS": "abc",
+            "RATE_LIMIT_WINDOW_SECONDS": "xyz",
+            "RATE_LIMIT_COOLDOWN_SECONDS": "!!!",
+            "CONTROL_TOKEN": "test"
+        }, clear=False):
+            importlib.reload(cs)
+            # Should fallback to defaults (5, 60, 300) and not crash
+            assert cs.RATE_LIMIT_MAX_ATTEMPTS == 5
+            assert cs.RATE_LIMIT_WINDOW_SECONDS == 60
+            assert cs.RATE_LIMIT_COOLDOWN_SECONDS == 300
+
+    def test_zero_window_seconds_clamped_to_one(self):
+        """RATE_LIMIT_WINDOW_SECONDS=0 must be clamped to 1 (min_val)."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {
+            "RATE_LIMIT_WINDOW_SECONDS": "0",
+            "CONTROL_TOKEN": "test"
+        }, clear=False):
+            importlib.reload(cs)
+            assert cs.RATE_LIMIT_WINDOW_SECONDS == 1
+
+    def test_negative_window_seconds_clamped_to_one(self):
+        """RATE_LIMIT_WINDOW_SECONDS=-5 must be clamped to 1 (min_val)."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {
+            "RATE_LIMIT_WINDOW_SECONDS": "-5",
+            "CONTROL_TOKEN": "test"
+        }, clear=False):
+            importlib.reload(cs)
+            assert cs.RATE_LIMIT_WINDOW_SECONDS == 1
+
+    def test_empty_rate_limit_env_vars_use_defaults(self):
+        """Empty string env vars for rate limits should use defaults."""
+        import importlib
+        import codebot.control_server as cs
+
+        with patch.dict(os.environ, {
+            "RATE_LIMIT_MAX_ATTEMPTS": "",
+            "RATE_LIMIT_WINDOW_SECONDS": "",
+            "RATE_LIMIT_COOLDOWN_SECONDS": "",
+            "CONTROL_TOKEN": "test"
+        }, clear=False):
+            importlib.reload(cs)
+            assert cs.RATE_LIMIT_MAX_ATTEMPTS == 5
+            assert cs.RATE_LIMIT_WINDOW_SECONDS == 60
+            assert cs.RATE_LIMIT_COOLDOWN_SECONDS == 300
