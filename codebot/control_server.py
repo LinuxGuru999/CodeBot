@@ -248,18 +248,31 @@ def validate_bot_name(name: str) -> bool:
 
 
 def _read_pid_file(name: str) -> int | None:
-    """Read PID from state/<name>.pid file.
+    """Read PID from state/<name>.pid file with security verification.
 
-    Returns None when the file is missing, unreadable, or holds a
-    non-numeric payload (treated as corrupt/stale, not an error).
+    Verifies file ownership and permissions to prevent PID spoofing attacks.
+    Returns None when the file is missing, unreadable, insecure, or holds a
+    non-numeric payload.
     """
     pid_path = _resolve_control_state_dir() / f"{name}.pid"
     try:
-        if pid_path.exists():
-            txt = pid_path.read_text(encoding="utf-8").strip()
-            if txt.isdigit():
-                return int(txt)
-    except Exception as e:
+        # Security check: verify file permissions and ownership before trusting content
+        stat_info = os.stat(pid_path)
+        # Check permissions are exactly 0o600 (owner read/write only)
+        if stat_info.st_mode & 0o777 != 0o600:
+            logger.warning("_read_pid_file: insecure permissions on PID file for '%s': %o", name, stat_info.st_mode & 0o777)
+            return None
+        # Check ownership matches current user (prevent other users from spoofing PIDs)
+        if stat_info.st_uid != os.getuid():
+            logger.warning("_read_pid_file: PID file for '%s' owned by uid %d, expected %d", name, stat_info.st_uid, os.getuid())
+            return None
+        
+        txt = pid_path.read_text(encoding="utf-8").strip()
+        if txt.isdigit():
+            return int(txt)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
         logger.warning("_read_pid_file: error reading PID file for '%s': %s", name, e)
     return None
 
@@ -316,121 +329,101 @@ def _verify_cmdline(pid: int, name: str) -> bool:
         return False
 
 
-def _atomic_signal_pid(pid: int, sig: int) -> bool:
-    """Send signal to PID atomically using pidfd if available, else os.kill.
+def _atomic_signal_pid(
+    pid: int,
+    sig: int,
+) -> bool:
+    """Send signal to PID atomically using pidfd.
 
     Using ``pidfd_open`` + ``pidfd_send_signal`` (Linux 5.1+, Python 3.9+
     exposes ``os.pidfd_open``; 3.12+ also ``os.pidfd_send_signal``) pins
     the signal to the *process object* the verified ``/proc/<pid>/cmdline``
-    belonged to, instead of re-resolving the numeric PID.  When pidfds
-    are available the classic verify-then-``os.kill`` TOCTOU window
-    (PID exits and its number is recycled between ``_verify_cmdline``
-    and signal delivery) is closed: ``pidfd_send_signal`` fails with
-    ``ESRCH`` if the original process is gone rather than signalling the
-    PID reuser.
+    belonged to, instead of re-resolving the numeric PID.  This closes
+    the classic verify-then-``os.kill`` TOCTOU window where a PID could
+    be recycled between cmdline verification and signal delivery.
 
-    For Python <3.12 where ``os.pidfd_send_signal`` is missing, we use
-    ``ctypes`` to call the syscall directly. If pidfd is unavailable or
-    ``pidfd_open`` fails (e.g. seccomp blocks it), we fall back to
-    PID-file-verified ``os.kill`` — the caller has already verified
-    ``/proc/PID/cmdline`` so the TOCTOU window is bounded to the interval
-    since verification, which is the same guarantee as the pre-pidfd path.
+    Returns ``True`` only when the signal was delivered via pidfd.
+    Returns ``False`` when pidfd is unavailable (kernel/seccomp without
+    pidfd support, ``pidfd_send_signal`` returns ENOSYS/EOPNOTSUPP, or
+    ``pidfd_open`` fails).  Callers must treat ``False`` as a safe
+    failure: the process may still be running, but no signal was sent
+    to avoid risking collateral termination of a recycled PID.
+
+    Raises ``PermissionError`` or ``OSError`` for unrecoverable errors
+    (EPERM, EINVAL, etc.) that indicate a problem other than PID reuse.
     """
+    # Fail closed: if pidfd_open is not available, do NOT fall back to os.kill.
+    # os.kill has an inherent TOCTOU race with PID recycling that cannot be
+    # eliminated without kernel-level pidfd support.
+    if not hasattr(os, "pidfd_open"):
+        return False
+
     try:
-        # Try using pidfd_open for atomic signaling (Python 3.9+ on Linux 5.1+).
-        if hasattr(os, "pidfd_open"):
-            try:
-                pidfd = os.pidfd_open(pid, 0)
-                try:
-                    if hasattr(os, "pidfd_send_signal"):
-                        os.pidfd_send_signal(pidfd, sig, None, None, 0)
-                        return True
-                    else:
-                        # Python <3.12: Use ctypes to call pidfd_send_signal syscall directly.
-                        # This avoids the TOCTOU race of os.kill(pid) by pinning the signal
-                        # to the pidfd object.
-                        try:
-                            import ctypes
-                            import ctypes.util
-
-                            libc_path = ctypes.util.find_library("c")
-                            if not libc_path:
-                                raise OSError("Cannot find libc")
-                            libc = ctypes.CDLL(libc_path, use_errno=True)
-
-                            # SYS_pidfd_send_signal = 427 on x86_64 and aarch64 Linux
-                            SYS_pidfd_send_signal = 427
-
-                            # Set argtypes for proper marshalling
-                            libc.syscall.argtypes = [
-                                ctypes.c_long,  # syscall number
-                                ctypes.c_int,   # pidfd
-                                ctypes.c_int,   # sig
-                                ctypes.c_void_p,  # info (NULL)
-                                ctypes.c_uint,  # flags
-                            ]
-                            libc.syscall.restype = ctypes.c_int
-
-                            ret = libc.syscall(
-                                SYS_pidfd_send_signal,
-                                pidfd,
-                                sig,
-                                None,  # NULL info pointer
-                                0,     # flags
-                            )
-                            if ret == 0:
-                                return True
-                            else:
-                                errno_val = ctypes.get_errno()
-                                if errno_val == 3:  # ESRCH - process gone
-                                    return False
-                                elif errno_val == 22:  # EINVAL - bad args
-                                    raise OSError(errno_val, "Invalid argument to pidfd_send_signal")
-                                elif errno_val == 1:  # EPERM
-                                    raise PermissionError(os.strerror(errno_val))
-                                else:
-                                    raise OSError(errno_val, os.strerror(errno_val))
-                        except (OSError, PermissionError):
-                            raise
-                        except Exception:
-                            # Fallback: re-verify cmdline immediately before os.kill to narrow TOCTOU window.
-                            # This is not atomic but reduces the race window significantly.
-                            # We don't have the bot name here in the generic helper, so we skip the fallback
-                            # to avoid risking collateral termination. The caller (_safe_kill_bot_process)
-                            # has already verified the PID file and cmdline before calling this helper.
-                            return False
-                finally:
-                    os.close(pidfd)
-            except OSError:
-                # pidfd_open failed (e.g., process exited, blocked by seccomp,
-                # or kernel without pidfd). Fall through to os.kill fallback
-                # below — the caller has already verified /proc/PID/cmdline
-                # via _verify_cmdline, so the TOCTOU window is narrowed to the
-                # interval since verification. This is the same guarantee we
-                # had before pidfd hardening and is sufficient for the
-                # PID-file-verified kill path (Constitution §2).
-                pass
-
-        # Fallback: pidfd unavailable or pidfd_open failed → verified os.kill.
-        # The PID was verified via /proc/PID/cmdline immediately before this
-        # call in _safe_kill_bot_process/_safe_kill_orchestrator. Re-checking
-        # is not possible here without the bot name, but the caller-supplied
-        # PID file + _verify_cmdline already prevents pkill -f broad matching.
-        try:
-            os.kill(pid, sig)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            raise
-        except OSError:
-            raise
+        pidfd = os.pidfd_open(pid, 0)
     except ProcessLookupError:
+        # Process already exited
         return False
     except PermissionError:
         raise
-    except Exception:
-        raise
+    except OSError:
+        # pidfd_open failed (seccomp, kernel without pidfd, etc.)
+        return False
+
+    try:
+        if hasattr(os, "pidfd_send_signal"):
+            os.pidfd_send_signal(pidfd, sig, None, None, 0)
+            return True
+        else:
+            # Python <3.12: Use ctypes to call pidfd_send_signal syscall directly.
+            try:
+                import ctypes
+                import ctypes.util
+
+                libc_path = ctypes.util.find_library("c")
+                if not libc_path:
+                    raise OSError("Cannot find libc")
+                libc = ctypes.CDLL(libc_path, use_errno=True)
+
+                # SYS_pidfd_send_signal = 427 on x86_64 and aarch64 Linux
+                SYS_pidfd_send_signal = 427
+
+                libc.syscall.argtypes = [
+                    ctypes.c_long,    # syscall number
+                    ctypes.c_int,     # pidfd
+                    ctypes.c_int,     # sig
+                    ctypes.c_void_p,  # info (NULL)
+                    ctypes.c_uint,    # flags
+                ]
+                libc.syscall.restype = ctypes.c_int
+
+                ret = libc.syscall(
+                    SYS_pidfd_send_signal,
+                    pidfd,
+                    sig,
+                    None,  # NULL info pointer
+                    0,     # flags
+                )
+                if ret == 0:
+                    return True
+                else:
+                    errno_val = ctypes.get_errno()
+                    if errno_val == 3:  # ESRCH - process gone
+                        return False
+                    elif errno_val == 95:  # EOPNOTSUPP
+                        return False
+                    elif errno_val == 22:  # EINVAL
+                        raise OSError(errno_val, "Invalid argument to pidfd_send_signal")
+                    elif errno_val == 1:  # EPERM
+                        raise PermissionError(os.strerror(errno_val))
+                    else:
+                        raise OSError(errno_val, os.strerror(errno_val))
+            except (OSError, PermissionError):
+                raise
+            except Exception:
+                # Any unexpected error in ctypes path → fail closed
+                return False
+    finally:
+        os.close(pidfd)
 
 
 def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]]:
@@ -461,23 +454,32 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
     if pid is not None:
         # Verify cmdline matches expected bot before killing
         if _verify_cmdline(pid, name):
+            signal_sent = False
             try:
-                _atomic_signal_pid(pid, signal.SIGTERM)
-                logger.info("_safe_kill_bot_process: sent SIGTERM to PID %d from PID file for bot '%s'", pid, name)
-                killed_pids.append(pid)
-                # Clean up PID file after successful signal
-                try:
-                    pid_file = STATE_DIR / f"{name}.pid"
-                    if pid_file.exists():
-                        pid_file.unlink()
-                except OSError:
-                    pass
+                signal_sent = _atomic_signal_pid(
+                    pid,
+                    signal.SIGTERM,
+                )
+                if signal_sent:
+                    logger.info("_safe_kill_bot_process: sent SIGTERM to PID %d from PID file for bot '%s'", pid, name)
+                    killed_pids.append(pid)
+                    # Clean up PID file after successful signal
+                    try:
+                        pid_file = _resolve_control_state_dir() / f"{name}.pid"
+                        if pid_file.exists():
+                            pid_file.unlink()
+                    except OSError:
+                        pass
+                else:
+                    # pidfd signaling unavailable - fail closed, do NOT clean up PID file
+                    # The process may still be running; operator must investigate
+                    logger.warning("_safe_kill_bot_process: pidfd signaling unavailable for PID %d bot '%s' - safe failure", pid, name)
             except ProcessLookupError:
                 logger.info("_safe_kill_bot_process: PID %d from PID file already exited for bot '%s'", pid, name)
                 killed_pids.append(pid)
                 # Clean up stale PID file
                 try:
-                    pid_file = STATE_DIR / f"{name}.pid"
+                    pid_file = _resolve_control_state_dir() / f"{name}.pid"
                     if pid_file.exists():
                         pid_file.unlink()
                 except OSError:
@@ -489,14 +491,10 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
                 logger.warning("_safe_kill_bot_process: error killing PID %d for bot '%s': %s", pid, name, e)
                 killed_pids.append(pid)
         else:
-            logger.warning("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s'", pid, name)
-            # Stale PID file pointing to wrong process? Clean it up to be safe.
-            try:
-                pid_file = STATE_DIR / f"{name}.pid"
-                if pid_file.exists():
-                    pid_file.unlink()
-            except OSError:
-                pass
+            logger.warning("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s' - NOT deleting PID file to prevent DoS race", pid, name)
+            # DO NOT delete PID file on verification failure. An attacker could create
+            # a fake PID file pointing to a legitimate process; deleting it on failed
+            # verification enables denial-of-service. Only delete after confirmed exit.
     else:
         # No PID file found. Do NOT fall back to pgrep to avoid broad matching.
         logger.warning("_safe_kill_bot_process: No PID file found for bot '%s'. Skipping kill.", name)
@@ -506,13 +504,14 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
 
 def _read_orchestrator_pid_file() -> int | None:
     """Read orchestrator PID from state/.orchestrator.pid file."""
-    pid_path = STATE_DIR / ".orchestrator.pid"
+    pid_path = _resolve_control_state_dir() / ".orchestrator.pid"
     try:
-        if pid_path.exists():
-            txt = pid_path.read_text(encoding="utf-8").strip()
-            if txt.isdigit():
-                return int(txt)
-    except Exception as e:
+        txt = pid_path.read_text(encoding="utf-8").strip()
+        if txt.isdigit():
+            return int(txt)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
         logger.warning("_read_orchestrator_pid_file: error reading PID file: %s", e)
     return None
 
@@ -575,37 +574,44 @@ def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
     if pid is not None:
         if _verify_orchestrator_cmdline(pid):
             try:
-                _atomic_signal_pid(pid, signal.SIGTERM)
-                logger.info("_safe_kill_orchestrator: sent SIGTERM to verified PID %d from PID file", pid)
-                killed_pids.append(pid)
-                # Clean up PID file
-                try:
-                    pid_file = STATE_DIR / ".orchestrator.pid"
-                    if pid_file.exists():
-                        pid_file.unlink()
-                except OSError:
-                    pass
+                signal_sent = _atomic_signal_pid(
+                    pid,
+                    signal.SIGTERM,
+                )
+                if signal_sent:
+                    logger.info("_safe_kill_orchestrator: sent SIGTERM to verified PID %d from PID file", pid)
+                    killed_pids.append(pid)
+                    # Clean up PID file after successful signal
+                    try:
+                        pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
+                        if pid_file.exists():
+                            pid_file.unlink()
+                    except OSError:
+                        pass
+                else:
+                    # pidfd signaling unavailable - fail closed, do NOT clean up PID file
+                    # The process may still be running; operator must investigate
+                    logger.warning("_safe_kill_orchestrator: pidfd signaling unavailable for PID %d - safe failure", pid)
             except ProcessLookupError:
                 logger.info("_safe_kill_orchestrator: PID %d from PID file already exited", pid)
+                killed_pids.append(pid)
                 try:
-                    pid_file = STATE_DIR / ".orchestrator.pid"
+                    pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
                     if pid_file.exists():
                         pid_file.unlink()
                 except OSError:
                     pass
             except PermissionError:
                 logger.warning("_safe_kill_orchestrator: permission denied killing PID %d", pid)
+                killed_pids.append(pid)
             except Exception as e:
                 logger.warning("_safe_kill_orchestrator: error killing PID %d: %s", pid, e)
+                killed_pids.append(pid)
         else:
-            logger.warning("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification", pid)
-            # Stale PID file? Clean it up.
-            try:
-                pid_file = STATE_DIR / ".orchestrator.pid"
-                if pid_file.exists():
-                    pid_file.unlink()
-            except OSError:
-                pass
+            logger.warning("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification - NOT deleting PID file to prevent DoS race", pid)
+            # DO NOT delete PID file on verification failure. An attacker could create
+            # a fake PID file pointing to a legitimate process; deleting it on failed
+            # verification enables denial-of-service. Only delete after confirmed exit.
     else:
         logger.warning("_safe_kill_orchestrator: No PID file found for orchestrator. Skipping kill.")
 
