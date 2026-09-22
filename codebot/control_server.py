@@ -65,10 +65,31 @@ from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
+def _safe_int_env(key: str, default: int, min_val: int = 1) -> int:
+    """Safely parse an integer environment variable with bounds validation.
+
+    Args:
+        key: Environment variable name.
+        default: Default value if var is missing or invalid.
+        min_val: Minimum allowed value (enforced lower bound).
+
+    Returns:
+        Parsed integer, clamped to min_val, or default if parsing fails.
+    """
+    try:
+        val = int(os.environ.get(key, str(default)))
+        return max(val, min_val)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid value for %s; using default %d", key, default
+        )
+        return default
+
+
 # Rate limiting configuration
-RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("RATE_LIMIT_MAX_ATTEMPTS", "5"))
-RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
-RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("RATE_LIMIT_COOLDOWN_SECONDS", "300"))
+RATE_LIMIT_MAX_ATTEMPTS = _safe_int_env("RATE_LIMIT_MAX_ATTEMPTS", 5, 1)
+RATE_LIMIT_WINDOW_SECONDS = _safe_int_env("RATE_LIMIT_WINDOW_SECONDS", 60, 1)
+RATE_LIMIT_COOLDOWN_SECONDS = _safe_int_env("RATE_LIMIT_COOLDOWN_SECONDS", 300, 1)
 
 
 class RateLimiter:
@@ -151,13 +172,13 @@ CONTROL_UNAUTHORIZED_HINT = (
     "export CONTROL_TOKEN=your-secret-token && fly secrets set CONTROL_TOKEN=$CONTROL_TOKEN"
 )
 TELEMETRY_UNAUTHORIZED_HINT = (
-    "Set the CODEBOT_TELEMETRY_TOKEN (or CONTROL_TOKEN) environment variable "
+    "Set the CODEBOT_TELEMETRY_TOKEN environment variable "
     "on the server and pass it as an 'Authorization: Bearer <token>' header. "
     "Example: export CODEBOT_TELEMETRY_TOKEN=your-telemetry-token"
 )
 TELEMETRY_NOT_CONFIGURED_HINT = (
-    "Neither CODEBOT_TELEMETRY_TOKEN nor CONTROL_TOKEN is configured on the server. "
-    "Set at least one via environment variables, e.g. "
+    "CODEBOT_TELEMETRY_TOKEN is not configured on the server. "
+    "Set it via environment variable, e.g. "
     "export CODEBOT_TELEMETRY_TOKEN=your-telemetry-token"
 )
 
@@ -233,30 +254,33 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
         if not candidate_pids:
             return True, []
 
-        # Step 2: Verify each PID's cmdline matches exactly
-        expected_suffix = f"api_runner.py {name}"
+        # Step 2: Verify each PID's cmdline matches exactly using argv elements
         for pid in candidate_pids:
             try:
                 cmdline_path = f"/proc/{pid}/cmdline"
                 with open(cmdline_path, 'rb') as f:
                     cmdline_bytes = f.read()
-                # cmdline is null-separated; decode and check
-                cmdline = cmdline_bytes.decode('utf-8', errors='replace').replace('\x00', ' ').strip()
-                # Verify the command line ends with expected pattern
-                # This prevents matching processes like "api_runner.py foo-bar-baz" when looking for "foo"
-                if cmdline.endswith(expected_suffix) or f" {expected_suffix}" in cmdline:
-                    # Additional safety: ensure it's actually a python process running api_runner
-                    if "python" in cmdline.lower() or "api_runner.py" in cmdline:
-                        killed_pids.append(pid)
-                    else:
-                        logger.warning(
-                            "_safe_kill_bot_process: PID %d matched pattern but not python/api_runner, skipping: %s",
-                            pid, cmdline[:200]
-                        )
+                # Split on null bytes to get individual argv elements
+                argv = [arg.decode('utf-8', errors='replace') for arg in cmdline_bytes.split(b'\x00') if arg]
+                # Check for exact consecutive match: 'api_runner.py' followed by bot name
+                # Also verify it's a python process
+                is_python = any('python' in arg.lower() for arg in argv)
+                has_exact_match = False
+                for i in range(len(argv) - 1):
+                    if argv[i] == 'api_runner.py' and argv[i + 1] == name:
+                        has_exact_match = True
+                        break
+                if has_exact_match and is_python:
+                    killed_pids.append(pid)
+                elif has_exact_match:
+                    logger.warning(
+                        "_safe_kill_bot_process: PID %d matched api_runner.py and bot name but not python, skipping: %s",
+                        pid, ' '.join(argv)[:200]
+                    )
                 else:
                     logger.debug(
-                        "_safe_kill_bot_process: PID %d did not match expected suffix '%s': %s",
-                        pid, expected_suffix, cmdline[:200]
+                        "_safe_kill_bot_process: PID %d did not have exact argv match for 'api_runner.py %s': %s",
+                        pid, name, ' '.join(argv)[:200]
                     )
             except FileNotFoundError:
                 # Process already exited
@@ -292,7 +316,241 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
         return False, killed_pids
 
 
+def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
+    """Safely kill orchestrator process using pgrep + /proc/PID/cmdline exact verification.
+
+    Mirrors _safe_kill_bot_process safety pattern but targets orchestrator.py.
+    Only kills processes where 'orchestrator.py' appears as the executed script
+    (argv element basename match) in a python process cmdline, preventing DoS
+    against editors or other tools that reference orchestrator.py in arguments.
+
+    Args:
+        timeout: Timeout for subprocess calls
+
+    Returns:
+        Tuple of (success, killed_pids) where success indicates no errors occurred
+    """
+    killed_pids: list[int] = []
+    try:
+        # Use fixed-string pattern to find candidate PIDs
+        ps = subprocess.run(
+            ["pgrep", "-f", "orchestrator\\.py"],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if not ps.stdout.strip():
+            return True, []
+
+        candidate_pids = []
+        for line in ps.stdout.strip().split('\n'):
+            line = line.strip()
+            if line.isdigit():
+                candidate_pids.append(int(line))
+
+        if not candidate_pids:
+            return True, []
+
+        import signal
+        for pid in candidate_pids:
+            try:
+                cmdline_path = f"/proc/{pid}/cmdline"
+                with open(cmdline_path, 'rb') as f:
+                    cmdline_bytes = f.read()
+                # cmdline is null-separated; split into argv elements
+                argv = cmdline_bytes.split(b'\x00')
+                # Decode each argument safely
+                decoded_argv = []
+                for arg in argv:
+                    if arg:
+                        decoded_argv.append(arg.decode('utf-8', errors='replace'))
+
+                if not decoded_argv:
+                    continue
+
+                # Check if any argv element's basename is exactly 'orchestrator.py'
+                # This ensures we match 'python3 orchestrator.py' but NOT 'vim orchestrator.py'
+                # or 'grep orchestrator.py'
+                is_orchestrator_script = False
+                for arg in decoded_argv:
+                    # Extract basename from path (e.g., '/path/to/orchestrator.py' -> 'orchestrator.py')
+                    basename = arg.rsplit('/', 1)[-1] if '/' in arg else arg
+                    if basename == 'orchestrator.py':
+                        is_orchestrator_script = True
+                        break
+
+                if not is_orchestrator_script:
+                    logger.debug(
+                        "_safe_kill_orchestrator: PID %d cmdline does not have orchestrator.py as executed script, skipping",
+                        pid
+                    )
+                    continue
+
+                # Additional safety: ensure it's a python process
+                cmdline_str = ' '.join(decoded_argv).lower()
+                if 'python' not in cmdline_str:
+                    logger.warning(
+                        "_safe_kill_orchestrator: PID %d has orchestrator.py but not python process, skipping: %s",
+                        pid, ' '.join(decoded_argv)[:200]
+                    )
+                    continue
+
+                # Verified: send SIGTERM
+                os.kill(pid, signal.SIGTERM)
+                logger.info("_safe_kill_orchestrator: sent SIGTERM to verified PID %d", pid)
+                killed_pids.append(pid)
+
+            except FileNotFoundError:
+                # Process already exited
+                continue
+            except PermissionError:
+                logger.warning("_safe_kill_orchestrator: permission denied reading/killing PID %d", pid)
+                continue
+            except ProcessLookupError:
+                # Process exited between check and kill
+                continue
+            except Exception as e:
+                logger.warning("_safe_kill_orchestrator: error verifying/killing PID %d: %s", pid, e)
+                continue
+
+        return True, killed_pids
+
+    except subprocess.TimeoutExpired:
+        logger.warning("_safe_kill_orchestrator: pgrep timed out")
+        return False, killed_pids
+    except Exception as e:
+        logger.error("_safe_kill_orchestrator: unexpected error: %s", e)
+        return False, killed_pids
+
+
+def _safe_kill_process(pid: int, expected_cmdline: str, grace_period: float = 5.0) -> tuple[bool, int | None]:
+    """Safely kill a process by PID with /proc/cmdline verification and SIGTERM/SIGKILL escalation.
+
+    Verifies that the target PID's cmdline matches expected_cmdline before sending signals.
+    Sends SIGTERM first, waits up to grace_period seconds, then escalates to SIGKILL if needed.
+    Re-verifies cmdline before each signal to prevent killing recycled PIDs.
+
+    Args:
+        pid: Process ID to terminate (must be positive integer)
+        expected_cmdline: Expected substring/suffix of /proc/<pid>/cmdline for verification
+        grace_period: Seconds to wait between SIGTERM and SIGKILL
+
+    Returns:
+        Tuple of (success, killed_pid). success=True only if process is confirmed gone.
+        killed_pid is the targeted PID or None if aborted before signaling.
+    """
+    import signal as _signal
+
+    # Validate inputs
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        logger.warning("_safe_kill_process: invalid pid rejected: %r", pid)
+        return False, None
+    if not isinstance(expected_cmdline, str) or not expected_cmdline:
+        logger.warning("_safe_kill_process: invalid expected_cmdline rejected: %r", expected_cmdline)
+        return False, None
+
+    def _read_cmdline(p: int) -> str | None:
+        try:
+            with open(f"/proc/{p}/cmdline", "rb") as f:
+                data = f.read(4096)
+            return data.decode("utf-8", errors="replace").replace("\x00", " ").strip()
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            logger.warning("_safe_kill_process: permission denied reading /proc/%d/cmdline", p)
+            return None
+        except Exception as e:
+            logger.warning("_safe_kill_process: error reading /proc/%d/cmdline: %s", p, e)
+            return None
+
+    def _is_alive(p: int) -> bool:
+        try:
+            os.kill(p, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Process exists but we lack permission; treat as alive
+            return True
+        except Exception:
+            return False
+
+    # Initial cmdline verification
+    cmdline = _read_cmdline(pid)
+    if cmdline is None:
+        logger.info("_safe_kill_process: PID %d does not exist or unreadable, nothing to kill", pid)
+        return False, None
+    if expected_cmdline not in cmdline:
+        logger.warning(
+            "_safe_kill_process: PID %d cmdline mismatch (expected %r in %r), aborting",
+            pid, expected_cmdline[:200], cmdline[:200]
+        )
+        return False, None
+
+    # Send SIGTERM
+    try:
+        os.kill(pid, _signal.SIGTERM)
+        logger.info("_safe_kill_process: sent SIGTERM to PID %d", pid)
+    except ProcessLookupError:
+        logger.info("_safe_kill_process: PID %d already exited before SIGTERM", pid)
+        return True, pid
+    except PermissionError:
+        logger.warning("_safe_kill_process: permission denied sending SIGTERM to PID %d", pid)
+        return False, pid
+    except Exception as e:
+        logger.warning("_safe_kill_process: error sending SIGTERM to PID %d: %s", pid, e)
+        return False, pid
+
+    # Grace period polling
+    elapsed = 0.0
+    poll_interval = min(0.2, grace_period / 10.0) if grace_period > 0 else 0.2
+    while elapsed < grace_period:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        if not _is_alive(pid):
+            logger.info("_safe_kill_process: PID %d exited after SIGTERM", pid)
+            return True, pid
+
+    # Re-verify cmdline before SIGKILL to avoid killing recycled PID
+    cmdline_after = _read_cmdline(pid)
+    if cmdline_after is None:
+        logger.info("_safe_kill_process: PID %d exited during grace period", pid)
+        return True, pid
+    if expected_cmdline not in cmdline_after:
+        logger.warning(
+            "_safe_kill_process: PID %d cmdline changed during grace period (expected %r in %r), aborting SIGKILL",
+            pid, expected_cmdline[:200], cmdline_after[:200]
+        )
+        return False, pid
+
+    # Escalate to SIGKILL
+    try:
+        os.kill(pid, _signal.SIGKILL)
+        logger.warning("_safe_kill_process: escalated to SIGKILL for PID %d", pid)
+    except ProcessLookupError:
+        logger.info("_safe_kill_process: PID %d exited before SIGKILL", pid)
+        return True, pid
+    except PermissionError:
+        logger.warning("_safe_kill_process: permission denied sending SIGKILL to PID %d", pid)
+        return False, pid
+    except Exception as e:
+        logger.warning("_safe_kill_process: error sending SIGKILL to PID %d: %s", pid, e)
+        return False, pid
+
+    # Brief wait after SIGKILL
+    time.sleep(min(0.5, grace_period * 0.1))
+    if not _is_alive(pid):
+        logger.info("_safe_kill_process: PID %d terminated after SIGKILL", pid)
+        return True, pid
+
+    logger.warning("_safe_kill_process: PID %d still alive after SIGKILL (possible zombie)", pid)
+    return False, pid
+
+
 def heartbeat_age(name: str) -> float | None:
+    # Defense-in-depth (CB-3E4571EFBE42): validate bot name before using it
+    # in filesystem path construction to block path traversal.
+    if not validate_bot_name(name):
+        logger.warning("heartbeat_age: rejected invalid bot name: %s", repr(name)[:100])
+        return None
     p = STATE_DIR / f"{name}.heartbeat"
     try:
         v = float(p.read_text().strip().split()[0])
@@ -331,6 +589,13 @@ def log_tail(name: str, lines: int = 200) -> str:
 
 
 def bot_status(name: str) -> dict:
+    # Defense-in-depth (CB-3E4571EFBE42): bot names interpolated into
+    # pgrep -f (regex) patterns must be allowlist-validated first.
+    # Invalid names are neutralized to a safe sentinel (still re.escape()d
+    # below) so no crafted regex/metacharacters can ever reach subprocess.
+    if not validate_bot_name(name):
+        logger.warning("bot_status: rejected invalid bot name: %s", repr(name)[:100])
+        name = "invalid-bot-name-rejected"
     cfg = next((c for c in BOT_REGISTRY if c.name == name), None)
     hb = heartbeat_age(name)
     state_file = STATE_DIR / f"{name}.state.json"
@@ -344,9 +609,11 @@ def bot_status(name: str) -> dict:
     running = False
     pid = None
     try:
-        # Defense-in-depth: escape bot name to prevent regex injection in pgrep pattern
+        # Defense-in-depth (CB-3E4571EFBE42): escape bot name to prevent
+        # regex injection in pgrep pattern; name was allowlist-validated above.
         escaped_name = re.escape(name)
-        ps = subprocess.run(["pgrep", "-f", f"api_runner\\.py {escaped_name}"], capture_output=True, text=True, timeout=3)
+        # Anchor with $ so "bot" cannot match "bot-extra" via regex prefix.
+        ps = subprocess.run(["pgrep", "-f", f"api_runner\\.py {escaped_name}$"], capture_output=True, text=True, timeout=3)
         if ps.stdout.strip():
             running = True
             pid = ps.stdout.strip().split()[0]
@@ -777,6 +1044,9 @@ def retry_dead_letter(item_id: str) -> dict:
 
 
 class ControlHandler(BaseHTTPRequestHandler):
+    def _is_loopback_client(self) -> bool:
+        return bool(self.client_address and self.client_address[0] in {"127.0.0.1", "::1"})
+
     def _auth(self) -> bool | None:
         """Validate Bearer token via Authorization header with rate limiting.
 
@@ -845,6 +1115,17 @@ class ControlHandler(BaseHTTPRequestHandler):
         if extra_headers:
             for k, v in extra_headers.items():
                 self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _html(self, code: int, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
@@ -942,6 +1223,38 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok", "time": time.time()})
             return
 
+        if path == "/dashboard":
+            from codebot.dashboard import dashboard_page
+            self._html(200, dashboard_page())
+            return
+
+        if path == "/tickets":
+            from codebot.dashboard import ticket_explorer_page
+            self._html(200, ticket_explorer_page())
+            return
+
+        if path in ("/dashboard/snapshot", "/api/dashboard/snapshot") and self._is_loopback_client():
+            from codebot.dashboard import live_snapshot
+            self._json(200, dict(live_snapshot(BOTS_DIR.parent)))
+            return
+
+        if path in ("/tickets/snapshot", "/api/tickets/snapshot") and self._is_loopback_client():
+            from codebot.dashboard import ticket_explorer_snapshot
+            self._json(200, dict(ticket_explorer_snapshot(
+                BOTS_DIR.parent,
+                state=qs.get("state", [""])[0],
+                query=qs.get("query", [""])[0],
+                offset=qs.get("offset", [0])[0],
+                limit=qs.get("limit", [100])[0],
+            )))
+            return
+
+        if path in ("/tickets/detail", "/api/tickets/detail") and self._is_loopback_client():
+            from codebot.dashboard import ticket_explorer_detail
+            detail = ticket_explorer_detail(BOTS_DIR.parent, qs.get("id", [""])[0])
+            self._json(200 if detail else 404, detail or {"error": "ticket not found"})
+            return
+
         auth_result = self._auth()
         if auth_result is None:
             return  # Rate limited, response already sent
@@ -951,6 +1264,28 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         if path in ("/bots", "/api/bots"):
             self._json(200, [bot_status(c.name) for c in BOT_REGISTRY])
+            return
+
+        if path in ("/dashboard/snapshot", "/api/dashboard/snapshot"):
+            from codebot.dashboard import live_snapshot
+            self._json(200, dict(live_snapshot(BOTS_DIR.parent)))
+            return
+
+        if path in ("/tickets/snapshot", "/api/tickets/snapshot"):
+            from codebot.dashboard import ticket_explorer_snapshot
+            self._json(200, dict(ticket_explorer_snapshot(
+                BOTS_DIR.parent,
+                state=qs.get("state", [""])[0],
+                query=qs.get("query", [""])[0],
+                offset=qs.get("offset", [0])[0],
+                limit=qs.get("limit", [100])[0],
+            )))
+            return
+
+        if path in ("/tickets/detail", "/api/tickets/detail"):
+            from codebot.dashboard import ticket_explorer_detail
+            detail = ticket_explorer_detail(BOTS_DIR.parent, qs.get("id", [""])[0])
+            self._json(200 if detail else 404, detail or {"error": "ticket not found"})
             return
 
         if path in ("/scheduler/status", "/api/scheduler/status"):
@@ -1309,12 +1644,22 @@ class ControlHandler(BaseHTTPRequestHandler):
                             logger.warning("stop: safe kill reported errors for bot '%s'", n)
                         all_killed_pids.extend(killed_pids)
                 else:
-                    subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
-                    subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)
+                    # Stop-all: use PID-verified killing for all registered bots
+                    # instead of raw pkill -f which can match arbitrary processes
+                    all_killed_pids = []
+                    for cfg in BOT_REGISTRY:
+                        success, killed_pids = _safe_kill_bot_process(cfg.name, timeout=5)
+                        if not success:
+                            logger.warning("stop-all: safe kill reported errors for bot '%s'", cfg.name)
+                        all_killed_pids.extend(killed_pids)
+                    # Also kill orchestrator using safe verification helper
+                    orch_success, orch_killed_pids = _safe_kill_orchestrator(timeout=5)
+                    if not orch_success:
+                        logger.warning("stop-all: safe kill reported errors for orchestrator")
+                    all_killed_pids.extend(orch_killed_pids)
                 response_data = {"ok": True, "stopped": bots or "all",
+                                 "killed_pids": all_killed_pids,
                                  "undo": "Run 'start' or 'restart <bot>' to resume bots; orchestrator will auto-respawn if still running"}
-                if bots:
-                    response_data["killed_pids"] = all_killed_pids
                 self._json(200, response_data)
             except Exception as e:
                 self._json(500, {"error": str(e)})
