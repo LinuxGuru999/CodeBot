@@ -258,22 +258,45 @@ def validate_bot_name(name: str) -> bool:
 
 def _read_pid_file(name: str) -> int | None:
     """Read PID from state/<name>.pid file with security verification.
+    Trust boundary hardening (reviewer feedback #44/#46/#48/#51):
+    the state dir is writable by the bot fleet, so a PID file is NOT
+    trusted until it passes ALL of these checks:
 
-    Verifies file ownership and permissions to prevent PID spoofing attacks.
-    Returns None when the file is missing, unreadable, insecure, or holds a
-    non-numeric payload.
+    1. ``os.lstat`` (never ``os.stat``): symlinks are refused outright.
+       A symlinked PID file could otherwise point at an arbitrary file
+       (e.g. /proc/<victim>/...) and turn read_text() into a content
+       oracle, or redirect the ownership/permissions check at a
+       different inode than the bytes we read.
+    2. Permission bits EXACTLY 0o600 (owner read/write only). A group-
+       or world-writable/readable PID file lets any local user rewrite
+       the PID and aim our SIGTERM at an arbitrary process.
+    3. ``st_uid`` equals ``os.getuid()``: a file owned by another user
+       (planted via a shared/writable directory) is rejected.
+    4. Payload is ASCII digits only (``str.isdigit`` after strip);
+       anything else (empty, negative, "12\\n34", huge) is rejected.
+
+    Returns None when the file is missing, is a symlink, is unreadable,
+    is insecure, or holds a non-numeric payload.
     """
     pid_path = _resolve_control_state_dir() / f"{name}.pid"
     try:
+        # lstat (not stat): a symlink must never be trusted. An attacker who
+        # can write to the state dir (or plant a link there) could otherwise
+        # point <name>.pid at /proc/<victim>/... or another sensitive file so
+        # that read_text() leaks its content into the PID parse path.
+        lst = os.lstat(pid_path)
+        import stat as _stat_mod
+
+        if _stat_mod.S_ISLNK(lst.st_mode):
+            logger.warning("_read_pid_file: refusing symlink PID file for '%s'", name)
+            return None
         # Security check: verify file permissions and ownership before trusting content
-        stat_info = os.stat(pid_path)
-        # Check permissions are exactly 0o600 (owner read/write only)
-        if stat_info.st_mode & 0o777 != 0o600:
-            logger.warning("_read_pid_file: insecure permissions on PID file for '%s': %o", name, stat_info.st_mode & 0o777)
+        if _stat_mod.S_IMODE(lst.st_mode) != 0o600:
+            logger.warning("_read_pid_file: insecure permissions on PID file for '%s': %o", name, _stat_mod.S_IMODE(lst.st_mode))
             return None
         # Check ownership matches current user (prevent other users from spoofing PIDs)
-        if stat_info.st_uid != os.getuid():
-            logger.warning("_read_pid_file: PID file for '%s' owned by uid %d, expected %d", name, stat_info.st_uid, os.getuid())
+        if lst.st_uid != os.getuid():
+            logger.warning("_read_pid_file: PID file for '%s' owned by uid %d, expected %d", name, lst.st_uid, os.getuid())
             return None
         
         txt = pid_path.read_text(encoding="utf-8").strip()
@@ -354,9 +377,12 @@ def _atomic_signal_pid(
     Returns ``True`` only when the signal was delivered via pidfd.
     Returns ``False`` when pidfd is unavailable (kernel/seccomp without
     pidfd support, ``pidfd_send_signal`` returns ENOSYS/EOPNOTSUPP, or
-    ``pidfd_open`` fails).  Callers must treat ``False`` as a safe
-    failure: the process may still be running, but no signal was sent
-    to avoid risking collateral termination of a recycled PID.
+    ``pidfd_open`` fails) or when the process exited (ESRCH surfaced as
+    ``ProcessLookupError`` on Python 3.12+ or as ``OSError`` errno 3 on
+    older runtimes).  Every ``False`` means *no signal was delivered*:
+    callers fail closed (safe failure, process may still be running, PID
+    file preserved) and NEVER fall back to ``os.kill``, whose numeric-PID
+    re-resolution re-opens the exact TOCTOU race pidfd exists to close.
 
     Raises ``PermissionError`` or ``OSError`` for unrecoverable errors
     (EPERM, EINVAL, etc.) that indicate a problem other than PID reuse.
@@ -380,8 +406,25 @@ def _atomic_signal_pid(
 
     try:
         if hasattr(os, "pidfd_send_signal"):
-            os.pidfd_send_signal(pidfd, sig, None, None, 0)
-            return True
+            try:
+                os.pidfd_send_signal(pidfd, sig, None, None, 0)
+                return True
+            except ProcessLookupError:
+                # ESRCH: process exited between verification and signaling.
+                # Nothing was signaled; report safe non-delivery.
+                return False
+            except PermissionError:
+                raise
+            except OSError as e:
+                # Fail closed on sandbox/kernel gaps: ENOSYS (38) means the
+                # kernel lacks pidfd_send_signal; EOPNOTSUPP (95) means
+                # seccomp/sandbox blocked it. ESRCH (3) surfaced as plain
+                # OSError on some runtimes means the process is gone.
+                # In all three cases no signal was delivered -> return False
+                # so callers take the safe-failure path (no PID file cleanup).
+                if e.errno in (3, 38, 95):
+                    return False
+                raise
         else:
             # Python <3.12: Use ctypes to call pidfd_send_signal syscall directly.
             try:
@@ -492,7 +535,14 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
     pid = _read_pid_file(name)
     
     if pid is not None:
-        # Verify cmdline matches expected bot before killing
+        # Verify cmdline matches expected bot before killing.
+        # NOTE on TOCTOU: this check alone cannot pin the PID -- the process
+        # could exit and the numeric PID be recycled before the signal lands.
+        # The actual anti-recycling guarantee comes from _atomic_signal_pid,
+        # which signals through a pidfd (an object handle, not a number), so
+        # even an immediately-recycled PID cannot receive our SIGTERM. A
+        # verified cmdline + pidfd failure therefore means "not safe to
+        # signal" and we fail closed below, never falling back to os.kill.
         if _verify_cmdline(pid, name):
             signal_sent = False
             try:
@@ -540,21 +590,31 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
 def _read_orchestrator_pid_file() -> int | None:
     """Read orchestrator PID from state/.orchestrator.pid file with security verification.
 
-    Verifies file ownership and permissions to prevent PID spoofing attacks.
-    Returns None when the file is missing, unreadable, insecure, or holds a
-    non-numeric payload.
+    Same trust-boundary hardening as :func:`_read_pid_file` (reviewer
+    feedback #48/#51/#55): refuse symlinks via ``os.lstat``, require
+    EXACTLY 0o600 permission bits, require ``st_uid == os.getuid()``,
+    and accept digits-only payloads.
+
+    Returns None when the file is missing, is a symlink, is unreadable,
+    is insecure, or holds a non-numeric payload.
     """
     pid_path = _resolve_control_state_dir() / ".orchestrator.pid"
     try:
+        # lstat (not stat): refuse symlinks for the same PID-spoof reason
+        # documented in _read_pid_file.
+        lst = os.lstat(pid_path)
+        import stat as _stat_mod
+
+        if _stat_mod.S_ISLNK(lst.st_mode):
+            logger.warning("_read_orchestrator_pid_file: refusing symlink PID file")
+            return None
         # Security check: verify file permissions and ownership before trusting content
-        stat_info = os.stat(pid_path)
-        # Check permissions are exactly 0o600 (owner read/write only)
-        if stat_info.st_mode & 0o777 != 0o600:
-            logger.warning("_read_orchestrator_pid_file: insecure permissions on PID file: %o", stat_info.st_mode & 0o777)
+        if _stat_mod.S_IMODE(lst.st_mode) != 0o600:
+            logger.warning("_read_orchestrator_pid_file: insecure permissions on PID file: %o", _stat_mod.S_IMODE(lst.st_mode))
             return None
         # Check ownership matches current user (prevent other users from spoofing PIDs)
-        if stat_info.st_uid != os.getuid():
-            logger.warning("_read_orchestrator_pid_file: PID file owned by uid %d, expected %d", stat_info.st_uid, os.getuid())
+        if lst.st_uid != os.getuid():
+            logger.warning("_read_orchestrator_pid_file: PID file owned by uid %d, expected %d", lst.st_uid, os.getuid())
             return None
 
         txt = pid_path.read_text(encoding="utf-8").strip()
