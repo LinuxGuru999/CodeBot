@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from enum import Enum
 from pathlib import Path
@@ -92,6 +93,52 @@ class Gatekeeper:
         Only runs build/test gates. Reviewer verdicts are trusted —
         no re-checking of findings, checklists, or tampering detection.
         """
+        # Input validation: prevent path traversal in ticket_id and changed_files
+        if not re.match(r'^[A-Za-z0-9_-]+$', ticket_id):
+            logger.error("verify_ticket rejected: invalid ticket_id format: %r", ticket_id)
+            validation_result = {
+                "ticket_id": ticket_id,
+                "decision": "REWORK",
+                "passed": False,
+                "reason": "verification_error: invalid_ticket_id_format",
+                "failed_gates": [],
+                "total_gates": 0,
+                "rework_count": rework_count,
+                "evolve_prompt": False,
+                "timestamp": time.time(),
+            }
+            try:
+                self._log_decision(validation_result)
+            except OSError:
+                pass
+            try:
+                self._transition_ticket(ticket_id, "REWORK", [], store)
+            except Exception:
+                logger.exception("failed to transition ticket %s to REWORK after validation failure", ticket_id)
+            return validation_result
+        for cf in changed_files:
+            if not re.match(r'^[A-Za-z0-9_./-]+$', cf):
+                logger.error("verify_ticket rejected: invalid changed_file path: %r", cf)
+                validation_result = {
+                    "ticket_id": ticket_id,
+                    "decision": "REWORK",
+                    "passed": False,
+                    "reason": "verification_error: invalid_changed_file_path",
+                    "failed_gates": [],
+                    "total_gates": 0,
+                    "rework_count": rework_count,
+                    "evolve_prompt": False,
+                    "timestamp": time.time(),
+                }
+                try:
+                    self._log_decision(validation_result)
+                except OSError:
+                    pass
+                try:
+                    self._transition_ticket(ticket_id, "REWORK", [], store)
+                except Exception:
+                    logger.exception("failed to transition ticket %s to REWORK after validation failure", ticket_id)
+                return validation_result
         try:
             from codebot.quality_gate import (
                 load_policy,
@@ -346,7 +393,7 @@ class Gatekeeper:
                         ticket_id, ticket.state.value,
                     )
                     return False
-            elif decision == "REWORK":
+            elif decision in ("REWORK", "FAIL"):
                 if ticket.state == TicketState.REVIEW:
                     reviewer_feedback = self._collect_reviewer_feedback(ticket_id, failed_gates)
                     store.transition(ticket_id, TicketState.REWORK, reviewer_feedback)
@@ -360,7 +407,7 @@ class Gatekeeper:
                     return False
             return False
         except Exception as e:
-            logger.error("failed to transition ticket %s: %s", ticket_id, e)
+            logger.error("failed to transition ticket %s: %s", ticket_id, e, exc_info=True)
             return False
 
     def _commit_completed_ticket(self, ticket_id: str) -> bool:
@@ -408,7 +455,7 @@ class Gatekeeper:
                 return False
 
         except Exception as e:
-            logger.error("ticket %s: completion commit failed: %s", ticket_id, e)
+            logger.error("ticket %s: completion commit failed with exception: %s", ticket_id, e, exc_info=True)
             return False
 
     def _create_documentation_ticket_if_needed(self, ticket_id: str, store: Any) -> None:
