@@ -191,11 +191,38 @@ class Gatekeeper:
             except OSError:
                 pass
             self._log_decision(result)
-            self._transition_ticket(ticket_id, decision, failed_gates, store)
+            transition_ok = self._transition_ticket(ticket_id, decision, failed_gates, store)
+            if not transition_ok:
+                logger.error("ticket %s: state transition failed for decision %s", ticket_id, decision)
+                result["decision"] = "REWORK"
+                result["passed"] = False
+                result["reason"] = f"state_transition_failed: {result['reason']}"
+                # Attempt to transition to REWORK instead
+                try:
+                    self._transition_ticket(ticket_id, "REWORK", failed_gates, store)
+                except Exception:
+                    logger.exception("failed to fallback-transition ticket %s to REWORK", ticket_id)
+                return result
+
+            # If COMPLETE, also verify commit succeeded (artifact provenance)
+            if decision == "COMPLETE":
+                commit_ok = self._commit_completed_ticket(ticket_id)
+                if not commit_ok:
+                    logger.error("ticket %s: artifact provenance failed after COMPLETE transition", ticket_id)
+                    result["decision"] = "REWORK"
+                    result["passed"] = False
+                    result["reason"] = "artifact_provenance_failed"
+                    # Transition back to REWORK since commit failed
+                    try:
+                        self._transition_ticket(ticket_id, "REWORK", failed_gates, store)
+                    except Exception:
+                        logger.exception("failed to rollback ticket %s to REWORK after commit failure", ticket_id)
+                    return result
+
             return result
         except Exception as e:
             logger.error("verify_ticket failed for %s: %s", ticket_id, e, exc_info=True)
-            decision = "FAIL"
+            decision = "REWORK"
             reason_msg = f"verification_error: {str(e)}"
             result = {
                 "ticket_id": ticket_id,
@@ -292,7 +319,8 @@ class Gatekeeper:
     def _transition_ticket(
         self, ticket_id: str, decision: str, failed_gates: list[str] | None = None,
         store: Any | None = None,
-    ) -> None:
+    ) -> bool:
+        """Transition ticket state. Returns True on success, False on failure."""
         try:
             from codebot.ticket_engine import TicketState
             from codebot.ticket_dispatcher import get_ticket_store
@@ -300,38 +328,43 @@ class Gatekeeper:
             store = store if store is not None else get_ticket_store()
             if store is None:
                 logger.warning("TicketStore unavailable for ticket %s", ticket_id)
-                return
+                return False
             ticket = store.get(ticket_id)
 
             if ticket is None:
                 logger.warning("ticket %s not found in store", ticket_id)
-                return
+                return False
 
             if decision == "COMPLETE":
                 if ticket.state == TicketState.REVIEW:
                     store.transition(ticket_id, TicketState.COMPLETE)
                     logger.info("ticket %s transitioned to COMPLETE", ticket_id)
-                    self._commit_completed_ticket(ticket_id)
+                    return True
                 else:
                     logger.info(
                         "ticket %s in state %s — skipping COMPLETE transition",
                         ticket_id, ticket.state.value,
                     )
+                    return False
             elif decision == "REWORK":
                 if ticket.state == TicketState.REVIEW:
                     reviewer_feedback = self._collect_reviewer_feedback(ticket_id, failed_gates)
                     store.transition(ticket_id, TicketState.REWORK, reviewer_feedback)
                     logger.info("ticket %s transitioned to REWORK with %d feedback items", ticket_id, len(reviewer_feedback))
+                    return True
                 else:
                     logger.info(
                         "ticket %s in state %s — skipping REWORK transition",
                         ticket_id, ticket.state.value,
                     )
+                    return False
+            return False
         except Exception as e:
             logger.error("failed to transition ticket %s: %s", ticket_id, e)
+            return False
 
-    def _commit_completed_ticket(self, ticket_id: str) -> None:
-        """Commit the ticket's files on cb/<ticket>, open PR, record SHA+URL. Fail-open."""
+    def _commit_completed_ticket(self, ticket_id: str) -> bool:
+        """Commit the ticket's files on cb/<ticket>, open PR, record SHA+URL. Returns True on success."""
         try:
             from codebot.ticket_dispatcher import get_ticket_store
             from codebot.completion_commit import (
@@ -341,13 +374,14 @@ class Gatekeeper:
 
             store = get_ticket_store()
             if store is None:
-                return
+                logger.warning("TicketStore unavailable for ticket %s commit", ticket_id)
+                return False
             ticket = store.get(ticket_id)
             if ticket is None or getattr(ticket, "commit_sha", ""):
-                return
+                return True  # Already committed or no ticket
             files = list(getattr(ticket, "affected_modules", None) or [])
             if not files:
-                return
+                return True  # No files to commit
             title = getattr(ticket, "title", "")
             ok, sha = commit_ticket_files(
                 self._workspace, ticket_id, title, files, branch=True,
@@ -366,11 +400,16 @@ class Gatekeeper:
                 push_current_branch(self._workspace)
                 sync_ticket_issue(ticket_id, title, sha, "COMPLETE")
 
-            # Auto-create documentation ticket if needed
-            self._create_documentation_ticket_if_needed(ticket_id, store)
+                # Auto-create documentation ticket if needed
+                self._create_documentation_ticket_if_needed(ticket_id, store)
+                return True
+            else:
+                logger.error("ticket %s: commit_ticket_files failed", ticket_id)
+                return False
 
         except Exception as e:
-            logger.warning("ticket %s: completion commit failed (fail-open): %s", ticket_id, e)
+            logger.error("ticket %s: completion commit failed: %s", ticket_id, e)
+            return False
 
     def _create_documentation_ticket_if_needed(self, ticket_id: str, store: Any) -> None:
         """Create a documentation ticket if documentation wasn't updated."""
