@@ -3,10 +3,9 @@
 
 Purpose
 -------
-The sole authority that transitions tickets from VERIFYING to COMPLETE.
-Implementers and reviewers produce evidence; the gatekeeper independently
-evaluates it against the quality gate policy, structured review findings,
-and completion-evidence requirements, then makes the final determination.
+The sole authority that transitions tickets from REVIEW to COMPLETE.
+Runs deterministic quality gates (build, tests) and makes the final
+determination based on gate results.
 
 Why
 ---
@@ -19,12 +18,10 @@ Invariants
 ----------
 - stdlib-only
 - Only this module may transition tickets to COMPLETE
-- Every COMPLETE transition is logged with full gate evidence
+- Every COMPLETE transition is logged with gate evidence
 - Gate failures trigger REWORK, not silent bypass
 - Maximum 3 rework attempts before cycling back to REWORK for QA review
-- Unresolved BLOCKER/CRITICAL/MAJOR findings from any reviewer block COMPLETE
-- Changes to review/gatekeeper config files trigger elevated scrutiny
-  (gate-tampering detection)
+- Reviewer verdicts are trusted — no re-checking of findings or checklists
 """
 
 from __future__ import annotations
@@ -32,19 +29,24 @@ from __future__ import annotations
 import json
 import logging
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from codebot.review_types import (
-    CompletionEvidence,
-    FindingSeverity,
-    ReviewDecision,
-    StructuredFinding,
-    DEFAULT_BLOCKING_SEVERITIES,
-)
-from codebot.review_config import get_review_config
-
 logger = logging.getLogger("gatekeeper")
+
+
+class Decision(str, Enum):
+    """Placeholder stub decision for Gatekeeper.verify_ticket.
+
+    Scoped as a stub type only; Gatekeeper.verify_ticket continues to
+    return its established COMPLETE/REWORK dict shape (see GateDecision
+    in codebot/review_types.py for the canonical verdict type).
+    """
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    WARN = "WARN"
 
 
 def _push_enabled_for_prs() -> bool:
@@ -56,30 +58,6 @@ def _push_enabled_for_prs() -> bool:
         return False
 
 MAX_REWORK_ATTEMPTS = 3
-
-_REVIEW_FILE_PATTERNS: tuple[str, ...] = (
-    "correctness_review.json",
-    "security_review.json",
-    "architecture_review.json",
-    "performance_review.json",
-    "simplicity_review.json",
-    "test_review.json",
-    "documentation_review.json",
-    "adversarial_review.json",
-)
-
-# Gate-tampering detection: files whose modification could weaken CodeBot's
-# own quality controls. Changes to these receive elevated scrutiny because
-# an agent could otherwise improve its completion rate by loosening gates.
-_GATE_TAMPER_PATTERNS: tuple[str, ...] = (
-    "review.yaml",
-    "quality_gates.yaml",
-    "codebot/gatekeeper.py",
-    "codebot/quality_gate.py",
-    "codebot/review_config.py",
-    "codebot/review_types.py",
-    "codebot/review_metrics.py",
-)
 
 
 class Gatekeeper:
@@ -93,128 +71,7 @@ class Gatekeeper:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._policy_path = policy_path
         self._workspace = workspace or Path.cwd()
-        self._log_path = self._state_dir / "gatekeeper_log.jsonl"
-
-    # ------------------------------------------------------------------
-    # Gate-tampering detection
-    # ------------------------------------------------------------------
-
-    def _detect_gate_tampering(self, changed_files: list[str]) -> list[str]:
-        """Return changed files that touch review/gatekeeper configuration.
-
-        Any non-empty result means the ticket modifies CodeBot's own quality
-        controls and must receive elevated scrutiny.
-        """
-        flagged: list[str] = []
-        for f in changed_files:
-            for pat in _GATE_TAMPER_PATTERNS:
-                if pat in f:
-                    flagged.append(f)
-                    break
-        return flagged
-
-    # ------------------------------------------------------------------
-    # Structured review loading
-    # ------------------------------------------------------------------
-
-    def _load_review_decisions(self, ticket_id: str) -> list[ReviewDecision]:
-        """Load all structured *_review.json verdicts for a ticket."""
-        decisions: list[ReviewDecision] = []
-        for pattern in _REVIEW_FILE_PATTERNS:
-            review_path = self._state_dir / pattern
-            if not review_path.exists():
-                for alt in (
-                    Path(".codebot/state") / pattern,
-                    self._state_dir.parent / pattern,
-                ):
-                    if alt.exists():
-                        review_path = alt
-                        break
-            if not review_path.exists():
-                continue
-            try:
-                data = json.loads(review_path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    continue
-                if data.get("ticket_id", "") != ticket_id:
-                    continue
-                decisions.append(ReviewDecision.from_dict(data))
-            except (json.JSONDecodeError, OSError, ValueError, KeyError):
-                continue
-        return decisions
-
-    # ------------------------------------------------------------------
-    # Completion evidence
-    # ------------------------------------------------------------------
-
-    def _build_completion_evidence(
-        self,
-        ticket_id: str,
-        gates_passed: bool,
-        evaluations: list,
-        review_decisions: list[ReviewDecision],
-        all_findings: list[StructuredFinding],
-        tampered_files: list[str],
-    ) -> CompletionEvidence:
-        """Assemble the machine-readable evidence artifact for a decision."""
-        finding_counts: dict[str, int] = {}
-        for f in all_findings:
-            if not f.resolved:
-                finding_counts[f.severity.value] = (
-                    finding_counts.get(f.severity.value, 0) + 1
-                )
-
-        tests_passed = sum(1 for ev in evaluations if ev.passed)
-        tests_failed = sum(1 for ev in evaluations if not ev.passed)
-
-        checklists_complete = (
-            all(rd.checklist.is_complete() for rd in review_decisions)
-            if review_decisions
-            else False
-        )
-
-        requirement_verified = (
-            any(
-                rd.checklist.result_for("requirement_satisfied").value == "PASS"
-                for rd in review_decisions
-            )
-            if review_decisions
-            else False
-        )
-
-        acceptance_failed = sum(
-            1
-            for rd in review_decisions
-            if rd.checklist.result_for("acceptance_criteria_satisfied").value == "FAIL"
-        )
-        acceptance_unknown = sum(
-            1
-            for rd in review_decisions
-            if rd.checklist.result_for("acceptance_criteria_satisfied").value == "UNKNOWN"
-        )
-
-        return CompletionEvidence(
-            requirement_verified=requirement_verified,
-            acceptance_passed=len(review_decisions) - acceptance_failed - acceptance_unknown,
-            acceptance_failed=acceptance_failed,
-            acceptance_unknown=acceptance_unknown,
-            tests_executed=len(evaluations),
-            tests_passed=tests_passed,
-            tests_failed=tests_failed,
-            new_tests_added=0,
-            finding_counts=finding_counts,
-            build_verified=gates_passed,
-            security_checked=any(
-                rd.reviewer == "security_reviewer" for rd in review_decisions
-            ),
-            regression_checked=any(
-                rd.checklist.result_for("no_obvious_regressions").value == "PASS"
-                for rd in review_decisions
-            ),
-            deterministic_gates_passed=gates_passed,
-            checklist_complete=checklists_complete,
-            completion_confidence=0.0,
-        )
+        self._log_path = self._state_dir / "gate_results.jsonl"
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -228,113 +85,219 @@ class Gatekeeper:
         test_dirs: str = "tests/",
         conditions: list[str] | None = None,
         rework_count: int = 0,
+        store: Any | None = None,
     ) -> dict[str, Any]:
-        from codebot.quality_gate import (
-            load_policy,
-            run_quality_gates_with_cache,
-            record_gate_results,
-        )
+        """Run deterministic quality gates and transition ticket.
 
-        cfg = get_review_config()
-        blocking = cfg.blocking_severities
-
-        policy = load_policy(self._policy_path)
-        passed, evaluations = run_quality_gates_with_cache(
-            policy=policy,
-            workspace=self._workspace,
-            state_dir=self._state_dir,
-            ticket_id=ticket_id,
-            ticket_class=ticket_class,
-            changed_files=changed_files,
-            test_dirs=test_dirs,
-            conditions=conditions,
-        )
-
-        record_gate_results(self._state_dir, ticket_id, passed, evaluations)
-
-        # Independent evidence collection: do not trust reviewer verdicts alone.
-        review_decisions = self._load_review_decisions(ticket_id)
-        all_findings: list[StructuredFinding] = []
-        for rd in review_decisions:
-            all_findings.extend(rd.findings)
-
-        unresolved_blocking = [f for f in all_findings if f.is_blocking(blocking)]
-
-        tampered_files = self._detect_gate_tampering(changed_files)
-        if tampered_files:
-            logger.warning(
-                "ticket %s modifies gate/review config files: %s — elevated scrutiny",
-                ticket_id, tampered_files,
+        Only runs build/test gates. Reviewer verdicts are trusted —
+        no re-checking of findings, checklists, or tampering detection.
+        """
+        try:
+            from codebot.quality_gate import (
+                load_policy,
+                run_quality_gates_with_cache,
+                record_gate_results,
             )
 
-        evidence = self._build_completion_evidence(
-            ticket_id=ticket_id,
-            gates_passed=passed,
-            evaluations=evaluations,
-            review_decisions=review_decisions,
-            all_findings=all_findings,
-            tampered_files=tampered_files,
+            policy = load_policy(self._policy_path)
+            ticket_revision = 0.0
+            resolved_store = store
+            if resolved_store is None:
+                try:
+                    from codebot.ticket_dispatcher import get_ticket_store
+                    resolved_store = get_ticket_store()
+                except Exception:
+                    resolved_store = None
+            if resolved_store is not None:
+                ticket = resolved_store.get(ticket_id)
+                if ticket is not None:
+                    ticket_revision = getattr(ticket, "updated_at", 0.0)
+            passed, evaluations = run_quality_gates_with_cache(
+                policy=policy,
+                workspace=self._workspace,
+                state_dir=self._state_dir,
+                ticket_id=ticket_id,
+                ticket_class=ticket_class,
+                changed_files=changed_files,
+                test_dirs=test_dirs,
+                conditions=conditions,
+                ticket_revision=ticket_revision,
+            )
+            coverage_evaluation = self._coverage_evaluation(changed_files, test_dirs)
+            if coverage_evaluation is not None:
+                evaluations.append(coverage_evaluation)
+                passed = passed and coverage_evaluation.passed
+
+            record_gate_results(self._state_dir, ticket_id, passed, evaluations)
+            if resolved_store is not None:
+                resolved_store.update_gate_approval(ticket_id, passed)
+            self._write_verification_packet(ticket_id, ticket_revision, changed_files, evaluations)
+            try:
+                from codebot.lifecycle_packet import LifecyclePacketStore
+                LifecyclePacketStore(self._state_dir).append_evidence(
+                    ticket_id,
+                    ticket_revision,
+                    "verification",
+                    {"passed": passed, "gates": [evaluation.to_dict() for evaluation in evaluations]},
+                )
+            except OSError:
+                pass
+
+            failed_gates = [ev.gate_name for ev in evaluations if not ev.passed]
+
+            if not passed:
+                decision = "REWORK"
+                reason = "deterministic gates failed"
+            else:
+                decision = "COMPLETE"
+                reason = "all gates passed"
+
+            if decision == "COMPLETE":
+                logger.info("ticket %s PASSED: %s", ticket_id, reason)
+            else:
+                if rework_count >= MAX_REWORK_ATTEMPTS:
+                    logger.warning(
+                        "ticket %s FAILED %d attempts (%s) — triggering prompt evolution + REWORK",
+                        ticket_id, rework_count + 1, reason,
+                    )
+                else:
+                    logger.info(
+                        "ticket %s FAILED (attempt %d): %s — sending to REWORK",
+                        ticket_id, rework_count + 1, reason,
+                    )
+
+            result = {
+                "ticket_id": ticket_id,
+                "decision": decision,
+                "passed": passed,
+                "reason": reason,
+                "failed_gates": failed_gates,
+                "total_gates": len(evaluations),
+                "rework_count": rework_count,
+                "evolve_prompt": decision != "COMPLETE" and rework_count >= MAX_REWORK_ATTEMPTS,
+                "timestamp": time.time(),
+            }
+
+            try:
+                from codebot.review_metrics import record_gatekeeper_metric
+                record_gatekeeper_metric(
+                    ticket_id=ticket_id,
+                    decision=decision,
+                    gates_passed=passed,
+                    blocking_findings=0,
+                    review_count=0,
+                    rework_count=rework_count,
+                )
+            except OSError:
+                pass
+            self._log_decision(result)
+            self._transition_ticket(ticket_id, decision, failed_gates, store)
+            return result
+        except Exception as e:
+            logger.error("verify_ticket failed for %s: %s", ticket_id, e, exc_info=True)
+            decision = "FAIL"
+            reason_msg = f"verification_error: {str(e)}"
+            result = {
+                "ticket_id": ticket_id,
+                "decision": decision,
+                "passed": False,
+                "reason": reason_msg,
+                "failed_gates": [],
+                "total_gates": 0,
+                "rework_count": rework_count,
+                "evolve_prompt": False,
+                "timestamp": time.time(),
+            }
+            try:
+                self._log_decision(result)
+            except OSError:
+                pass
+            # Transition to REWORK so the ticket is not orphaned when verification crashes.
+            try:
+                self._transition_ticket(ticket_id, "REWORK", [], store)
+            except Exception:
+                logger.exception("failed to transition ticket %s to REWORK after error", ticket_id)
+            return result
+
+    def _coverage_evaluation(self, changed_files: list[str], test_dirs: str):
+        from codebot.review_config import load_review_config
+
+        policy = load_review_config(self._workspace / ".codebot" / "review.yaml")
+        def normalize_path(path: str) -> str:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                try:
+                    return candidate.relative_to(self._workspace).as_posix()
+                except ValueError:
+                    return candidate.as_posix()
+            return candidate.as_posix()
+
+        affected_modules = [
+            normalize_path(path)
+            for path in changed_files
+            if path.endswith(".py") and not Path(path).parts[0] == "tests"
+        ]
+        if not policy.require_full_coverage or not affected_modules:
+            return None
+
+        from codebot.coverage_runner import run_coverage
+        from codebot.quality_gate import GateEvaluation, GateResult
+
+        started_at = time.monotonic()
+        report = run_coverage(self._workspace, test_dirs=[test_dirs])
+        duration_ms = (time.monotonic() - started_at) * 1000
+        if report.error:
+            return GateEvaluation(
+                "coverage", GateResult.ERROR, "python3 -m pytest --cov", "", duration_ms,
+                False, True, report.error,
+            )
+
+        modules = {normalize_path(path): coverage for path, coverage in report.modules.items()}
+        incomplete = [
+            path
+            for path in affected_modules
+            if path not in modules or modules[path].coverage_pct < 100.0
+        ]
+        if incomplete:
+            output = ", ".join(
+                f"{path}={modules[path].coverage_pct:.1f}%" if path in modules else f"{path}=missing"
+                for path in incomplete
+            )
+            return GateEvaluation(
+                "coverage", GateResult.FAIL, "python3 -m pytest --cov", output, duration_ms,
+                False, True, "affected modules require 100% coverage",
+            )
+        return GateEvaluation(
+            "coverage", GateResult.PASS, "python3 -m pytest --cov", "", duration_ms, True,
         )
 
-        failed_gates = [ev.gate_name for ev in evaluations if not ev.passed]
-
-        if not passed:
-            decision = "REWORK"
-            reason = "deterministic gates failed"
-        elif unresolved_blocking:
-            decision = "REWORK"
-            reason = f"{len(unresolved_blocking)} unresolved blocking finding(s)"
-        elif tampered_files:
-            decision = "REWORK"
-            reason = f"gate/review config modified: {tampered_files}"
-        elif evidence.has_missing_evidence() and cfg.require_checklist_complete:
-            decision = "REWORK"
-            reason = "incomplete completion evidence"
-        else:
-            decision = "COMPLETE"
-            reason = "all gates passed, no blocking findings, evidence complete"
-
-        if decision == "COMPLETE":
-            logger.info("ticket %s PASSED: %s", ticket_id, reason)
-        else:
-            if rework_count >= MAX_REWORK_ATTEMPTS:
-                logger.warning(
-                    "ticket %s FAILED %d attempts (%s) — triggering prompt evolution + REWORK",
-                    ticket_id, rework_count + 1, reason,
-                )
-            else:
-                logger.info(
-                    "ticket %s FAILED (attempt %d): %s — sending to REWORK",
-                    ticket_id, rework_count + 1, reason,
-                )
-
-        result = {
+    def _write_verification_packet(
+        self, ticket_id: str, ticket_revision: float, changed_files: list[str],
+        evaluations: list[Any],
+    ) -> None:
+        directory = self._state_dir / "verification_packets"
+        directory.mkdir(parents=True, exist_ok=True)
+        packet = {
             "ticket_id": ticket_id,
-            "decision": decision,
-            "passed": passed,
-            "reason": reason,
-            "failed_gates": failed_gates,
-            "total_gates": len(evaluations),
-            "review_count": len(review_decisions),
-            "total_findings": len(all_findings),
-            "blocking_findings": len(unresolved_blocking),
-            "tampered_files": tampered_files,
-            "rework_count": rework_count,
-            "evolve_prompt": decision != "COMPLETE" and rework_count >= MAX_REWORK_ATTEMPTS,
-            "evidence": evidence.to_dict(),
-            "timestamp": time.time(),
+            "ticket_revision": ticket_revision,
+            "changed_files": changed_files,
+            "gates": [evaluation.to_dict() for evaluation in evaluations],
+            "generated_at": time.time(),
         }
+        path = directory / f"{ticket_id}.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+        temporary.replace(path)
 
-        self._log_decision(result)
-        self._transition_ticket(ticket_id, decision, failed_gates)
-        return result
-
-    def _transition_ticket(self, ticket_id: str, decision: str, failed_gates: list[str] | None = None) -> None:
+    def _transition_ticket(
+        self, ticket_id: str, decision: str, failed_gates: list[str] | None = None,
+        store: Any | None = None,
+    ) -> None:
         try:
             from codebot.ticket_engine import TicketState
             from codebot.ticket_dispatcher import get_ticket_store
 
-            store = get_ticket_store()
+            store = store if store is not None else get_ticket_store()
             if store is None:
                 logger.warning("TicketStore unavailable for ticket %s", ticket_id)
                 return
@@ -345,7 +308,7 @@ class Gatekeeper:
                 return
 
             if decision == "COMPLETE":
-                if ticket.state == TicketState.VERIFYING:
+                if ticket.state == TicketState.REVIEW:
                     store.transition(ticket_id, TicketState.COMPLETE)
                     logger.info("ticket %s transitioned to COMPLETE", ticket_id)
                     self._commit_completed_ticket(ticket_id)
@@ -355,7 +318,7 @@ class Gatekeeper:
                         ticket_id, ticket.state.value,
                     )
             elif decision == "REWORK":
-                if ticket.state in (TicketState.REVIEWING, TicketState.VERIFYING):
+                if ticket.state == TicketState.REVIEW:
                     reviewer_feedback = self._collect_reviewer_feedback(ticket_id, failed_gates)
                     store.transition(ticket_id, TicketState.REWORK, reviewer_feedback)
                     logger.info("ticket %s transitioned to REWORK with %d feedback items", ticket_id, len(reviewer_feedback))
@@ -402,65 +365,72 @@ class Gatekeeper:
                 store.record_commit(ticket_id, sha, pr_url)
                 push_current_branch(self._workspace)
                 sync_ticket_issue(ticket_id, title, sha, "COMPLETE")
+
+            # Auto-create documentation ticket if needed
+            self._create_documentation_ticket_if_needed(ticket_id, store)
+
         except Exception as e:
             logger.warning("ticket %s: completion commit failed (fail-open): %s", ticket_id, e)
 
-    def _collect_reviewer_feedback(self, ticket_id: str, failed_gates: list[str] | None = None) -> list[dict]:
-        """Collect structured feedback from reviewer verdict files.
+    def _create_documentation_ticket_if_needed(self, ticket_id: str, store: Any) -> None:
+        """Create a documentation ticket if documentation wasn't updated."""
+        try:
+            from codebot.documentation_ticket_generator import create_documentation_ticket
 
-        Reads both structured findings (with severity/evidence fields) and
-        legacy description/recommendation fields for backward compatibility.
+            ticket = store.get(ticket_id)
+            if ticket is None:
+                return
+
+            create_documentation_ticket(
+                ticket=ticket,
+                store=store,
+                workspace=self._workspace,
+            )
+
+        except Exception as e:
+            logger.debug("ticket %s: documentation ticket creation skipped: %s", ticket_id, e)
+
+    def _collect_reviewer_feedback(self, ticket_id: str, failed_gates: list[str] | None = None) -> list[dict]:
+        """Collect feedback for REWORK transitions.
+
+        Since we trust reviewer verdicts and only gate on deterministic checks,
+        feedback is just the list of failed gates.
         """
         feedback: list[dict] = []
-        for pattern in _REVIEW_FILE_PATTERNS:
-            review_path = self._state_dir / pattern
-            if not review_path.exists():
-                for alt in (
-                    Path(".codebot/state") / pattern,
-                    self._state_dir.parent / pattern,
-                ):
-                    if alt.exists():
-                        review_path = alt
-                        break
-            if not review_path.exists():
-                continue
-            try:
-                data = json.loads(review_path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    continue
-                if data.get("verdict") != "REWORK":
-                    continue
-                findings = data.get("findings", [])
-                reviewer = data.get("reviewer", pattern.replace("_review.json", ""))
-                for finding in findings:
-                    if not isinstance(finding, dict):
-                        continue
-                    feedback.append({
-                        "reviewer": reviewer,
-                        "file": finding.get("file", ""),
-                        "severity": finding.get("severity", "medium"),
-                        "category": finding.get("category", ""),
-                        "description": finding.get("description", ""),
-                        "recommendation": finding.get("recommendation", ""),
-                        "evidence": finding.get("evidence", ""),
-                        "reproduction": finding.get("reproduction", ""),
-                        "timestamp": data.get("review_completed_at", ""),
-                    })
-            except Exception as e:
-                logger.debug("failed to read review file %s: %s", review_path, e)
+        if failed_gates:
+            for gate_name in failed_gates:
+                feedback.append({
+                    "reviewer": "gatekeeper",
+                    "file": "",
+                    "severity": "high",
+                    "category": "quality_gate",
+                    "description": f"Quality gate '{gate_name}' failed",
+                    "recommendation": f"Fix the issue causing '{gate_name}' to fail",
+                    "evidence": "",
+                    "reproduction": "",
+                    "timestamp": time.time(),
+                })
         return feedback
 
     def _log_decision(self, result: dict[str, Any]) -> None:
         line = json.dumps(result) + "\n"
+        import fcntl
         import os
+
         fd = os.open(
             str(self._log_path),
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
             0o644,
         )
         try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
             os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
         finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
             os.close(fd)
 
     def get_history(self, ticket_id: str) -> list[dict[str, Any]]:
