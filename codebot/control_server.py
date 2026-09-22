@@ -158,7 +158,23 @@ ORCH = BOTS_DIR / "orchestrator.py"
 SAFE_UPDATE = BOTS_DIR / "safe_update.sh"
 
 CONTROL_TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
-PORT = int(os.environ.get("PORT", os.environ.get("CONTROL_PORT", "8081")))
+
+
+def _safe_port_env() -> int:
+    """Safely parse PORT/CONTROL_PORT env vars with fallback to 8081."""
+    try:
+        val = os.environ.get("PORT") or os.environ.get("CONTROL_PORT", "8081")
+        port = int(val)
+        if 1 <= port <= 65535:
+            return port
+        logger.warning("Invalid PORT value %s; using default 8081", val)
+        return 8081
+    except (TypeError, ValueError):
+        logger.warning("Invalid PORT value; using default 8081")
+        return 8081
+
+
+PORT = _safe_port_env()
 MAX_LOG_LINES = 2_000
 MAX_REQUEST_BYTES = 65_536
 REQUEST_TIMEOUT_SECONDS = 15
@@ -313,9 +329,12 @@ def _atomic_signal_pid(pid: int, sig: int) -> bool:
     ``ESRCH`` if the original process is gone rather than signalling the
     PID reuser.
 
-    When pidfds are unavailable the code falls back to ``os.kill`` (the
-    same semantics as before); PID-file targeting plus cmdline
-    verification still prevents regex-based over-matching.
+    For Python <3.12 where ``os.pidfd_send_signal`` is missing, we use
+    ``ctypes`` to call the syscall directly. If pidfd is unavailable or
+    ``pidfd_open`` fails (e.g. seccomp blocks it), we fall back to
+    PID-file-verified ``os.kill`` — the caller has already verified
+    ``/proc/PID/cmdline`` so the TOCTOU window is bounded to the interval
+    since verification, which is the same guarantee as the pre-pidfd path.
     """
     try:
         # Try using pidfd_open for atomic signaling (Python 3.9+ on Linux 5.1+).
@@ -327,21 +346,85 @@ def _atomic_signal_pid(pid: int, sig: int) -> bool:
                         os.pidfd_send_signal(pidfd, sig, None, None, 0)
                         return True
                     else:
-                        # Python <3.12: pidfd pins the process but we can only
-                        # signal via os.kill(pid); the fd at least lets us
-                        # detect PID reuse cheaply (fd becomes invalid/ESRCH
-                        # on poll) — but kill-by-number remains best-effort.
-                        os.kill(pid, sig)
-                        return True
+                        # Python <3.12: Use ctypes to call pidfd_send_signal syscall directly.
+                        # This avoids the TOCTOU race of os.kill(pid) by pinning the signal
+                        # to the pidfd object.
+                        try:
+                            import ctypes
+                            import ctypes.util
+
+                            libc_path = ctypes.util.find_library("c")
+                            if not libc_path:
+                                raise OSError("Cannot find libc")
+                            libc = ctypes.CDLL(libc_path, use_errno=True)
+
+                            # SYS_pidfd_send_signal = 427 on x86_64 and aarch64 Linux
+                            SYS_pidfd_send_signal = 427
+
+                            # Set argtypes for proper marshalling
+                            libc.syscall.argtypes = [
+                                ctypes.c_long,  # syscall number
+                                ctypes.c_int,   # pidfd
+                                ctypes.c_int,   # sig
+                                ctypes.c_void_p,  # info (NULL)
+                                ctypes.c_uint,  # flags
+                            ]
+                            libc.syscall.restype = ctypes.c_int
+
+                            ret = libc.syscall(
+                                SYS_pidfd_send_signal,
+                                pidfd,
+                                sig,
+                                None,  # NULL info pointer
+                                0,     # flags
+                            )
+                            if ret == 0:
+                                return True
+                            else:
+                                errno_val = ctypes.get_errno()
+                                if errno_val == 3:  # ESRCH - process gone
+                                    return False
+                                elif errno_val == 22:  # EINVAL - bad args
+                                    raise OSError(errno_val, "Invalid argument to pidfd_send_signal")
+                                elif errno_val == 1:  # EPERM
+                                    raise PermissionError(os.strerror(errno_val))
+                                else:
+                                    raise OSError(errno_val, os.strerror(errno_val))
+                        except (OSError, PermissionError):
+                            raise
+                        except Exception:
+                            # Fallback: re-verify cmdline immediately before os.kill to narrow TOCTOU window.
+                            # This is not atomic but reduces the race window significantly.
+                            # We don't have the bot name here in the generic helper, so we skip the fallback
+                            # to avoid risking collateral termination. The caller (_safe_kill_bot_process)
+                            # has already verified the PID file and cmdline before calling this helper.
+                            return False
                 finally:
                     os.close(pidfd)
             except OSError:
-                # pidfd_open failed (e.g., process exited, not supported), fall back
+                # pidfd_open failed (e.g., process exited, blocked by seccomp,
+                # or kernel without pidfd). Fall through to os.kill fallback
+                # below — the caller has already verified /proc/PID/cmdline
+                # via _verify_cmdline, so the TOCTOU window is narrowed to the
+                # interval since verification. This is the same guarantee we
+                # had before pidfd hardening and is sufficient for the
+                # PID-file-verified kill path (Constitution §2).
                 pass
 
-        # Standard fallback
-        os.kill(pid, sig)
-        return True
+        # Fallback: pidfd unavailable or pidfd_open failed → verified os.kill.
+        # The PID was verified via /proc/PID/cmdline immediately before this
+        # call in _safe_kill_bot_process/_safe_kill_orchestrator. Re-checking
+        # is not possible here without the bot name, but the caller-supplied
+        # PID file + _verify_cmdline already prevents pkill -f broad matching.
+        try:
+            os.kill(pid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            raise
+        except OSError:
+            raise
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -391,6 +474,7 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
                     pass
             except ProcessLookupError:
                 logger.info("_safe_kill_bot_process: PID %d from PID file already exited for bot '%s'", pid, name)
+                killed_pids.append(pid)
                 # Clean up stale PID file
                 try:
                     pid_file = STATE_DIR / f"{name}.pid"
@@ -400,8 +484,10 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
                     pass
             except PermissionError:
                 logger.warning("_safe_kill_bot_process: permission denied killing PID %d for bot '%s'", pid, name)
+                killed_pids.append(pid)
             except Exception as e:
                 logger.warning("_safe_kill_bot_process: error killing PID %d for bot '%s': %s", pid, name, e)
+                killed_pids.append(pid)
         else:
             logger.warning("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s'", pid, name)
             # Stale PID file pointing to wrong process? Clean it up to be safe.
@@ -526,130 +612,6 @@ def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
     return True, killed_pids
 
 
-def _safe_kill_process(pid: int, expected_cmdline: str, grace_period: float = 5.0) -> tuple[bool, int | None]:
-    """Safely kill a process by PID with /proc/cmdline verification and SIGTERM/SIGKILL escalation.
-
-    Verifies that the target PID's cmdline matches expected_cmdline before sending signals.
-    Sends SIGTERM first, waits up to grace_period seconds, then escalates to SIGKILL if needed.
-    Re-verifies cmdline before each signal to prevent killing recycled PIDs.
-
-    Args:
-        pid: Process ID to terminate (must be positive integer)
-        expected_cmdline: Expected substring/suffix of /proc/<pid>/cmdline for verification
-        grace_period: Seconds to wait between SIGTERM and SIGKILL
-
-    Returns:
-        Tuple of (success, killed_pid). success=True only if process is confirmed gone.
-        killed_pid is the targeted PID or None if aborted before signaling.
-    """
-    import signal as _signal
-
-    # Validate inputs
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        logger.warning("_safe_kill_process: invalid pid rejected: %r", pid)
-        return False, None
-    if not isinstance(expected_cmdline, str) or not expected_cmdline:
-        logger.warning("_safe_kill_process: invalid expected_cmdline rejected: %r", expected_cmdline)
-        return False, None
-
-    def _read_cmdline(p: int) -> str | None:
-        try:
-            with open(f"/proc/{p}/cmdline", "rb") as f:
-                data = f.read(4096)
-            return data.decode("utf-8", errors="replace").replace("\x00", " ").strip()
-        except FileNotFoundError:
-            return None
-        except PermissionError:
-            logger.warning("_safe_kill_process: permission denied reading /proc/%d/cmdline", p)
-            return None
-        except Exception as e:
-            logger.warning("_safe_kill_process: error reading /proc/%d/cmdline: %s", p, e)
-            return None
-
-    def _is_alive(p: int) -> bool:
-        try:
-            os.kill(p, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            # Process exists but we lack permission; treat as alive
-            return True
-        except Exception:
-            return False
-
-    # Initial cmdline verification
-    cmdline = _read_cmdline(pid)
-    if cmdline is None:
-        logger.info("_safe_kill_process: PID %d does not exist or unreadable, nothing to kill", pid)
-        return False, None
-    if expected_cmdline not in cmdline:
-        logger.warning(
-            "_safe_kill_process: PID %d cmdline mismatch (expected %r in %r), aborting",
-            pid, expected_cmdline[:200], cmdline[:200]
-        )
-        return False, None
-
-    # Send SIGTERM
-    try:
-        os.kill(pid, _signal.SIGTERM)
-        logger.info("_safe_kill_process: sent SIGTERM to PID %d", pid)
-    except ProcessLookupError:
-        logger.info("_safe_kill_process: PID %d already exited before SIGTERM", pid)
-        return True, pid
-    except PermissionError:
-        logger.warning("_safe_kill_process: permission denied sending SIGTERM to PID %d", pid)
-        return False, pid
-    except Exception as e:
-        logger.warning("_safe_kill_process: error sending SIGTERM to PID %d: %s", pid, e)
-        return False, pid
-
-    # Grace period polling
-    elapsed = 0.0
-    poll_interval = min(0.2, grace_period / 10.0) if grace_period > 0 else 0.2
-    while elapsed < grace_period:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-        if not _is_alive(pid):
-            logger.info("_safe_kill_process: PID %d exited after SIGTERM", pid)
-            return True, pid
-
-    # Re-verify cmdline before SIGKILL to avoid killing recycled PID
-    cmdline_after = _read_cmdline(pid)
-    if cmdline_after is None:
-        logger.info("_safe_kill_process: PID %d exited during grace period", pid)
-        return True, pid
-    if expected_cmdline not in cmdline_after:
-        logger.warning(
-            "_safe_kill_process: PID %d cmdline changed during grace period (expected %r in %r), aborting SIGKILL",
-            pid, expected_cmdline[:200], cmdline_after[:200]
-        )
-        return False, pid
-
-    # Escalate to SIGKILL
-    try:
-        os.kill(pid, _signal.SIGKILL)
-        logger.warning("_safe_kill_process: escalated to SIGKILL for PID %d", pid)
-    except ProcessLookupError:
-        logger.info("_safe_kill_process: PID %d exited before SIGKILL", pid)
-        return True, pid
-    except PermissionError:
-        logger.warning("_safe_kill_process: permission denied sending SIGKILL to PID %d", pid)
-        return False, pid
-    except Exception as e:
-        logger.warning("_safe_kill_process: error sending SIGKILL to PID %d: %s", pid, e)
-        return False, pid
-
-    # Brief wait after SIGKILL
-    time.sleep(min(0.5, grace_period * 0.1))
-    if not _is_alive(pid):
-        logger.info("_safe_kill_process: PID %d terminated after SIGKILL", pid)
-        return True, pid
-
-    logger.warning("_safe_kill_process: PID %d still alive after SIGKILL (possible zombie)", pid)
-    return False, pid
-
-
 def heartbeat_age(name: str) -> float | None:
     # Defense-in-depth (CB-3E4571EFBE42): validate bot name before using it
     # in filesystem path construction to block path traversal.
@@ -694,10 +656,7 @@ def log_tail(name: str, lines: int = 200) -> str:
 
 
 def bot_status(name: str) -> dict:
-    # Defense-in-depth (CB-3E4571EFBE42): bot names interpolated into
-    # pgrep -f (regex) patterns must be allowlist-validated first.
-    # Invalid names are neutralized to a safe sentinel (still re.escape()d
-    # below) so no crafted regex/metacharacters can ever reach subprocess.
+    # Defense-in-depth (CB-3E4571EFBE42): bot names must be allowlist-validated.
     if not validate_bot_name(name):
         logger.warning("bot_status: rejected invalid bot name: %s", repr(name)[:100])
         name = "invalid-bot-name-rejected"
@@ -710,25 +669,22 @@ def bot_status(name: str) -> dict:
             state = json.loads(state_file.read_text())
     except Exception:
         pass
-    # process check via pgrep
+    # process check via PID file + cmdline verification (no pgrep)
     running = False
     pid = None
     try:
-        # Defense-in-depth (CB-3E4571EFBE42): escape bot name to prevent
-        # regex injection in pgrep pattern; name was allowlist-validated above.
-        escaped_name = re.escape(name)
-        # Anchor with $ so "bot" cannot match "bot-extra" via regex prefix.
-        ps = subprocess.run(["pgrep", "-f", f"api_runner\\.py {escaped_name}$"], capture_output=True, text=True, timeout=3)
-        if ps.stdout.strip():
+        found_pid = _read_pid_file(name)
+        if found_pid is not None and _verify_cmdline(found_pid, name):
             running = True
-            pid = ps.stdout.strip().split()[0]
+            pid = str(found_pid)
     except Exception:
         pass
-    # orchestrator process check
+    # orchestrator process check via PID file
     orch_running = False
     try:
-        ps2 = subprocess.run(["pgrep", "-f", "orchestrator.py"], capture_output=True, text=True, timeout=3)
-        orch_running = bool(ps2.stdout.strip())
+        orch_pid = _read_orchestrator_pid_file()
+        if orch_pid is not None and _verify_orchestrator_cmdline(orch_pid):
+            orch_running = True
     except Exception:
         pass
     eff = eff_timeout(cfg) if cfg else None
