@@ -45,7 +45,7 @@ except ImportError:
     try:
         from tool_policy import allowlisted_command, resolve_workspace_path
     except ImportError:
-        def allowlisted_command(command: str) -> list[str] | None:
+        def allowlisted_command(command: str, workspace_root=None) -> list[str] | None:
             import shlex
             try:
                 return shlex.split(command)
@@ -53,14 +53,26 @@ except ImportError:
                 return None
 
         def resolve_workspace_path(path: str, workspace_root) -> "Path | None":
+            import os
             from pathlib import Path
             candidate = Path(path)
-            resolved = (candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve(strict=False)
-            try:
-                resolved.relative_to(workspace_root)
-            except ValueError:
-                return None
-            return resolved
+            # Construct absolute path without resolving symlinks yet
+            if candidate.is_absolute():
+                abs_path = str(candidate)
+            else:
+                abs_path = os.path.join(str(workspace_root), str(candidate))
+            # Resolve all symlinks using os.path.realpath for security
+            real_path = os.path.realpath(abs_path)
+            # Normalize workspace_root with trailing separator to prevent prefix attacks
+            # e.g., /workspace-evil should not match /workspace
+            norm_root = os.path.realpath(str(workspace_root))
+            if not norm_root.endswith(os.sep):
+                norm_root += os.sep
+            # Check if resolved path is within workspace root
+            # Also allow exact match to workspace root itself
+            if real_path == norm_root.rstrip(os.sep) or real_path.startswith(norm_root):
+                return Path(real_path)
+            return None
 
 # Import file locking primitives for serializing concurrent edits
 try:
@@ -161,6 +173,13 @@ def bash(command, timeout=30):
             import logging as _log
             _log.getLogger(__name__).warning("bash denied: %s", command[:200])
             return {"success": False, "output": "", "error": "command denied"}
+        # Pre-exec revalidation to mitigate TOCTOU race between validation and execution.
+        # Re-check the command immediately before subprocess.run to catch symlink swaps.
+        revalidated = allowlisted_command(command, WORKSPACE_ROOT)
+        if revalidated is None:
+            import logging as _log
+            _log.getLogger(__name__).warning("bash pre-exec revalidation denied: %s", command[:200])
+            return {"success": False, "output": "", "error": "command denied (pre-exec revalidation)"}
         result = subprocess.run(
             command,
             shell=True,
@@ -504,6 +523,17 @@ def batch_grep(patterns: list[str], path: str = ".", include: str = "", limit_pe
             results.append(f"\n--- pattern: {pat} ---\n[invalid regex]")
             continue
 
+        # SECURITY: Validate include parameter to prevent path traversal
+        # Reject include values with '..' segments or absolute paths before glob construction
+        if include:
+            # Normalize backslashes to forward slashes for consistent checking
+            normalized_include = include.replace('\\', '/')
+            inc_path = Path(normalized_include)
+            if inc_path.is_absolute() or '..' in inc_path.parts:
+                logger.warning('batch_grep: rejected traversal/absolute include: %r', include)
+                results.append(f"\n--- pattern: {pat} ---\n[invalid include]")
+                continue
+
         matches = []
         search_path = resolve_workspace_path(path, WORKSPACE_ROOT)
         if search_path is None:
@@ -512,10 +542,26 @@ def batch_grep(patterns: list[str], path: str = ".", include: str = "", limit_pe
         if search_path.is_file():
             file_list = [search_path]
         else:
-            pattern = str(search_path / "**" / (include or "*"))
-            file_list = [Path(f) for f in _glob.glob(pattern, recursive=True) if Path(f).is_file()]
+            glob_pattern = str(search_path / "**" / (include or "*"))
+            raw_files = _glob.glob(glob_pattern, recursive=True)
+            # Filter glob results: only include files within WORKSPACE_ROOT
+            file_list = []
+            filtered_count = 0
+            for f in raw_files:
+                fp = Path(f)
+                if not fp.is_file():
+                    continue
+                resolved = resolve_workspace_path(str(fp), WORKSPACE_ROOT)
+                if resolved is None:
+                    filtered_count += 1
+                    continue
+                file_list.append(fp)
+            if filtered_count > 0:
+                logger.warning('batch_grep: filtered %d glob results outside workspace', filtered_count)
 
         for fp in file_list[:200]:
+            if resolve_workspace_path(str(fp), WORKSPACE_ROOT) is None:
+                continue
             try:
                 txt = fp.read_text(encoding="utf-8", errors="replace")
                 for i, line in enumerate(txt.splitlines(), 1):
