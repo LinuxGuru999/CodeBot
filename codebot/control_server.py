@@ -58,7 +58,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -93,14 +93,22 @@ RATE_LIMIT_COOLDOWN_SECONDS = _safe_int_env("RATE_LIMIT_COOLDOWN_SECONDS", 300, 
 
 
 class RateLimiter:
-    """Thread-safe rate limiter for authentication attempts."""
+    """Thread-safe rate limiter for authentication attempts.
 
-    def __init__(self):
+    Uses bounded OrderedDict to prevent memory exhaustion DoS via IP spoofing.
+    When max_tracked_ips is exceeded, oldest entries are evicted (LRU).
+    """
+
+    # Maximum number of IPs to track simultaneously (prevents memory exhaustion)
+    MAX_TRACKED_IPS = 10000
+
+    def __init__(self, max_tracked_ips: int | None = None):
         self._lock = threading.Lock()
-        # ip -> list of failure timestamps
-        self._failures: dict[str, list[float]] = defaultdict(list)
-        # ip -> cooldown until timestamp (blocked)
-        self._blocked_until: dict[str, float] = {}
+        self._max_tracked_ips = max_tracked_ips or self.MAX_TRACKED_IPS
+        # ip -> list of failure timestamps (bounded OrderedDict for LRU eviction)
+        self._failures: OrderedDict[str, list[float]] = OrderedDict()
+        # ip -> cooldown until timestamp (blocked) (bounded OrderedDict for LRU eviction)
+        self._blocked_until: OrderedDict[str, float] = OrderedDict()
 
     def is_allowed(self, client_ip: str) -> tuple[bool, str | None]:
         """Check if request from client_ip is allowed.
@@ -121,6 +129,7 @@ class RateLimiter:
 
             # Clean old failures outside the window
             cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+            self._failures.setdefault(client_ip, [])
             self._failures[client_ip] = [
                 ts for ts in self._failures[client_ip] if ts > cutoff
             ]
@@ -140,7 +149,7 @@ class RateLimiter:
         """Record a failed authentication attempt for client_ip."""
         now = time.time()
         with self._lock:
-            self._failures[client_ip].append(now)
+            self._failures.setdefault(client_ip, []).append(now)
 
 
 # Global rate limiter instance for authenticated endpoints
@@ -426,6 +435,37 @@ def _atomic_signal_pid(
         os.close(pidfd)
 
 
+def _wait_for_exit_and_cleanup(pid: int, name: str) -> None:
+    """Poll for process exit and clean up PID file only after confirmed exit.
+
+    After sending a signal via pidfd, poll /proc/{pid} existence with short
+    intervals (100ms) for up to 2 seconds. Only delete the PID file if the
+    process has actually exited or if ProcessLookupError is raised.
+    This prevents denial-of-service race conditions where an attacker could
+    create a fake PID file pointing to a legitimate process.
+    """
+    import time
+    pid_file = _resolve_control_state_dir() / f"{name}.pid"
+    for _ in range(20):  # 20 * 100ms = 2 seconds max
+        try:
+            # Check if /proc/{pid} exists
+            os.stat(f"/proc/{pid}")
+            time.sleep(0.1)
+        except FileNotFoundError:
+            # Process has exited, safe to clean up PID file
+            try:
+                if pid_file.exists():
+                    pid_file.unlink()
+            except OSError:
+                pass
+            return
+        except OSError:
+            # Other OS error, continue polling
+            time.sleep(0.1)
+    # Timeout reached - process may still be running, do NOT delete PID file
+    logger.warning("_wait_for_exit_and_cleanup: PID %d for bot '%s' still running after 2s - preserving PID file", pid, name)
+
+
 def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]]:
     """Safely kill bot process using PID file and verified signaling.
 
@@ -463,7 +503,7 @@ def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]
                 if signal_sent:
                     logger.info("_safe_kill_bot_process: sent SIGTERM to PID %d from PID file for bot '%s'", pid, name)
                     killed_pids.append(pid)
-                    # Poll for process exit before deleting PID file (Feedback #49)
+                    # Poll for process exit before deleting PID file (Feedback #45, #47, #49)
                     _wait_for_exit_and_cleanup(pid, name)
                 else:
                     # pidfd signaling unavailable - fail closed, do NOT clean up PID file
@@ -592,13 +632,8 @@ def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
                 if signal_sent:
                     logger.info("_safe_kill_orchestrator: sent SIGTERM to verified PID %d from PID file", pid)
                     killed_pids.append(pid)
-                    # Clean up PID file after successful signal
-                    try:
-                        pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
-                        if pid_file.exists():
-                            pid_file.unlink()
-                    except OSError:
-                        pass
+                    # Poll for process exit before deleting PID file (Feedback #49)
+                    _wait_for_exit_and_cleanup_orch(pid)
                 else:
                     # pidfd signaling unavailable - fail closed, do NOT clean up PID file
                     # The process may still be running; operator must investigate
@@ -627,6 +662,31 @@ def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
         logger.warning("_safe_kill_orchestrator: No PID file found for orchestrator. Skipping kill.")
 
     return True, killed_pids
+
+
+def _wait_for_exit_and_cleanup_orch(pid: int) -> None:
+    """Poll for orchestrator process exit and clean up PID file only after confirmed exit.
+
+    After sending a signal via pidfd, poll /proc/{pid} existence with short
+    intervals (100ms) for up to 2 seconds. Only delete the PID file if the
+    process has actually exited or if ProcessLookupError is raised.
+    """
+    import time
+    pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
+    for _ in range(20):  # 20 * 100ms = 2 seconds max
+        try:
+            os.stat(f"/proc/{pid}")
+            time.sleep(0.1)
+        except FileNotFoundError:
+            try:
+                if pid_file.exists():
+                    pid_file.unlink()
+            except OSError:
+                pass
+            return
+        except OSError:
+            time.sleep(0.1)
+    logger.warning("_wait_for_exit_and_cleanup_orch: PID %d still running after 2s - preserving PID file", pid)
 
 
 def heartbeat_age(name: str) -> float | None:
@@ -1813,8 +1873,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 logger.warning("Telemetry authentication failed for %s", client_ip)
                 self._json(401, {"error": "unauthorized", "hint": TELEMETRY_UNAUTHORIZED_HINT})
                 return
-        elif not CONTROL_TOKEN:
-            # If neither token is set, reject telemetry (safer default)
+        else:
+            # TELEMETRY_TOKEN not configured — reject telemetry (fail-closed, Constitution §2)
             self._json(401, {"error": "telemetry token not configured", "hint": TELEMETRY_NOT_CONFIGURED_HINT})
             return
 
