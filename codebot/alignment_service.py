@@ -24,62 +24,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
 
+from codebot.state_manager import get_paths
+
 logger = logging.getLogger(__name__)
-
-# Paths resolved relative to the package root
-_CODEBOT_PKG_DIR = Path(__file__).parent
-_project_root = _CODEBOT_PKG_DIR.parent
-STATE_DIR = _project_root / ".codebot" / "state"
-ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
-
-# T4.3 incremental adapter seam: when a ProjectAdapter is provided, its
-# state_dir overrides the static default above (mirrors findings_log.py /
-# rl_engine.py). Also honours CODEBOT_STATE_DIR / CODEBOT_PROJECT_ROOT
-# env vars so all agents resolve the same location without an adapter.
-_adapter_instance: Any | None = None
-
-
-def set_project_adapter(adapter: Any) -> None:
-    """Inject a ProjectAdapter; its state_dir becomes the alignment state location."""
-    global _adapter_instance, STATE_DIR, ALIGNMENT_EVENTS_DIR
-    _adapter_instance = adapter
-    try:
-        p = adapter.paths()  # type: ignore[union-attr]
-        STATE_DIR = p.state_dir
-        ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
-    except Exception:
-        pass
-
-
-def get_adapter() -> Any | None:
-    """Return the injected ProjectAdapter, if any."""
-    return _adapter_instance
-
-
-def _resolve_state_dir() -> Path:
-    """Resolve the project state dir: adapter > env > static default."""
-    if _adapter_instance is not None:
-        try:
-            return _adapter_instance.paths().state_dir  # type: ignore[union-attr]
-        except Exception:
-            pass
-    env_state = os.environ.get("CODEBOT_STATE_DIR")
-    if env_state:
-        return Path(env_state)
-    env_root = os.environ.get("CODEBOT_PROJECT_ROOT")
-    if env_root:
-        return Path(env_root) / ".codebot" / "state"
-    return STATE_DIR
-
-
-def _resolve_events_dir() -> Path:
-    """Resolve the alignment events dir based on current state dir."""
-    return _resolve_state_dir() / "alignment_events"
 
 
 def _collect_reviewer_feedback_for_trigger(bot_name: str) -> list[dict]:
@@ -90,7 +41,7 @@ def _collect_reviewer_feedback_for_trigger(bot_name: str) -> list[dict]:
     optimizer to address recurring issues.
     """
     feedback_items = []
-    state_dir = _resolve_state_dir()
+    state_dir = get_paths().state_dir
     review_files = [
         state_dir / "security_review.json",
         state_dir / "architecture_review.json",
@@ -152,7 +103,7 @@ def run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
             logger.warning("rl_engine not available, skipping alignment pipeline")
             return False
 
-    events_dir = _resolve_events_dir()
+    events_dir = get_paths().alignment_events_dir
     event_file = events_dir / f"{bot_name}.exit.json"
     if not event_file.exists():
         return False
@@ -176,16 +127,14 @@ def run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
     try:
         score_result = score_event(event)
         metrics_entry: dict = {}
+        _mc: Any = None
         try:
             from codebot import metrics_collector as _mc  # type: ignore
         except ImportError:
+            _mc = None  # type: ignore
+        if _mc is not None and getattr(_mc, "collect_all", None) is not None:
             try:
-                import metrics_collector as _mc  # type: ignore
-            except ImportError:
-                _mc = None  # type: ignore
-        if _mc is not None:
-            try:
-                _snap = _mc.collect_all()
+                _snap = _mc.collect_all()  # type: ignore[union-attr]
                 _bots = _snap.get("bots") or {}
                 if isinstance(_bots.get(bot_name), dict):
                     metrics_entry = _bots[bot_name]
@@ -279,19 +228,28 @@ def run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
 def run_alignment_pipeline_for_all() -> None:
     """Run alignment scoring for all pending events (called every 30 minutes)."""
     try:
-        from rl_engine import list_pending_events
-    except ImportError:
-        return
+        from codebot.rl_engine import list_pending_events
+    except ImportError:  # pragma: no cover - import fallback shim
+        try:
+            from rl_engine import list_pending_events  # type: ignore[no-redef]
+        except ImportError:
+            return
 
-    pending = list_pending_events()
+    pending = list_pending_events(get_paths().alignment_events_dir)
     if not pending:
         return
 
     logger.info(f"Alignment pipeline: processing {len(pending)} pending events")
-    for event_file in pending:
+    for item in pending:
         try:
-            event = json.loads(event_file.read_text())
+            # list_pending_events returns list[tuple[Path, dict]]; accept
+            # bare Paths as well for forward-compat with mocks.
+            if isinstance(item, (tuple, list)) and len(item) == 2:
+                event_file, _cached = item
+            else:
+                event_file = item  # type: ignore[assignment]
+            event = json.loads(event_file.read_text())  # type: ignore[union-attr]
             bot_name = event.get("bot", "unknown")
             run_alignment_pipeline(bot_name)
         except Exception as e:
-            logger.error(f"Error processing event {event_file}: {e}")
+            logger.error(f"Error processing event {item}: {e}")
