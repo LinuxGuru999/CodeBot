@@ -6,8 +6,7 @@ Path Configuration
 Paths (BOTS_DIR, STATE_DIR, etc.) are encapsulated in a ``PathConfig``
 dataclass provided by ``codebot.state_manager``.  Components access paths
 via ``get_paths()`` or the ``PathConfig`` object returned by
-``set_project_adapter()``.  The old pattern of mutating module-level
-globals with the ``global`` keyword has been removed.
+``set_project_adapter()``.
 
 Backward Compatibility
 ----------------------
@@ -53,16 +52,6 @@ from codebot.process_manager import (
 )
 
 # ---------------------------------------------------------------------------
-# Patchable wrappers — tests patch these at the orchestrator module level.
-# Each wrapper resolves STATE_DIR / DRAIN_FILE dynamically so that
-# ``patch.object(orch, "STATE_DIR", tmp)`` works correctly.
-# ---------------------------------------------------------------------------
-
-# heartbeat_path: thin alias, not patched directly by tests
-heartbeat_path = _pm_heartbeat_path
-
-
-# ---------------------------------------------------------------------------
 # Patchable wrappers — delegates to orchestrator_compat module
 # ---------------------------------------------------------------------------
 from codebot.orchestrator_compat import (
@@ -74,49 +63,40 @@ from codebot.orchestrator_compat import (
     is_draining as _compat_is_draining,
 )
 
-
-def read_heartbeat(bot_name: str) -> float:
-    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-    return _compat_read_heartbeat(bot_name, state_dir_override=sd)
-
-
-def checkpoint_path(bot_name: str):
-    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-    return _compat_checkpoint_path(bot_name, state_dir_override=sd)
-
-
-def read_checkpoint(bot_name: str):
-    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-    return _compat_read_checkpoint(bot_name, state_dir_override=sd)
-
-
-# Thin alias — not patched by tests directly
+heartbeat_path = _pm_heartbeat_path
 is_stuck = _pm_is_stuck
-
-
-# Thin aliases for internal use and __all__ backward compatibility.
-# is_log_stalled kept as function because tests patch it via patch.object
-def is_log_stalled(bot=None, model: str = ""):
-    """Patchable wrapper for log stall detection."""
-    return _pm_is_log_stalled(bot, model)
-
 effective_heartbeat_timeout = _pm_effective_heartbeat_timeout
 model_profile = _pm_model_profile
 update_bot_state = _pm_update_bot_state
 log_mtime = _pm_log_mtime
 _write_json_atomic = _pm_write_json_atomic
-
-
 _get_code_mtimes = _pm_get_code_mtimes
 
 
+def _get_sd():
+    """Get STATE_DIR override for test patching."""
+    return getattr(sys.modules[__name__], 'STATE_DIR', None)
+
+
+def read_heartbeat(bot_name: str) -> float:
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    return _compat_read_heartbeat(bot_name, state_dir_override=_get_sd())
+
+def checkpoint_path(bot_name: str):
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    return _compat_checkpoint_path(bot_name, state_dir_override=_get_sd())
+
+def read_checkpoint(bot_name: str):
+    """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
+    return _compat_read_checkpoint(bot_name, state_dir_override=_get_sd())
+
 def batch_read_heartbeats(bot_names: list):
     """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-    return _compat_batch_read_heartbeats(bot_names, state_dir_override=sd)
+    return _compat_batch_read_heartbeats(bot_names, state_dir_override=_get_sd())
+
+def is_log_stalled(bot=None, model: str = ""):
+    """Patchable wrapper for log stall detection."""
+    return _pm_is_log_stalled(bot, model)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +108,7 @@ from codebot.orchestrator_services import _read_state_file as _svc_read_state_fi
 
 def worker_reserved_slots(max_concurrent=26):
     """Return number of slots reserved for workers (len of WORKER_POOL)."""
-    return len(WORKER_POOL)
+    return len(_get_default_controller().worker_pool)
 
 
 def rotating_slots(max_concurrent=26):
@@ -138,49 +118,9 @@ def rotating_slots(max_concurrent=26):
 
 def _read_state_file(bot_name):
     """Patchable wrapper honoring orchestrator-level STATE_DIR patches."""
-    sd = getattr(sys.modules[__name__], 'STATE_DIR', None)
-    return _compat_read_state_file(bot_name, state_dir_override=sd)
+    return _compat_read_state_file(bot_name, state_dir_override=_get_sd())
 
 
-def is_manifest_restart_budget_exceeded(manifest, now=None):
-    """Test-compatible wrapper: accepts (manifest_dict, timestamp) or (bot_name_str)."""
-    if now is None:
-        now = time.time()
-    if isinstance(manifest, str):
-        return _svc_manifest_restart_budget_exceeded(manifest)
-    max_restarts = manifest.get("max_restarts", 5) if isinstance(manifest, dict) else 5
-    if max_restarts == 0:
-        return False
-    name = manifest.get("name", "") if isinstance(manifest, dict) else ""
-    state = _read_state_file(name) if name else {}
-    if "_state_error" in state:
-        return True
-    timestamps = state.get("restart_timestamps", [])
-    if not isinstance(timestamps, list):
-        return True
-    recent = [t for t in timestamps if isinstance(t, (int, float)) and (now - t) < 3600]
-    return len(recent) >= max_restarts
-
-
-def is_manifest_error_disabled(manifest, max_consecutive=3):
-    """Test-compatible wrapper: accepts (manifest_dict, max_consecutive=N) or (bot_name_str)."""
-    if isinstance(manifest, str):
-        return _svc_manifest_error_disabled(manifest)
-    if not isinstance(manifest, dict) or not manifest:
-        return False
-    name = manifest.get("name", "")
-    state = _read_state_file(name) if name else {}
-    if "_state_error" in state:
-        return True
-    errors = state.get("consecutive_errors", 0)
-    try:
-        errors = int(errors)
-    except (TypeError, ValueError):
-        return True
-    return errors >= max_consecutive
-
-
-# Re-export is_draining with patchable DRAIN_FILE support
 def is_draining():
     """Patchable wrapper: honors orch.DRAIN_FILE patches from tests."""
     df = getattr(sys.modules[__name__], 'DRAIN_FILE', None)
@@ -188,20 +128,42 @@ def is_draining():
 
 
 from codebot.alignment_coordinator import write_alignment_event
-from codebot.alignment_service import (
-    run_alignment_pipeline, run_alignment_pipeline_for_all,
-)
 try:
-    from codebot.alignment_service import set_project_adapter as _align_set_project_adapter
-except ImportError:
-    _align_set_project_adapter = None  # type: ignore[assignment]
-from codebot.rl_engine import set_project_adapter as _rl_set_project_adapter
+    from codebot.alignment_service import (
+        run_alignment_pipeline, run_alignment_pipeline_for_all,
+    )
+except ModuleNotFoundError:
+    def run_alignment_pipeline(*a: Any, **kw: Any) -> bool:  # type: ignore[misc]
+        return False
+    def run_alignment_pipeline_for_all() -> None:  # type: ignore[misc]
+        pass
+
+
+def _periodic_rl_pipeline_tick() -> None:
+    """Combined periodic task: legacy alignment sweep + new RL pipeline processing."""
+    try:
+        run_alignment_pipeline_for_all()
+    except Exception:
+        pass
+    try:
+        from codebot.rl_diagnostics import run_pipeline_tick
+        run_pipeline_tick()
+    except Exception:
+        pass
+
+
 from codebot.ticket_dispatcher import (
-    clear_ticket_store_cache, get_ticket_store,
+    clear_ticket_store_cache as _clear_ticket_store_cache,
+    get_ticket_store as _get_ticket_store,
     _sweep_orphan_claims, advance_reviewed_tickets, process_deferred_gates,
-    process_rework_tickets,
+    process_rework_tickets, process_deferred_tickets,
     TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER,
 )
+
+# Explicit re-exports for backward compatibility and test visibility
+get_ticket_store = _get_ticket_store
+clear_ticket_store_cache = _clear_ticket_store_cache
+from codebot.role_registry import RoleCategory, roles_by_category
 from codebot.dispatch_service import (
     get_pipeline_state, is_needed_bot, apply_agent_availability,
     rotate_model_on_error, transition_ticket_on_success,
@@ -209,7 +171,6 @@ from codebot.dispatch_service import (
     record_workforce_completion,
     retry_disabled_bot, retry_stuck_starting, log_bot_statuses,
     dispatch_ready_tickets,
-    IMPLEMENTER_ROLE_NAMES, REVIEWER_ROLE_NAMES,
     batch_read_bot_statuses,
 )
 from codebot.scratchpad import load_scratchpad, save_scratchpad
@@ -219,6 +180,7 @@ from codebot.state_manager import (
     safe_stop_all, set_project_adapter as _sm_set_project_adapter,
     get_adapter_instance,
 )
+from codebot.process_supervisor import ProcessSupervisor
 from codebot.worker_scaler import (
     load_bot_registry, build_bots,
     _get_available_memory_mb,
@@ -230,6 +192,12 @@ from codebot.orchestrator_services import (
     is_restart_budget_exceeded as _svc_is_restart_budget_exceeded,
     is_error_disabled as _svc_is_error_disabled,
 )
+from codebot.checkpoint_manager import (
+    is_manifest_restart_budget_exceeded as _cm_is_manifest_restart_budget_exceeded,
+    is_manifest_error_disabled as _cm_is_manifest_error_disabled,
+)
+from codebot.config_reloader import check_prompt_changes
+from codebot.orchestrator_controller import OrchestratorController, ModelRouter
 # Paths are resolved dynamically via get_paths() or __getattr__.
 # No module-level _paths cache; state_manager.get_paths() is the single source.
 
@@ -250,6 +218,13 @@ def __getattr__(name: str) -> Any:
             "RESTART_FILE": p.restart_file,
         }
         return mapping[name]
+    # Delegate WORKER_POOL and BOT_REGISTRY to singleton controller
+    if name == "WORKER_POOL":
+        return _get_default_controller().worker_pool
+    if name == "BOT_REGISTRY":
+        return _get_default_controller().registry
+    if name == "_adapter":
+        return _get_default_controller().adapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -259,26 +234,25 @@ _manifest_error_disabled = _svc_manifest_error_disabled
 is_restart_budget_exceeded = _svc_is_restart_budget_exceeded
 is_error_disabled = _svc_is_error_disabled
 
-# Build WORKER_POOL from bot registry for backward compatibility
-def _build_worker_pool() -> frozenset:
-    """Build worker pool from current bot registry."""
-    try:
-        registry = load_bot_registry()
-        impl_names = IMPLEMENTER_ROLE_NAMES
-        return frozenset(
-            c.name for c in registry
-            if c.name in impl_names or any(c.name.startswith(f"{r}-") for r in impl_names)
-        )
-    except Exception:
-        return frozenset({"worker-1", "worker-2"})
+# Public API aliases (dict-based manifest) from checkpoint_manager for test compatibility
+is_manifest_restart_budget_exceeded = _cm_is_manifest_restart_budget_exceeded
+is_manifest_error_disabled = _cm_is_manifest_error_disabled
 
-WORKER_POOL = _build_worker_pool()
+# Singleton controller for backward-compatible attribute access.
+# Tests and external code accessing orch.WORKER_POOL or orch.BOT_REGISTRY
+# will be served via __getattr__ delegation to this controller.
+class _ControllerHolder:
+    """Mutable holder to avoid 'global' keyword in lazy initialization."""
+    instance: OrchestratorController | None = None
 
-# Adapter instance for queue depth and ticket class queries.
-# The adapter is registered via state_manager.set_adapter_instance() during
-# bootstrap and queried via get_adapter_instance() at tick boundaries.
-# The module-level _adapter variable is kept for backward-compatible test patches.
-_adapter: Any = None
+_holder = _ControllerHolder()
+
+
+def _get_default_controller() -> OrchestratorController:
+    """Lazily instantiate the singleton controller for backward compat."""
+    if _holder.instance is None:
+        _holder.instance = OrchestratorController()
+    return _holder.instance
 
 
 __all__ = [
@@ -299,17 +273,8 @@ __all__ = [
 
 
 def set_project_adapter(adapter: Any) -> PathConfig:
-    """Delegate to state_manager.set_project_adapter; no module-level mutation.
-    Also injects the adapter into alignment_service and rl_engine to ensure consistent path resolution."""
+    """Delegate to state_manager.set_project_adapter; no module-level mutation."""
     config = _sm_set_project_adapter(adapter)
-    try:
-        _align_set_project_adapter(adapter)
-    except Exception as e:
-        logger.warning("Failed to set project adapter for alignment_service: %s", e)
-    try:
-        _rl_set_project_adapter(adapter)
-    except Exception as e:
-        logger.warning("Failed to set project adapter for rl_engine: %s", e)
     return config
 
 
@@ -400,6 +365,7 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
 
     _hcl_init_tick()
     from codebot.health_check_loop import current_tick_store, flush_tick_store
+    from codebot.state_manager import get_adapter_instance
     tick_store = current_tick_store()
     now = time.time()
 
@@ -409,6 +375,17 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     running_names = [n for n, b in bots.items()
                      if b.process is not None and b.process.poll() is None]
     status_cache = batch_read_bot_statuses(running_names) if running_names else {}
+
+    # Check for prompt changes using injected adapter
+    try:
+        adapter = get_adapter_instance()
+        check_prompt_changes(bots, BOTS_DIR, stop_bot, adapter=adapter)
+    except Exception:
+        # Fallback to legacy behavior if adapter retrieval fails
+        try:
+            check_prompt_changes(bots, BOTS_DIR, stop_bot)
+        except Exception:
+            logger.debug("check_prompt_changes failed", exc_info=True)
 
     _hcl_retry_disabled_and_stuck(bots, heartbeat_cache)
     error_recovered_tids = _hcl_handle_exited_bots(bots, now, start_bot, stop_bot, tick_store)
@@ -433,6 +410,12 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
             logger.info("process_rework_tickets cleaned %d stale claims", rework_cleaned)
     except Exception as e:
         logger.debug("process_rework_tickets failed: %s", e)
+    try:
+        undeferred = process_deferred_tickets(store=tick_store)
+        if undeferred:
+            logger.info("process_deferred_tickets undeferred %d tickets", undeferred)
+    except Exception as e:
+        logger.debug("process_deferred_tickets failed: %s", e)
     _hcl_start_eligible_bots(bots, now, start_bot, store=tick_store)
     flush_tick_store(tick_store)
 
@@ -463,43 +446,28 @@ def _handle_cli_commands(args: Any, bots: dict[str, BotState]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler V2 — unconditional dispatch
+# Scheduler V2 — delegates to orchestrator_scheduler module
 # ---------------------------------------------------------------------------
-_v2_scheduler: Any = None
+from codebot.orchestrator_scheduler import (
+    get_scheduler as _sched_get_scheduler,
+    count_active as _sched_count_active,
+    check_all_bots_with_scheduler as _sched_check_all_bots,
+)
 
 
 def _v2_get_scheduler(state_dir: Path | None = None) -> Any | None:
-    global _v2_scheduler
-    if _v2_scheduler is not None:
-        return _v2_scheduler
-    from codebot.scheduler_v2.dispatcher import Scheduler as V2Scheduler
-    try:
-        from codebot.ticket_dispatcher import WORKER_MODEL_CYCLE
-        model_pool = list(dict.fromkeys(WORKER_MODEL_CYCLE))
-    except ImportError:
-        model_pool = ["qwen-3.5-plus"]
-
-    _v2_scheduler = V2Scheduler(
-        max_slots=GATEWAY_MAX_CONCURRENT,
-        state_dir=state_dir or get_paths().state_dir,
-        model_pool=model_pool,
-        stagger_seconds=1.0,
-    )
-    return _v2_scheduler
+    """Backward-compatible wrapper for V2 scheduler access."""
+    return _sched_get_scheduler(state_dir)
 
 
 def _v2_count_active() -> int:
-    if _v2_scheduler is not None:
-        try:
-            return _v2_scheduler.gate.count_active()
-        except Exception:
-            pass
-    return 0
+    """Backward-compatible wrapper for active task count."""
+    return _sched_count_active()
 
 
 def _v2_check_all_bots(bots: dict[str, BotState]) -> None:
-    _v2_get_scheduler()
-    check_all_bots(bots)
+    """Backward-compatible wrapper ensuring scheduler is initialized."""
+    _sched_check_all_bots(bots, check_all_bots)
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +484,8 @@ def main() -> None:
     """Entry point: parse args, build bot state, run or dispatch."""
     args = _parse_args()
     adapter = _rt_bootstrap_adapter(logger, get_paths)
-    registry = load_bot_registry(adapter)
+    controller = OrchestratorController(adapter=adapter)
+    registry = controller.registry
     bots = build_bots(registry)
 
     if _handle_cli_commands(args, bots):
@@ -533,7 +502,7 @@ def main() -> None:
         bots, args.check_interval,
         check_all_bots_fn=_v2_check_all_bots,
         stop_bot_fn=stop_bot,
-        run_alignment_pipeline_for_all_fn=run_alignment_pipeline_for_all,
+        run_alignment_pipeline_for_all_fn=_periodic_rl_pipeline_tick,
     )
 
 

@@ -89,54 +89,67 @@ class ComponentDef:
 class ProjectAdapter(ABC):
     @abstractmethod
     def project_name(self) -> str:
+        """Return the canonical name of the project."""
         ...
 
     @abstractmethod
     def paths(self) -> ProjectPaths:
+        """Return standard project paths (root, state, logs, docs, etc.)."""
         ...
 
     @abstractmethod
     def test_config(self) -> ProjectTestConfig:
+        """Return testing framework, commands, and tooling configuration."""
         ...
 
     @abstractmethod
     def dependency_policy(self) -> DependencyPolicy:
+        """Return dependency management policy and allowed third-party libraries."""
         ...
 
     @abstractmethod
     def autonomy_config(self) -> AutonomyConfig:
+        """Return autonomy level and approval requirements for autonomous actions."""
         ...
 
     @abstractmethod
     def components(self) -> list[ComponentDef]:
+        """Return list of project components with their metadata."""
         ...
 
     @abstractmethod
     def bot_registry(self) -> list[dict[str, Any]]:
+        """Return registry of available bots and their configurations."""
         ...
 
     @abstractmethod
     def model_profiles(self) -> dict[str, dict[str, Any]]:
+        """Return model profiles mapping model names to their configurations."""
         ...
 
     @abstractmethod
     def tier_priority(self) -> dict[str, int]:
+        """Return mapping of ticket tiers to priority levels."""
         ...
 
     @abstractmethod
     def prompt_directory(self) -> Path:
+        """Return the directory containing prompt templates."""
         ...
 
     @abstractmethod
     def api_runner_command(self, bot_name: str, prompt_file: str) -> list[str]:
+        """Return the command list to execute a bot with a given prompt file."""
         ...
 
     @abstractmethod
     def is_protected_path(self, path: str) -> bool:
+        """Return True if the path is protected and should not be modified by bots."""
         ...
 
     @abstractmethod
     def validate_project(self) -> list[str]:
+        """Validate project structure and configuration; return list of errors (empty if valid)."""
         ...
 
     @abstractmethod
