@@ -21,6 +21,14 @@ Invariants
 - Effective timeout comes from manifest heartbeat_timeout; batch_ctx
   heartbeat_max_gap_s is a test override only, never production precedence.
 - _parse_queue_complexity logic adapted from orchestrator queue parser.
+
+Platform Compatibility
+----------------------
+- Uses only stdlib imports (time, pathlib, typing); no fcntl/msvcrt.
+- Imports successfully on Windows without ImportError (no Unix-only deps).
+- File operations use pathlib.Path methods with OSError fallbacks.
+- No advisory file locking required; pure functions with injected inputs.
+- For future locking needs, see codebot/locks.py for cross-platform pattern.
 """
 
 import time

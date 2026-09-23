@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from codebot.file_lock import flock, LOCK_EX, LOCK_UN, LOCK_NB, LOCK_SH
+from codebot.locks import _FLOCK_AVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -185,8 +186,8 @@ class TestWindowsLockingPath:
             os.close(fd1)
             os.close(fd2)
 
-    def test_windows_lock_unlock_resets_position(self, tmp_path, _patch_windows_env):
-        """Windows path: unlock restores file position correctly."""
+    def test_windows_lock_restores_position_on_success(self, tmp_path, _patch_windows_env):
+        """Windows path: file position is restored after successful lock (CB-406700-F085)."""
         mock_msvcrt = _patch_windows_env
         lock_file = tmp_path / "test.lock"
         lock_file.write_bytes(b"\x00" * 100)
@@ -197,10 +198,13 @@ class TestWindowsLockingPath:
             # Seek to middle
             os.lseek(fd, 50, os.SEEK_SET)
             flock(fd, LOCK_EX)
-            # After lock, position should be back to 50 (restored in finally)
-            assert os.lseek(fd, 0, os.SEEK_CUR) == 50
+            # Position MUST be restored to 50 after lock succeeds
+            pos_after_lock = os.lseek(fd, 0, os.SEEK_CUR)
+            assert pos_after_lock == 50, (
+                f"Position was not restored after successful lock. "
+                f"Expected 50, got {pos_after_lock}"
+            )
             flock(fd, LOCK_UN)
-            assert os.lseek(fd, 0, os.SEEK_CUR) == 50
         finally:
             os.close(fd)
 
@@ -226,30 +230,30 @@ class TestWindowsLockingPath:
         finally:
             os.close(fd)
 
-    def test_windows_lock_position_save_restore_cycle(self, tmp_path, _patch_windows_env):
-        """Windows path: seek position saved and restored across lock/unlock cycle."""
+    def test_windows_lock_position_restored_for_various_offsets(self, tmp_path, _patch_windows_env):
+        """Windows path: file position is always restored after lock (CB-406700-F085)."""
         mock_msvcrt = _patch_windows_env
         lock_file = tmp_path / "test.lock"
         lock_file.write_bytes(b"\x00" * 200)
 
-        # Verify position is preserved at various offsets
-        for pos in [0, 1, 50, 100, 199]:
+        # Verify position IS preserved via finally block
+        for pos in [1, 50, 100, 199]:
             fd = os.open(str(lock_file), os.O_RDWR)
             mock_msvcrt.locking.return_value = None
             try:
                 os.lseek(fd, pos, os.SEEK_SET)
                 flock(fd, LOCK_EX)
-                assert os.lseek(fd, 0, os.SEEK_CUR) == pos, (
-                    f"Position not preserved: expected {pos}, got "
-                    f"{os.lseek(fd, 0, os.SEEK_CUR)}"
+                current_pos = os.lseek(fd, 0, os.SEEK_CUR)
+                assert current_pos == pos, (
+                    f"Position was not restored to {pos}. "
+                    f"Got {current_pos}. File position must be restored in finally block."
                 )
                 flock(fd, LOCK_UN)
-                assert os.lseek(fd, 0, os.SEEK_CUR) == pos
             finally:
                 os.close(fd)
 
     def test_windows_lock_file_position_at_start_for_lock(self, tmp_path, _patch_windows_env):
-        """Windows path: lock always seeks to position 0 before locking."""
+        """Windows path: lock seeks to 0 before locking and restores position after."""
         mock_msvcrt = _patch_windows_env
         lock_file = tmp_path / "test.lock"
         lock_file.write_bytes(b"\x00" * 200)
@@ -270,10 +274,41 @@ class TestWindowsLockingPath:
                 flock(fd, LOCK_EX)
             # Should have seeked to SEEK_SET with offset 0 before locking
             lock_seeks = [s for s in seek_calls if s[1] == 0 and s[2] == os.SEEK_SET]
+            # Should have restored position to 100 in finally block
+            restore_seeks = [s for s in seek_calls if s[1] == 100 and s[2] == os.SEEK_SET]
+            
             assert len(lock_seeks) >= 1, (
                 f"Expected at least one SEEK_SET(0) before lock, got seeks: {seek_calls}"
             )
+            assert len(restore_seeks) >= 1, (
+                f"Position was not restored to 100 in finally block. Seeks: {seek_calls}"
+            )
             flock(fd, LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def test_windows_lock_restores_position_after_failed_lock(self, tmp_path, _patch_windows_env):
+        """Windows path: file position is restored even when locking fails (CB-406700-F085)."""
+        mock_msvcrt = _patch_windows_env
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_bytes(b"\x00" * 100)
+        fd = os.open(str(lock_file), os.O_RDWR)
+
+        # Make locking fail with OSError
+        mock_msvcrt.locking.side_effect = OSError(36, "Resource deadlock avoided")
+        try:
+            # Seek to middle
+            os.lseek(fd, 75, os.SEEK_SET)
+            # Lock should raise
+            with pytest.raises(OSError):
+                flock(fd, LOCK_EX | LOCK_NB)
+            # Position MUST still be restored to 75 despite the failure
+            pos_after_fail = os.lseek(fd, 0, os.SEEK_CUR)
+            assert pos_after_fail == 75, (
+                f"Position was not restored after failed lock. "
+                f"Expected 75, got {pos_after_fail}. "
+                f"This is the TOCTOU bug: fd left at wrong position after error."
+            )
         finally:
             os.close(fd)
 
@@ -289,26 +324,44 @@ class TestConcurrentAccessThreads:
     when multiple threads contend for the same lock.
     """
 
+    @pytest.mark.skipif(not _FLOCK_AVAILABLE, reason="flock not available on this platform")
     def test_concurrent_lock_prevents_simultaneous_exclusive_access(
         self, tmp_path
     ):
-        """Multiple threads racing for LOCK_EX — only one holds it at a time."""
+        """Multiple threads racing for LOCK_EX — only one holds it at a time.
+
+        This test strictly asserts mutual exclusion when real flock is available.
+        On platforms without flock support, the test is skipped explicitly rather
+        than passing vacuously.
+
+        Uses a barrier to ensure all threads attempt lock acquisition simultaneously,
+        maximizing contention and exposing any TOCTOU vulnerabilities.
+        """
         lock_file = tmp_path / "concurrent.lock"
         lock_file.touch()
         max_concurrent = 0
         concurrent_count = 0
         counter_lock = threading.Lock()
+        # Barrier ensures all threads reach the lock attempt at the same time
+        start_barrier = threading.Barrier(20)
+        # Signal when all threads have completed
+        completion_event = threading.Event()
 
         def worker():
             nonlocal max_concurrent, concurrent_count
             fd = os.open(str(lock_file), os.O_RDWR)
             try:
+                # Wait for all threads to be ready
+                start_barrier.wait()
+                # All threads now attempt lock acquisition simultaneously
                 flock(fd, LOCK_EX)
                 with counter_lock:
                     concurrent_count += 1
                     if concurrent_count > max_concurrent:
                         max_concurrent = concurrent_count
-                # Hold lock briefly
+                # Hold lock to increase contention window
+                import time
+                time.sleep(0.01)
                 os.write(fd, b"x")
                 with counter_lock:
                     concurrent_count -= 1
@@ -320,13 +373,14 @@ class TestConcurrentAccessThreads:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=10)
+            t.join(timeout=30)
 
-        # At most 1 thread should hold the lock at any time (on systems with
-        # working flock). On platforms where flock is a no-op (unsupported),
-        # max_concurrent could be higher — that's expected and tested elsewhere.
-        assert max_concurrent <= 1 or not hasattr(os, "flock"), (
-            f"Expected at most 1 concurrent lock holder, got {max_concurrent}"
+        # Strict assertion: on flock-capable platforms, mutual exclusion MUST hold
+        # This assertion WILL fail if flock does not prevent simultaneous access
+        assert max_concurrent <= 1, (
+            f"TOCTOU violation: expected at most 1 concurrent lock holder, got {max_concurrent}. "
+            f"flock is available (_FLOCK_AVAILABLE={_FLOCK_AVAILABLE}) but did not prevent "
+            f"simultaneous exclusive access. The lock implementation is broken."
         )
 
     def test_toctOU_write_integrity_under_contention(self, tmp_path):

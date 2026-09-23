@@ -26,8 +26,12 @@ Load tests the HTTP endpoints of `control_server.py` (GET /health, /bots, /sched
 
 **Ephemeral localhost (default, safe for CI):**
 ```bash
-CONTROL_ALLOW_UNAUTHENTICATED=1 python3 tests/load_tests/control_server_load.py --ephemeral-only --concurrency 10 --requests 100
+python3 tests/load_tests/control_server_load.py --ephemeral-only --concurrency 10 --requests 100
 ```
+
+> Note (CB-B4086): the legacy `CONTROL_ALLOW_UNAUTHENTICATED=1` prefix is
+> removed — the harness boots with a throwaway `CONTROL_TOKEN` and matching
+> `Authorization` header automatically.
 
 **Remote target (requires explicit confirmation):**
 ```bash
@@ -129,12 +133,12 @@ The harness defaults to ephemeral localhost servers to prevent accidental DoS.
 
 ### Quick smoke test (ephemeral)
 ```bash
-CONTROL_ALLOW_UNAUTHENTICATED=1 python3 tests/load_tests/control_server_load.py --ephemeral-only --concurrency 2 --requests 10
+python3 tests/load_tests/control_server_load.py --ephemeral-only --concurrency 2 --requests 10
 ```
 
 ### Moderate load test
 ```bash
-CONTROL_ALLOW_UNAUTHENTICATED=1 python3 tests/load_tests/control_server_load.py --ephemeral-only --concurrency 20 --requests 200 --json
+python3 tests/load_tests/control_server_load.py --ephemeral-only --concurrency 20 --requests 200 --json
 ```
 
 ### API runner concurrency test

@@ -18,18 +18,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import codebot.botop as _codebot_botop
+import sys as _sys
+_sys.modules["botop"] = _codebot_botop
 
-# Import internals from botop
-sys.path.insert(0, str(Path(__file__).parent.parent / "codebot"))
-from botop import (
+# Import internals via canonical path so patch("codebot.botop.*") hits the same objects
+from codebot.botop import (
     _parse_checkpoint_text,
     _collect_agents,
     _collect_ticket_throughput,
     _implementation_claims,
     cmd_status,
     cmd_health,
+    _collect_orchestrator_info,
     _find_state_dir,
     _find_logs_dir,
+    _tasklog_tail_line_count,
+    _TASKLOG_TAIL_BYTES,
 )
 
 
@@ -76,6 +81,17 @@ def test_parse_checkpoint_nested_json():
     assert result is not None
     assert result["outer"]["inner"]["deep"] == "value"
     assert result["list"] == [1, 2, 3]
+
+
+def test_collect_orchestrator_info_reads_hidden_pid_file(tmp_path):
+    state_dir = tmp_path / ".codebot" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / ".orchestrator.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    info = _collect_orchestrator_info(tmp_path)
+
+    assert info["pid"] == os.getpid()
+    assert info["alive"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -459,3 +475,54 @@ def test_drain_status_clear_readable_without_color(tmp_path, capsys):
                         # Verify [OK] marker appears in output
                         assert '[OK]' in captured.out, f"Expected '[OK]' marker in output: {captured.out}"
                         assert 'clear' in captured.out, f"Expected 'clear' in output: {captured.out}"
+
+
+# ---------------------------------------------------------------------------
+# _tasklog_tail_line_count tests
+# ---------------------------------------------------------------------------
+
+class TestTasklogTailLineCount:
+    """Direct unit tests for _tasklog_tail_line_count covering all branches."""
+
+    def test_tail_line_count_large_file(self, tmp_path):
+        """Large file where offset > 0 and data.count(b'\\n') runs on tail window."""
+        tasklog = tmp_path / "agent.tasklog"
+        # Create a file larger than _TASKLOG_TAIL_BYTES (65536)
+        # Write 128KB of data with known newline count in the tail
+        line = b"x" * 63 + b"\n"  # 64 bytes per line
+        num_lines_total = 3000  # ~192KB total
+        num_lines_in_tail = 1000  # last 64KB should contain ~1000 lines
+        
+        with open(tasklog, "wb") as f:
+            for _ in range(num_lines_total):
+                f.write(line)
+        
+        count = _tasklog_tail_line_count(tasklog)
+        assert count is not None
+        # The tail window is 65536 bytes. Each line is 64 bytes.
+        # 65536 / 64 = 1024 lines approximately in the tail window
+        assert count == 1024, f"Expected 1024 newlines in tail, got {count}"
+
+    def test_tail_line_count_small_file(self, tmp_path):
+        """Small file where offset = 0 and full file is read."""
+        tasklog = tmp_path / "agent.tasklog"
+        content = b"line1\nline2\nline3\n"
+        tasklog.write_bytes(content)
+        
+        count = _tasklog_tail_line_count(tasklog)
+        assert count == 3, f"Expected 3 newlines, got {count}"
+
+    def test_tail_line_count_empty_file(self, tmp_path):
+        """Zero-byte file returns 0."""
+        tasklog = tmp_path / "agent.tasklog"
+        tasklog.write_bytes(b"")
+        
+        count = _tasklog_tail_line_count(tasklog)
+        assert count == 0, f"Expected 0 newlines for empty file, got {count}"
+
+    def test_tail_line_count_missing_file(self, tmp_path):
+        """Non-existent file triggers except clause, returns None."""
+        nonexistent = tmp_path / "nonexistent_dir" / "tasklog.txt"
+        
+        count = _tasklog_tail_line_count(nonexistent)
+        assert count is None, f"Expected None for missing file, got {count}"

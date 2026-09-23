@@ -44,6 +44,80 @@ CodeBot operates as a standalone entity. It reads a project's `.codebot/project.
                     └───────────────────┘
 ```
 
+## Role Management API
+
+CodeBot uses a role-based abstraction instead of hardcoded bot names. Roles define *what* an agent does, while model profiles define *how smart* it is, and tool policies define *what it can touch*.
+
+### Role Categories
+
+There are 31 predefined roles across 5 categories:
+
+| Category | Count | Purpose | Example Roles |
+|----------|-------|---------|---------------|
+| **Discovery** | 9 | Scan codebase for issues, vulnerabilities, debt | `bug_hunter`, `security_auditor`, `architecture_auditor` |
+| **Planning** | 2 | Decompose tickets, generate implementation plans | `feature_decomposer`, `implementation_planner` |
+| **Implementation** | 6 | Execute changes, write code, fix bugs | `general_implementer`, `backend_implementer`, `test_implementer` |
+| **Review** | 8 | Verify correctness, security, architecture | `correctness_reviewer`, `security_reviewer`, `architecture_reviewer` |
+| **Control** | 6 | Orchestrate workflow, manage state | `ticket_triager`, `dependency_planner`, `completion_commit` |
+
+### Data Structures
+
+-   **`AgentRole`**: Immutable definition containing name, category, description, required model profile, tool policy, incentive, and adversarial mappings.
+-   **`ModelProfile`**: Specifies capability requirements (reasoning level, coding skill, context size, cost class, latency, security review flag).
+-   **`ToolPolicy`**: Fail-closed allowlist defining permitted tools (`read`, `write`, `bash`, etc.), permitted commands (`git`, `pytest`, etc.), filesystem scope, network access, git write access, and max file size.
+
+### Interaction with API Runner
+
+The `api_runner.py` executes the agent loop constrained by the assigned role's `ToolPolicy`:
+
+1.  **Role Assignment**: The Orchestrator/Scheduler assigns a role to a ticket based on ticket class and current queue pressure.
+2.  **Prompt Assembly**: `role_prompt.py` loads the role-specific template and injects project context.
+3.  **Tool Enforcement**: `api_tools.py` validates every tool call against the role's `ToolPolicy`. Calls outside the allowlist are rejected before execution.
+4.  **Iteration Limit**: Each run is capped at 50 tool-call iterations to prevent runaway loops.
+5.  **Claim Protocol**: The agent claims the ticket (`state/claims/{id}.{agent}.json`) before working and releases it upon completion or failure.
+
+### Role Management Data Flow
+
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant S as Scheduler
+    participant R as Role Registry
+    participant AR as API Runner
+    participant T as Tool Policy
+    participant L as LLM Provider
+
+    O->>S: Request worker for READY ticket
+    S->>R: Query available roles & model profiles
+    R-->>S: Return matched Role (e.g., backend_implementer)
+    S->>O: Assign Role + Model to Ticket
+    O->>AR: Spawn api_runner with Role config
+    
+    Note over AR: Load Role Template & Tool Policy
+    
+    loop Agent Loop (max 50 iterations)
+        AR->>L: POST Prompt + Context
+        L-->>AR: Response (Text or Tool Calls)
+        
+        alt Tool Call Detected
+            AR->>T: Validate Tool vs ToolPolicy
+            T-->>AR: Allow/Deny
+            
+            alt Allowed
+                AR->>AR: Execute Tool (read/write/bash/etc.)
+                AR->>L: Submit Tool Result
+            else Denied
+                AR->>L: Submit Error: "Tool not allowed"
+            end
+        else Text Response
+            AR->>AR: Check Completion Criteria
+        end
+    end
+    
+    AR->>O: Report Exit State (COMPLETE/REWORK/ERROR)
+    O->>O: Transition Ticket State
+```
+
 ## Core Modules
 
 | Module | Lines | Purpose |

@@ -285,21 +285,32 @@ class TestGenerateFeedbackHint:
     def test_empty_feedback_returns_empty(self):
         assert po._generate_feedback_hint([]) == ""
 
-    def test_feedback_with_description_and_recommendation(self):
+    def test_feedback_with_known_category_uses_template(self):
+        fb = [{"category": "add_file_paths"}]
+        hint = po._generate_feedback_hint(fb)
+        assert po.PATTERN_HINTS["add_file_paths"] in hint
+
+    def test_feedback_with_unknown_category_returns_empty(self):
         fb = [{"description": "Missing tests", "recommendation": "Add unit tests"}]
         hint = po._generate_feedback_hint(fb)
-        assert "Missing tests" in hint
-        assert "Add unit tests" in hint
+        assert hint == ""
+        assert "Missing tests" not in hint
+
+    def test_feedback_deduplicates_categories(self):
+        fb = [{"category": "add_examples"}, {"category": "add_examples"}]
+        hint = po._generate_feedback_hint(fb)
+        assert hint.count(po.PATTERN_HINTS["add_examples"]) == 1
 
     def test_feedback_capped_at_5_items(self):
-        fb = [{"description": f"Issue {i}"} for i in range(10)]
+        categories = list(po.PATTERN_HINTS.keys())[:7]
+        fb = [{"category": c} for c in categories]
         hint = po._generate_feedback_hint(fb)
-        # Should only contain first 5
-        assert "Issue 0" in hint
-        assert "Issue 4" in hint
-        assert "Issue 9" not in hint
+        for c in categories[:5]:
+            assert po.PATTERN_HINTS[c] in hint
+        for c in categories[5:]:
+            assert po.PATTERN_HINTS[c] not in hint
 
-    def test_feedback_without_description_or_recommendation(self):
+    def test_feedback_without_category_returns_empty(self):
         fb = [{"other_field": "value"}]
         hint = po._generate_feedback_hint(fb)
         assert hint == ""
@@ -321,7 +332,7 @@ class TestConsumeTriggersWithFeedback:
         trigger_data = {
             "bot": "tester",
             "reviewer_feedback": [
-                {"description": "Fix indentation", "recommendation": "Use 4 spaces"}
+                {"category": "add_file_paths"}
             ],
             "verdict": "rework",
             "reason": "reviewer rejected",
@@ -335,8 +346,9 @@ class TestConsumeTriggersWithFeedback:
         assert consumed == 1
 
         content = (roles_dir / "tester.md").read_text(encoding="utf-8")
-        assert "Fix indentation" in content
-        assert "Use 4 spaces" in content
+        assert po.PATTERN_HINTS["add_file_paths"] in content
+        assert "Fix indentation" not in content
+        assert "Use 4 spaces" not in content
 
     def test_corrupt_trigger_file_is_skipped(self, tmp_path):
         triggers_dir = tmp_path / "triggers"

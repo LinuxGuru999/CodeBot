@@ -30,11 +30,58 @@ It must define the engineering path from the current CodeBot/BotNet implementati
 
 # 1. Product Vision
 
-CodeBot's long-term purpose is:
+CodeBot is an autonomous software engineering environment capable of creating, understanding, documenting, maintaining, testing, reviewing, and continuously improving software projects.
 
-> Given a software repository plus a structured project contract and engineering constitution, autonomously understand the system, discover necessary work, create evidence-backed tickets, prioritize and plan changes, implement them, test them, attack them, review them, update documentation, verify acceptance criteria, and continuously maintain the application with minimal human engineering effort.
+It can begin with either an existing repository or a user description of a new application.
 
-CodeBot should eventually be capable of working on almost any sufficiently documented web application or software project.
+Once initialized, CodeBot manages the engineering lifecycle through discovery, decomposition, planning, implementation, review, verification, QA, documentation, and continuous improvement while providing users with an interface for requirements, feature requests, revisions, approvals, and progress monitoring.
+
+### Two Entry Points, One Platform
+
+CodeBot supports two primary modes of operation. These are not two separate products—they are two entry points into the same autonomous engineering system.
+
+**Mode 1: Existing Software**
+
+Point CodeBot at an existing repository. CodeBot:
+
+- Understands the project
+- Generates and maintains documentation
+- Discovers problems and opportunities
+- Improves the codebase
+- Adds tests
+- Fixes bugs
+- Improves security, architecture, and performance
+- Maintains dependencies
+- Implements requested features
+- Performs QA
+- Monitors its own progress
+- Continuously improves the software
+
+**Mode 2: New Application**
+
+Describe an application through a user interface. CodeBot:
+
+- Converts the description into product requirements
+- Designs the architecture
+- Creates the repository
+- Decomposes the product into work
+- Plans implementation
+- Writes the application
+- Tests it, reviews it, performs QA
+- Generates documentation
+- Accepts new feature requests and revisions
+- Tracks progress
+- Continuously improves the resulting application
+
+### Product Vision
+
+> Give CodeBot software or an idea for software, describe the desired outcome, and let CodeBot manage the engineering process required to create, understand, document, maintain, and continuously improve it—while keeping the user informed and in control of product intent.
+
+### Long-Term Purpose
+
+> Given a software repository or a product description, autonomously understand the requirements, design the solution, implement it, test it, review it, document it, deploy it, maintain it, and continuously improve it with minimal human engineering effort.
+
+CodeBot should eventually be capable of working on almost any software project, whether starting from an existing codebase or a new product description.
 
 Monitor is currently the primary proving ground, but CodeBot must not remain architecturally dependent on Monitor.
 
@@ -43,10 +90,11 @@ The eventual relationship must be:
 ```text
 CodeBot
    │
+   ├── Existing Repository → Understand, Document, Improve
+   ├── New Application → Design, Build, Test, Document
    ├── Project Profile: Monitor
    ├── Project Profile: Customer App A
-   ├── Project Profile: Customer App B
-   └── Project Profile: SaaS Experiment C
+   └── Project Profile: SaaS Experiment B
 ```
 
 NOT:
@@ -601,7 +649,23 @@ HISTORICAL RECORDS
 
 Avoid multiple documents independently claiming ownership of the same implementation status.
 
-The roadmap should explicitly address documentation drift.
+**Exit Criteria:**
+
+1. **Artifact Completeness**: All core documentation artifacts are present and verified against source code:
+   - `docs/ARCHITECTURE.md` exists and accurately reflects the current system structure.
+   - All public modules in `codebot/` have corresponding `docs/modules/*.md` files with accurate summaries, exports, and dependencies.
+   - `docs/api/CONTRACTS.md` (or equivalent) lists all active API endpoints with verified request/response schemas.
+   - `docs/adr/` contains at least one Architecture Decision Record (ADR) for each major architectural decision identified in the codebase.
+
+2. **Automated Update Mechanism**: An automated documentation audit pipeline is implemented and scheduled to run weekly. This pipeline:
+   - Compares current documentation against actual code state.
+   - Creates tickets for any detected drift older than 48 hours.
+   - Verifies that `ROADMAP.md` deliverable statuses match the actual state of the ticket engine and file system via a verification script.
+
+3. **Validation and Coverage**: Documentation quality is validated through deterministic checks:
+   - Every public function/class in `codebot/` has docstrings including Args, Returns, and Raises sections.
+   - 100% of public APIs are documented with working examples and error cases.
+   - `CHANGELOG.md` is updated for every merged feature or bug fix as part of the merge process.
 
 ---
 

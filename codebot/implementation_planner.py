@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import hashlib
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
@@ -56,6 +57,22 @@ RISK_TO_DEPTH: dict[str, PlanDepth] = {
 
 
 @dataclass(frozen=True)
+class PlanningBudget:
+    max_grep_calls: int
+    max_read_calls: int
+    max_glob_calls: int
+    max_steps: int
+    effort_tokens: int
+
+
+PLANNING_BUDGETS: dict[PlanDepth, PlanningBudget] = {
+    PlanDepth.SUMMARY: PlanningBudget(1, 0, 0, 2, 5_000),
+    PlanDepth.STANDARD: PlanningBudget(2, 1, 0, 4, 20_000),
+    PlanDepth.FULL: PlanningBudget(2, 2, 1, 6, 50_000),
+}
+
+
+@dataclass(frozen=True)
 class ImplementationPlan:
     ticket_id: str
     depth: PlanDepth
@@ -73,6 +90,11 @@ class ImplementationPlan:
     estimated_effort_tokens: int
     generated_at: float
     version: int = 1
+    evidence_fingerprint: str = ""
+    evidence_reused: bool = False
+    reused_from_ticket_id: str = ""
+    fresh_verification_required: bool = True
+    investigation_budget: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -93,6 +115,25 @@ def determine_plan_depth(risk: str) -> PlanDepth:
     return RISK_TO_DEPTH.get(risk.lower(), PlanDepth.STANDARD)
 
 
+def get_planning_budget(risk: str) -> PlanningBudget:
+    return PLANNING_BUDGETS[determine_plan_depth(risk)]
+
+
+def evidence_fingerprint(
+    risk: str, affected_modules: list[str], dependencies: list[str],
+    acceptance_criteria: list[str], ticket_class: str = "",
+) -> str:
+    evidence = {
+        "risk": risk.lower(),
+        "ticket_class": ticket_class.lower(),
+        "affected_modules": sorted(affected_modules),
+        "dependencies": sorted(dependencies),
+        "acceptance_criteria": sorted(acceptance_criteria),
+    }
+    encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
 def generate_plan(
     ticket_id: str,
     risk: str,
@@ -107,6 +148,7 @@ def generate_plan(
     required_tests: list[str] | None = None,
 ) -> ImplementationPlan:
     depth = determine_plan_depth(risk)
+    budget = get_planning_budget(risk)
     components = list(affected_modules) if affected_modules else ["unknown"]
     arch_implications: list[str] = []
     interfaces: list[str] = []
@@ -140,7 +182,6 @@ def generate_plan(
     elif depth == PlanDepth.SUMMARY:
         if not tests and acceptance_criteria:
             tests = [f"verify: {acceptance_criteria[0]}"]
-    effort_map = {PlanDepth.SUMMARY: 5000, PlanDepth.STANDARD: 20000, PlanDepth.FULL: 50000}
     return ImplementationPlan(
         ticket_id=ticket_id,
         depth=depth,
@@ -155,8 +196,17 @@ def generate_plan(
         documentation_updates=docs,
         dependency_ordering=list(dependencies),
         expected_artifacts=[f"Modified files in: {', '.join(components)}"],
-        estimated_effort_tokens=effort_map[depth],
+        estimated_effort_tokens=budget.effort_tokens,
         generated_at=time.time(),
+        evidence_fingerprint=evidence_fingerprint(
+            risk, affected_modules, dependencies, acceptance_criteria, ticket_class,
+        ),
+        investigation_budget={
+            "max_grep_calls": budget.max_grep_calls,
+            "max_read_calls": budget.max_read_calls,
+            "max_glob_calls": budget.max_glob_calls,
+            "max_steps": budget.max_steps,
+        },
     )
 
 
@@ -246,6 +296,14 @@ class PlanStore:
                     tmp = p.with_suffix(".tmp")
                     tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
                     os.replace(str(tmp), str(p))
+                    # sync legacy
+                    try:
+                        legacy = self._legacy_path(ticket_id)
+                        tmp2 = legacy.with_suffix(".tmp")
+                        tmp2.write_text(json.dumps(d, indent=2), encoding="utf-8")
+                        os.replace(str(tmp2), str(legacy))
+                    except OSError:
+                        pass
                     return
                 elif "plan" in d and isinstance(d["plan"], dict):
                     # wrapper style {"ticket_id":..., "plan": {...}}
@@ -260,6 +318,17 @@ class PlanStore:
                     else:
                         tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
                     os.replace(str(tmp), str(p))
+                    # sync legacy
+                    try:
+                        legacy = self._legacy_path(ticket_id)
+                        tmp2 = legacy.with_suffix(".tmp")
+                        if "depth" in plan_inner:
+                            tmp2.write_text(json.dumps(plan_inner, indent=2), encoding="utf-8")
+                        else:
+                            tmp2.write_text(json.dumps(d, indent=2), encoding="utf-8")
+                        os.replace(str(tmp2), str(legacy))
+                    except OSError:
+                        pass
                     return
                 else:
                     # Fallback: store dict as is
@@ -268,6 +337,14 @@ class PlanStore:
                     tmp = p.with_suffix(".tmp")
                     tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
                     os.replace(str(tmp), str(p))
+                    # sync legacy
+                    try:
+                        legacy = self._legacy_path(ticket_id)
+                        tmp2 = legacy.with_suffix(".tmp")
+                        tmp2.write_text(json.dumps(d, indent=2), encoding="utf-8")
+                        os.replace(str(tmp2), str(legacy))
+                    except OSError:
+                        pass
                     return
             else:
                 raise TypeError(f"unsupported save signature: {type(ticket_id_or_plan)}")
@@ -323,6 +400,14 @@ class PlanStore:
                     tmp = p.with_suffix(".tmp")
                     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                     os.replace(str(tmp), str(p))
+                    # sync legacy
+                    try:
+                        legacy = self._legacy_path(ticket_id)
+                        tmp2 = legacy.with_suffix(".tmp")
+                        tmp2.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                        os.replace(str(tmp2), str(legacy))
+                    except OSError:
+                        pass
                     return
             else:
                 raise TypeError(f"unsupported plan type: {type(plan_data)}")
@@ -366,6 +451,41 @@ class PlanStore:
         """Check if a plan exists for a ticket (either naming convention)."""
         return any(p.exists() for p in self._path_candidates(ticket_id))
 
+    def find_reusable(self, fingerprint: str, risk: str) -> ImplementationPlan | None:
+        depth = determine_plan_depth(risk)
+        for path in self._dir.glob("*.plan.json"):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                plan = ImplementationPlan.from_dict(raw)
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                continue
+            if plan.depth == depth and plan.evidence_fingerprint == fingerprint:
+                return plan
+        return None
+
+    def reuse_for_ticket(
+        self, ticket_id: str, risk: str, affected_modules: list[str],
+        dependencies: list[str], acceptance_criteria: list[str], ticket_class: str = "",
+    ) -> ImplementationPlan | None:
+        fingerprint = evidence_fingerprint(
+            risk, affected_modules, dependencies, acceptance_criteria, ticket_class,
+        )
+        source = self.find_reusable(fingerprint, risk)
+        if source is None:
+            return None
+        reused = ImplementationPlan.from_dict(
+            {
+                **source.to_dict(),
+                "ticket_id": ticket_id,
+                "generated_at": time.time(),
+                "evidence_reused": True,
+                "reused_from_ticket_id": source.ticket_id,
+                "fresh_verification_required": True,
+            }
+        )
+        self.save(reused)
+        return reused
+
     def delete(self, ticket_id: str) -> None:
         """Delete an implementation plan for a ticket."""
         for p in self._path_candidates(ticket_id):
@@ -374,3 +494,42 @@ class PlanStore:
                     p.unlink()
                 except OSError:
                     pass
+
+
+class PlanningTelemetry:
+    def __init__(self, state_dir: Path | str) -> None:
+        self._path = Path(state_dir) / "planning_outcomes.jsonl"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(
+        self, ticket_id: str, risk: str, duration_seconds: float,
+        outcome: str, rework_count: int = 0, evidence_reused: bool = False,
+    ) -> None:
+        record = {
+            "ticket_id": ticket_id,
+            "risk": risk,
+            "duration_seconds": duration_seconds,
+            "outcome": outcome,
+            "rework_count": rework_count,
+            "evidence_reused": evidence_reused,
+            "recorded_at": time.time(),
+        }
+        with self._path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def summary(self) -> dict[str, float | int]:
+        records: list[dict[str, Any]] = []
+        if not self._path.exists():
+            return {"plans": 0, "average_duration_seconds": 0.0, "rework_rate": 0.0}
+        for line in self._path.read_text(encoding="utf-8").splitlines():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        if not records:
+            return {"plans": 0, "average_duration_seconds": 0.0, "rework_rate": 0.0}
+        return {
+            "plans": len(records),
+            "average_duration_seconds": sum(float(r["duration_seconds"]) for r in records) / len(records),
+            "rework_rate": sum(int(r["rework_count"]) > 0 for r in records) / len(records),
+        }

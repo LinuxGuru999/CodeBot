@@ -141,7 +141,7 @@ def test_queuemanager_actionable_queue_depth():
                     "title": "Test bug",
                     "ticket_class": "bug",
                     "severity": "medium",
-                    "state": "READY",
+                    "state": "PLANNING",
                     "source": "test",
                     "evidence": "test evidence",
                     "problem_statement": "test problem",
@@ -244,8 +244,8 @@ def test_queuemanager_actionable_queue_depth():
         qm = QueueManager.from_state_dir(state_dir)
         depth = qm.actionable_queue_depth()
 
-        # Should count READY + DECOMPOSE + REWORK = 3 (not IMPLEMENTING)
-        assert depth == 3, f"Expected actionable depth 3, got {depth}"
+        # Should count PLANNING + DECOMPOSE(=DECOMP) + REWORK + IMPLEMENTING(=IMPLEMENT) = 4
+        assert depth == 4, f"Expected actionable depth 4, got {depth}"
 
 
 def test_queuemanager_ticket_classes():
@@ -268,7 +268,7 @@ def test_queuemanager_ticket_classes():
                     "title": "Test bug",
                     "ticket_class": "bug",
                     "severity": "medium",
-                    "state": "READY",
+                    "state": "IMPLEMENT",
                     "source": "test",
                     "evidence": "test",
                     "problem_statement": "test",
@@ -293,7 +293,7 @@ def test_queuemanager_ticket_classes():
                     "title": "Test feature",
                     "ticket_class": "feature",
                     "severity": "low",
-                    "state": "READY",
+                    "state": "IMPLEMENT",
                     "source": "test",
                     "evidence": "test",
                     "problem_statement": "test",
@@ -315,10 +315,10 @@ def test_queuemanager_ticket_classes():
                 },
                 {
                     "id": "TEST-003",
-                    "title": "Test not ready",
+                    "title": "Test not implement",
                     "ticket_class": "security",
                     "severity": "critical",
-                    "state": "IMPLEMENTING",
+                    "state": "PLANNING",
                     "source": "test",
                     "evidence": "test",
                     "problem_statement": "test",
@@ -346,7 +346,7 @@ def test_queuemanager_ticket_classes():
         qm = QueueManager.from_state_dir(state_dir)
         classes = qm.ticket_classes()
 
-        # Should only return classes for READY tickets (bug, feature), not IMPLEMENTING
+        # Should return classes for IMPLEMENT tickets (bug, feature), not PLANNING
         assert len(classes) == 2, f"Expected 2 ticket classes, got {len(classes)}"
         assert "bug" in classes, "Should include 'bug' class"
         assert "feature" in classes, "Should include 'feature' class"

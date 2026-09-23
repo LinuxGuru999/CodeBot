@@ -27,11 +27,13 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
+from uuid import uuid4
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
 import codebot.health_monitor as _hm
 from codebot.health_monitor import (
@@ -41,8 +43,45 @@ from codebot.health_monitor import (
 )
 from codebot.model_manager import model_profile, ModelProfile, MODEL_PROFILES
 from codebot.state_manager import get_paths
+from codebot.scheduler_config import MAX_CONCURRENT_AGENTS
+from codebot.dispatch_service import batch_read_bot_states
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Bot Registry — lazy-loaded to avoid circular import with orchestrator_services
+# ---------------------------------------------------------------------------
+_BOT_REGISTRY_CACHE: list | None = None
+
+
+def _load_bot_registry_lazy() -> list:
+    """Load bot registry from orchestrator_services (lazy to avoid circular import)."""
+    global _BOT_REGISTRY_CACHE
+    if _BOT_REGISTRY_CACHE is None:
+        try:
+            from codebot.orchestrator_services import load_bot_registry as _svc_load
+            _BOT_REGISTRY_CACHE = _svc_load()
+        except Exception as e:
+            logger.warning("Failed to load BOT_REGISTRY from orchestrator_services: %s", e)
+            _BOT_REGISTRY_CACHE = []
+    return _BOT_REGISTRY_CACHE
+
+
+class _BotRegistryProxy(list):
+    """List proxy that lazy-loads BOT_REGISTRY on first access."""
+    def __iter__(self):
+        return iter(_load_bot_registry_lazy())
+    def __len__(self):
+        return len(_load_bot_registry_lazy())
+    def __getitem__(self, idx):
+        return _load_bot_registry_lazy()[idx]
+    def __contains__(self, item):
+        return item in _load_bot_registry_lazy()
+    def __bool__(self):
+        return bool(_load_bot_registry_lazy())
+
+
+BOT_REGISTRY: list = _BotRegistryProxy()
 
 
 def _resolve_state_dir() -> Path:
@@ -286,20 +325,122 @@ class BotState:
     consecutive_errors: int = 0
     last_throttle_log: float = 0.0
     started_at: float | None = None
-    prompt_mtime: float = 0.0
-    last_prompt_mtime: float = 0.0
+    prompt_mtime: int = 0
+    last_prompt_mtime: int = 0
     last_code_mtimes: dict[str, float] = field(default_factory=dict)
+    status: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Prompt Gateway Interface — injected service seam (CB-7976975-5D65)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class PromptGatewayProtocol(Protocol):
+    """Interface for prompt gateway operations.
+
+    Abstracts codebot.prompt_gateway so orchestrator/process_manager delegate
+    via the interface and tests can mock the gateway without direct imports.
+    """
+
+    def build_message(
+        self,
+        bot: str,
+        model: str,
+        prompt_text: str,
+        heartbeat_file: str,
+        ckpt_file: str,
+        ckpt_block: str,
+        state_dir: str,
+        logs_dir: str,
+        prompt_name: str,
+    ) -> str:
+        """Assemble the spawn message."""
+        ...
+
+    def note_spawn(self) -> None:
+        """Record a successful spawn for gap pacing."""
+        ...
+
+    def spawn_allowed(self, bots: dict, model: str = "") -> tuple[bool, str]:
+        """Check the global spawn gate without mutating state."""
+        ...
+
+    @property
+    def max_concurrent(self) -> int:
+        """Maximum concurrent bot subprocesses allowed."""
+        ...
+
+
+class DefaultPromptGateway:
+    """Default implementation that lazy-imports codebot.prompt_gateway.
+
+    Each method performs an inside-body import to avoid top-level coupling
+    between process_manager and prompt_gateway modules.
+    """
+
+    def build_message(
+        self,
+        bot: str,
+        model: str,
+        prompt_text: str,
+        heartbeat_file: str,
+        ckpt_file: str,
+        ckpt_block: str,
+        state_dir: str,
+        logs_dir: str,
+        prompt_name: str,
+    ) -> str:
+        import codebot.prompt_gateway as _pg
+        return _pg.build_message(
+            bot, model, prompt_text, heartbeat_file, ckpt_file,
+            ckpt_block, state_dir, logs_dir, prompt_name,
+        )
+
+    def note_spawn(self) -> None:
+        import codebot.prompt_gateway as _pg
+        _pg.note_spawn()
+
+    def spawn_allowed(self, bots: dict, model: str = "") -> tuple[bool, str]:
+        import codebot.prompt_gateway as _pg
+        return _pg.spawn_allowed(bots, model)
+
+    @property
+    def max_concurrent(self) -> int:
+        import codebot.prompt_gateway as _pg
+        return _pg.MAX_CONCURRENT
+
+
+_prompt_gateway_instance: Optional[PromptGatewayProtocol] = None
+
+
+def get_prompt_gateway() -> PromptGatewayProtocol:
+    """Return the current gateway instance, creating default if needed."""
+    global _prompt_gateway_instance
+    if _prompt_gateway_instance is None:
+        _prompt_gateway_instance = DefaultPromptGateway()
+    return _prompt_gateway_instance
+
+
+def set_prompt_gateway(gw: Optional[PromptGatewayProtocol]) -> None:
+    """Inject a custom gateway (or None to restore default)."""
+    global _prompt_gateway_instance
+    _prompt_gateway_instance = gw
+
+
+def clear_prompt_gateway() -> None:
+    """Reset gateway to default (for test teardown)."""
+    global _prompt_gateway_instance
+    _prompt_gateway_instance = None
 
 
 # ---------------------------------------------------------------------------
 # Process Management
 # ---------------------------------------------------------------------------
 
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", "26"))
-GATEWAY_MIN_SPAWN_GAP = int(os.getenv("CODEBOT_MIN_SPAWN_GAP", "25"))
-
-_last_spawn_time: float = 0.0
-_SPAWN_STAGGER_SECONDS: float = 5.0
+# Backward-compatible aliases delegating to gateway when available,
+# falling back to env vars. Kept for external callers (orchestrator, health_check).
+GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", str(MAX_CONCURRENT_AGENTS)))
 
 # Process count cache with TTL to avoid repeated pgrep calls
 _PROCESS_COUNT_TTL: float = 5.0
@@ -355,49 +496,23 @@ def _count_api_runner_processes() -> int:
     return count
 
 
+def _v2_active_count() -> int:
+    try:
+        from codebot.orchestrator_scheduler import count_active
+        return count_active()
+    except Exception:
+        return 0
+
+
 def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False,
                 runner_mode: str = "api", bot_model: str = "", bot_name: str = "",
                 is_overture: bool = False, is_demand: bool = False) -> tuple[bool, str]:
-    global _last_spawn_time
-    now = time.time()
-    running = _count_api_runner_processes()
-
+    v2_active = _v2_active_count()
     cap = GATEWAY_MAX_CONCURRENT
-    if running >= cap:
-        return False, f"cap {running}/{cap} running"
-
-    has_assignment = bot_name and any(
-        b.config.name == bot_name and getattr(b, '_assigned_ticket_id', '')
-        for b in (bots.values() if bots else [])
-    )
-    if not has_assignment and bot_name:
-        claims_dir = _resolve_state_dir() / "claims"
-        if claims_dir.exists():
-            for cf in claims_dir.glob(f"*.{bot_name}.json"):
-                try:
-                    age = time.time() - cf.stat().st_mtime
-                    if age < 60:
-                        has_assignment = True
-                        break
-                except OSError:
-                    pass
-    if has_assignment or is_demand:
+    if is_demand or is_overture:
         cap = GATEWAY_MAX_CONCURRENT + 2
-        if running >= cap:
-            return False, f"cap {running}/{cap} running (with assignment)"
-
-    if is_demand or is_overture or has_assignment:
-        return True, "slot available"
-
-    if now - _last_spawn_time < _SPAWN_STAGGER_SECONDS:
-        gap = now - _last_spawn_time
-        worker_gap = _SPAWN_STAGGER_SECONDS
-        if bot_name and bot_name.startswith("worker-"):
-            if gap < worker_gap:
-                return False, f"gap {gap:.0f}s<{worker_gap}s (worker)"
-        elif gap < GATEWAY_MIN_SPAWN_GAP:
-            return False, f"gap {gap:.0f}s<{GATEWAY_MIN_SPAWN_GAP}s"
-
+    if v2_active >= cap:
+        return False, f"cap {v2_active}/{cap} (v2)"
     return True, "slot available"
 
 
@@ -448,6 +563,7 @@ def _prompt_read_lock(path: Path) -> Iterator[None]:
 
 
 def update_bot_state(bot: BotState, status: str) -> None:
+    bot.status = status
     state_file = _resolve_state_dir() / f"{bot.config.name}.state.json"
     try:
         with _state_write_lock(bot.config.name):
@@ -493,57 +609,120 @@ def _load_json_file(path: Path) -> tuple[dict | None, str]:
         return None, ""
 
 
-def _discard_and_read_backup(p: Path, bak: Path) -> dict | None:
-    """Move corrupt p to bak, then try reading bak. Returns dict or None."""
+CHECKPOINT_MAX_BYTES = 4096
+
+
+def checkpoint_backup_path(path: Path) -> Path:
+    if path.suffix == ".json":
+        return path.with_name(f"{path.stem}.checkpoint.bak")
+    return Path(f"{path}.bak")
+
+
+def validate_checkpoint_payload(data: object) -> dict | None:
+    if not isinstance(data, dict):
+        return None
+    bot = data.get("bot", "")
+    if bot is not None and not isinstance(bot, str):
+        return None
+    updated_at = data.get("updated_at", 0)
+    if updated_at is not None:
+        try:
+            float(updated_at)
+        except (TypeError, ValueError):
+            return None
     try:
-        p.rename(bak)
+        if len(json.dumps(data).encode("utf-8")) > CHECKPOINT_MAX_BYTES:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return data
+
+
+def write_platform_checkpoint(bot_name: str, payload: dict) -> Path | None:
+    if not isinstance(payload, dict):
+        return None
+    data = dict(payload)
+    data.setdefault("bot", bot_name)
+    try:
+        data.setdefault("updated_at", __import__("time").time())
+    except Exception:
+        data.setdefault("updated_at", 0.0)
+    validated = validate_checkpoint_payload(data)
+    if validated is None:
+        return None
+    path = checkpoint_path(bot_name)
+    try:
+        _write_json_atomic(path, validated)
+    except OSError:
+        return None
+    backup = checkpoint_backup_path(path)
+    try:
+        backup.write_text(json.dumps(validated, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return path
+
+
+def _quarantine_checkpoint(path: Path, reason: str) -> None:
+    try:
+        quarantine_dir = path.parent / "checkpoint_quarantine"
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        target = quarantine_dir / f"{path.stem}-{int(__import__('time').time())}-{reason}.json"
+        path.replace(target)
     except OSError:
         try:
-            p.unlink()
+            path.unlink()
         except OSError:
             pass
-    if not bak.exists():
-        return None
-    data, _ = _load_json_file(bak)
-    return data if isinstance(data, dict) else None
+
+
+def _discard_and_read_backup(p: Path, bak: Path) -> dict | None:
+    _quarantine_checkpoint(p, "corrupt")
+    for candidate in (bak, p.with_suffix(".bak"), Path(f"{p}.bak")):
+        try:
+            if not candidate.exists():
+                continue
+            data, _ = _load_json_file(candidate)
+            if isinstance(data, dict) and validate_checkpoint_payload(data) is not None:
+                return data
+        except OSError:
+            continue
+    return None
 
 
 def read_checkpoint(bot_name: str) -> dict | None:
     p = checkpoint_path(bot_name)
-    bak = p.with_suffix(".bak") if p.suffix == ".json" else Path(str(p) + ".bak")
+    bak = checkpoint_backup_path(p)
 
-    # Main file missing — try backup
     if not p.exists():
         if bak.exists():
             data, _ = _load_json_file(bak)
-            if isinstance(data, dict):
+            if isinstance(data, dict) and validate_checkpoint_payload(data) is not None:
                 logger.info(f"Restored last-good checkpoint for '{bot_name}' from .bak")
                 return data
         return None
 
-    # Read and parse main file
     data, raw = _load_json_file(p)
     if data is None and not raw:
-        # File exists but couldn't read at all
         if not p.exists():
-            # _load_json_file might have failed mid-read
             return _discard_and_read_backup(p, bak) if p.exists() else None
     if data is None:
         logger.warning(f"Checkpoint corrupt for '{bot_name}' — falling back to .bak")
         return _discard_and_read_backup(p, bak)
 
-    if not isinstance(data, dict):
-        logger.warning(f"Checkpoint for '{bot_name}' is not a JSON object — falling back to .bak")
+    validated = validate_checkpoint_payload(data)
+    if validated is None:
+        logger.warning(f"Checkpoint for '{bot_name}' failed validation — falling back to .bak")
         return _discard_and_read_backup(p, bak)
 
-    # Check size and backup good copy
-    if len(raw.encode("utf-8")) > 4096:
-        logger.warning(f"Checkpoint for '{bot_name}' exceeds 4KB — truncating")
+    if len(raw.encode("utf-8")) > CHECKPOINT_MAX_BYTES:
+        logger.warning(f"Checkpoint for '{bot_name}' exceeds 4KB — quarantining")
+        return _discard_and_read_backup(p, bak)
     try:
         bak.write_text(raw, encoding="utf-8")
     except OSError:
         pass
-    return data
+    return validated
 
 
 # ---------------------------------------------------------------------------
@@ -595,35 +774,64 @@ def _should_skip_run(bot: BotState, last_run_mtime: float, is_demand: bool = Fal
     return True
 
 
-def _prepare_prompt_with_context(bot: BotState) -> str:
+def _prepare_prompt_with_context(bot: BotState, extra_block: str = "") -> str:
     """Read prompt file and inject ticket context + scratchpad handoff.
 
-    Acquires an exclusive lock on the prompt file before stat() and holds it
-    through read() to prevent race conditions with concurrent writes that
-    could cause stale/inconsistent reads or mismatched mtime/content.
+    Build order: choose base (canonical OR tournament variant) → ticket context → scratchpad → return.
+    When a tournament is active for this role, the variant prompt replaces the canonical base entirely.
+    Context layers are added once on top of whichever base was selected.
     """
-    prompt_path = _resolve_bots_dir() / bot.config.prompt_file
-
-    # Acquire lock, then stat() and read() atomically
-    try:
-        with _prompt_read_lock(prompt_path):
-            bot.prompt_mtime = prompt_path.stat().st_mtime
-            bot.last_prompt_mtime = bot.prompt_mtime
-            prompt_text = prompt_path.read_text()
-    except FileNotFoundError:
-        logger.warning(f"Prompt file not found: {prompt_path}")
-        bot.prompt_mtime = 0.0
-        bot.last_prompt_mtime = 0.0
-        return ""
-    except Exception as e:
-        logger.error(f"Failed to read prompt file {prompt_path}: {e}")
-        bot.prompt_mtime = 0.0
-        bot.last_prompt_mtime = 0.0
-        return ""
-
     assigned_tid = getattr(bot, '_assigned_ticket_id', '')
-    logger.info(f"start_bot '{bot.config.name}': assigned_tid='{assigned_tid}', prompt={len(prompt_text)} chars")
+    base_role = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
+    prompt_text = ""
+    using_variant = False
 
+    # Step 1: Choose base prompt — tournament variant or canonical
+    try:
+        from codebot.rl_tournament import load_state, get_variant_prompt_path, assign_ticket_to_variant
+        state_dir = _resolve_state_dir()
+        ts = load_state(state_dir, base_role)
+        if ts.active and assigned_tid:
+            variant = assign_ticket_to_variant(base_role, assigned_tid, state_dir)
+            if variant:
+                vpath = get_variant_prompt_path(base_role, variant, state_dir)
+                if vpath:
+                    try:
+                        prompt_text = vpath.read_text(encoding="utf-8")
+                        using_variant = True
+                        logger.info(
+                            "Tournament variant %s replaced base prompt for %s (ticket %s)",
+                            variant, base_role, assigned_tid,
+                        )
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+    # Fall back to canonical prompt if no variant loaded
+    if not prompt_text:
+        prompt_path = _resolve_bots_dir() / bot.config.prompt_file
+        try:
+            with _prompt_read_lock(prompt_path):
+                # Use st_mtime_ns (integer nanoseconds) for consistency with config_reloader
+                mtime_ns = prompt_path.stat().st_mtime_ns
+                bot.prompt_mtime = mtime_ns
+                bot.last_prompt_mtime = mtime_ns
+                prompt_text = prompt_path.read_text()
+        except FileNotFoundError:
+            logger.warning(f"Prompt file not found: {prompt_path}")
+            bot.prompt_mtime = 0
+            bot.last_prompt_mtime = 0
+            return ""
+        except Exception as e:
+            logger.error(f"Failed to read prompt file {prompt_path}: {e}")
+            bot.prompt_mtime = 0
+            bot.last_prompt_mtime = 0
+            return ""
+
+    logger.info(f"start_bot '{bot.config.name}': assigned_tid='{assigned_tid}', prompt={len(prompt_text)} chars, variant={using_variant}")
+
+    # Step 2: Add ticket context
     if assigned_tid:
         ticket_ctx = _load_ticket_context(assigned_tid)
         if ticket_ctx:
@@ -632,7 +840,7 @@ def _prepare_prompt_with_context(bot: BotState) -> str:
         else:
             logger.warning(f"No ticket context found for {bot.config.name}: {assigned_tid}")
 
-    # Inject handoff note from scratchpad
+    # Step 3: Add scratchpad handoff
     try:
         from codebot.scratchpad import load_scratchpad, create_handoff_note
         if assigned_tid:
@@ -642,6 +850,20 @@ def _prepare_prompt_with_context(bot: BotState) -> str:
                 prompt_text = f"{prompt_text}\n\n{handoff}\nResume from where the previous agent left off. Do NOT redo completed work."
     except Exception:
         pass
+
+    # Step 4: Inline implementation packet to eliminate startup read cascade
+    if assigned_tid:
+        try:
+            packet_path = _resolve_state_dir() / "implementation_packets" / f"{assigned_tid}.json"
+            if packet_path.exists():
+                packet_text = packet_path.read_text(encoding="utf-8")
+                prompt_text = f"{prompt_text}\n\n--- IMPLEMENTATION PACKET ---\n{packet_text}\n--- END PACKET ---"
+        except Exception:
+            pass
+
+    if extra_block:
+        prompt_text = f"{prompt_text}\n\n{extra_block}"
+
     return prompt_text
 
 
@@ -665,34 +887,16 @@ def _build_checkpoint_block(bot_name: str, ckpt: dict | None, ckpt_file: Path) -
 
 def _build_mission_message(bot: BotState, prompt_text: str, heartbeat_file: Path,
                            ckpt_file: Path, ckpt_block: str) -> str:
-    """Build the full mission message for the bot subprocess."""
+    """Build the full mission message for the bot subprocess via injected gateway."""
     state_dir = _resolve_state_dir()
     logs_dir = _resolve_logs_dir()
     bots_dir = _resolve_bots_dir()
     prompt_path = bots_dir / bot.config.prompt_file
-    try:
-        from codebot.prompt_gateway import build_message as _gateway_build_message
-        _GATEWAY = True
-    except ImportError:
-        _GATEWAY = False
-
-    if _GATEWAY:
-        return _gateway_build_message(
-            bot.config.name, bot.config.model, prompt_text,
-            str(heartbeat_file), str(ckpt_file), ckpt_block,
-            str(state_dir), str(logs_dir), prompt_path.name)
-
-    return (
-        f"Sisyphus \u2014 delegated task: '{bot.config.name}' workflow (model {bot.config.model}).\n"
-        f"Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
-        f"- At startup and after every atomic task, write Unix timestamp to {heartbeat_file} using the `write` tool.\n"
-        f"- After every atomic task, write <4KB checkpoint to {ckpt_file} using the `write` tool (atomic tmp->replace).\n"
-        f"- Before each atomic task, run `bash` with `test -f {state_dir}/.drain || test -f {state_dir}/.update_lock && echo DRAIN` to check for drain. If output contains DRAIN, exit 0. Do NOT use the `read` tool for drain checks.\n"
-        f"- State dir: {state_dir}  Log dir: {logs_dir}  Prompt: {prompt_path.name}\n"
-        f"{ckpt_block}\n"
-        f"--- Task Specification ({prompt_path.name}) ---\n"
-        f"{prompt_text}"
-    )
+    gw = get_prompt_gateway()
+    return gw.build_message(
+        bot.config.name, bot.config.model, prompt_text,
+        str(heartbeat_file), str(ckpt_file), ckpt_block,
+        str(state_dir), str(logs_dir), prompt_path.name)
 
 
 def _build_popen_args(bot: BotState, heartbeat_file: Path,
@@ -708,14 +912,12 @@ def _build_popen_args(bot: BotState, heartbeat_file: Path,
 
 
 def _update_bot_after_launch(bot: BotState, state_data: dict) -> None:
-    """Update bot state fields after successful subprocess launch."""
+    _clear_process_count_cache()
     bot.last_heartbeat = time.time()
     bot.last_log_mtime = time.time()
     bot.next_run_at = time.time() + bot.config.interval_seconds
     bot.consecutive_errors = 0
     bot.started_at = state_data["started"]
-    global _last_spawn_time
-    _last_spawn_time = time.time()
     try:
         (_resolve_state_dir() / ".last_spawn").write_text(str(time.time()))
     except OSError:
@@ -743,6 +945,25 @@ def _launch_bot_subprocess(bot: BotState, message: str, heartbeat_file: Path,
         _update_bot_after_launch(bot, state_data)
         log_fh.close()
         logger.info(f"Started bot '{bot.config.name}' (PID {process.pid})")
+        
+        # Write PID file atomically for safe, race-free termination by control_server
+        # Atomic pattern: write tmp, chmod 0o600, rename to target. Prevents partial reads.
+        try:
+            state_dir = _resolve_state_dir()
+            pid_file = state_dir / f"{bot.config.name}.pid"
+            tmp_pid = pid_file.with_name(f"{pid_file.name}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.tmp")
+            tmp_pid.write_text(str(process.pid), encoding="utf-8")
+            tmp_pid.chmod(0o600)
+            tmp_pid.replace(pid_file)
+        except OSError as e:
+            logger.warning(f"Failed to write atomic PID file for '{bot.config.name}': {e}")
+            # Cleanup tmp file if it exists
+            try:
+                if 'tmp_pid' in locals():
+                    tmp_pid.unlink(missing_ok=True)
+            except OSError:
+                pass
+        
         return True
     except (FileNotFoundError, Exception) as e:
         if isinstance(e, FileNotFoundError):
@@ -758,7 +979,7 @@ def _launch_bot_subprocess(bot: BotState, message: str, heartbeat_file: Path,
 # Main Start/Stop/Restart
 # ---------------------------------------------------------------------------
 
-def _init_and_prepare_bot(bot: BotState, resume_checkpoint: bool) -> tuple[Path, Path, str]:
+def _init_and_prepare_bot(bot: BotState, resume_checkpoint: bool, extra_block: str = "") -> tuple[Path, Path, str]:
     """Initialize state, prepare prompt, and build mission message. Returns (heartbeat_file, ckpt_file, message)."""
     bots_dir = _resolve_bots_dir()
     state_dir = _resolve_state_dir()
@@ -771,7 +992,7 @@ def _init_and_prepare_bot(bot: BotState, resume_checkpoint: bool) -> tuple[Path,
     write_heartbeat(bot.config.name)
     bot.last_heartbeat = time.time()
 
-    prompt_text = _prepare_prompt_with_context(bot)
+    prompt_text = _prepare_prompt_with_context(bot, extra_block=extra_block)
     if not bot.last_code_mtimes:
         bot.last_code_mtimes = _get_code_mtimes()
 
@@ -816,6 +1037,34 @@ def start_bot(bot: BotState, resume_checkpoint: bool = True,
         logger.info(f"Queued '{bot.config.name}' ({why})")
         update_bot_state(bot, "queued")
         return False
+
+    from codebot.model_manager import next_model_for_role
+    base_role = bot.config.name.split("-")[0] if "-" in bot.config.name else bot.config.name
+    tc_val = ""
+    sev_val = ""
+    risk_val = ""
+    assigned_tid = getattr(bot, '_assigned_ticket_id', '')
+    if assigned_tid:
+        try:
+            from codebot.ticket_dispatcher import get_ticket_store
+            ts = get_ticket_store()
+            if ts is not None:
+                t = ts.get(assigned_tid)
+                if t is not None:
+                    tc = getattr(t, "ticket_class", None)
+                    tc_val = tc.value if hasattr(tc, "value") else str(tc) if tc else ""
+                    sv = getattr(t, "severity", None)
+                    sev_val = sv.value if hasattr(sv, "value") else str(sv) if sv else ""
+                    rk = getattr(t, "risk", None)
+                    risk_val = rk.value if hasattr(rk, "value") else str(rk) if rk else ""
+        except Exception:
+            pass
+    assignment = next_model_for_role(base_role, ticket_class=tc_val, severity=sev_val, risk=risk_val)
+    old_model = bot.config.model
+    bot.config.model = assignment.model
+    bot.config.fallback_model = assignment.fallback
+    if old_model != assignment.model:
+        logger.info(f"Model rotation '{bot.config.name}': {old_model} -> {assignment.model} (fallback {assignment.fallback})")
 
     try:
         heartbeat_file, ckpt_file, message = _init_and_prepare_bot(bot, resume_checkpoint)
@@ -891,14 +1140,39 @@ def restart_bot(bot: BotState, reason: str = "stuck",
     return start_bot(bot, bots=bots)
 
 
-def _is_queued(bot: BotState) -> bool:
-    state_file = _resolve_state_dir() / f"{bot.config.name}.state.json"
-    try:
-        if state_file.exists():
-            return json.loads(state_file.read_text()).get("status") == "queued"
-    except Exception:
-        pass
-    return False
+def _is_queued(bot: BotState, cached_states: dict[str, dict | None] | None = None) -> bool:
+    """Check if bot is in queued status using in-memory cache only.
+
+    Args:
+        bot: BotState instance.
+        cached_states: Ignored; retained for backward compatibility.
+
+    Returns:
+        True if bot.status == "queued", False otherwise.
+    """
+    return bot.status == "queued"
+
+
+def _count_queued_bots(bots: dict[str, BotState], cached_states: dict[str, dict | None] | None = None) -> int:
+    """Count how many bots are in queued status.
+
+    Args:
+        bots: Dict mapping bot name to BotState.
+        cached_states: Optional preloaded .state.json data from batch_read_bot_states().
+            If provided, avoids per-bot disk reads entirely.
+
+    Returns:
+        Number of bots with status="queued".
+    """
+    if cached_states is not None:
+        return sum(1 for name in bots if cached_states.get(name, {}).get("status") == "queued")
+
+    # Fallback: read each bot's state file (N+1 I/O pattern - avoid in hot paths)
+    count = 0
+    for bot in bots.values():
+        if _is_queued(bot):
+            count += 1
+    return count
 
 
 def _get_code_mtimes() -> dict[str, float]:
@@ -913,6 +1187,22 @@ def _get_code_mtimes() -> dict[str, float]:
     except OSError:
         pass
     return mtimes
+
+
+def _truncate_field(text: str, max_bytes: int) -> str:
+    """Truncate text to max_bytes UTF-8 bytes with '... [truncated]' suffix if exceeded."""
+    if not text:
+        return text
+    suffix = "... [truncated]"
+    # Reserve space for suffix
+    suffix_bytes = suffix.encode("utf-8")
+    max_content_bytes = max(max_bytes - len(suffix_bytes), 0)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    # Truncate and decode with ignore to handle multi-byte characters at boundary
+    truncated = encoded[:max_content_bytes].decode("utf-8", "ignore")
+    return truncated + suffix
 
 
 def _load_ticket_context(ticket_id: str) -> str:
@@ -930,8 +1220,8 @@ def _load_ticket_context(ticket_id: str) -> str:
             f"Title: {t.title}",
             f"Class: {t.ticket_class.value}",
             f"Severity: {t.severity.value}",
-            f"Problem: {t.problem_statement}",
-            f"Desired State: {t.desired_state}",
+            f"Problem: {_truncate_field(t.problem_statement, 2048)}",
+            f"Desired State: {_truncate_field(t.desired_state, 2048)}",
         ]
         if t.acceptance_criteria:
             lines.append("Acceptance Criteria:")
@@ -949,12 +1239,12 @@ def _load_ticket_context(ticket_id: str) -> str:
                 if fb.get('file'):
                     lines.append(f"  File: {fb['file']}")
                 if fb.get('description'):
-                    lines.append(f"  Issue: {fb['description']}")
+                    lines.append(f"  Issue: {_truncate_field(fb['description'], 2048)}")
                 if fb.get('recommendation'):
-                    lines.append(f"  Fix: {fb['recommendation']}")
+                    lines.append(f"  Fix: {_truncate_field(fb['recommendation'], 2048)}")
             lines.append("=== END REVIEWER FEEDBACK ===")
         lines.append("--- END TICKET CONTEXT ---")
-        return "\n".join(lines)
+        return _truncate_field("\n".join(lines), 8192)
     except Exception:
         return ""
 

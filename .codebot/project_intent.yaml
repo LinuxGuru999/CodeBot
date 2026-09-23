@@ -1,0 +1,35 @@
+# CodeBot Project Intent — canonical goal context for goal_aligner
+# Consumed by LLM agents; keep under 50 lines.
+# Source: docs/GOALS.md (rev 2026-09-20), .codebot/project.yaml
+
+schema_version: "1.0"
+goal_revision: "2026-09-20"
+
+purpose: "Portable, model-independent autonomous software factory: given repo + contract + constitution, understand system, discover work, ticket, plan, implement, test, review, verify, document with minimal human effort. First managed project is itself under strongest safeguards (§17)."
+
+current_goals:
+  - "Portable project understanding via ProjectAdapter — any documented repo"
+  - "Ticket-centered development: normalized schema, 14-state machine, SHA-256 dedup"
+  - "Planning pipeline: depth-scaled plans (summary/standard/full) before IMPLEMENTING"
+  - "Composable roles (ROLE+TASK+MODEL_POLICY+TOOL_POLICY), model independence + fallback"
+  - "Deterministic verification (quality_gate sole authority) + adversarial review"
+
+current_milestone: "v1.0 — >80% autonomous completion, >70% first-pass gate success, >85% coverage, 50+ meaningful tickets on self"
+
+current_priorities:
+  - "Wire discovery→triage→decomp→planning→implement→review→verify lifecycle end-to-end"
+  - "Enforce plan prerequisite and gate blocking on state transitions"
+  - "Replace BOT_REGISTRY with role-based agent assembly in orchestrator"
+  - "Multi-provider fallback chain + per-ticket cost tracking"
+
+non_goals:
+  - "Monitor-specific business logic in core (verified 0, must stay 0)"
+  - "Constitution weakening without adversarial swarm + QA recommendation"
+  - "New-app scaffolding — focus is existing-repo understanding & improvement"
+
+constraints:
+  - "stdlib-only core; pytest/pytest-cov dev-only; no third-party runtime deps"
+  - "Constitution §10 self-improvement controls; §17 bootstrap recovery always possible"
+  - "SSRF/bearer/rate-limit/security-headers enforced; secrets never in repo"
+
+user_requested_outcomes: []

@@ -1,10 +1,11 @@
 """Tests for FlaskAppAdapter — validates second-project adapter portability.
 
 Verifies that FlaskAppAdapter:
-1. Implements all ProjectAdapter ABC methods correctly
+1. Implements all ProjectAdapter Protocol methods correctly
 2. Contains no Monitor or CodeBot-specific assumptions
 3. Returns valid data structures matching the interface contract
 4. Protected paths are appropriate for a Flask app (not CodeBot internals)
+5. Uses only stdlib imports (no codebot.* dependencies)
 """
 import pytest
 from pathlib import Path
@@ -12,24 +13,27 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from codebot.adapters.flask_app_adapter import FlaskAppAdapter
-from codebot.project_adapter import (
-    ProjectAdapter,
+from codebot.adapters.flask_app_adapter import (
+    FlaskAppAdapter,
     ProjectPaths,
     ProjectTestConfig,
     DependencyPolicy,
     AutonomyConfig,
     ComponentDef,
+    migrate_forward,
+    migrate_rollback,
 )
 
 
 class TestFlaskAppAdapterInterface:
-    """Verify FlaskAppAdapter implements all ABC methods."""
+    """Verify FlaskAppAdapter implements all Protocol methods."""
 
     def setup_method(self):
         self.adapter = FlaskAppAdapter(Path("/tmp/flask-demo-app"))
 
-    def test_is_project_adapter_subclass(self):
+    def test_is_project_adapter_protocol_compliant(self):
+        """Structural subtyping: adapter satisfies ProjectAdapter protocol without inheritance."""
+        from codebot.adapters.flask_app_adapter import ProjectAdapter
         assert isinstance(self.adapter, ProjectAdapter)
 
     def test_project_name_returns_string(self):
@@ -187,3 +191,42 @@ class TestFlaskAppAdapterInstantiation:
     def test_relative_root_resolved(self):
         adapter = FlaskAppAdapter(Path("./my-app"))
         assert adapter.paths().repository_root.is_absolute()
+
+
+class TestFlaskAppAdapterMigration:
+    """Test standalone migration functions and stub methods for full coverage."""
+
+    def test_migrate_forward_with_source(self):
+        """migrate_forward with 'source' in store is a no-op (idempotent)."""
+        store = {"source": "something", "other": 42}
+        migrate_forward(store)
+        # Store should be unchanged
+        assert store == {"source": "something", "other": 42}
+
+    def test_migrate_forward_without_source(self):
+        """migrate_forward without 'source' in store is also a no-op."""
+        store = {"other": 42}
+        migrate_forward(store)
+        assert store == {"other": 42}
+
+    def test_migrate_rollback_with_source(self):
+        """migrate_rollback with 'source' in store is a no-op (idempotent)."""
+        store = {"source": "something", "other": 42}
+        migrate_rollback(store)
+        assert store == {"source": "something", "other": 42}
+
+    def test_migrate_rollback_without_source(self):
+        """migrate_rollback without 'source' in store is also a no-op."""
+        store = {"other": 42}
+        migrate_rollback(store)
+        assert store == {"other": 42}
+
+    def test_queue_depth_returns_zero(self):
+        """queue_depth stub always returns 0 (no TicketStore access)."""
+        adapter = FlaskAppAdapter(Path("/tmp/flask-demo-app"))
+        assert adapter.queue_depth() == 0
+
+    def test_ticket_class_counts_returns_empty(self):
+        """ticket_class_counts stub always returns empty dict (no TicketStore access)."""
+        adapter = FlaskAppAdapter(Path("/tmp/flask-demo-app"))
+        assert adapter.ticket_class_counts() == {}

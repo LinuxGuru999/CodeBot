@@ -58,28 +58,73 @@ import subprocess
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
+def _safe_int_env(key: str, default: int, min_val: int = 1) -> int:
+    """Safely parse an integer environment variable with bounds validation.
+
+    Args:
+        key: Environment variable name.
+        default: Default value if var is missing or invalid.
+        min_val: Minimum allowed value (enforced lower bound).
+
+    Returns:
+        Parsed integer, clamped to min_val, or default if parsing fails.
+    """
+    try:
+        val = int(os.environ.get(key, str(default)))
+        return max(val, min_val)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid value for %s; using default %d", key, default
+        )
+        return default
+
+
 # Rate limiting configuration
-RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("RATE_LIMIT_MAX_ATTEMPTS", "5"))
-RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
-RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("RATE_LIMIT_COOLDOWN_SECONDS", "300"))
+RATE_LIMIT_MAX_ATTEMPTS = _safe_int_env("RATE_LIMIT_MAX_ATTEMPTS", 5, 1)
+RATE_LIMIT_WINDOW_SECONDS = _safe_int_env("RATE_LIMIT_WINDOW_SECONDS", 60, 1)
+RATE_LIMIT_COOLDOWN_SECONDS = _safe_int_env("RATE_LIMIT_COOLDOWN_SECONDS", 300, 1)
+MAX_TRACKED_IPS = _safe_int_env("MAX_TRACKED_IPS", 10000, 100)
 
 
 class RateLimiter:
-    """Thread-safe rate limiter for authentication attempts."""
+    """Thread-safe rate limiter for authentication attempts.
 
-    def __init__(self):
+    Uses bounded OrderedDict to prevent memory exhaustion DoS via IP spoofing.
+    When max_tracked_ips is exceeded, oldest entries are evicted (LRU).
+    """
+
+    # Maximum number of IPs to track simultaneously (prevents memory exhaustion)
+    MAX_TRACKED_IPS = 10000
+
+    def __init__(self, max_tracked_ips: int | None = None):
         self._lock = threading.Lock()
-        # ip -> list of failure timestamps
-        self._failures: dict[str, list[float]] = defaultdict(list)
-        # ip -> cooldown until timestamp (blocked)
-        self._blocked_until: dict[str, float] = {}
+        self._max_tracked_ips = max_tracked_ips or self.MAX_TRACKED_IPS
+        # ip -> list of failure timestamps (bounded OrderedDict for LRU eviction)
+        self._failures: OrderedDict[str, list[float]] = OrderedDict()
+        # ip -> cooldown until timestamp (blocked) (bounded OrderedDict for LRU eviction)
+        self._blocked_until: OrderedDict[str, float] = OrderedDict()
+
+    def _evict_if_needed(self) -> None:
+        """Evict oldest entries if tracking capacity is exceeded."""
+        while len(self._failures) > self._max_tracked_ips:
+            # popitem(last=False) removes the oldest inserted item (LRU)
+            oldest_ip, _ = self._failures.popitem(last=False)
+            self._blocked_until.pop(oldest_ip, None)
+
+    def _touch_ip(self, client_ip: str) -> None:
+        """Move IP to end of OrderedDict (most recently used) and evict if needed."""
+        if client_ip in self._failures:
+            self._failures.move_to_end(client_ip)
+        if client_ip in self._blocked_until:
+            self._blocked_until.move_to_end(client_ip)
+        self._evict_if_needed()
 
     def is_allowed(self, client_ip: str) -> tuple[bool, str | None]:
         """Check if request from client_ip is allowed.
@@ -98,6 +143,11 @@ class RateLimiter:
                     del self._blocked_until[client_ip]
                     self._failures[client_ip] = []
 
+            # Ensure IP is tracked (insert if new) and move to end (LRU update)
+            if client_ip not in self._failures:
+                self._failures[client_ip] = []
+            self._touch_ip(client_ip)
+
             # Clean old failures outside the window
             cutoff = now - RATE_LIMIT_WINDOW_SECONDS
             self._failures[client_ip] = [
@@ -108,6 +158,7 @@ class RateLimiter:
             if len(self._failures[client_ip]) >= RATE_LIMIT_MAX_ATTEMPTS:
                 # Enter cooldown
                 self._blocked_until[client_ip] = now + RATE_LIMIT_COOLDOWN_SECONDS
+                self._blocked_until.move_to_end(client_ip)
                 return (
                     False,
                     f"rate limit exceeded ({RATE_LIMIT_MAX_ATTEMPTS} attempts in {RATE_LIMIT_WINDOW_SECONDS}s); blocked for {RATE_LIMIT_COOLDOWN_SECONDS}s (try again later)",
@@ -119,11 +170,19 @@ class RateLimiter:
         """Record a failed authentication attempt for client_ip."""
         now = time.time()
         with self._lock:
+            if client_ip not in self._failures:
+                self._failures[client_ip] = []
             self._failures[client_ip].append(now)
+            self._touch_ip(client_ip)
 
 
-# Global rate limiter instance
+# Global rate limiter instance for authenticated endpoints
 _rate_limiter = RateLimiter()
+
+# Separate rate limiter for /health endpoint to isolate it from auth-failure brute-force.
+# This prevents an attacker from triggering rate limits via failed auth attempts that
+# would block /health checks (causing orchestrator restart loops).
+_health_rate_limiter = RateLimiter()
 
 BOTS_DIR = Path(__file__).resolve().parent
 STATE_DIR = BOTS_DIR / "state"
@@ -132,8 +191,23 @@ ORCH = BOTS_DIR / "orchestrator.py"
 SAFE_UPDATE = BOTS_DIR / "safe_update.sh"
 
 CONTROL_TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
-CONTROL_ALLOW_UNAUTHENTICATED = os.environ.get("CONTROL_ALLOW_UNAUTHENTICATED", "").strip() == "1"
-PORT = int(os.environ.get("PORT", os.environ.get("CONTROL_PORT", "8081")))
+
+
+def _safe_port_env() -> int:
+    """Safely parse PORT/CONTROL_PORT env vars with fallback to 8081."""
+    try:
+        val = os.environ.get("PORT") or os.environ.get("CONTROL_PORT", "8081")
+        port = int(val)
+        if 1 <= port <= 65535:
+            return port
+        logger.warning("Invalid PORT value %s; using default 8081", val)
+        return 8081
+    except (TypeError, ValueError):
+        logger.warning("Invalid PORT value; using default 8081")
+        return 8081
+
+
+PORT = _safe_port_env()
 MAX_LOG_LINES = 2_000
 MAX_REQUEST_BYTES = 65_536
 REQUEST_TIMEOUT_SECONDS = 15
@@ -151,38 +225,45 @@ CONTROL_UNAUTHORIZED_HINT = (
     "export CONTROL_TOKEN=your-secret-token && fly secrets set CONTROL_TOKEN=$CONTROL_TOKEN"
 )
 TELEMETRY_UNAUTHORIZED_HINT = (
-    "Set the CODEBOT_TELEMETRY_TOKEN (or CONTROL_TOKEN) environment variable "
+    "Set the CODEBOT_TELEMETRY_TOKEN environment variable "
     "on the server and pass it as an 'Authorization: Bearer <token>' header. "
     "Example: export CODEBOT_TELEMETRY_TOKEN=your-telemetry-token"
 )
 TELEMETRY_NOT_CONFIGURED_HINT = (
-    "Neither CODEBOT_TELEMETRY_TOKEN nor CONTROL_TOKEN is configured on the server. "
-    "Set at least one via environment variables, e.g. "
+    "CODEBOT_TELEMETRY_TOKEN is not configured on the server. "
+    "Set it via environment variable, e.g. "
     "export CODEBOT_TELEMETRY_TOKEN=your-telemetry-token"
 )
 
-# Import orchestrator model profiles without starting it
-try:
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("orch_cfg", str(ORCH))
-    _m = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    spec.loader.exec_module(_m)  # type: ignore[union-attr]
-    BOT_REGISTRY = _m.BOT_REGISTRY
-    MODEL_PROFILES = _m.MODEL_PROFILES
-    def eff_timeout(cfg):  # type: ignore[no-untyped-def]
-        from dataclasses import dataclass
-        # reuse orchestrator effective_heartbeat_timeout logic
-        prof = MODEL_PROFILES.get(cfg.model)
-        if prof:
-            return max(int(cfg.interval_seconds * prof.heartbeat_multiplier), cfg.heartbeat_timeout)
-        return cfg.heartbeat_timeout
-except Exception:
-    # Log import failures so operators detect degraded state instead of silent empty registry
-    logger.exception("Failed to load orchestrator module; bot registry will be empty")
-    BOT_REGISTRY = []
-    MODEL_PROFILES = {}
-    def eff_timeout(cfg):  # type: ignore[no-untyped-def]
-        return getattr(cfg, "heartbeat_timeout", 600)
+# Import bot registry and model profiles safely from process_manager.
+# This avoids dynamic code execution (exec_module) of orchestrator.py,
+# preventing arbitrary code execution vulnerabilities (CB-495709-D068).
+from codebot.process_manager import BOT_REGISTRY, MODEL_PROFILES, BotConfig, ModelProfile
+
+
+def _resolve_control_state_dir() -> Path:
+    """Resolve the state dir for PID files, honoring test patches.
+
+    Production path is the module-level ``STATE_DIR`` (``codebot/state``).
+    Tests patch ``codebot.control_server.STATE_DIR`` to a tmp dir; the
+    helpers below must honor that patch so PID-file behavior is testable.
+    """
+    try:
+        mod = sys.modules.get(__name__)
+        sd = getattr(mod, "STATE_DIR", None) if mod is not None else None
+        if sd is not None:
+            return Path(sd)
+    except Exception:
+        pass
+    return STATE_DIR
+
+
+def eff_timeout(cfg: BotConfig) -> int:
+    """Calculate effective heartbeat timeout for a bot config."""
+    prof = MODEL_PROFILES.get(cfg.model)
+    if prof:
+        return max(int(cfg.interval_seconds * prof.heartbeat_multiplier), cfg.heartbeat_timeout)
+    return cfg.heartbeat_timeout
 
 
 def validate_bot_name(name: str) -> bool:
@@ -199,7 +280,550 @@ def validate_bot_name(name: str) -> bool:
     return bool(BOT_NAME_PATTERN.match(name))
 
 
+def _read_pid_file(name: str) -> int | None:
+    """Read PID from state/<name>.pid file with security verification.
+    Trust boundary hardening (reviewer feedback #44/#46/#48/#51):
+    the state dir is writable by the bot fleet, so a PID file is NOT
+    trusted until it passes ALL of these checks:
+
+    1. ``os.lstat`` (never ``os.stat``): symlinks are refused outright.
+       A symlinked PID file could otherwise point at an arbitrary file
+       (e.g. /proc/<victim>/...) and turn read_text() into a content
+       oracle, or redirect the ownership/permissions check at a
+       different inode than the bytes we read.
+    2. Permission bits EXACTLY 0o600 (owner read/write only). A group-
+       or world-writable/readable PID file lets any local user rewrite
+       the PID and aim our SIGTERM at an arbitrary process.
+    3. ``st_uid`` equals ``os.getuid()``: a file owned by another user
+       (planted via a shared/writable directory) is rejected.
+    4. Payload is ASCII digits only (``str.isdigit`` after strip);
+       anything else (empty, negative, "12\\n34", huge) is rejected.
+
+    Returns None when the file is missing, is a symlink, is unreadable,
+    is insecure, or holds a non-numeric payload.
+    """
+    pid_path = _resolve_control_state_dir() / f"{name}.pid"
+    try:
+        # lstat (not stat): a symlink must never be trusted. An attacker who
+        # can write to the state dir (or plant a link there) could otherwise
+        # point <name>.pid at /proc/<victim>/... or another sensitive file so
+        # that read_text() leaks its content into the PID parse path.
+        lst = os.lstat(pid_path)
+        import stat as _stat_mod
+
+        if _stat_mod.S_ISLNK(lst.st_mode):
+            logger.warning("_read_pid_file: refusing symlink PID file for '%s'", name)
+            return None
+        # Security check: verify file permissions and ownership before trusting content
+        if _stat_mod.S_IMODE(lst.st_mode) != 0o600:
+            logger.warning("_read_pid_file: insecure permissions on PID file for '%s': %o", name, _stat_mod.S_IMODE(lst.st_mode))
+            return None
+        # Check ownership matches current user (prevent other users from spoofing PIDs)
+        if lst.st_uid != os.getuid():
+            logger.warning("_read_pid_file: PID file for '%s' owned by uid %d, expected %d", name, lst.st_uid, os.getuid())
+            return None
+        
+        txt = pid_path.read_text(encoding="utf-8").strip()
+        if txt.isdigit():
+            return int(txt)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        logger.warning("_read_pid_file: error reading PID file for '%s': %s", name, e)
+    return None
+
+
+def _read_proc_cmdline_via_pidfd(pidfd: int) -> list[str] | None:
+    """Read /proc/<pid>/cmdline using a pidfd to avoid PID-recycling races.
+
+    Opens ``/proc/self/fd/<pidfd>/cmdline`` which follows the pidfd's
+    pinned process reference rather than the numeric PID.  Returns the
+    decoded argv list, or ``None`` on any error (process gone, permission
+    denied, etc.).
+    """
+    try:
+        proc_fd_path = f"/proc/self/fd/{pidfd}/cmdline"
+        with open(proc_fd_path, "rb") as f:
+            raw = f.read()
+        if not raw:
+            return []
+        return [arg.decode("utf-8", errors="replace") for arg in raw.split(b"\x00") if arg]
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return None
+    except OSError:
+        return None
+    except Exception:
+        return None
+
+
+def _verify_cmdline_from_argv(argv: list[str], name: str) -> bool:
+    """Check whether *argv* matches a bot api_runner invocation for *name*.
+
+    Accepts both the modern ``-m codebot.api_runner <name>`` form and the
+    legacy ``api_runner.py <name>`` script form.  Requires an EXACT argv
+    element match for the bot name (substring matches are rejected).
+    """
+    if not argv:
+        return False
+    cmdline_lower = " ".join(argv).lower()
+    is_python = "python" in cmdline_lower or "codebot.api_runner" in cmdline_lower
+    if not is_python:
+        return False
+    for i, arg in enumerate(argv):
+        base = arg.rsplit("/", 1)[-1] if "/" in arg else arg
+        if arg == "codebot.api_runner" or base == "api_runner.py":
+            if i + 1 < len(argv) and argv[i + 1] == name:
+                return True
+    return False
+
+
+def _verify_cmdline(pid: int, name: str) -> bool:
+    """Verify that PID belongs to a bot api_runner process with the given bot name.
+
+    DEPRECATED for security-critical paths: this function reads
+    ``/proc/<pid>/cmdline`` by numeric PID and is subject to a TOCTOU
+    race if the PID is recycled between the read and any subsequent
+    signal.  Prefer :func:`_verify_and_signal_pidfd` which opens a pidfd
+    first and verifies through the pinned descriptor.
+
+    Kept for backward compatibility (e.g. status probes) but MUST NOT be
+    used in kill paths.
+    """
+    try:
+        cmdline_path = f"/proc/{pid}/cmdline"
+        with open(cmdline_path, "rb") as f:
+            cmdline_bytes = f.read()
+        argv = [arg.decode("utf-8", errors="replace") for arg in cmdline_bytes.split(b"\x00") if arg]
+        return _verify_cmdline_from_argv(argv, name)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def _verify_and_signal_pidfd(
+    pid: int,
+    name: str,
+    sig: int,
+) -> tuple[bool, bool]:
+    """Atomically verify cmdline and signal a bot process via pidfd.
+
+    Opens a pidfd (pinning the process object), reads cmdline through
+    ``/proc/self/fd/<pidfd>/cmdline`` (so verification is bound to the
+    pinned process, not the numeric PID), and sends *sig* via
+    ``pidfd_send_signal``.  This eliminates the TOCTOU race where a PID
+    could be recycled between verification and signaling.
+
+    Returns ``(signal_sent, verified)``:
+    - ``signal_sent`` is True only when the signal was actually delivered.
+    - ``verified`` is True when the cmdline matched *name* (even if the
+      signal could not be delivered because pidfd support is missing).
+
+    Callers should treat ``signal_sent=False, verified=True`` as a
+    "safe-fail" scenario: the right process was identified but the kernel
+    refused the pidfd signal (e.g. seccomp).  Do NOT fall back to
+    ``os.kill``.
+    """
+    if not hasattr(os, "pidfd_open"):
+        # No pidfd support at all – cannot guarantee atomicity.
+        # Return (False, False) so caller does NOT delete PID file.
+        return False, False
+
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+    except ProcessLookupError:
+        return False, False
+    except PermissionError:
+        raise
+    except OSError:
+        return False, False
+
+    try:
+        argv = _read_proc_cmdline_via_pidfd(pidfd)
+        if argv is None:
+            # Process vanished or unreadable
+            return False, False
+        verified = _verify_cmdline_from_argv(argv, name)
+        if not verified:
+            return False, False
+
+        # Now signal through the pinned pidfd
+        if hasattr(os, "pidfd_send_signal"):
+            try:
+                os.pidfd_send_signal(pidfd, sig, None, None, 0)
+                return True, True
+            except ProcessLookupError:
+                return False, True
+            except PermissionError:
+                raise
+            except OSError as e:
+                if e.errno in (3, 38, 95):
+                    return False, True
+                raise
+        else:
+            # Python <3.12 ctypes fallback
+            try:
+                import ctypes
+                import ctypes.util
+
+                libc_path = ctypes.util.find_library("c")
+                if not libc_path:
+                    raise OSError("Cannot find libc")
+                libc = ctypes.CDLL(libc_path, use_errno=True)
+                SYS_pidfd_send_signal = 427
+                libc.syscall.argtypes = [
+                    ctypes.c_long, ctypes.c_int, ctypes.c_int,
+                    ctypes.c_void_p, ctypes.c_uint,
+                ]
+                libc.syscall.restype = ctypes.c_int
+                ret = libc.syscall(SYS_pidfd_send_signal, pidfd, sig, None, 0)
+                if ret == 0:
+                    return True, True
+                errno_val = ctypes.get_errno()
+                if errno_val in (3, 95):
+                    return False, True
+                if errno_val == 22:
+                    raise OSError(errno_val, "Invalid argument to pidfd_send_signal")
+                if errno_val == 1:
+                    raise PermissionError(os.strerror(errno_val))
+                raise OSError(errno_val, os.strerror(errno_val))
+            except (OSError, PermissionError):
+                raise
+            except Exception:
+                return False, True
+    finally:
+        try:
+            os.close(pidfd)
+        except OSError:
+            pass
+
+
+def _atomic_signal_pid(
+    pid: int,
+    sig: int,
+) -> bool:
+    """Send signal to PID atomically using pidfd.
+
+    DEPRECATED: use :func:`_verify_and_signal_pidfd` which combines
+    verification and signaling in one atomic step.  This wrapper remains
+    for backward compatibility but does NOT perform verification.
+    """
+    sent, _ = _verify_and_signal_pidfd(pid, "__unused__", sig)
+    return sent
+
+
+def _wait_for_exit_and_cleanup(pid: int, name: str) -> None:
+    """Poll for process exit and clean up PID file only after confirmed exit.
+
+    After sending a signal via pidfd, poll /proc/{pid} existence with short
+    intervals (100ms) for up to 2 seconds. Only delete the PID file if the
+    process has actually exited or if ProcessLookupError is raised.
+    This prevents denial-of-service race conditions where an attacker could
+    create a fake PID file pointing to a legitimate process.
+    """
+    import time
+    pid_file = _resolve_control_state_dir() / f"{name}.pid"
+    for _ in range(20):  # 20 * 100ms = 2 seconds max
+        try:
+            # Check if /proc/{pid} exists
+            os.stat(f"/proc/{pid}")
+            time.sleep(0.1)
+        except FileNotFoundError:
+            # Process has exited, safe to clean up PID file
+            try:
+                if pid_file.exists():
+                    pid_file.unlink()
+            except OSError:
+                pass
+            return
+        except OSError:
+            # Other OS error, continue polling
+            time.sleep(0.1)
+    # Timeout reached - process may still be running, do NOT delete PID file
+    logger.warning("_wait_for_exit_and_cleanup: PID %d for bot '%s' still running after 2s - preserving PID file", pid, name)
+
+
+def _safe_kill_bot_process(name: str, timeout: int = 5) -> tuple[bool, list[int]]:
+    """Safely kill bot process using PID file and verified signaling.
+
+    Uses PID file written at startup for exact targeting, eliminating
+    TOCTOU races from pgrep/pkill. Verifies cmdline before signaling
+    to prevent killing recycled PIDs. Uses pidfd for atomic signaling
+    if available.
+
+    Args:
+        name: Validated bot name (must pass validate_bot_name first)
+        timeout: Timeout for operations (unused in PID-file path, kept for signature compat)
+
+    Returns:
+        Tuple of (success, killed_pids) where success indicates no errors occurred
+    """
+    if not validate_bot_name(name):
+        logger.error("_safe_kill_bot_process: invalid bot name rejected: %s", repr(name))
+        return False, []
+
+    killed_pids: list[int] = []
+    import signal
+    
+    # Primary path: Read PID from file
+    pid = _read_pid_file(name)
+    
+    if pid is not None:
+        # Verify cmdline matches expected bot before killing.
+        # NOTE on TOCTOU: this check alone cannot pin the PID -- the process
+        # could exit and the numeric PID be recycled before the signal lands.
+        # The actual anti-recycling guarantee comes from _atomic_signal_pid,
+        # which signals through a pidfd (an object handle, not a number), so
+        # even an immediately-recycled PID cannot receive our SIGTERM. A
+        # verified cmdline + pidfd failure therefore means "not safe to
+        # signal" and we fail closed below, never falling back to os.kill.
+        if _verify_cmdline(pid, name):
+            signal_sent = False
+            try:
+                signal_sent = _atomic_signal_pid(
+                    pid,
+                    signal.SIGTERM,
+                )
+                if signal_sent:
+                    logger.info("_safe_kill_bot_process: sent SIGTERM to PID %d from PID file for bot '%s'", pid, name)
+                    killed_pids.append(pid)
+                    # Poll for process exit before deleting PID file (Feedback #45, #47, #49)
+                    _wait_for_exit_and_cleanup(pid, name)
+                else:
+                    # pidfd signaling unavailable - fail closed, do NOT clean up PID file
+                    # The process may still be running; operator must investigate
+                    logger.warning("_safe_kill_bot_process: pidfd signaling unavailable for PID %d bot '%s' - safe failure", pid, name)
+            except ProcessLookupError:
+                logger.info("_safe_kill_bot_process: PID %d from PID file already exited for bot '%s'", pid, name)
+                killed_pids.append(pid)
+                # Clean up stale PID file
+                try:
+                    pid_file = _resolve_control_state_dir() / f"{name}.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
+            except PermissionError:
+                logger.warning("_safe_kill_bot_process: permission denied killing PID %d for bot '%s'", pid, name)
+                killed_pids.append(pid)
+            except Exception as e:
+                logger.warning("_safe_kill_bot_process: error killing PID %d for bot '%s': %s", pid, name, e)
+                killed_pids.append(pid)
+        else:
+            # Cmdline mismatch may be transient (e.g. during execve the
+            # /proc/PID/cmdline window can be momentarily empty). Only clean
+            # up the PID file after confirming the process is truly gone via
+            # /proc existence. If /proc/{pid} still exists, the bot process
+            # may still be alive -> preserve the PID file so the bot remains
+            # manageable (prevents DoS via orphaned processes, CB-388D0).
+            try:
+                _proc_alive = os.path.exists(f"/proc/{pid}")
+            except Exception:
+                # Fail closed: on any error checking /proc, preserve PID file.
+                _proc_alive = True
+            if _proc_alive:
+                logger.warning("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s' - NOT deleting PID file to prevent DoS race", pid, name)
+                logger.debug("_safe_kill_bot_process: PID %d still present in /proc; retaining PID file for bot '%s'", pid, name)
+                # DO NOT delete PID file while process may still be running.
+                # An attacker could otherwise trigger a kill during a transient
+                # execve window to orphan the running bot process.
+            else:
+                logger.info("_safe_kill_bot_process: PID %d from PID file failed cmdline verification for bot '%s' and /proc/%d is gone - cleaning up stale PID file", pid, name, pid)
+                try:
+                    pid_file = _resolve_control_state_dir() / f"{name}.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
+    else:
+        # No PID file found. Do NOT fall back to pgrep to avoid broad matching.
+        logger.warning("_safe_kill_bot_process: No PID file found for bot '%s'. Skipping kill.", name)
+
+    return True, killed_pids
+
+
+def _read_orchestrator_pid_file() -> int | None:
+    """Read orchestrator PID from state/.orchestrator.pid file with security verification.
+
+    Same trust-boundary hardening as :func:`_read_pid_file` (reviewer
+    feedback #48/#51/#55): refuse symlinks via ``os.lstat``, require
+    EXACTLY 0o600 permission bits, require ``st_uid == os.getuid()``,
+    and accept digits-only payloads.
+
+    Returns None when the file is missing, is a symlink, is unreadable,
+    is insecure, or holds a non-numeric payload.
+    """
+    pid_path = _resolve_control_state_dir() / ".orchestrator.pid"
+    try:
+        # lstat (not stat): refuse symlinks for the same PID-spoof reason
+        # documented in _read_pid_file.
+        lst = os.lstat(pid_path)
+        import stat as _stat_mod
+
+        if _stat_mod.S_ISLNK(lst.st_mode):
+            logger.warning("_read_orchestrator_pid_file: refusing symlink PID file")
+            return None
+        # Security check: verify file permissions and ownership before trusting content
+        if _stat_mod.S_IMODE(lst.st_mode) != 0o600:
+            logger.warning("_read_orchestrator_pid_file: insecure permissions on PID file: %o", _stat_mod.S_IMODE(lst.st_mode))
+            return None
+        # Check ownership matches current user (prevent other users from spoofing PIDs)
+        if lst.st_uid != os.getuid():
+            logger.warning("_read_orchestrator_pid_file: PID file owned by uid %d, expected %d", lst.st_uid, os.getuid())
+            return None
+
+        txt = pid_path.read_text(encoding="utf-8").strip()
+        if txt.isdigit():
+            return int(txt)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        logger.warning("_read_orchestrator_pid_file: error reading PID file: %s", e)
+    return None
+
+
+def _verify_orchestrator_cmdline(pid: int) -> bool:
+    """Verify that PID belongs to orchestrator.py.
+
+    Accepts both the module form (``-m codebot...`` running orchestrator
+    code is NOT expected; orchestrator runs as a script) and the script
+    form where some argv element's basename is exactly
+    ``'orchestrator.py'``, plus a python/module token in the cmdline.
+    Path normalization uses basename comparison so ``/a/b/orchestrator.py``
+    matches but ``fake_orchestrator.py`` or ``orchestrator.py.bak`` do not.
+    """
+    try:
+        cmdline_path = f"/proc/{pid}/cmdline"
+        with open(cmdline_path, "rb") as f:
+            cmdline_bytes = f.read()
+        argv = [arg.decode("utf-8", errors="replace") for arg in cmdline_bytes.split(b"\x00") if arg]
+        if not argv:
+            return False
+
+        # Check if any argv element's basename is exactly 'orchestrator.py'
+        for arg in argv:
+            basename = arg.rsplit("/", 1)[-1] if "/" in arg else arg
+            if basename == "orchestrator.py":
+                # Additional safety: ensure it's a python process
+                cmdline_str = " ".join(argv).lower()
+                if "python" in cmdline_str:
+                    return True
+                else:
+                    logger.warning(
+                        "_verify_orchestrator_cmdline: PID %d has orchestrator.py but not python process", pid
+                    )
+                    return False
+        return False
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def _safe_kill_orchestrator(timeout: int = 5) -> tuple[bool, list[int]]:
+    """Safely kill orchestrator process using PID file and verified signaling.
+
+    Uses PID file written at startup for exact targeting, eliminating
+    TOCTOU races from pgrep. Verifies cmdline before signaling.
+
+    Args:
+        timeout: Timeout for operations (unused in PID-file path, kept for signature compat)
+
+    Returns:
+        Tuple of (success, killed_pids) where success indicates no errors occurred
+    """
+    killed_pids: list[int] = []
+    import signal
+
+    pid = _read_orchestrator_pid_file()
+    
+    if pid is not None:
+        if _verify_orchestrator_cmdline(pid):
+            try:
+                signal_sent = _atomic_signal_pid(
+                    pid,
+                    signal.SIGTERM,
+                )
+                if signal_sent:
+                    logger.info("_safe_kill_orchestrator: sent SIGTERM to verified PID %d from PID file", pid)
+                    killed_pids.append(pid)
+                    # Poll for process exit before deleting PID file (Feedback #49)
+                    _wait_for_exit_and_cleanup_orch(pid)
+                else:
+                    # pidfd signaling unavailable - fail closed, do NOT clean up PID file
+                    # The process may still be running; operator must investigate
+                    logger.warning("_safe_kill_orchestrator: pidfd signaling unavailable for PID %d - safe failure", pid)
+            except ProcessLookupError:
+                logger.info("_safe_kill_orchestrator: PID %d from PID file already exited", pid)
+                killed_pids.append(pid)
+                try:
+                    pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
+            except PermissionError:
+                logger.warning("_safe_kill_orchestrator: permission denied killing PID %d", pid)
+                killed_pids.append(pid)
+            except Exception as e:
+                logger.warning("_safe_kill_orchestrator: error killing PID %d: %s", pid, e)
+                killed_pids.append(pid)
+        else:
+            # Same transient-execve guard as _safe_kill_bot_process (CB-388D0):
+            # only delete the PID file after confirming /proc/{pid} is gone.
+            try:
+                _orch_alive = os.path.exists(f"/proc/{pid}")
+            except Exception:
+                _orch_alive = True
+            if _orch_alive:
+                logger.warning("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification - NOT deleting PID file to prevent DoS race", pid)
+                logger.debug("_safe_kill_orchestrator: PID %d still present in /proc; retaining PID file", pid)
+                # DO NOT delete PID file while process may still be running.
+            else:
+                logger.info("_safe_kill_orchestrator: PID %d from PID file failed cmdline verification and /proc/%d is gone - cleaning up stale PID file", pid, pid)
+                try:
+                    pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
+                    if pid_file.exists():
+                        pid_file.unlink()
+                except OSError:
+                    pass
+    else:
+        logger.warning("_safe_kill_orchestrator: No PID file found for orchestrator. Skipping kill.")
+
+    return True, killed_pids
+
+
+def _wait_for_exit_and_cleanup_orch(pid: int) -> None:
+    """Poll for orchestrator process exit and clean up PID file only after confirmed exit.
+
+    After sending a signal via pidfd, poll /proc/{pid} existence with short
+    intervals (100ms) for up to 2 seconds. Only delete the PID file if the
+    process has actually exited or if ProcessLookupError is raised.
+    """
+    import time
+    pid_file = _resolve_control_state_dir() / ".orchestrator.pid"
+    for _ in range(20):  # 20 * 100ms = 2 seconds max
+        try:
+            os.stat(f"/proc/{pid}")
+            time.sleep(0.1)
+        except FileNotFoundError:
+            try:
+                if pid_file.exists():
+                    pid_file.unlink()
+            except OSError:
+                pass
+            return
+        except OSError:
+            time.sleep(0.1)
+    logger.warning("_wait_for_exit_and_cleanup_orch: PID %d still running after 2s - preserving PID file", pid)
+
+
 def heartbeat_age(name: str) -> float | None:
+    # Defense-in-depth (CB-3E4571EFBE42): validate bot name before using it
+    # in filesystem path construction to block path traversal.
+    if not validate_bot_name(name):
+        logger.warning("heartbeat_age: rejected invalid bot name: %s", repr(name)[:100])
+        return None
     p = STATE_DIR / f"{name}.heartbeat"
     try:
         v = float(p.read_text().strip().split()[0])
@@ -238,6 +862,10 @@ def log_tail(name: str, lines: int = 200) -> str:
 
 
 def bot_status(name: str) -> dict:
+    # Defense-in-depth (CB-3E4571EFBE42): bot names must be allowlist-validated.
+    if not validate_bot_name(name):
+        logger.warning("bot_status: rejected invalid bot name: %s", repr(name)[:100])
+        name = "invalid-bot-name-rejected"
     cfg = next((c for c in BOT_REGISTRY if c.name == name), None)
     hb = heartbeat_age(name)
     state_file = STATE_DIR / f"{name}.state.json"
@@ -247,21 +875,22 @@ def bot_status(name: str) -> dict:
             state = json.loads(state_file.read_text())
     except Exception:
         pass
-    # process check via pgrep
+    # process check via PID file + cmdline verification (no pgrep)
     running = False
     pid = None
     try:
-        ps = subprocess.run(["pgrep", "-f", f"api_runner\\.py {name}"], capture_output=True, text=True, timeout=3)
-        if ps.stdout.strip():
+        found_pid = _read_pid_file(name)
+        if found_pid is not None and _verify_cmdline(found_pid, name):
             running = True
-            pid = ps.stdout.strip().split()[0]
+            pid = str(found_pid)
     except Exception:
         pass
-    # orchestrator process check
+    # orchestrator process check via PID file
     orch_running = False
     try:
-        ps2 = subprocess.run(["pgrep", "-f", "orchestrator.py"], capture_output=True, text=True, timeout=3)
-        orch_running = bool(ps2.stdout.strip())
+        orch_pid = _read_orchestrator_pid_file()
+        if orch_pid is not None and _verify_orchestrator_cmdline(orch_pid):
+            orch_running = True
     except Exception:
         pass
     eff = eff_timeout(cfg) if cfg else None
@@ -466,6 +1095,200 @@ def scheduler_status() -> dict:
     }
 
 
+def _check_budget_alerts(budget_pct: float, budget_state: str) -> list[dict]:
+    """Check budget thresholds and return alert list.
+
+    Alerts trigger at 80% (warn) and 90% (critical) of daily budget cap.
+    Returns list of alert dicts with threshold, level, message, and timestamp.
+    """
+    alerts: list[dict] = []
+    now = time.time()
+    if budget_pct >= 90:
+        alerts.append({
+            "threshold": 90,
+            "level": "critical",
+            "message": f"Daily budget at {budget_pct:.1f}% — shedding tier-3 work",
+            "ts": now,
+        })
+    elif budget_pct >= 80:
+        alerts.append({
+            "threshold": 80,
+            "level": "warn",
+            "message": f"Daily budget at {budget_pct:.1f}% — approaching limit",
+            "ts": now,
+        })
+    # Also check budget_state for additional context
+    if budget_state == "stop":
+        alerts.append({
+            "threshold": 100,
+            "level": "critical",
+            "message": "Daily budget exhausted — all work stopped",
+            "ts": now,
+        })
+    return alerts
+
+
+def economics_budget_status() -> dict:
+    """Return current daily budget status from token_budget module.
+
+    Returns dict with: budget_cap, budget_used, budget_remaining,
+    budget_pct, budget_state, day_utc, per_model_actual.
+    Follows same try/except ImportError pattern as scheduler_status().
+    """
+    budget_cap = 4_000_000_000  # Default CAP
+    budget_used = 0
+    budget_state = "budget-unknown"
+    day_utc = None
+    per_model: dict[str, dict[str, int]] = {}
+
+    try:
+        try:
+            from codebot.token_budget import current_day_utc, day_total, get_budget_state, CAP
+        except ImportError:
+            from bots.token_budget import current_day_utc, day_total, get_budget_state, CAP
+
+        budget_cap = CAP
+        day_utc = current_day_utc()
+        ledger_path = STATE_DIR / "token_ledger.json"
+        total = day_total(day_utc, path=ledger_path)
+        budget_used = int(total) if isinstance(total, (int, float)) else 0
+        budget_state = get_budget_state(budget_used, budget_cap)
+
+        # Read per-model actuals from ledger
+        try:
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+            if isinstance(ledger, dict) and ledger.get("day_utc") == day_utc:
+                by_model = ledger.get("by_model")
+                if isinstance(by_model, dict):
+                    for name, row in list(by_model.items())[:32]:
+                        if not isinstance(name, str) or not isinstance(row, dict):
+                            continue
+                        try:
+                            per_model[name] = {
+                                "prompt_actual": int(row.get("prompt_actual", 0) or 0),
+                                "completion_actual": int(row.get("completion_actual", 0) or 0),
+                            }
+                        except (TypeError, ValueError):
+                            continue
+        except (OSError, ValueError):
+            pass
+    except (ImportError, OSError, ValueError):
+        pass
+
+    budget_remaining = max(0, budget_cap - budget_used)
+    budget_pct = (budget_used / budget_cap * 100) if budget_cap > 0 else 0.0
+
+    return {
+        "budget_cap": budget_cap,
+        "budget_used": budget_used,
+        "budget_remaining": budget_remaining,
+        "budget_pct": round(budget_pct, 2),
+        "budget_state": budget_state,
+        "day_utc": day_utc,
+        "per_model_actual": per_model,
+    }
+
+
+def economics_summary() -> dict:
+    """Return combined economics summary: budget status + fleet cost data.
+
+    Combines token_budget data with CostTracker.build_summary() and
+    pricing_table.calculate_cost_usd() for USD conversion.
+    Includes budget alerts at 80%/90% thresholds.
+    """
+    # Get budget status
+    budget_data = economics_budget_status()
+    budget_pct = budget_data.get("budget_pct", 0.0)
+    budget_state = budget_data.get("budget_state", "budget-unknown")
+
+    # Check alerts
+    alerts = _check_budget_alerts(budget_pct, budget_state)
+
+    # Log alerts if any triggered
+    for alert in alerts:
+        level = alert.get("level", "warn")
+        msg = alert.get("message", "")
+        if level == "critical":
+            logger.warning("ECONOMICS ALERT [CRITICAL]: %s", msg)
+        else:
+            logger.info("ECONOMICS ALERT [%s]: %s", level.upper(), msg)
+
+    # Get fleet cost data from CostTracker
+    fleet_totals = {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "ticket_count": 0, "total_usd": 0.0}
+    by_model: dict[str, dict] = {}
+    by_day: dict[str, int] = {}
+
+    try:
+        try:
+            from codebot.cost_tracker import CostTracker
+        except ImportError:
+            from bots.cost_tracker import CostTracker
+
+        tracker = CostTracker(STATE_DIR)
+        summary = tracker.build_summary()
+
+        ft = summary.get("fleet_totals", {})
+        fleet_totals["total_tokens"] = int(ft.get("total_tokens", 0))
+        fleet_totals["prompt_tokens"] = int(ft.get("prompt_tokens", 0))
+        fleet_totals["completion_tokens"] = int(ft.get("completion_tokens", 0))
+        fleet_totals["ticket_count"] = int(ft.get("ticket_count", 0))
+
+        # Calculate USD costs per model using pricing_table
+        try:
+            try:
+                from codebot.pricing_table import calculate_cost_usd
+            except ImportError:
+                from bots.pricing_table import calculate_cost_usd
+
+            tickets = summary.get("tickets", {})
+            model_tokens: dict[str, dict[str, int]] = {}
+            for tid, tdata in tickets.items():
+                models = tdata.get("models", [])
+                prompt = int(tdata.get("prompt_tokens", 0))
+                completion = int(tdata.get("completion_tokens", 0))
+                # Attribute tokens to first model listed (simplified)
+                if models:
+                    model_name = models[0] if isinstance(models, list) and models else "unknown"
+                else:
+                    model_name = "unknown"
+                if model_name not in model_tokens:
+                    model_tokens[model_name] = {"prompt": 0, "completion": 0}
+                model_tokens[model_name]["prompt"] += prompt
+                model_tokens[model_name]["completion"] += completion
+
+            total_usd = 0.0
+            for model_name, tokens in model_tokens.items():
+                usd = calculate_cost_usd(model_name, tokens["prompt"], tokens["completion"])
+                by_model[model_name] = {
+                    "tokens": tokens["prompt"] + tokens["completion"],
+                    "usd": round(usd, 6),
+                }
+                total_usd += usd
+            fleet_totals["total_usd"] = round(total_usd, 6)
+        except (ImportError, OSError, ValueError):
+            pass
+
+    except (ImportError, OSError, ValueError):
+        pass
+
+    return {
+        "version": 1,
+        "generated_at": time.time(),
+        "budget": {
+            "cap": budget_data.get("budget_cap"),
+            "used": budget_data.get("budget_used"),
+            "remaining": budget_data.get("budget_remaining"),
+            "pct": budget_data.get("budget_pct"),
+            "state": budget_data.get("budget_state"),
+            "day": budget_data.get("day_utc"),
+        },
+        "fleet": fleet_totals,
+        "by_model": by_model,
+        "by_day": by_day,
+        "alerts": alerts,
+    }
+
+
 def retry_dead_letter(item_id: str) -> dict:
     try:
         try:
@@ -488,6 +1311,9 @@ def retry_dead_letter(item_id: str) -> dict:
 
 
 class ControlHandler(BaseHTTPRequestHandler):
+    def _is_loopback_client(self) -> bool:
+        return bool(self.client_address and self.client_address[0] in {"127.0.0.1", "::1"})
+
     def _auth(self) -> bool | None:
         """Validate Bearer token via Authorization header with rate limiting.
 
@@ -512,16 +1338,9 @@ class ControlHandler(BaseHTTPRequestHandler):
             return None
 
         if not CONTROL_TOKEN:
-            if CONTROL_ALLOW_UNAUTHENTICATED:
-                logger.warning(
-                    "CONTROL_TOKEN is not set but CONTROL_ALLOW_UNAUTHENTICATED=1 — "
-                    "allowing unauthenticated access (local testing only)."
-                )
-                return True
             logger.critical(
                 "SECURITY: CONTROL_TOKEN is not set — rejecting all authenticated requests. "
-                "Set CONTROL_TOKEN env var to enable API access, or set "
-                "CONTROL_ALLOW_UNAUTHENTICATED=1 for local testing. "
+                "Set CONTROL_TOKEN env var to enable API access. "
                 "This is a fail-closed security measure."
             )
             return False
@@ -556,6 +1375,17 @@ class ControlHandler(BaseHTTPRequestHandler):
         if extra_headers:
             for k, v in extra_headers.items():
                 self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _html(self, code: int, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
@@ -644,13 +1474,46 @@ class ControlHandler(BaseHTTPRequestHandler):
         # But enforce rate limiting to prevent abuse (Constitution §2).
         if path in ("/health", "/api/health"):
             client_ip = self.client_address[0] if self.client_address else "unknown"
-            allowed, reason = _rate_limiter.is_allowed(client_ip)
+            # Use separate rate limiter to isolate health checks from auth brute-force
+            allowed, reason = _health_rate_limiter.is_allowed(client_ip)
             if not allowed:
                 logger.warning("Rate limit exceeded for /health from %s: %s", client_ip, reason)
                 retry_after = str(RATE_LIMIT_COOLDOWN_SECONDS)
                 self._json(429, {"error": "too many requests", "reason": reason}, extra_headers={"Retry-After": retry_after})
                 return
             self._json(200, {"status": "ok", "time": time.time()})
+            return
+
+        if path == "/dashboard":
+            from codebot.dashboard import dashboard_page
+            self._html(200, dashboard_page())
+            return
+
+        if path == "/tickets":
+            from codebot.dashboard import ticket_explorer_page
+            self._html(200, ticket_explorer_page())
+            return
+
+        if path in ("/dashboard/snapshot", "/api/dashboard/snapshot") and self._is_loopback_client():
+            from codebot.dashboard import live_snapshot
+            self._json(200, dict(live_snapshot(BOTS_DIR.parent)))
+            return
+
+        if path in ("/tickets/snapshot", "/api/tickets/snapshot") and self._is_loopback_client():
+            from codebot.dashboard import ticket_explorer_snapshot
+            self._json(200, dict(ticket_explorer_snapshot(
+                BOTS_DIR.parent,
+                state=qs.get("state", [""])[0],
+                query=qs.get("query", [""])[0],
+                offset=qs.get("offset", [0])[0],
+                limit=qs.get("limit", [100])[0],
+            )))
+            return
+
+        if path in ("/tickets/detail", "/api/tickets/detail") and self._is_loopback_client():
+            from codebot.dashboard import ticket_explorer_detail
+            detail = ticket_explorer_detail(BOTS_DIR.parent, qs.get("id", [""])[0])
+            self._json(200 if detail else 404, detail or {"error": "ticket not found"})
             return
 
         auth_result = self._auth()
@@ -662,6 +1525,28 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         if path in ("/bots", "/api/bots"):
             self._json(200, [bot_status(c.name) for c in BOT_REGISTRY])
+            return
+
+        if path in ("/dashboard/snapshot", "/api/dashboard/snapshot"):
+            from codebot.dashboard import live_snapshot
+            self._json(200, dict(live_snapshot(BOTS_DIR.parent)))
+            return
+
+        if path in ("/tickets/snapshot", "/api/tickets/snapshot"):
+            from codebot.dashboard import ticket_explorer_snapshot
+            self._json(200, dict(ticket_explorer_snapshot(
+                BOTS_DIR.parent,
+                state=qs.get("state", [""])[0],
+                query=qs.get("query", [""])[0],
+                offset=qs.get("offset", [0])[0],
+                limit=qs.get("limit", [100])[0],
+            )))
+            return
+
+        if path in ("/tickets/detail", "/api/tickets/detail"):
+            from codebot.dashboard import ticket_explorer_detail
+            detail = ticket_explorer_detail(BOTS_DIR.parent, qs.get("id", [""])[0])
+            self._json(200 if detail else 404, detail or {"error": "ticket not found"})
             return
 
         if path in ("/scheduler/status", "/api/scheduler/status"):
@@ -811,6 +1696,15 @@ class ControlHandler(BaseHTTPRequestHandler):
                 })
             return
 
+        # Economics endpoints — read-only observability for budget/cost data
+        if path in ("/economics/budget-status", "/api/economics/budget-status"):
+            self._json(200, economics_budget_status())
+            return
+
+        if path in ("/economics/summary", "/api/economics/summary"):
+            self._json(200, economics_summary())
+            return
+
         self._json(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802
@@ -873,15 +1767,17 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not (force is True or confirm is True):
                 self._json(400, {"error": "destructive action requires 'force': true or 'confirm': true in request body; use --force flag or interactive confirmation"})
                 return
-            # ask orchestrator via pkill + let interval-aware respawn handle, or direct start
+            # Safely kill existing process using PID verification, then restart
             try:
-                # kill existing if running; apply defense-in-depth: regex validation + shlex.quote
-                quoted_name = shlex.quote(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
+                # Use safe kill with PID verification instead of pkill regex (CB-8668967-A113)
+                success, killed_pids = _safe_kill_bot_process(name, timeout=5)
+                if not success:
+                    logger.warning("restart: safe kill reported errors for bot '%s', proceeding with restart anyway", name)
                 time.sleep(1)
                 # orchestrator will respawn on next health check if waiting; force start via orchestrator CLI
                 subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "action": "restart", "bot": name,
+                                 "killed_pids": killed_pids,
                                  "undo": "Bot will auto-respawn on next orchestrator health check"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -913,10 +1809,12 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             try:
                 (STATE_DIR / f"{name}.paused").write_text(str(time.time()))
-                # Apply defense-in-depth: regex validation + shlex.quote
-                quoted_name = shlex.quote(name)
-                subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
+                # Use safe kill with PID verification instead of pkill regex (CB-8668967-A113)
+                success, killed_pids = _safe_kill_bot_process(name, timeout=5)
+                if not success:
+                    logger.warning("pause: safe kill reported errors for bot '%s'", name)
                 self._json(200, {"ok": True, "paused": name,
+                                 "killed_pids": killed_pids,
                                  "undo": f"POST /bots/{name}/resume to unpause"})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -936,9 +1834,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 p = STATE_DIR / f"{name}.paused"
                 if p.exists():
                     p.unlink()
-                # Apply defense-in-depth: regex validation + shlex.quote
-                quoted_name = shlex.quote(name)
-                subprocess.Popen(["python3", str(ORCH), "--start", quoted_name], cwd=str(BOTS_DIR))
+                # Safe: list-mode subprocess + validate_bot_name() regex check above
+                # prevents injection. Do NOT use shlex.quote with list args.
+                subprocess.Popen(["python3", str(ORCH), "--start", name], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "resumed": name})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -962,15 +1860,16 @@ class ControlHandler(BaseHTTPRequestHandler):
                         self._json(400, {"error": "invalid bot name format"})
                         return
                 # Validate each bot name against BOT_REGISTRY (Constitution §2)
+                # Return 400 for unknown bots to prevent enumeration and argument injection
                 valid_bot_names = {c.name for c in BOT_REGISTRY}
                 for n in bots:
                     if n not in valid_bot_names:
-                        self._json(404, {"error": f"unknown bot: {n}"})
+                        self._json(400, {"error": f"unknown bot: {n}"})
                         return
             try:
-                # Apply defense-in-depth: shlex.quote for each bot name
-                quoted_bots = [shlex.quote(n) for n in bots]
-                subprocess.Popen(["python3", str(ORCH), "--start", *quoted_bots], cwd=str(BOTS_DIR))
+                # Safe: list-mode subprocess + validate_bot_name() regex check above
+                # prevents injection. Do NOT use shlex.quote with list args.
+                subprocess.Popen(["python3", str(ORCH), "--start", *bots], cwd=str(BOTS_DIR))
                 self._json(200, {"ok": True, "started": bots})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -992,21 +1891,37 @@ class ControlHandler(BaseHTTPRequestHandler):
                             self._json(400, {"error": "invalid bot name format"})
                             return
                     # Validate each bot name against BOT_REGISTRY (Constitution §2)
-                    # Reject unknown bots with 404 to prevent arbitrary process targeting
+                    # Reject unknown bots with 400 to prevent arbitrary process targeting
                     valid_bot_names = {c.name for c in BOT_REGISTRY}
                     for n in bots:
                         if n not in valid_bot_names:
-                            self._json(404, {"error": f"unknown bot: {n}"})
+                            self._json(400, {"error": f"unknown bot: {n}"})
                             return
-                    # Apply defense-in-depth: regex validation + shlex.quote
+                    # Use safe kill with PID verification instead of pkill regex (CB-8668967-A113)
+                    all_killed_pids: list[int] = []
                     for n in bots:
-                        quoted_name = shlex.quote(n)
-                        subprocess.run(["pkill", "-f", f"api_runner\\.py {quoted_name}"], timeout=5)
+                        success, killed_pids = _safe_kill_bot_process(n, timeout=5)
+                        if not success:
+                            logger.warning("stop: safe kill reported errors for bot '%s'", n)
+                        all_killed_pids.extend(killed_pids)
                 else:
-                    subprocess.run(["pkill", "-f", "orchestrator.py"], timeout=5)
-                    subprocess.run(["pkill", "-f", "[a]pi_runner\\.py"], timeout=5)
-                self._json(200, {"ok": True, "stopped": bots or "all",
-                                 "undo": "Run 'start' or 'restart <bot>' to resume bots; orchestrator will auto-respawn if still running"})
+                    # Stop-all: use PID-verified killing for all registered bots
+                    # instead of raw pkill -f which can match arbitrary processes
+                    all_killed_pids = []
+                    for cfg in BOT_REGISTRY:
+                        success, killed_pids = _safe_kill_bot_process(cfg.name, timeout=5)
+                        if not success:
+                            logger.warning("stop-all: safe kill reported errors for bot '%s'", cfg.name)
+                        all_killed_pids.extend(killed_pids)
+                    # Also kill orchestrator using safe verification helper
+                    orch_success, orch_killed_pids = _safe_kill_orchestrator(timeout=5)
+                    if not orch_success:
+                        logger.warning("stop-all: safe kill reported errors for orchestrator")
+                    all_killed_pids.extend(orch_killed_pids)
+                response_data = {"ok": True, "stopped": bots or "all",
+                                 "killed_pids": all_killed_pids,
+                                 "undo": "Run 'start' or 'restart <bot>' to resume bots; orchestrator will auto-respawn if still running"}
+                self._json(200, response_data)
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -1069,6 +1984,15 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._json(429, {"error": "too many requests", "reason": reason}, extra_headers={"Retry-After": retry_after})
             return
 
+        # Fail-closed guard: Reject telemetry when CONTROL_TOKEN is empty (CB-B4086).
+        # No opt-in flag may re-enable unauthenticated access (Constitution §2).
+        if not CONTROL_TOKEN:
+            logger.warning(
+                "SECURITY: Telemetry request rejected because CONTROL_TOKEN is empty."
+            )
+            self._json(401, {"error": "unauthorized", "hint": CONTROL_UNAUTHORIZED_HINT})
+            return
+
         # Check telemetry-specific auth using constant-time comparison (Constitution §2)
         if TELEMETRY_TOKEN:
             auth = self.headers.get("Authorization", "")
@@ -1078,8 +2002,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 logger.warning("Telemetry authentication failed for %s", client_ip)
                 self._json(401, {"error": "unauthorized", "hint": TELEMETRY_UNAUTHORIZED_HINT})
                 return
-        elif not CONTROL_TOKEN:
-            # If neither token is set, reject telemetry (safer default)
+        else:
+            # TELEMETRY_TOKEN not configured — reject telemetry (fail-closed, Constitution §2)
             self._json(401, {"error": "telemetry token not configured", "hint": TELEMETRY_NOT_CONFIGURED_HINT})
             return
 

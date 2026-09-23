@@ -1,102 +1,114 @@
 # CodeBot
 
-Portable autonomous software engineering platform.
+**Autonomous Software Engineering Platform**
 
-CodeBot discovers, plans, implements, reviews, and verifies software changes across any sufficiently documented repository — without project-specific knowledge baked into its core.
+CodeBot is an autonomous software engineering environment capable of creating, understanding, documenting, maintaining, testing, reviewing, and continuously improving software projects.
 
-## Architecture
+It can begin with either an existing repository or a user description of a new application.
+
+Once initialized, CodeBot manages the engineering lifecycle through discovery, decomposition, planning, implementation, review, verification, QA, documentation, and continuous improvement while providing users with an interface for requirements, feature requests, revisions, approvals, and progress monitoring.
+
+---
+
+## Two Entry Points, One Platform
 
 ```
-.codebot/                  # Project contract (per-repository)
-├── project.yaml           # Standardized project interface
-├── constitution.md        # Protected invariants
-└── quality_gates.yaml     # Verification policy
+                     CODEBOT
+                        │
+          ┌─────────────┴─────────────┐
+          │                           │
+          ▼                           ▼
+ EXISTING SOFTWARE              NEW APPLICATION
 
-codebot/                   # CodeBot core (portable, no project knowledge)
-── __init__.py
-├── __main__.py
-├── adaptive_rate_limiter.py   # Adaptive rate limiting based on API provider feedback
-├── adaptive_scheduler.py      # Core 30-slot adaptive concurrency scheduler control loop
-├── alignment_coordinator.py   # Coordinates alignment pipeline across agents
-├── alignment_events.py        # Alignment event bus for reward scoring and prompt evolution
-├── alignment_service.py       # Decoupled alignment pipeline for reward scoring
-├── anomaly_alerts.py          # Anomaly detection on metrics
-├── api_runner.py              # LLM execution loop: prompt assembly, tool dispatch, claim (commit happens at COMPLETE, not here)
-├── api_tools.py               # read/write/edit/bash/grep/glob tool implementations
-├── auto_revert.py             # Automatic rollback on build gate failure
-├── batch_scheduler.py         # Tier-based batch ordering, concurrency packing
-├── bot_metrics.py             # Per-bot performance metrics collection and reporting
-├── botop.py                   # Standalone CLI for agent operations (status, logs, restart, drain)
-├── checkpoint_manager.py      # Agent checkpoint save/restore for crash recovery
-├── codebot_adapter.py         # Self-hosting adapter: CodeBot manages its own repo
-├── codebot_bootstrap.py       # Adapter discovery, injection into core modules
-├── completion_commit.py       # Per-ticket scoped git commit at COMPLETE + SHA traceability
-├── config_reloader.py         # Hot-reloading for prompts, source code, and bot registry config
-├── conflict_detector.py       # File/module overlap detection between concurrent tickets
-├── context_compactor.py       # Sliding window message summarization
-├── control_client.py          # Stdlib HTTP client for control server
-├── control_server.py          # HTTP control plane: agent status, logs, restart, drain
-├── cost_tracker.py            # Per-ticket cost attribution and fleet summaries
-├── coverage_bridge.py         # Generates tickets from coverage gaps
-├── coverage_runner.py         # Runs pytest-cov, parses per-module coverage reports
-├── credentials.py             # SSH/GitHub/API credential resolution from env or secret files
-├── dependency_graph.py        # DAG construction, cycle detection, topological sort
-├── discovery_manager.py       # Discovery cooldown, yield stats, diversity allocation
-├── dispatch_service.py        # Ticket dispatch orchestration service
-├── event_log.py               # Append-only event persistence
-├── file_lock.py               # Cross-process file locking primitives
-├── findings_log.py            # Findings persistence
-├── freeze_detector.py         # Detects and handles process freeze conditions
-├── gatekeeper.py              # Central completion authority, max 3 rework cap; commits COMPLETE tickets' files
-├── health_check.py            # Standalone health evaluation + eligible-bot startup
-├── health_monitor.py          # Heartbeat monitoring, stuck/log-stall detection (BotState API)
-├── implementation_planner.py  # Depth-scaled plan generation (summary/standard/full)
-├── integration_queue.py       # Integration queue with dependency-aware merge ordering
-├── lease_state.py             # Distributed coordination via file-based leases
-├── lifecycle_scheduler.py     # Process lifecycle management and scheduling
-├── locks.py                   # Cross-platform flock primitives (single source of truth)
-├── manifest_schema.py         # Manifest loading and validation
-├── metrics_collector.py       # Per-agent telemetry: execution, alignment, progress, quality
-├── metrics_service.py         # Per-bot metrics snapshots for status views
-├── migrate_queue.py           # One-time QUEUE.md → TicketStore migration script
-├── model_router.py            # Multi-provider model routing with fallback
-├── model_manager.py           # Model profiles: heartbeat multipliers, stall thresholds, lockup risk
-├── monitor_adapter.py         # Concrete Monitor Platform adapter implementation
-├── orchestrator.py            # Process lifecycle: start, stop, health, heartbeat, drain
-├── orchestrator_services.py   # Supporting services for the orchestrator
-├── pipeline_state.py          # Frozen dataclass snapshot of entire engineering pipeline
-├── pricing_table.py           # Model pricing table for monetary cost calculation
-├── process_manager.py         # OS process spawning, monitoring, and cleanup
-├── project_adapter.py         # Abstract base class defining the 13-method adapter interface
-├── prompt_gateway.py          # Prompt compression, shared contract injection, spawn gating
-├── prompt_optimizer.py        # Consumes RL alignment triggers to evolve agent prompts
-├── quality_gate.py            # YAML-driven gate engine, subprocess evaluation, file-hash pass cache
-├── quality_metrics.py         # Quality-specific metrics tracking and reporting
-├── queue_pressure.py          # Queue pressure ratios and bottleneck detection
-├── readiness.py               # Readiness checks, noop detection, queue complexity parsing
-├── review_config.py           # Blocking-severity policy + review config loading
-├── review_metrics.py          # Review metrics aggregation
-├── review_types.py            # ReviewDecision/StructuredFinding/CompletionEvidence types
-├── risk_classifier.py         # Deterministic risk scoring (0-100), autonomy decisions
-├── rl_engine.py               # Epsilon-greedy bandit optimization, Q-value updates
-├── role_prompt.py             # Role template loading, project context injection
-├── role_registry.py           # ROLE + TASK + MODEL + TOOL_POLICY abstraction (29 roles)
-├── scheduler_config.py        # Centralized configuration for adaptive scheduler
-├── scheduler_metrics.py       # Throughput metrics: utilization, cycle time, cost per ticket
-├── scratchpad.py              # Ticket-scoped cross-agent context handoff
-├── stale_branch_detector.py   # Stale branch detection and cleanup
-├── state_manager.py           # Centralized state management for runtime data
-├── stats_collector.py         # Per-model API call statistics tracking
-├── task_splitter.py           # Decomposes oversized tickets into ≤10 sub-tasks
-├── telemetry.py               # HTTP ingestion endpoint for production telemetry signals
-├── ticket_dispatcher.py       # Dispatches tickets to appropriate agent roles; commits COMPLETE tickets' files
-├── ticket_engine.py           # Normalized ticket schema v2, 14-state machine, SHA-256 dedup; records commit_sha
-├── token_budget.py            # Fleet-wide token ledger, UTC-day accounting
-├── tool_policy.py             # Sandbox boundary: path resolution, command allowlisting
-├── web_tools.py               # SSRF-safe internet research (web_search, web_fetch)
-├── worker_scaler.py           # Dynamic worker count scaling based on queue pressure
-└── work_scorer.py             # Utility scoring: priority + bottleneck + dependency + aging
+ Point at repository            Describe application
+          │                           │
+          ▼                           │
+ Understand                     Define requirements
+ Document                       Design architecture
+ Analyze                        Create repository
+          │                           │
+          └─────────────┬─────────────┘
+                        ▼
+              AUTONOMOUS ENGINEERING
+                        │
+      ┌─────────────────┼─────────────────┐
+      │                 │                 │
+      ▼                 ▼                 ▼
+  Discover          User Requests        QA
+      │                 │                 │
+      └─────────────────┼─────────────────┘
+                        ▼
+                   Decompose
+                        ↓
+                      Plan
+                        ↓
+                   Implement
+                        ↓
+                     Review
+                        ↓
+                     Verify
+                        ↓
+                   Document
+                        ↓
+                     Release
+                        ↓
+               Continuous Improvement
+                        ↑
+                        │
+                User monitors progress
+                requests new features
+                performs QA
+                revises requirements
 ```
+
+---
+
+## What You Can Do
+
+### For Existing Software
+
+```text
+"Here is my repository.
+Understand it, document it, and make it better."
+```
+
+CodeBot will:
+- Analyze repository structure, languages, frameworks, and dependencies
+- Generate comprehensive project documentation
+- Discover bugs, security issues, and improvement opportunities
+- Create and implement fixes autonomously
+- Add tests and improve coverage
+- Continuously improve the codebase
+
+### For New Software
+
+```text
+"Here is what I want to build.
+Build it."
+```
+
+CodeBot will:
+- Extract requirements from your description
+- Design the architecture
+- Create the repository and project structure
+- Implement the application
+- Test and verify functionality
+- Generate documentation
+- Accept revisions and new features
+
+### After Initialization
+
+```text
+"Add this feature."
+"Fix this bug."
+"Change this behavior."
+"This isn't working correctly."
+"What's the current progress?"
+```
+
+CodeBot translates high-level human intentions into the engineering work necessary to evolve the software.
+
+---
 
 ## Quick Start
 
@@ -107,48 +119,169 @@ pip install -e .
 # Run tests
 python3 -m pytest -q
 
-# Bootstrap with a project
+# Bootstrap with an existing project
 python3 -m codebot.codebot_bootstrap --project-root /path/to/your/project
 ```
 
+---
+
 ## How It Works
 
-1. **Project Contract**: Every managed repository contains a `.codebot/` directory with `project.yaml` (structure, paths, testing, dependencies) and `constitution.md` (protected invariants agents cannot weaken).
+### Autonomous Engineering Core
 
-2. **Adapter Injection**: `codebot_bootstrap.py` discovers the project's adapter and injects it into all core modules via `set_project_adapter()`. Core resolves paths/config through the adapter, never through hardcoded values.
+CodeBot's autonomous engineering pipeline handles the complete software development lifecycle:
 
-3. **Ticket Lifecycle**: All work flows through normalized tickets: DISCOVERED → VALIDATING → TRIAGED → READY → PLANNING → IMPLEMENTING → REVIEWING → VERIFYING → COMPLETE. Deduplication via SHA-256 evidence hashing prevents duplicate work.
+1. **Discovery**: Continuously identifies work from source inspection, security scans, test gaps, documentation drift, and user feedback
+2. **Decomposition**: Breaks work into manageable, independent engineering tasks
+3. **Planning**: Creates implementation plans with risk assessment and dependency analysis
+4. **Implementation**: Executes changes using specialized agent roles
+5. **Review**: Adversarial multi-agent review ensures quality
+6. **Verification**: Deterministic quality gates validate all changes
+7. **Documentation**: Maintains project documentation as code evolves
+8. **Continuous Improvement**: Proactively finds and implements improvements
 
-4. **Quality Gates**: YAML-defined verification policies enforce build, test, security, and documentation gates. Only the central gatekeeper may transition tickets to COMPLETE. Gate passes are cached by file hash (24h TTL) so unchanged re-runs skip subprocesses.
+### Project Model
 
-5. **Role-Based Agents**: 29 registered roles across discovery/planning/implementation/review/control categories, with 40 prompt files. Each role specifies required model capabilities, tool permissions, and adversarial relationships.
+CodeBot maintains a comprehensive project model that goes beyond the repository:
 
-6. **Completion Commits**: After VERIFYING → COMPLETE, the ticket's own files are committed with a `[CB-xxx]` message and the SHA is recorded on the ticket (`commit_sha`). Commits are scoped (never `add -A`) and fail-open. No push — push stays batched/periodic.
+- **Intent**: What the software is trying to achieve
+- **Requirements**: Functional and non-functional requirements
+- **Features**: Implemented and planned features
+- **Architecture**: System design decisions and constraints
+- **Quality**: Test coverage, security posture, performance
+- **Progress**: What's done, in progress, and planned
+- **Decisions**: Key architectural and product decisions
+- **History**: Major events and changes
 
-7. **Risk-Driven Autonomy**: Deterministic risk scoring (0-100) drives autonomy decisions. Constitution-protected categories always score 100 (human required). Low-risk documentation/test changes proceed autonomously.
+### User Interface
 
-## Adding a New Project
+CodeBot provides a user-facing interface for:
 
-Create a `.codebot/project.yaml` and implement `ProjectAdapter`:
+- **Requirements**: Define what you want to build
+- **Feature Requests**: Add new capabilities at any time
+- **Revisions**: Modify behavior without knowing the code
+- **QA Feedback**: Report issues and provide feedback
+- **Decisions**: Answer questions about product direction
+- **Progress**: Monitor what CodeBot is doing
+- **Approvals**: Control high-risk changes
 
-```python
-from codebot.project_adapter import ProjectAdapter
+---
 
-class MyProjectAdapter(ProjectAdapter):
-    def project_name(self) -> str:
-        return "my-project"
-    # ... implement all abstract methods
+## Architecture Overview
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    USER INTERFACE                          │
+│                                                            │
+│  New Application · Existing Repository                    │
+│  Feature Requests · Revisions · QA Feedback               │
+│  Requirements · Progress · Decisions / Approvals          │
+└──────────────────────────────┬─────────────────────────────┘
+                               │
+                               ▼
+┌────────────────────────────────────────────────────────────┐
+│               PROJECT INTENT MODEL                         │
+│                                                            │
+│  Goals · Requirements · Constraints · Features             │
+│  Acceptance Criteria · Architecture Decisions              │
+└──────────────────────────────┬─────────────────────────────┘
+                               │
+                               ▼
+┌────────────────────────────────────────────────────────────┐
+│             AUTONOMOUS ENGINEERING CORE                    │
+│                                                            │
+│  Discovery · Decomposition · Planning                      │
+│  Implementation · Review · Verification                    │
+│  QA · Documentation · Workforce Allocation                 │
+└──────────────────────────────┬─────────────────────────────┘
+                               │
+                               ▼
+┌────────────────────────────────────────────────────────────┐
+│                  SOFTWARE PROJECT                          │
+│                                                            │
+│  Source Code · Tests · Documentation                       │
+│  Infrastructure · Configuration · Builds                   │
+└──────────────────────────────┬─────────────────────────────┘
+                               │
+                               ▼
+┌────────────────────────────────────────────────────────────┐
+│              CONTINUOUS IMPROVEMENT                        │
+│                                                            │
+│  Bugs · Security · Performance · UX                       │
+│  Architecture · Dependencies · Tests · Docs                │
+└────────────────────────────────────────────────────────────┘
 ```
 
-Then bootstrap:
-```python
-from codebot.codebot_bootstrap import bootstrap
-adapter = bootstrap(Path("/path/to/my-project"))
+---
+
+## Core Capabilities
+
+### Ticket Lifecycle
+
+All work flows through normalized structured tickets:
+
 ```
+DISCOVERED → VALIDATING → TRIAGED → READY → PLANNING → IMPLEMENTING → REVIEWING → VERIFYING → COMPLETE
+```
+
+With side states for exceptions:
+
+```
+BLOCKED · REWORK · REJECTED · DUPLICATE · DEFERRED · HUMAN_REQUIRED
+```
+
+### Role-Based Agents
+
+29 registered roles across 5 categories:
+
+- **Discovery**: Bug hunters, security auditors, architecture auditors, performance auditors
+- **Planning**: Decomposers, implementation planners, dependency planners
+- **Implementation**: General, backend, frontend, test, migration, documentation implementers
+- **Review**: Correctness, security, architecture, test, performance, simplicity reviewers
+- **Control**: Scheduler, quality gate, conflict resolver, budget controller
+
+### Quality Gates
+
+YAML-defined verification policies enforce:
+
+- Build validation
+- Test execution
+- Security scanning
+- Documentation review
+- Architecture compliance
+
+### Adaptive Workforce
+
+Dynamic allocation of engineering capacity based on queue pressure, risk, and dependencies.
+
+---
+
+## Documentation
+
+CodeBot generates and maintains documentation including:
+
+- Project overview and README
+- Architecture documentation
+- API documentation
+- Module documentation
+- Data model documentation
+- Deployment instructions
+- Configuration reference
+- Testing strategy
+- Security model
+- User documentation
+
+Documentation is synchronized with code changes and maintained continuously.
+
+---
+
+## Security & Credentials
+
+For details on how CodeBot manages secrets, SSH keys, and API tokens, see [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Version
 
-0.2.0 — Portable core extracted from Monitor-BotNet.
+0.2.0 — Portable autonomous software engineering platform.
 
 ## License
 

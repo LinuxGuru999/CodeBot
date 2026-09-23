@@ -27,6 +27,7 @@ Invariants
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -182,9 +183,13 @@ def _create_ticket_from_signal(data: dict[str, Any], state_dir: Path) -> dict[st
         return {"success": False, "error": str(ve)}
 
     store_path = state_dir / "tickets.json"
+    store = None
     try:
         store = TicketStore(store_path)
         stored = store.add(ticket)
+        # Force synchronous persist so subsequent TicketStore instances (and tests)
+        # observe the ticket immediately; TicketStore.add() is debounced async.
+        store.flush()
         logger.info(
             "Telemetry ticket created: %s (state=%s, requires human triage)",
             stored.id,
@@ -197,6 +202,12 @@ def _create_ticket_from_signal(data: dict[str, Any], state_dir: Path) -> dict[st
     except Exception as e:
         logger.error("Failed to store telemetry ticket: %s", e)
         return {"success": False, "error": f"store failed: {e}"}
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
 
 
 class TelemetryHandler(BaseHTTPRequestHandler):
@@ -211,7 +222,7 @@ class TelemetryHandler(BaseHTTPRequestHandler):
         if not TELEMETRY_TOKEN:
             return False
         auth = self.headers.get("Authorization", "")
-        return auth.strip() == f"Bearer {TELEMETRY_TOKEN}"
+        return hmac.compare_digest(auth.strip(), f"Bearer {TELEMETRY_TOKEN}")
 
     def _send_security_headers(self) -> None:
         """Apply security headers per Constitution §2."""
@@ -287,7 +298,7 @@ class TelemetryHandler(BaseHTTPRequestHandler):
         # Determine state directory
         state_dir = Path(os.environ.get(
             "CODEBOT_STATE_DIR",
-            str(Path(__file__).parent / ".codebot" / "state"),
+            str(Path(__file__).parent.parent / ".codebot" / "state"),
         ))
         state_dir.mkdir(parents=True, exist_ok=True)
 

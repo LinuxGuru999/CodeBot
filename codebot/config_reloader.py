@@ -6,6 +6,7 @@ triggering graceful respawns when updates are detected.
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, TYPE_CHECKING
@@ -20,31 +21,68 @@ def check_prompt_changes(
     bots: Dict[str, "BotState"],
     bots_dir: Path,
     stop_bot_fn: Any,
+    adapter: Optional[Any] = None,
 ) -> None:
     """Check for prompt file changes and trigger graceful respawn.
     
+    Uses atomic mtime read under exclusive flock (via _prompt_read_lock)
+    to prevent TOCTOU race conditions. Uses nanosecond precision (st_mtime_ns)
+    to handle filesystem granularity issues and ensure rapid successive updates
+    are detected.
+    
     Args:
         bots: Dictionary of bot states
-        bots_dir: Root directory containing prompt files
+        bots_dir: Root directory containing prompt files (fallback if adapter is None)
         stop_bot_fn: Callback to stop a bot (signature: stop_bot(bot, reason))
+        adapter: Optional ProjectAdapter instance; if provided, resolves prompt
+                 directory via adapter.prompt_directory(), otherwise uses bots_dir.
     """
+    # Lazy import to avoid circular dependency issues
+    from codebot.process_manager import _prompt_read_lock
+    
+    # Resolve effective directory: adapter takes precedence, fallback to explicit bots_dir
+    if adapter is not None:
+        try:
+            effective_dir = adapter.prompt_directory()
+        except Exception:
+            effective_dir = bots_dir
+    else:
+        effective_dir = bots_dir
+    
     for name, bot in bots.items():
         if not bot.config.enabled:
             continue
-        prompt_path = bots_dir / bot.config.prompt_file
+        prompt_path = effective_dir / bot.config.prompt_file
+        current_mtime_ns = 0
+        
+        # Atomic mtime read: acquire exclusive lock, stat (single call), then release
+        # Using st_mtime_ns (integer nanoseconds) avoids float precision issues
+        # and TOCTOU races from separate exists()/stat() calls.
         try:
-            current_mtime = prompt_path.stat().st_mtime if prompt_path.exists() else 0.0
-        except OSError:
-            current_mtime = 0.0
-        if current_mtime == 0.0:
+            with _prompt_read_lock(prompt_path):
+                current_mtime_ns = prompt_path.stat().st_mtime_ns
+        except (OSError, FileNotFoundError):
+            # File doesn't exist or can't be opened; skip this tick
             continue
-        if bot.last_prompt_mtime > 0 and current_mtime > bot.last_prompt_mtime:
+        
+        if current_mtime_ns == 0:
+            continue
+        
+        # Ensure bot.last_prompt_mtime is treated as nanoseconds (int)
+        # If it was initialized as float (seconds), convert on first comparison
+        last_mtime_ns = bot.last_prompt_mtime
+        if isinstance(last_mtime_ns, float):
+            # Convert float seconds to int nanoseconds
+            last_mtime_ns = int(last_mtime_ns * 1e9)
+            bot.last_prompt_mtime = last_mtime_ns  # Update stored value to int
+        
+        if last_mtime_ns > 0 and current_mtime_ns > last_mtime_ns:
             alive = bot.process is not None and bot.process.poll() is None
             if alive:
                 logger.info(f"Prompt changed for '{name}' \u2014 triggering live reload (graceful respawn)")
                 stop_bot_fn(bot, "prompt-hot-reload")
                 bot.next_run_at = time.time()
-        bot.last_prompt_mtime = current_mtime
+        bot.last_prompt_mtime = current_mtime_ns
 
 
 def get_code_mtimes(pkg_dir: Path) -> Dict[str, float]:

@@ -30,10 +30,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from codebot.scheduler_config import MAX_CONCURRENT_AGENTS
+
 logger = logging.getLogger("prompt_gateway")
 
-MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", "30")))
-MIN_SPAWN_GAP = int(os.getenv("BOTNET_MIN_SPAWN_GAP", os.getenv("CODEBOT_MIN_SPAWN_GAP", "15")))
+MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", str(MAX_CONCURRENT_AGENTS))))
 
 try:
     from codebot.adaptive_rate_limiter import rate_limiter
@@ -141,9 +142,9 @@ def _common_contract(bot: str, heartbeat_file: str, ckpt_file: str, state_dir: s
     align_scores = sd / "alignment_scores.json"
     align_trigger = sd / "alignment_triggers" / f"{bot}.evolve.json"
     return f"""[SHARED INFRA CONTRACT — identical for every bot]
-- Drain: before startup and between atomic tasks, run `bash` with `python3 -c "import os,sys; sys.exit(0 if os.path.exists('{drain}') or os.path.exists('{update_lock}') else 1)"` to check for drain. If exit code is 0, exit 0 cleanly; you will be respawned. Do NOT use the `read` tool for drain checks.
+- Drain: if `bash` is in your allowed tools list, before startup and between atomic tasks run `bash` with `python3 -m codebot.check_drain` to check for drain. If exit code is 0, exit 0 cleanly; you will be respawned. If `bash` is NOT in your allowed tools, SKIP this step entirely — the orchestrator handles drain gating for you. Do NOT attempt bash calls if your role does not permit them.
 - Heartbeat: write float Unix time to {heartbeat_file} at startup, after every atomic task, and every 60s while waiting on subagents. Never exceed 120s gap or you are restarted. Use the `write` tool with just the timestamp string.
-- Checkpoint: after every atomic task (and at startup) write <4KB JSON to {ckpt_file} via tmp+replace. Keys: bot, scan_iteration, current_task, completed_tasks, queue_remaining, findings_so_far, updated_at, reason. On startup resume current_task/queue_remaining, never redo completed_tasks; prefer an injected CHECKPOINT HANDOFF block over the file.
+- Checkpoint: platform-owned only. Do NOT write {ckpt_file} directly; report progress through scratchpad/status updates. The runner validates and persists checkpoints. If you must include state, keep it under 4KB JSON with keys bot, updated_at, reason. On startup prefer an injected CHECKPOINT HANDOFF block over the file.
 - Alignment: on startup and clean exit read {align_scores} and {align_trigger}. Score 80+ clears stale triggers; score <60 with fresh trigger means prompt evolution will improve this agent's prompt. You do NOT self-evolve.
 - Research: prefer web_search/webfetch/context7/gh code search over guessing; verify, then write.
 - Bound: you are a bounded delegated task, not a daemon. Do atomic work, heartbeat, checkpoint, exit 0 on drain or SESSION_TIMEOUT.
@@ -190,24 +191,15 @@ def running_count(bots: dict) -> int:
 
 
 def spawn_allowed(bots: dict, model: str = "") -> tuple[bool, str]:
-    """Check the global spawn gate without mutating state."""
-    running = running_count(bots)
-    if running >= MAX_CONCURRENT:
-        return False, f"{running} running at cap {MAX_CONCURRENT}"
-    gap = time.time() - _last_spawn_ts
-    if gap < MIN_SPAWN_GAP:
-        return False, f"spawn gap {gap:.0f}s < {MIN_SPAWN_GAP}s"
     if _HAS_RATE_LIMITER and rate_limiter and model:
-        can_spawn, reason = rate_limiter.can_spawn(model)
+        can_spawn, reason = rate_limiter.can_spawn_now(model)
         if not can_spawn:
             return False, reason
     return True, "slot available"
 
 
 def note_spawn() -> None:
-    """Record a successful spawn for gap pacing."""
-    global _last_spawn_ts
-    _last_spawn_ts = time.time()
+    pass
 
 
 def estimate_tokens(text: str) -> int:

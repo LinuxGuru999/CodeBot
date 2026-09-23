@@ -40,12 +40,42 @@ class TestSecurityHeadersOnResponses(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Start a test HTTP server."""
+        from codebot.control_server import _rate_limiter, _health_rate_limiter
+        for _lim in (_rate_limiter, _health_rate_limiter):
+            try:
+                with _lim._lock:
+                    _lim._failures.pop("127.0.0.1", None)
+                    _lim._blocked_until.pop("127.0.0.1", None)
+            except Exception:
+                pass
         cls.port = _find_free_port()
         cls.server = ThreadingHTTPServer(("127.0.0.1", cls.port), ControlHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         # Give server a moment to start
         time.sleep(0.1)
+
+    def setUp(self):
+        """Reset global rate limiters AND re-sync CONTROL_TOKEN.
+
+        Earlier test modules reload codebot.control_server with different
+        CONTROL_TOKEN values (module-global, read at import time). This
+        module's server was started with "test-token-for-security-headers",
+        so re-assert the env var and module global before each test; also
+        clear rate limiter state so tests are order-independent.
+        """
+        os.environ["CONTROL_TOKEN"] = "test-token-for-security-headers"
+        os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
+        import codebot.control_server as _cs_live
+        _cs_live.CONTROL_TOKEN = "test-token-for-security-headers"
+        from codebot.control_server import _rate_limiter, _health_rate_limiter
+        for _lim in (_rate_limiter, _health_rate_limiter):
+            try:
+                with _lim._lock:
+                    _lim._failures.pop("127.0.0.1", None)
+                    _lim._blocked_until.pop("127.0.0.1", None)
+            except Exception:
+                pass
 
     @classmethod
     def tearDownClass(cls):
@@ -139,6 +169,19 @@ class TestSecurityHeadersOnResponses(unittest.TestCase):
         status, headers, body = self._get("/bots", headers=auth_headers)
         self.assertEqual(status, 401)
         self._assert_security_headers(headers, "GET /bots (401 wrong token)")
+
+    def test_internal_error_response_has_security_headers(self):
+        """500 responses must include all security headers.
+
+        Triggers a 500 by mocking bot_status to raise, verifying that even
+        unhandled exceptions produce responses with Constitution §2 headers.
+        """
+        auth_headers = {"Authorization": "Bearer test-token-for-security-headers"}
+        with patch("codebot.control_server.bot_status", side_effect=RuntimeError("simulated failure")):
+            status, headers, body = self._get("/bots", headers=auth_headers)
+        # The handler should catch the exception and return 500 via _json or send_error
+        self.assertEqual(status, 500, f"Expected 500 but got {status}: {body}")
+        self._assert_security_headers(headers, "GET /bots (500 internal error)")
 
 
 if __name__ == "__main__":

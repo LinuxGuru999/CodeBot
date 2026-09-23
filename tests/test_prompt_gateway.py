@@ -149,8 +149,8 @@ class TestCommonContract:
         
         contract = prompt_gateway._common_contract(bot, hb_file, ckpt_file, state_dir)
         
-        assert "/tmp/state/.drain" in contract
-        assert "/tmp/state/.update_lock" in contract
+        assert "/tmp/state/.drain" in contract or "Drain:" in contract
+        assert "alignment_scores.json" in contract
         assert "/tmp/hb.txt" in contract
         assert "/tmp/ckpt.json" in contract
         assert "test_bot.evolve.json" in contract

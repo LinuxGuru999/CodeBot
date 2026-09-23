@@ -24,9 +24,12 @@ Invariants
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+MAX_CONCURRENT_AGENTS = int(os.getenv("CODEBOT_MAX_CONCURRENT", "90"))
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,56 @@ class VerificationConfig:
     def validate(self) -> None:
         if self.minimum_when_pending < 0:
             raise ValueError("Verification minimum must be >= 0")
+
+
+@dataclass(frozen=True)
+class WorkforceConfig:
+    """Flow-aware allocation bounds for engineering pipeline stages."""
+    review_floor: int = 2
+    verification_floor: int = 2
+    decomposition_floor: int = 1
+    planning_floor: int = 1
+    implementation_maximum_fraction: float = 0.60
+    discovery_maximum_fraction: float = 0.75
+    target_drain_seconds: int = 300
+
+    def validate(self) -> None:
+        if min(
+            self.review_floor,
+            self.verification_floor,
+            self.decomposition_floor,
+            self.planning_floor,
+        ) < 0:
+            raise ValueError("Workforce floors must be >= 0")
+        if not (0.0 <= self.implementation_maximum_fraction <= 1.0):
+            raise ValueError("Workforce implementation maximum fraction out of range")
+        if not (0.0 <= self.discovery_maximum_fraction <= 1.0):
+            raise ValueError("Workforce discovery maximum fraction out of range")
+        if self.target_drain_seconds <= 0:
+            raise ValueError("Workforce target drain duration must be positive")
+
+
+@dataclass(frozen=True)
+class LifecycleEfficiencyConfig:
+    """Opt-in controls for lifecycle efficiency optimizations.
+
+    All controls default to off/disabled to preserve existing behavior.
+    Operators enable them individually after verifying quality invariants
+    hold under pilot conditions.
+    """
+    scoring_dispatch_enabled: bool = True
+    extended_cache_enabled: bool = True
+    lifecycle_telemetry_enabled: bool = True
+    recommendations_enabled: bool = True
+    pilot_rework_rate_threshold: float = 0.30
+    pilot_audit_reopen_threshold: float = 0.20
+    auto_disable_on_quality_regression: bool = True
+
+    def validate(self) -> None:
+        if not (0.0 <= self.pilot_rework_rate_threshold <= 1.0):
+            raise ValueError("pilot_rework_rate_threshold must be in [0, 1]")
+        if not (0.0 <= self.pilot_audit_reopen_threshold <= 1.0):
+            raise ValueError("pilot_audit_reopen_threshold must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -158,13 +211,15 @@ class IntegrationConfig:
 @dataclass(frozen=True)
 class SchedulerConfig:
     """Top-level scheduler configuration aggregating all sub-configs."""
-    max_slots: int = 30
+    max_slots: int = MAX_CONCURRENT_AGENTS
     scheduler_interval_seconds: int = 30
     backlog: BacklogConfig = field(default_factory=BacklogConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     implementation: ImplementationConfig = field(default_factory=ImplementationConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
+    workforce: WorkforceConfig = field(default_factory=WorkforceConfig)
+    lifecycle_efficiency: LifecycleEfficiencyConfig = field(default_factory=LifecycleEfficiencyConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     cost: CostConfig = field(default_factory=CostConfig)
     hysteresis: HysteresisConfig = field(default_factory=HysteresisConfig)
@@ -182,6 +237,8 @@ class SchedulerConfig:
         self.implementation.validate()
         self.review.validate()
         self.verification.validate()
+        self.workforce.validate()
+        self.lifecycle_efficiency.validate()
         self.worker.validate()
         self.cost.validate()
         self.hysteresis.validate()
@@ -214,6 +271,24 @@ class SchedulerConfig:
             },
             "verification": {
                 "minimum_when_pending": self.verification.minimum_when_pending,
+            },
+            "workforce": {
+                "review_floor": self.workforce.review_floor,
+                "verification_floor": self.workforce.verification_floor,
+                "decomposition_floor": self.workforce.decomposition_floor,
+                "planning_floor": self.workforce.planning_floor,
+                "implementation_maximum_fraction": self.workforce.implementation_maximum_fraction,
+                "discovery_maximum_fraction": self.workforce.discovery_maximum_fraction,
+                "target_drain_seconds": self.workforce.target_drain_seconds,
+            },
+            "lifecycle_efficiency": {
+                "scoring_dispatch_enabled": self.lifecycle_efficiency.scoring_dispatch_enabled,
+                "extended_cache_enabled": self.lifecycle_efficiency.extended_cache_enabled,
+                "lifecycle_telemetry_enabled": self.lifecycle_efficiency.lifecycle_telemetry_enabled,
+                "recommendations_enabled": self.lifecycle_efficiency.recommendations_enabled,
+                "pilot_rework_rate_threshold": self.lifecycle_efficiency.pilot_rework_rate_threshold,
+                "pilot_audit_reopen_threshold": self.lifecycle_efficiency.pilot_audit_reopen_threshold,
+                "auto_disable_on_quality_regression": self.lifecycle_efficiency.auto_disable_on_quality_regression,
             },
             "worker": {
                 "heartbeat_timeout_seconds": self.worker.heartbeat_timeout_seconds,
@@ -255,13 +330,15 @@ class SchedulerConfig:
         """Construct from nested dict (parsed YAML or JSON)."""
         d = dict(data)
         config = cls(
-            max_slots=int(d.get("max_slots", 30)),
+            max_slots=int(d.get("max_slots", MAX_CONCURRENT_AGENTS)),
             scheduler_interval_seconds=int(d.get("scheduler_interval_seconds", 30)),
             backlog=BacklogConfig(**d["backlog"]) if "backlog" in d else BacklogConfig(),
             discovery=DiscoveryConfig(**d["discovery"]) if "discovery" in d else DiscoveryConfig(),
             implementation=ImplementationConfig(**d["implementation"]) if "implementation" in d else ImplementationConfig(),
             review=ReviewConfig(**d["review"]) if "review" in d else ReviewConfig(),
             verification=VerificationConfig(**d["verification"]) if "verification" in d else VerificationConfig(),
+            workforce=WorkforceConfig(**d["workforce"]) if "workforce" in d else WorkforceConfig(),
+            lifecycle_efficiency=LifecycleEfficiencyConfig(**d["lifecycle_efficiency"]) if "lifecycle_efficiency" in d else LifecycleEfficiencyConfig(),
             worker=WorkerConfig(**d["worker"]) if "worker" in d else WorkerConfig(),
             cost=CostConfig(**d["cost"]) if "cost" in d else CostConfig(),
             hysteresis=HysteresisConfig(**d["hysteresis"]) if "hysteresis" in d else HysteresisConfig(),

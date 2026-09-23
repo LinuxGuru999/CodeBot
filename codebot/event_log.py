@@ -67,7 +67,7 @@ _SENSITIVE_SUBSTRINGS = (
     "transcript",
 )
 
-_SECRET_PREFIXES = ("ghp_", "gho_", "sk-", "Bearer ", "xoxb-")
+_SECRET_PREFIXES = ("ghp_", "gho_", "sk-", "sk_live_", "sk_test_", "Bearer ", "xoxb-")
 
 
 def _looks_secret(value: str) -> bool:

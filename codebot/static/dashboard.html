@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Read-only CodeBot BOTOP live mirror">
+  <title>CodeBot BOTOP</title>
+  <style>
+    :root { --surface-primary:#150f23; --surface-secondary:#1f1633; --surface-elevated:#2a2140; --text-primary:#f7f4fb; --text-secondary:#d8d2e2; --text-tertiary:#aea5bc; --border-default:#4a3d63; --accent-primary:#c2ef4e; --status-warning:#ffb287; --status-error:#fa7faa; --status-info:#9da9ff; --space-2:8px; --space-3:12px; --space-4:16px; --space-6:24px; --type-mono:12px; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-block-size:100dvb; background:var(--surface-primary); color:var(--text-primary); font:500 var(--type-mono)/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .shell { min-block-size:100dvb; padding:var(--space-4); }
+    .console { max-inline-size:1440px; margin-inline:auto; overflow:auto; }
+    .header { display:flex; flex-wrap:wrap; gap:var(--space-2); align-items:center; margin-block-end:var(--space-2); font-weight:700; }
+    .header span { color:var(--text-tertiary); font-weight:500; } .nav-control { border:1px solid var(--border-default); border-radius:8px; color:var(--accent-primary); padding:4px 8px; text-decoration:none; } .nav-control:hover,.nav-control:focus-visible { background:var(--surface-elevated); color:var(--accent-hover); outline:2px solid var(--accent-primary); outline-offset:2px; }
+    .health { color:var(--accent-primary); } .health[data-state="drain"] { color:var(--status-error); }
+    .meta { margin:0 0 var(--space-4); color:var(--text-secondary); }
+    .box { margin-block:var(--space-3); min-inline-size:76rem; }
+    .box-title,.box-footer { color:var(--border-default); } .box-title strong { color:var(--text-primary); }
+    .box-body { border-inline:1px solid var(--border-default); padding:var(--space-2) var(--space-3); }
+    .summary { color:var(--text-secondary); } .summary strong { color:var(--text-primary); }
+    .agents { min-inline-size:118ch; margin:0; overflow:visible; white-space:pre; }
+    .agents-head { color:var(--text-tertiary); border-block-end:1px solid var(--border-default); padding-block-end:var(--space-2); margin-block-end:var(--space-2); text-transform:uppercase; }
+    .agent-row { padding-block:2px; } .agent-row[data-bucket="RUNNING"] { color:var(--accent-primary); } .agent-row[data-bucket="STALE"] { color:var(--status-warning); } .agent-row[data-bucket="DEAD"] { color:var(--status-error); }
+    .ticket-summary { color:var(--text-primary); margin:0; overflow-wrap:break-word; white-space:pre-wrap; }
+    .tickets { display:grid; gap:var(--space-3); margin-block-start:var(--space-3); } .ticket-state h3 { margin:0 0 4px; font-size:inherit; color:var(--text-primary); } .ticket-state p { margin:0; color:var(--text-tertiary); }
+    .ticket-item { display:grid; grid-template-columns:10ch 22ch minmax(0,1fr); gap:var(--space-2); padding-inline-start:var(--space-2); color:var(--text-secondary); } .ticket-item strong { color:var(--text-primary); }
+    .footer { color:var(--text-tertiary); margin-block-start:var(--space-4); }
+    @media (max-width:767px) { .shell { padding:var(--space-2); } .console { overflow:auto; } }
+  </style>
+</head>
+<body>
+  <main class="shell"><div class="console" aria-label="CodeBot BOTOP live dashboard">
+    <header class="header"><strong>CodeBot BOTOP</strong><span id="project">codebot</span><span id="time">connecting</span><span>refresh 3s</span><span class="health" id="health">[OK] ○</span><span id="tick">tick 0</span><a class="nav-control" href="/tickets">Explore tickets</a></header>
+    <p class="meta"><span id="state-dir">state unavailable</span> logs:<span id="logs-dir">logs/</span> interval 3.0s</p>
+    <section class="box"><div class="box-title">┌─ <strong>Orchestrator</strong> ─────────────────────────────────────────────────────────</div><div class="box-body summary" id="orchestrator"></div><div class="box-footer">└────────────────────────────────────────────────────────────────────</div></section>
+    <section class="box"><div class="box-title">┌─ <strong id="implementation-title">Implementation (0 active)</strong> ─────────────────────────────────────────────</div><div class="box-body" id="implementation"></div><div class="box-footer">└────────────────────────────────────────────────────────────────────</div></section>
+    <section class="box"><div class="box-title">┌─ <strong id="agents-title">Agents (0)</strong> ───────────────────────────────────────────────────────────</div><div class="box-body"><pre class="agents agents-head">Agent                    State          HB      LOG  IT   Task                    PID  Err Model</pre><div id="agents"></div></div><div class="box-footer">└──────────────────────────────────────────────────────────────────────────</div></section>
+    <section class="box"><div class="box-title">┌─ <strong id="tickets-title">Tickets - total 0</strong> ─────────────────────────────────────────────────────</div><div class="box-body"><pre class="ticket-summary" id="ticket-summary"></pre><div class="summary" id="throughput"></div><div class="tickets" id="tickets"></div></div><div class="box-footer">└────────────────────────────────────────────────────────────────────</div></section>
+    <footer class="footer">botop live - browser mirror - refreshes automatically</footer>
+  </div></main>
+  <script>
+    const state={tick:0,timer:0}; const $=id=>document.getElementById(id); const text=value=>String(value??"-"); const age=value=>value===null||value===undefined?"-":value<60?Math.round(value)+"s":Math.round(value/60)+"m"; const fit=(value,width)=>text(value).slice(0,width).padEnd(width); const right=(value,width)=>text(value).slice(0,width).padStart(width);
+    const clear=node=>node.replaceChildren(); const item=(tag,value)=>{const node=document.createElement(tag);node.textContent=text(value);return node};
+    function boxRow(agent){const row=document.createElement("pre");row.className="agents agent-row";row.dataset.bucket=agent.bucket;row.textContent=fit(agent.name,24)+" "+fit(agent.bucket,10)+" "+right(age(agent.hb_age),7)+" "+right(age(agent.log_age),7)+" "+right(agent.iteration,3)+" "+fit(agent.current_task,20)+" "+right(agent.pid,7)+" "+right(agent.consecutive_errors,3)+" "+fit(agent.model,20);return row}
+    function render(snapshot){state.tick+=1;const orch=snapshot.orchestrator||{};const agents=snapshot.agents||{};const tickets=snapshot.tickets||{};const groups=tickets.groups||{};$("project").textContent=text(snapshot.project);$("time").textContent=new Date(snapshot.generated_at*1000).toISOString().replace("T"," ").replace(".000Z"," UTC");$("tick").textContent="tick "+state.tick;$("state-dir").textContent=text(snapshot.state_dir);$("logs-dir").textContent=text(snapshot.logs_dir)+"/";const health=$("health");health.textContent=orch.drain?"[DRAIN] ●":"[OK] ○";health.dataset.state=orch.drain?"drain":"ok";$("orchestrator").textContent="orch pid "+text(orch.pid)+" "+(orch.alive?"alive":"DOWN")+"  last_spawn "+age(orch.last_spawn_age)+" ago  hb "+text(orch.heartbeat_count)+" agents  paused "+text(orch.paused_count);const claims=agents.implementation||[];$("implementation-title").textContent="Implementation ("+claims.length+" active)";const implementation=$("implementation");clear(implementation);if(!claims.length){implementation.textContent="No active implementation claims."}else{claims.forEach(claim=>implementation.append(item("div",[claim.worker,claim.ticket_id,claim.task].filter(Boolean).join("  "))))}const buckets=(agents.items||[]).reduce((counts,agent)=>{counts[agent.bucket]=(counts[agent.bucket]||0)+1;return counts},{});$("agents-title").textContent="Agents ("+text(agents.total)+")  RUN "+(buckets.RUNNING||0)+"  STALE "+(buckets.STALE||0)+"  DEAD "+(buckets.DEAD||0)+"  PAUSED "+(buckets.PAUSED||0);const rows=$("agents");clear(rows);(agents.items||[]).forEach(agent=>rows.append(boxRow(agent)));const summary=tickets.summary||{};const total=(tickets.throughput||{}).total||Object.values(summary).reduce((sum,count)=>sum+count,0);$("tickets-title").textContent="Tickets - total "+total;$("ticket-summary").textContent=Object.entries(groups).map(([name,group])=>name+"="+group.count).join("  ");const throughput=tickets.throughput||{};$("throughput").textContent="24h +"+text(throughput.throughput_24h)+"  7d +"+text(throughput.throughput_7d)+"  avg age "+text(throughput.avg_age_h)+"h  rework "+((throughput.rework_rate||0)*100).toFixed(1)+"%  oldest "+text(throughput.oldest_h)+"h";const ticketList=$("tickets");clear(ticketList);Object.entries(groups).filter(([,group])=>group.count).forEach(([name,group])=>{const section=document.createElement("section");section.className="ticket-state";section.append(item("h3",name+" ("+group.count+"):"));const previews=group.items||[];if(!previews.length){section.append(item("p","Ticket detail records unavailable."))}else{previews.forEach(ticket=>{const row=document.createElement("div");row.className="ticket-item";row.append(item("span",ticket.severity),item("strong",ticket.id),item("span",ticket.title));section.append(row)})}ticketList.append(section)})}
+    async function refresh(){try{const response=await fetch("/dashboard/snapshot");if(!response.ok)throw new Error("Request failed");render(await response.json())}catch(error){$("health").textContent="[ERROR] ●";$("health").dataset.state="drain";clearInterval(state.timer);state.timer=0}}
+    refresh();state.timer=setInterval(refresh,3000);
+  </script>
+</body>
+</html>

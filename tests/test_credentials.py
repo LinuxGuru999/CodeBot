@@ -124,10 +124,37 @@ class TestGetGitSshCommand:
         key.touch()
         monkeypatch.setenv("SSH_PRIVATE_KEY_PATH", str(key))
         cmd = credentials.get_git_ssh_command()
-        assert f"-i {key}" in cmd
+        # shlex.quote may add quotes even for simple paths depending on implementation,
+        # but typically leaves alphanumeric paths unquoted. We check presence safely.
+        import shlex
+        quoted_key = shlex.quote(str(key))
+        assert f"-i {quoted_key}" in cmd
         assert "StrictHostKeyChecking=yes" in cmd
         assert "IdentitiesOnly=yes" in cmd
         assert "UserKnownHostsFile=" in cmd
+
+    def test_with_key_path_special_chars(self, monkeypatch, tmp_path):
+        """CB-4019533-C8F8: Paths with spaces/metacharacters must be safely quoted."""
+        # Create a directory and file with spaces and shell metacharacters
+        weird_dir = tmp_path / "my keys (backup)"
+        weird_dir.mkdir()
+        key = weird_dir / "id_rsa;rm -rf /"
+        key.touch()
+        monkeypatch.setenv("SSH_PRIVATE_KEY_PATH", str(key))
+        
+        cmd = credentials.get_git_ssh_command()
+        
+        import shlex
+        expected_quoted = shlex.quote(str(key))
+        assert expected_quoted in cmd, (
+            f"Key path with special chars was not properly quoted.\n"
+            f"Expected substring: {expected_quoted}\n"
+            f"Got command: {cmd}"
+        )
+        # Ensure raw unquoted path is NOT present (which would indicate injection vulnerability)
+        # Note: shlex.quote might wrap in single quotes, so raw string shouldn't appear bare
+        # unless it's inside the quotes. A simple check is that the shell-safe version exists.
+        assert "-i " in cmd
 
     def test_without_key_path(self, monkeypatch, tmp_path):
         monkeypatch.delenv("SSH_PRIVATE_KEY_PATH", raising=False)
@@ -308,3 +335,95 @@ class TestReadSecretFile:
         with patch.object(Path, "home", return_value=tmp_path):
             result = credentials._read_secret_file("gh_token")
         assert result == "token-from-botnet-env"
+
+    def test_oversized_file_skipped(self, tmp_path):
+        """Files exceeding 4KB limit should be skipped to prevent memory exhaustion."""
+        config_dir = tmp_path / ".config" / "codebot"
+        config_dir.mkdir(parents=True)
+        secret_file = config_dir / "big_secret.txt"
+        # Write >4KB content
+        secret_file.write_text("x" * 5000)
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            result = credentials._read_secret_file("big_secret")
+        assert result == ""
+
+    def test_oserror_during_read_skipped(self, tmp_path):
+        """OSError during file read should be caught and skipped gracefully."""
+        config_dir = tmp_path / ".config" / "codebot"
+        config_dir.mkdir(parents=True)
+        secret_file = config_dir / "unreadable.txt"
+        secret_file.write_text("secret=value")
+
+        # Mock open to raise OSError
+        original_open = open
+        def mock_open_raises(*args, **kwargs):
+            if str(secret_file) in str(args[0]):
+                raise OSError("Permission denied")
+            return original_open(*args, **kwargs)
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            with patch("builtins.open", side_effect=mock_open_raises):
+                result = credentials._read_secret_file("unreadable")
+        assert result == ""
+
+    def test_custom_secret_path_env_var(self, monkeypatch, tmp_path):
+        """CODEBOT_SECRET_PATH env var should override default secret paths."""
+        custom_dir = tmp_path / "custom_secrets"
+        custom_dir.mkdir()
+        secret_file = custom_dir / "my_token.txt"
+        secret_file.write_text("custom-secret-value\n")
+
+        monkeypatch.setenv("CODEBOT_SECRET_PATH", str(custom_dir))
+        with patch.object(Path, "home", return_value=tmp_path):
+            result = credentials._read_secret_file("my_token")
+        assert result == "custom-secret-value"
+
+    def test_custom_secret_path_takes_precedence(self, monkeypatch, tmp_path):
+        """CODEBOT_SECRET_PATH should take precedence over default paths."""
+        # Create both custom and default paths
+        custom_dir = tmp_path / "custom_secrets"
+        custom_dir.mkdir()
+        (custom_dir / "my_token.txt").write_text("from-custom-path\n")
+
+        default_dir = tmp_path / ".config" / "codebot"
+        default_dir.mkdir(parents=True)
+        (default_dir / "my_token.txt").write_text("from-default-path\n")
+
+        monkeypatch.setenv("CODEBOT_SECRET_PATH", str(custom_dir))
+        with patch.object(Path, "home", return_value=tmp_path):
+            result = credentials._read_secret_file("my_token")
+        # Should read from custom path, not default
+        assert result == "from-custom-path"
+
+    def test_insecure_permissions_warning_logged(self, tmp_path, caplog):
+        """File with group/other read permissions should trigger a warning."""
+        import os as os_module
+        config_dir = tmp_path / ".config" / "codebot"
+        config_dir.mkdir(parents=True)
+        secret_file = config_dir / "insecure_secret.txt"
+        secret_file.write_text("leaked-secret\n")
+        # Set permissions to 0o644 (world-readable)
+        secret_file.chmod(0o644)
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            result = credentials._read_secret_file("insecure_secret")
+        assert result == "leaked-secret"
+        assert "insecure permissions" in caplog.text
+        assert "0o644" in caplog.text or "0o644" in caplog.text.lower() or "644" in caplog.text
+
+    def test_secure_permissions_no_warning(self, tmp_path, caplog):
+        """File with 0o600 permissions should NOT trigger a warning."""
+        import os as os_module
+        config_dir = tmp_path / ".config" / "codebot"
+        config_dir.mkdir(parents=True)
+        secret_file = config_dir / "secure_secret.txt"
+        secret_file.write_text("safe-secret\n")
+        # Set permissions to 0o600 (owner-only)
+        secret_file.chmod(0o600)
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            result = credentials._read_secret_file("secure_secret")
+        assert result == "safe-secret"
+        # No warning should be logged for secure permissions
+        assert "insecure permissions" not in caplog.text

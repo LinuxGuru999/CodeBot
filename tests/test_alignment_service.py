@@ -1,241 +1,584 @@
-"""Unit tests for codebot.alignment_service module.
+#!/usr/bin/env python3
+"""Tests for alignment_service.py using state_manager.get_paths() for path resolution."""
 
-Covers _collect_reviewer_feedback_for_trigger with existing and missing
-review files, corrupt JSON handling, graceful failure when rl_engine is
-unavailable, and atomic state writes.
-"""
-
-from __future__ import annotations
-
-import json
+import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, PropertyMock
 
 import pytest
 
-from codebot.alignment_service import (
-    _collect_reviewer_feedback_for_trigger,
-    run_alignment_pipeline,
-    STATE_DIR,
-)
+from codebot import alignment_service
+from codebot import state_manager
 
 
-class TestCollectReviewerFeedback:
-    """Tests for _collect_reviewer_feedback_for_trigger()."""
+class TestEnsureRlAdapter:
+    """Tests for _ensure_rl_adapter() adapter injection."""
 
-    def test_no_review_files(self, tmp_path: Path) -> None:
-        """When no review files exist, returns empty list."""
-        # Patch STATE_DIR to use tmp_path
-        with patch("codebot.alignment_service.STATE_DIR", tmp_path):
-            feedback = _collect_reviewer_feedback_for_trigger("test_bot")
-        assert feedback == []
+    def test_ensure_rl_adapter_uses_get_paths(self, tmp_path):
+        """Verify _ensure_rl_adapter uses state_manager.get_paths()."""
+        # Create a temporary state directory structure
+        custom_state_dir = tmp_path / "test_state"
+        custom_state_dir.mkdir(parents=True)
+        events_dir = custom_state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Mock get_paths to return our custom paths
+        mock_paths = MagicMock()
+        mock_paths.state_dir = custom_state_dir
+        mock_paths.alignment_events_dir = events_dir
+        mock_paths.bots_dir = custom_state_dir.parent.parent
+        mock_paths.logs_dir = custom_state_dir.parent / "logs"
+        
+        from codebot import rl_engine
+        rl_engine._adapter_instance = None
+        
+        try:
+            with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+                alignment_service._ensure_rl_adapter()
+                
+                # Verify rl_engine now has an adapter
+                assert rl_engine._adapter_instance is not None
+                
+                # Verify the adapter is the paths object itself
+                assert rl_engine._adapter_instance is mock_paths
+        finally:
+            rl_engine._adapter_instance = None
 
-    def test_valid_review_file(self, tmp_path: Path) -> None:
-        """Collects feedback from valid review files."""
-        review_data = {
-            "findings": [
-                {"description": "Missing error handling", "severity": "high"},
-                {"description": "Bad variable name", "severity": "low"},
-            ]
-        }
-        review_file = tmp_path / "security_review.json"
-        review_file.write_text(json.dumps(review_data), encoding="utf-8")
+    def test_ensure_rl_adapter_does_not_override_existing_adapter(self):
+        """Verify _ensure_rl_adapter doesn't override an existing adapter."""
+        from codebot import rl_engine
+        
+        # Create and set a custom adapter
+        custom_adapter = MagicMock()
+        rl_engine._adapter_instance = custom_adapter
+        
+        try:
+            # Call _ensure_rl_adapter - should return early
+            alignment_service._ensure_rl_adapter()
+            
+            # Should not have changed the adapter
+            assert rl_engine._adapter_instance is custom_adapter
+        finally:
+            rl_engine._adapter_instance = None
 
-        with patch("codebot.alignment_service.STATE_DIR", tmp_path):
-            feedback = _collect_reviewer_feedback_for_trigger("test_bot")
+    def test_ensure_rl_adapter_handles_missing_rl_engine(self):
+        """Verify _ensure_rl_adapter fails gracefully when rl_engine is unavailable."""
+        # Temporarily remove rl_engine from modules
+        original_rl_engine = sys.modules.get('codebot.rl_engine')
+        try:
+            del sys.modules['codebot.rl_engine']
+            sys.modules['codebot.rl_engine'] = None
+            
+            # Should not raise an exception
+            alignment_service._ensure_rl_adapter()
+        finally:
+            # Restore original module
+            if original_rl_engine:
+                sys.modules['codebot.rl_engine'] = original_rl_engine
+            else:
+                del sys.modules['codebot.rl_engine']
 
-        assert len(feedback) == 2
-        assert feedback[0]["source"] == "security_review.json"
-        assert feedback[0]["finding"] == "Missing error handling"
-        assert feedback[0]["severity"] == "high"
-
-    def test_corrupt_json_handled(self, tmp_path: Path) -> None:
-        """Corrupt JSON files are skipped gracefully."""
-        review_file = tmp_path / "security_review.json"
-        review_file.write_text("{bad json", encoding="utf-8")
-
-        with patch("codebot.alignment_service.STATE_DIR", tmp_path):
-            feedback = _collect_reviewer_feedback_for_trigger("test_bot")
-
-        assert feedback == []
-
-    def test_missing_findings_key(self, tmp_path: Path) -> None:
-        """Review file without 'findings' key returns empty."""
-        review_data = {"other_key": "value"}
-        review_file = tmp_path / "security_review.json"
-        review_file.write_text(json.dumps(review_data), encoding="utf-8")
-
-        with patch("codebot.alignment_service.STATE_DIR", tmp_path):
-            feedback = _collect_reviewer_feedback_for_trigger("test_bot")
-
-        assert feedback == []
-
-    def test_non_dict_top_level(self, tmp_path: Path) -> None:
-        """Non-dict top-level JSON is handled."""
-        review_file = tmp_path / "security_review.json"
-        review_file.write_text('[{"description": "test"}]', encoding="utf-8")
-
-        with patch("codebot.alignment_service.STATE_DIR", tmp_path):
-            feedback = _collect_reviewer_feedback_for_trigger("test_bot")
-
-        assert feedback == []
-
-    def test_limits_to_last_five_findings(self, tmp_path: Path) -> None:
-        """Only last 5 findings are collected per file."""
-        review_data = {
-            "findings": [{"description": f"Finding {i}"} for i in range(10)]
-        }
-        review_file = tmp_path / "security_review.json"
-        review_file.write_text(json.dumps(review_data), encoding="utf-8")
-
-        with patch("codebot.alignment_service.STATE_DIR", tmp_path):
-            feedback = _collect_reviewer_feedback_for_trigger("test_bot")
-
-        # Only 5 findings from this file
-        assert len(feedback) == 5
-        assert feedback[0]["finding"] == "Finding 5"  # Last 5 start from index 5
-
-    def test_multiple_review_files(self, tmp_path: Path) -> None:
-        """Collects from multiple review files."""
-        for name in ["security_review.json", "architecture_review.json"]:
-            review_data = {"findings": [{"description": f"Issue in {name}", "severity": "medium"}]}
-            review_file = tmp_path / name
-            review_file.write_text(json.dumps(review_data), encoding="utf-8")
-
-        with patch("codebot.alignment_service.STATE_DIR", tmp_path):
-            feedback = _collect_reviewer_feedback_for_trigger("test_bot")
-
-        assert len(feedback) == 2
+    def test_ensure_rl_adapter_handles_set_project_adapter_error(self):
+        """Verify _ensure_rl_adapter handles errors when setting project adapter."""
+        from codebot import rl_engine
+        
+        # Clear any existing adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths
+        mock_paths = MagicMock()
+        
+        try:
+            with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+                 patch('codebot.rl_engine.set_project_adapter', side_effect=Exception("Test error")):
+                # Should not raise an exception
+                alignment_service._ensure_rl_adapter()
+                
+                # Adapter should still be None since set_project_adapter failed
+                assert rl_engine._adapter_instance is None
+        finally:
+            rl_engine._adapter_instance = None
 
 
-class TestRunAlignmentPipeline:
-    """Tests for run_alignment_pipeline()."""
+class TestAlignmentPipelineStateUsage:
+    """Tests verifying alignment pipeline functions use get_paths() for state directory."""
 
-    def test_rl_engine_not_available(self, tmp_path: Path) -> None:
-        """Returns False when rl_engine cannot be imported."""
-        event_dir = tmp_path / "alignment_events"
-        event_dir.mkdir()
-        event_file = event_dir / "test_bot.exit.json"
-        event_file.write_text(json.dumps({"bot": "test_bot"}), encoding="utf-8")
+    def test_run_alignment_pipeline_uses_get_paths(self, tmp_path):
+        """Verify run_alignment_pipeline uses state_manager.get_paths() for paths."""
+        # Create a temporary state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Mock get_paths to return our temp directory
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+            # Call the function (it will return False since no events exist)
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should complete without error
+            assert result is False  # No events to process
 
-        with patch("codebot.alignment_service.ALIGNMENT_EVENTS_DIR", event_dir.parent):
-            # Patch imports to fail
-            with patch.dict("sys.modules", {"codebot.rl_engine": None, "rl_engine": None}):
-                result = run_alignment_pipeline("test_bot")
-        # When module is None, import fails
-        assert result is False
+    def test_run_alignment_pipeline_for_all_uses_get_paths(self, tmp_path):
+        """Verify run_alignment_pipeline_for_all uses state_manager.get_paths() for paths."""
+        # Create a temporary state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Mock get_paths
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+            # Call the function
+            alignment_service.run_alignment_pipeline_for_all()
+            # Should complete without error
 
-    def test_event_file_not_exists(self, tmp_path: Path) -> None:
-        """Returns False when event file doesn't exist."""
-        event_dir = tmp_path / "alignment_events"
-        event_dir.mkdir()
+    def test_run_alignment_pipeline_for_all_handles_missing_events_dir(self, tmp_path):
+        """Verify run_alignment_pipeline_for_all handles missing events directory."""
+        # Create state directory without events subdirectory
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        
+        # Mock get_paths
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = state_dir / "alignment_events"  # Doesn't exist
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+            # Should not raise exception
+            alignment_service.run_alignment_pipeline_for_all()
+            # Test passes if no exception is raised
 
-        with patch("codebot.alignment_service.ALIGNMENT_EVENTS_DIR", event_dir):
-            result = run_alignment_pipeline("nonexistent_bot")
-        assert result is False
+    def test_run_alignment_pipeline_for_all_handles_consume_triggers_error(self, tmp_path):
+        """Verify run_alignment_pipeline_for_all handles consume_triggers failure."""
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Mock get_paths and consume_triggers to fail
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.prompt_optimizer.consume_triggers', side_effect=Exception("Test error")):
+            # Should not raise exception
+            alignment_service.run_alignment_pipeline_for_all()
+            # Test passes if no exception is raised
 
-    def test_corrupt_event_json(self, tmp_path: Path) -> None:
-        """Returns False when event JSON is corrupt."""
-        event_dir = tmp_path / "alignment_events"
-        event_dir.mkdir()
-        event_file = event_dir / "test_bot.exit.json"
-        event_file.write_text("{bad json", encoding="utf-8")
-
-        with patch("codebot.alignment_service.ALIGNMENT_EVENTS_DIR", event_dir):
-            result = run_alignment_pipeline("test_bot")
-        assert result is False
-
-    def test_already_processed_event(self, tmp_path: Path) -> None:
-        """Returns False when event is already processed."""
-        event_dir = tmp_path / "alignment_events"
-        event_dir.mkdir()
-        event_file = event_dir / "test_bot.exit.json"
-        event_file.write_text(json.dumps({"bot": "test_bot", "processed": True}), encoding="utf-8")
-
-        with patch("codebot.alignment_service.ALIGNMENT_EVENTS_DIR", event_dir):
-            result = run_alignment_pipeline("test_bot")
-        assert result is False
-
-    def test_self_target_guard(self, tmp_path: Path) -> None:
-        """prompt_opt bot is never triggered for optimization."""
-        event_dir = tmp_path / "alignment_events"
-        event_dir.mkdir()
-        event_file = event_dir / "prompt_opt.exit.json"
-        event_file.write_text(json.dumps({"bot": "prompt_opt", "processed": False}), encoding="utf-8")
-
-        # Mock rl_engine functions
-        mock_mark = MagicMock()
-        with patch("codebot.alignment_service.ALIGNMENT_EVENTS_DIR", event_dir):
-            with patch("codebot.alignment_service.mark_event_processed", mock_mark):
-                # We need to mock the rl_engine imports
-                with patch("codebot.rl_engine.mark_event_processed", mock_mark):
-                    result = run_alignment_pipeline("prompt_opt")
-        assert result is False
-        mock_mark.assert_called_once()
-
-    def test_low_reward_triggers_evolution(self, tmp_path: Path) -> None:
-        """Reward < 0.6 triggers prompt evolution."""
-        event_dir = tmp_path / "alignment_events"
-        event_dir.mkdir()
-        event_file = event_dir / "test_bot.exit.json"
-        event_file.write_text(json.dumps({
-            "bot": "test_bot",
-            "processed": False,
+    def test_run_alignment_pipeline_for_all_logs_failed_bot_pipeline(self, tmp_path):
+        """Verify run_alignment_pipeline_for_all logs warnings when a bot pipeline fails."""
+        import json
+        from codebot import rl_engine
+        
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Create an event file
+        event_data = {
+            "bot": "failing_bot",
             "exit_reason": "clean",
-            "exit_code": 0,
-        }), encoding="utf-8")
-
-        mock_score = MagicMock(return_value={"score": 50, "verdict": "misaligned", "evidence": "low score", "breakdown": {}})
-        mock_reward = MagicMock(return_value=0.4)  # Low reward
-        mock_mark = MagicMock()
-        mock_write = MagicMock()
-        mock_ensure = MagicMock(return_value={})
-        mock_load = MagicMock(return_value={})
-        mock_save = MagicMock()
-
-        with patch("codebot.alignment_service.ALIGNMENT_EVENTS_DIR", event_dir):
-            with patch("codebot.rl_engine.score_event", mock_score):
-                with patch("codebot.rl_engine.reward_from_score", mock_reward):
-                    with patch("codebot.rl_engine.mark_event_processed", mock_mark):
-                        with patch("codebot.rl_engine.write_trigger", mock_write):
-                            with patch("codebot.rl_engine.ensure_bot", mock_ensure):
-                                with patch("codebot.rl_engine.load_rl_state", mock_load):
-                                    with patch("codebot.rl_engine.save_rl_state", mock_save):
-                                        with patch("codebot.rl_engine.record_event_reward"):
-                                            result = run_alignment_pipeline("test_bot")
-
-        assert result is True
-        mock_write.assert_called_once()
-        mock_mark.assert_called_once()
-
-    def test_high_reward_no_trigger(self, tmp_path: Path) -> None:
-        """Reward >= 0.6 does not trigger evolution."""
-        event_dir = tmp_path / "alignment_events"
-        event_dir.mkdir()
-        event_file = event_dir / "test_bot.exit.json"
-        event_file.write_text(json.dumps({
-            "bot": "test_bot",
             "processed": False,
+        }
+        event_file = events_dir / "failing_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths and make run_alignment_pipeline raise
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch.object(alignment_service, 'run_alignment_pipeline', side_effect=Exception("Pipeline error")):
+            # Should not raise exception
+            alignment_service.run_alignment_pipeline_for_all()
+            # Test passes if no exception is raised
+
+    def test_run_alignment_pipeline_for_all_logs_consumed_triggers(self, tmp_path):
+        """Verify run_alignment_pipeline_for_all logs when triggers are consumed."""
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Mock get_paths and consume_triggers to return a count
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.prompt_optimizer.consume_triggers', return_value=3):
+            # Should not raise exception
+            alignment_service.run_alignment_pipeline_for_all()
+            # Test passes if no exception is raised
+
+    def test_run_alignment_pipeline_for_all_uses_bots_dir_fallback(self, tmp_path):
+        """Verify run_alignment_pipeline_for_all uses BOTS_DIR when roles_dir doesn't exist."""
+        import json
+        from codebot import rl_engine
+        
+        # Create state directory structure without roles dir
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        triggers_dir = state_dir / "alignment_triggers"
+        triggers_dir.mkdir()
+        
+        # Create a trigger file so consume_triggers has something to process
+        trigger_data = {
+            "bot": "test_bot",
+            "score": 45,
+            "verdict": "evolve",
+        }
+        trigger_file = triggers_dir / "test_bot.evolve.json"
+        trigger_file.write_text(json.dumps(trigger_data))
+        
+        # Create an event so the function processes something
+        event_data = {
+            "bot": "test_bot",
             "exit_reason": "clean",
+            "processed": False,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths, score_event, and consume_triggers
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.rl_engine.score_event', return_value={'score': 80}), \
+             patch('codebot.prompt_optimizer.consume_triggers', return_value=1) as mock_consume:
+            # Should not raise exception
+            alignment_service.run_alignment_pipeline_for_all()
+            
+            # Verify consume_triggers was called
+            assert mock_consume.called
+            # Verify it was called with the correct arguments (triggers_dir, roles_dir)
+            call_args = mock_consume.call_args
+            assert call_args[0][0] == triggers_dir
+            # The second arg should be BOTS_DIR / "roles" since tmp_path/roles doesn't exist
+            roles_arg = call_args[0][1]
+            assert str(roles_arg).endswith("/roles")
+
+    def test_run_alignment_pipeline_processes_events(self, tmp_path):
+        """Verify run_alignment_pipeline processes alignment events correctly."""
+        import json
+        from codebot import rl_engine
+        
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        triggers_dir = state_dir / "alignment_triggers"
+        triggers_dir.mkdir()
+        
+        # Create a test event file
+        event_data = {
+            "bot": "test_bot",
             "exit_code": 0,
-        }), encoding="utf-8")
+            "exit_reason": "clean",
+            "processed": False,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths and score_event to return high score
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.rl_engine.score_event', return_value={'score': 75}):
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should process the event
+            assert result is True
+            
+            # Verify event was marked as processed
+            updated_data = json.loads(event_file.read_text())
+            assert updated_data["processed"] is True
+            assert "processed_at" in updated_data
+            assert "reward" in updated_data
+            assert "pattern" in updated_data
 
-        mock_score = MagicMock(return_value={"score": 80, "verdict": "aligned", "evidence": "good", "breakdown": {}})
-        mock_reward = MagicMock(return_value=0.8)  # High reward
-        mock_mark = MagicMock()
-        mock_ensure = MagicMock(return_value={"consecutive_failures": 0, "total_runs": 1, "last_improvement": 0})
-        mock_load = MagicMock(return_value={})
-        mock_save = MagicMock()
+    def test_run_alignment_pipeline_creates_trigger_for_low_score(self, tmp_path):
+        """Verify run_alignment_pipeline creates alignment trigger for low scores."""
+        import json
+        from codebot import rl_engine
+        
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        triggers_dir = state_dir / "alignment_triggers"
+        triggers_dir.mkdir()
+        
+        # Create a test event
+        event_data = {
+            "bot": "test_bot",
+            "exit_code": 1,
+            "exit_reason": "error",
+            "processed": False,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths and score_event to return low score
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.rl_engine.score_event', return_value={'score': 45}):
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should process the event
+            assert result is True
+            
+            # Verify trigger was created
+            trigger_file = triggers_dir / "test_bot.evolve.json"
+            assert trigger_file.exists()
+            
+            trigger_data = json.loads(trigger_file.read_text())
+            assert trigger_data["bot"] == "test_bot"
+            assert trigger_data["score"] == 45
+            assert trigger_data["verdict"] == "evolve"
+            assert "reward" in trigger_data
+            assert "pattern" in trigger_data
 
-        with patch("codebot.alignment_service.ALIGNMENT_EVENTS_DIR", event_dir):
-            with patch("codebot.rl_engine.score_event", mock_score):
-                with patch("codebot.rl_engine.reward_from_score", mock_reward):
-                    with patch("codebot.rl_engine.mark_event_processed", mock_mark):
-                        with patch("codebot.rl_engine.ensure_bot", mock_ensure):
-                            with patch("codebot.rl_engine.load_rl_state", mock_load):
-                                with patch("codebot.rl_engine.save_rl_state", mock_save):
-                                    with patch("codebot.rl_engine.record_event_reward"):
-                                        result = run_alignment_pipeline("test_bot")
+    def test_run_alignment_pipeline_skips_processed_events(self, tmp_path):
+        """Verify run_alignment_pipeline skips already-processed events."""
+        import json
+        
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Create a processed event
+        event_data = {
+            "bot": "test_bot",
+            "processed": True,
+            "processed_at": 1234567890.0,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Mock get_paths
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should not process (already done)
+            assert result is False
 
-        assert result is False
-        mock_mark.assert_called_once()
+    def test_run_alignment_pipeline_for_all_process_multiple_bots(self, tmp_path):
+        """Verify run_alignment_pipeline_for_all processes events from multiple bots."""
+        import json
+        from codebot import rl_engine
+        
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        triggers_dir = state_dir / "alignment_triggers"
+        triggers_dir.mkdir()
+        
+        # Create events for multiple bots
+        for bot_name in ["bot1", "bot2"]:
+            event_data = {
+                "bot": bot_name,
+                "exit_reason": "clean",
+                "processed": False,
+            }
+            event_file = events_dir / f"{bot_name}.exit.json"
+            event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths and score_event
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.rl_engine.score_event', return_value={'score': 80}):
+            alignment_service.run_alignment_pipeline_for_all()
+            
+            # Verify both events were processed
+            for bot_name in ["bot1", "bot2"]:
+                event_file = events_dir / f"{bot_name}.exit.json"
+                updated_data = json.loads(event_file.read_text())
+                assert updated_data["processed"] is True
+
+    def test_run_alignment_pipeline_handles_malformed_json(self, tmp_path):
+        """Verify run_alignment_pipeline handles malformed JSON gracefully."""
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Create a malformed event file
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text("{invalid json")
+        
+        # Mock get_paths
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+            # Should not raise exception
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should return False (no valid events processed)
+            assert result is False
+
+    def test_run_alignment_pipeline_handles_missing_events_dir(self, tmp_path):
+        """Verify run_alignment_pipeline handles missing events directory."""
+        # Create state directory without events subdirectory
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        
+        # Mock get_paths
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = state_dir / "alignment_events"  # Doesn't exist
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should return False gracefully
+            assert result is False
+
+    def test_run_alignment_pipeline_handles_rl_import_error(self, tmp_path):
+        """Verify run_alignment_pipeline handles rl_engine import failure."""
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Mock get_paths and rl_engine import to fail
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch.dict('sys.modules', {'codebot.rl_engine': None}):
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should return False gracefully
+            assert result is False
+
+    def test_run_alignment_pipeline_handles_file_read_error(self, tmp_path):
+        """Verify run_alignment_pipeline handles file read errors."""
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Create an event file with permission issues
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text('{"valid": "json"}')
+        event_file.chmod(0o000)  # Remove all permissions
+        
+        try:
+            # Mock get_paths
+            mock_paths = MagicMock()
+            mock_paths.state_dir = state_dir
+            mock_paths.alignment_events_dir = events_dir
+            
+            with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+                # Should not raise exception
+                result = alignment_service.run_alignment_pipeline("test_bot")
+                
+                # Should return False (couldn't read file)
+                assert result is False
+        finally:
+            # Restore permissions for cleanup
+            event_file.chmod(0o644)
+
+    def test_run_alignment_pipeline_handles_trigger_write_error(self, tmp_path):
+        """Verify run_alignment_pipeline handles trigger write errors gracefully."""
+        import json
+        from codebot import rl_engine
+        
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Create a test event
+        event_data = {
+            "bot": "test_bot",
+            "exit_reason": "error",
+            "processed": False,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths and score_event
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.rl_engine.score_event', return_value={'score': 45}):
+            # Mock Path.mkdir to fail for triggers_dir
+            original_mkdir = Path.mkdir
+            def failing_mkdir(self, *args, **kwargs):
+                if 'alignment_triggers' in str(self):
+                    raise OSError("Permission denied")
+                return original_mkdir(self, *args, **kwargs)
+            
+            with patch.object(Path, 'mkdir', failing_mkdir):
+                # Should not raise exception
+                result = alignment_service.run_alignment_pipeline("test_bot")
+                
+                # Should still process the event
+                assert result is True
+"}}]}

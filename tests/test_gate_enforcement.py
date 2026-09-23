@@ -22,17 +22,17 @@ from codebot.ticket_engine import (
     create_ticket,
     TicketStore,
 )
-from codebot.quality_gate import record_gate_results, GateResult, GateEvaluation
+from codebot.quality_gate import record_gate_results, GateStatus, GateEvaluation
 
 
 def _advance_to_verifying(store: TicketStore, ticket_id: str) -> None:
-    """Helper to move a ticket through DISCOVERED -> ... -> VERIFYING."""
-    store.transition(ticket_id, TicketState.VALIDATING)
+    """Helper to move a ticket through DISCOVERED -> ... -> REVIEW via new pipeline."""
     store.transition(ticket_id, TicketState.TRIAGED)
-    store.transition(ticket_id, TicketState.READY)
-    store.transition(ticket_id, TicketState.IMPLEMENTING)
-    store.transition(ticket_id, TicketState.REVIEWING)
-    store.transition(ticket_id, TicketState.VERIFYING)
+    store.transition(ticket_id, TicketState.GOAL)
+    store.transition(ticket_id, TicketState.DECOMP)
+    store.transition(ticket_id, TicketState.PLANNING)
+    store.transition(ticket_id, TicketState.IMPLEMENT)
+    store.transition(ticket_id, TicketState.REVIEW)
 
 
 def _record_gate_pass(state_dir: Path, ticket_id: str, store: TicketStore | None = None) -> None:
@@ -40,7 +40,7 @@ def _record_gate_pass(state_dir: Path, ticket_id: str, store: TicketStore | None
     evaluations = [
         GateEvaluation(
             gate_name="build",
-            result=GateResult.PASS,
+            result=GateStatus.PASS,
             command="echo ok",
             output="ok",
             duration_ms=0.1,
@@ -49,7 +49,7 @@ def _record_gate_pass(state_dir: Path, ticket_id: str, store: TicketStore | None
         ),
         GateEvaluation(
             gate_name="unit_tests",
-            result=GateResult.PASS,
+            result=GateStatus.PASS,
             command="pytest -q",
             output="ok",
             duration_ms=0.5,
@@ -67,7 +67,7 @@ def _record_gate_fail(state_dir: Path, ticket_id: str, store: TicketStore | None
     evaluations = [
         GateEvaluation(
             gate_name="build",
-            result=GateResult.FAIL,
+            result=GateStatus.FAIL,
             command="echo fail",
             output="build failed",
             duration_ms=0.1,
@@ -82,10 +82,9 @@ def _record_gate_fail(state_dir: Path, ticket_id: str, store: TicketStore | None
 
 
 class TestGateEnforcement:
-    """Verify VERIFYING -> COMPLETE requires gatekeeper approval."""
+    """Verify REVIEW -> COMPLETE requires gatekeeper approval."""
 
     def test_complete_blocked_without_gate(self, tmp_path: Path) -> None:
-        """VERIFYING -> COMPLETE should fail when no gate results exist."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         store = TicketStore(state_dir / "tickets.json")
@@ -101,7 +100,6 @@ class TestGateEnforcement:
             store.transition(t.id, TicketState.COMPLETE)
 
     def test_complete_blocked_with_failed_gate(self, tmp_path: Path) -> None:
-        """VERIFYING -> COMPLETE should fail when gates did not pass."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         store = TicketStore(state_dir / "tickets.json")
@@ -119,7 +117,6 @@ class TestGateEnforcement:
             store.transition(t.id, TicketState.COMPLETE)
 
     def test_complete_allowed_with_passing_gate(self, tmp_path: Path) -> None:
-        """VERIFYING -> COMPLETE should succeed when gates passed."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         store = TicketStore(state_dir / "tickets.json")
@@ -137,7 +134,6 @@ class TestGateEnforcement:
         assert updated.state == TicketState.COMPLETE
 
     def test_rework_still_allowed_without_gate(self, tmp_path: Path) -> None:
-        """VERIFYING -> REWORK should still work without gate results."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         store = TicketStore(state_dir / "tickets.json")
@@ -233,7 +229,6 @@ class TestOtherTransitionsUnaffected:
     """Non-COMPLETE transitions should not require gate results."""
 
     def test_verifying_to_rework_unaffected(self, tmp_path: Path) -> None:
-        """VERIFYING -> REWORK should work without gate results."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         store = TicketStore(state_dir / "tickets.json")
@@ -249,21 +244,15 @@ class TestOtherTransitionsUnaffected:
         assert updated.state == TicketState.REWORK
 
     def test_reviewing_to_verifying_unaffected(self, tmp_path: Path) -> None:
-        """REVIEWING -> VERIFYING should work without gate results."""
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        store = TicketStore(state_dir / "tickets.json")
+        store = TicketStore(tmp_path / "tickets.json")
         t = create_ticket(
             "verify test", TicketClass.BUG, Severity.LOW,
             "test", "ev", "prob", "desired", ["ac"],
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        store.transition(t.id, TicketState.VALIDATING)
-        store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.IMPLEMENTING)
-        store.transition(t.id, TicketState.REVIEWING)
+        for st in (TicketState.TRIAGED, TicketState.GOAL, TicketState.DECOMP, TicketState.PLANNING, TicketState.IMPLEMENT):
+            store.transition(t.id, st)
 
-        updated = store.transition(t.id, TicketState.VERIFYING)
-        assert updated.state == TicketState.VERIFYING
+        updated = store.transition(t.id, TicketState.REVIEW)
+        assert updated.state == TicketState.REVIEW

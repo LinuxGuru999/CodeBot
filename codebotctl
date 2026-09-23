@@ -2,11 +2,14 @@
 # codebotctl — Safe lifecycle management for CodeBot orchestrator.
 #
 # Usage:
-#   ./codebotctl start       Start orchestrator (no-op if already running)
-#   ./codebotctl restart     Graceful drain → stop → start
-#   ./codebotctl stop        Drain + SIGTERM → SIGKILL after grace period
+#   ./codebotctl start       Start orchestrator + dashboard webserver
+#   ./codebotctl restart     Restart orchestrator + dashboard webserver
+#   ./codebotctl stop        Stop orchestrator + dashboard webserver
 #   ./codebotctl clear       Wipe state (heartbeats, checkpoints, logs) while stopped
-#   ./codebotctl status      Show process health, worker count, ticket summary
+#   ./codebotctl status      Show orchestrator + web health, workers, tickets
+#   ./codebotctl web-start   Start dashboard webserver only
+#   ./codebotctl web-stop    Stop dashboard webserver only
+#   ./codebotctl web-status  Show dashboard webserver health only
 #
 set -euo pipefail
 
@@ -15,9 +18,12 @@ STATE_DIR="$PROJECT_ROOT/.codebot/state"
 LOG_DIR="$PROJECT_ROOT/logs"
 BOT_LOG_DIR="$PROJECT_ROOT/.codebot/logs"
 LOG_FILE="$LOG_DIR/orchestrator.log"
+WEB_LOG_FILE="$LOG_DIR/control_server.log"
 DRAIN_FILE="$STATE_DIR/.drain"
 RESTART_FILE="$STATE_DIR/.restart"
 PID_FILE="$STATE_DIR/.orchestrator.pid"
+WEB_PID_FILE="$STATE_DIR/.control_server.pid"
+WEB_PORT="${CONTROL_PORT:-${PORT:-8081}}"
 GRACE_PERIOD=10
 
 cd "$PROJECT_ROOT"
@@ -37,6 +43,24 @@ _get_orch_pid() {
 _is_running() {
     local pid
     pid=$(_get_orch_pid)
+    [[ -n "$pid" ]]
+}
+
+_get_web_pid() {
+    if [[ -f "$WEB_PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$WEB_PID_FILE" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+    pgrep -f "python3.*codebot.control_server" 2>/dev/null | head -1 || true
+}
+
+_web_is_running() {
+    local pid
+    pid=$(_get_web_pid)
     [[ -n "$pid" ]]
 }
 
@@ -74,25 +98,26 @@ _clear_drain() {
 cmd_start() {
     if _is_running; then
         echo "CodeBot already running (PID $(_get_orch_pid))"
-        return 0
-    fi
-    _stop_workers
-    _clear_drain
-    mkdir -p "$LOG_DIR" "$BOT_LOG_DIR" "$STATE_DIR" \
-             "$STATE_DIR/alignment_events" "$STATE_DIR/alignment_triggers"
-    setsid env GITHUB_DRY_RUN=0 CODEBOT_PROJECT_ROOT="$PROJECT_ROOT" \
-        python3 -m codebot serve --project "$PROJECT_ROOT" \
-        >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
-    sleep 2
-    if kill -0 "$pid" 2>/dev/null; then
-        echo "CodeBot started (PID $pid)"
     else
-        echo "ERROR: CodeBot failed to start. Check $LOG_FILE" >&2
-        rm -f "$PID_FILE"
-        return 1
+        _stop_workers
+        _clear_drain
+        mkdir -p "$LOG_DIR" "$BOT_LOG_DIR" "$STATE_DIR" \
+                 "$STATE_DIR/alignment_events" "$STATE_DIR/alignment_triggers"
+        setsid env GITHUB_DRY_RUN=0 CODEBOT_PROJECT_ROOT="$PROJECT_ROOT" \
+            python3 -m codebot serve --project "$PROJECT_ROOT" \
+            >> "$LOG_FILE" 2>&1 &
+        local pid=$!
+        echo "$pid" > "$PID_FILE"
+        sleep 2
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "CodeBot started (PID $pid)"
+        else
+            echo "ERROR: CodeBot failed to start. Check $LOG_FILE" >&2
+            rm -f "$PID_FILE"
+            return 1
+        fi
     fi
+    cmd_web_start
 }
 
 cmd_stop() {
@@ -101,10 +126,68 @@ cmd_stop() {
     if [[ -z "$pid" ]]; then
         echo "CodeBot not running"
         _clear_drain
+    else
+        echo "Draining CodeBot (PID $pid)..."
+        _set_drain "stop requested"
+        kill -TERM "$pid" 2>/dev/null || true
+        local waited=0
+        while kill -0 "$pid" 2>/dev/null && (( waited < GRACE_PERIOD )); do
+            sleep 1
+            ((++waited))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Grace period expired, sending SIGKILL..."
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+        _stop_workers
+        rm -f "$PID_FILE"
+        _clear_drain
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "ERROR: Failed to stop PID $pid" >&2
+            return 1
+        fi
+        echo "CodeBot stopped"
+    fi
+    cmd_web_stop
+}
+
+cmd_restart() {
+    cmd_stop
+    sleep 1
+    cmd_start
+}
+
+cmd_web_start() {
+    if _web_is_running; then
+        echo "Web dashboard already running (PID $(_get_web_pid), port $WEB_PORT)"
         return 0
     fi
-    echo "Draining CodeBot (PID $pid)..."
-    _set_drain "stop requested"
+    mkdir -p "$LOG_DIR" "$STATE_DIR"
+    setsid env CODEBOT_PROJECT_ROOT="$PROJECT_ROOT" CONTROL_PORT="$WEB_PORT" \
+        python3 -m codebot.control_server \
+        >> "$WEB_LOG_FILE" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$WEB_PID_FILE"
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null && curl -sf "http://127.0.0.1:$WEB_PORT/health" >/dev/null 2>&1; then
+        echo "Web dashboard started (PID $pid, http://127.0.0.1:$WEB_PORT/dashboard)"
+    else
+        echo "ERROR: Web dashboard failed to start. Check $WEB_LOG_FILE" >&2
+        rm -f "$WEB_PID_FILE"
+        return 1
+    fi
+}
+
+cmd_web_stop() {
+    local pid
+    pid=$(_get_web_pid)
+    if [[ -z "$pid" ]]; then
+        echo "Web dashboard not running"
+        rm -f "$WEB_PID_FILE"
+        return 0
+    fi
+    echo "Stopping web dashboard (PID $pid)..."
     kill -TERM "$pid" 2>/dev/null || true
     local waited=0
     while kill -0 "$pid" 2>/dev/null && (( waited < GRACE_PERIOD )); do
@@ -116,24 +199,35 @@ cmd_stop() {
         kill -9 "$pid" 2>/dev/null || true
         sleep 1
     fi
-    _stop_workers
-    rm -f "$PID_FILE"
-    _clear_drain
+    rm -f "$WEB_PID_FILE"
     if kill -0 "$pid" 2>/dev/null; then
-        echo "ERROR: Failed to stop PID $pid" >&2
+        echo "ERROR: Failed to stop web dashboard PID $pid" >&2
         return 1
     fi
-    echo "CodeBot stopped"
+    echo "Web dashboard stopped"
 }
 
-cmd_restart() {
-    cmd_stop
-    sleep 1
-    cmd_start
+cmd_web_status() {
+    local pid
+    pid=$(_get_web_pid)
+    if [[ -n "$pid" ]]; then
+        echo "Web dashboard: RUNNING (PID $pid, port $WEB_PORT)"
+    else
+        echo "Web dashboard: STOPPED (port $WEB_PORT)"
+        return 0
+    fi
+    if curl -sf "http://127.0.0.1:$WEB_PORT/health" >/dev/null 2>&1; then
+        echo "Web health: OK (http://127.0.0.1:$WEB_PORT/health)"
+        echo "Dashboard: http://127.0.0.1:$WEB_PORT/dashboard"
+        echo "Tickets: http://127.0.0.1:$WEB_PORT/tickets"
+    else
+        echo "Web health: UNREACHABLE"
+        return 1
+    fi
 }
 
 cmd_clear() {
-    if _is_running; then
+    if _is_running || _web_is_running; then
         echo "ERROR: Stop CodeBot before clearing state" >&2
         echo "Run: ./codebotctl stop" >&2
         return 1
@@ -162,6 +256,7 @@ cmd_status() {
     else
         echo "Orchestrator: STOPPED"
     fi
+    cmd_web_status || true
     if [[ -f "$DRAIN_FILE" ]]; then
         echo "Drain: ACTIVE ($(cat "$DRAIN_FILE" 2>/dev/null))"
     else
@@ -171,18 +266,7 @@ cmd_status() {
     workers=$(pgrep -c -f "codebot.api_runner" 2>/dev/null || echo 0)
     echo "Workers: $workers active"
     if [[ -f "$STATE_DIR/tickets.json" ]]; then
-        python3 -c "
-import sys; sys.path.insert(0, '$PROJECT_ROOT')
-from codebot.ticket_engine import TicketStore
-from pathlib import Path
-try:
-    ts = TicketStore(Path('$STATE_DIR/tickets.json'))
-    print(f'Tickets: {ts.count()} total')
-    for s, c in sorted(ts.summary().items()):
-        if c > 0: print(f'  {s}: {c}')
-except Exception as e:
-    print(f'Tickets: error reading store ({e})')
-" 2>/dev/null || echo "Tickets: unable to read"
+        python3 -m codebot.ticket_status "$STATE_DIR" 2>/dev/null || echo "Tickets: unable to read"
     else
         echo "Tickets: no store found"
     fi
@@ -202,8 +286,12 @@ case "${1:-help}" in
     restart) cmd_restart ;;
     clear)   cmd_clear ;;
     status)  cmd_status ;;
+    web-start) cmd_web_start ;;
+    web-stop) cmd_web_stop ;;
+    web-status) cmd_web_status ;;
+    web-restart) cmd_web_stop; sleep 1; cmd_web_start ;;
     *)
-        echo "Usage: $0 {start|stop|restart|clear|status}"
+        echo "Usage: $0 {start|stop|restart|clear|status|web-start|web-stop|web-restart|web-status}"
         exit 1
         ;;
 esac

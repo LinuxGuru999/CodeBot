@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -85,6 +86,8 @@ class ScratchpadState:
     def mark_step_complete(self, step: str) -> None:
         if step not in self.completed_steps:
             self.completed_steps.append(step)
+            if len(self.completed_steps) > 20:
+                self.completed_steps = self.completed_steps[-20:]
         if step in self.remaining_steps:
             self.remaining_steps.remove(step)
         self.updated_at = time.time()
@@ -120,6 +123,8 @@ class ScratchpadState:
             error=self.error_message,
         )
         self.agent_history.append(rec.to_dict())
+        if self.current_stage == "IMPLEMENT":
+            self.agent_history = self.agent_history[-1:]
         self.current_agent = ""
         self.current_stage = ""
         self.phase = "idle"
@@ -141,7 +146,14 @@ class ScratchpadState:
             serialized = self.to_json()
 
 
+def _validate_ticket_id(ticket_id: str) -> None:
+    """Raise ValueError if ticket_id contains path traversal or disallowed characters."""
+    if not re.fullmatch(r'[a-zA-Z0-9_-]+', ticket_id):
+        raise ValueError(f'Invalid ticket_id: {ticket_id!r}')
+
+
 def _scratchpad_path(state_dir: Path, ticket_id: str) -> Path:
+    _validate_ticket_id(ticket_id)
     return state_dir / f"{ticket_id}.scratchpad.json"
 
 
@@ -150,7 +162,10 @@ def load_scratchpad(state_dir: Path, ticket_id: str) -> ScratchpadState:
     if not path.exists():
         return ScratchpadState(ticket_id=ticket_id, started_at=time.time(), updated_at=time.time())
     try:
-        raw = path.read_text(encoding="utf-8")
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read(MAX_SCRATCHPAD_BYTES + 1024)
+        if len(raw) > MAX_SCRATCHPAD_BYTES:
+            return ScratchpadState(ticket_id=ticket_id, started_at=time.time(), updated_at=time.time())
         state = ScratchpadState.from_json(raw)
         if state.version != SCRATCHPAD_VERSION:
             state.ticket_id = ticket_id

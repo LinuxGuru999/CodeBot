@@ -5,12 +5,12 @@ Purpose
 -------
 Commits exactly the files a completed ticket touched, with a message that
 traces back to the ticket ID, and returns the resulting commit SHA for
-ticket traceability. Called AFTER the VERIFYING -> COMPLETE transition
+ticket traceability. Called AFTER the REVIEW -> COMPLETE transition
 succeeds — never before, never at agent exit.
 
 Why
 ---
-The old api_runner._auto_commit ran at IMPLEMENTING exit (unverified work),
+The old api_runner._auto_commit ran at IMPLEMENT exit (unverified work),
 in a subprocess without adapter/paths (always fail-closed), matched
 hardcoded Monitor repo names (always empty on CodeBot), and used
 `git add -A` (would bundle concurrent tickets' work). This module runs in

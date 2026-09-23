@@ -34,12 +34,19 @@ from typing import Any
 logger = logging.getLogger("codebot_bootstrap")
 
 # Core modules that accept adapter injection via set_project_adapter()
+# Review-learning registry is the single registration point for the RL
+# subsystem (fix #2). Legacy goal/discovery/bandit/diagnostics modules
+# live on separate RL-LEGACY track and are not required for the review-learning
+# vertical slice (R0-M1..M3 → P0→P5). See docs/rl-system-flow.md and
+# .omo/plans/review-learning-rl-system.md §5.
 _ADAPTER_MODULES = [
     "codebot.orchestrator",
     "codebot.api_runner",
-    "codebot.rl_engine",
     "codebot.token_budget",
     "codebot.prompt_gateway",
+    "codebot.rl_event_log",
+    "codebot.rl_failure_taxonomy",
+    "codebot.review_learning_registry",
 ]
 
 _wired = False

@@ -34,11 +34,27 @@ class TestAutoCommitGatekeeperFailClosed(unittest.TestCase):
         CB-9254952-EE3B: This is the primary scenario — a buggy or malicious
         change that crashes the gatekeeper must NOT bypass quality gates.
         """
-        mock_gk_cls.side_effect = RuntimeError("Gatekeeper DB corrupted")
+        mock_instance = MagicMock()
+        mock_instance.verify_ticket.side_effect = RuntimeError("Gatekeeper DB corrupted")
+        mock_gk_cls.return_value = mock_instance
         from codebot.api_runner import _auto_commit
-        
-        result = _auto_commit("test_bot", ["codebot/api_runner.py"])
+
+        import io
+        import contextlib
+        log_capture = io.StringIO()
+        with contextlib.redirect_stdout(log_capture):
+            result = _auto_commit("test-bot", ["Monitor-Manager-Python/test.py"], ticket_id="CB-TEST-123")
         self.assertFalse(result, "Commit must be blocked when gatekeeper raises an exception")
+        self.assertTrue(mock_instance.verify_ticket.called,
+                        "verify_ticket must be called — proves RuntimeError path was exercised")
+        output = log_capture.getvalue()
+        self.assertIn("blocking commit", output.lower(),
+                       "Log must contain 'blocking commit' when gatekeeper raises exception")
+        for call in self.mock_bash.call_args_list:
+            cmd = str(call)
+            self.assertNotIn("git add", cmd, "No git add should execute when gatekeeper crashes")
+            self.assertNotIn("git commit", cmd, "No git commit should execute when gatekeeper crashes")
+            self.assertNotIn("git push", cmd, "No git push should execute when gatekeeper crashes")
         self.mock_bash.assert_not_called(), "No git operations should execute when gatekeeper crashes"
 
     @patch('codebot.gatekeeper.Gatekeeper')
@@ -84,7 +100,7 @@ class TestAutoCommitGatekeeperFailClosed(unittest.TestCase):
         self.mock_bash.return_value = {"success": True, "output": "M file.py", "error": ""}
         from codebot.api_runner import _auto_commit
         
-        result = _auto_commit("test_bot", ["/tmp/repo/Monitor-Manager-Python/codebot/api_runner.py"])
+        result = _auto_commit("test_bot", ["/tmp/repo/Monitor-Manager-Python/codebot/api_runner.py"], ticket_id="CB-TEST-GK")
         # bash should have been called for git status at minimum (repo matched)
         self.assertGreaterEqual(self.mock_bash.call_count, 1,
                                  "git operations should execute when gatekeeper returns COMPLETE")

@@ -130,7 +130,7 @@ class TestSyncRolesRegistered:
 
     def test_role_count_bumped(self):
         from codebot.role_registry import ALL_ROLES
-        assert len(ALL_ROLES) == 31
+        assert len(ALL_ROLES) == 32
 
 
 class TestTicketBranchFlow:
@@ -241,32 +241,22 @@ class TestGatekeeperCommitsOnComplete:
         t = create_ticket("feat", TicketClass.BUG, Severity.LOW, "s", "e3", "p", "d", ["a"],
                           risk=RiskLevel.LOW, affected_modules=["feat.py"])
         store.add(t)
-        for st in (TicketState.VALIDATING, TicketState.TRIAGED, TicketState.READY,
-                   TicketState.PLANNING, TicketState.IMPLEMENTING,
-                   TicketState.REVIEWING, TicketState.VERIFYING):
+        for st in (TicketState.TRIAGED, TicketState.GOAL, TicketState.DECOMP,
+                   TicketState.PLANNING, TicketState.IMPLEMENT,
+                   TicketState.REVIEW,):
             store.transition(t.id, st)
         store.record_gate_result(t.id, True)
         store.flush()
         store.close()
 
         passing = [__import__("codebot.quality_gate", fromlist=["GateEvaluation"]).GateEvaluation(
-            "build", __import__("codebot.quality_gate", fromlist=["GateResult"]).GateResult.PASS,
+            "build", __import__("codebot.quality_gate", fromlist=["GateStatus"]).GateStatus.PASS,
             "echo", "ok", 1.0, True)]
         shared = TSStore(state_dir / "tickets.json")
         with patch("codebot.quality_gate.run_quality_gates_with_cache", return_value=(True, passing)):
             with patch("codebot.ticket_dispatcher.get_ticket_store", return_value=shared):
                 gk = Gatekeeper(state_dir=state_dir, workspace=ws)
-                with patch.object(gk, "_build_completion_evidence") as mock_ev:
-                    from codebot.review_types import CompletionEvidence
-                    mock_ev.return_value = CompletionEvidence(
-                        requirement_verified=True, acceptance_passed=1, acceptance_failed=0,
-                        acceptance_unknown=0, tests_executed=1, tests_passed=1, tests_failed=0,
-                        new_tests_added=0, finding_counts={}, build_verified=True,
-                        security_checked=True, regression_checked=True,
-                        deterministic_gates_passed=True, checklist_complete=True,
-                        completion_confidence=1.0,
-                    )
-                    result = gk.verify_ticket(t.id, "bug", ["feat.py"])
+                result = gk.verify_ticket(t.id, "bug", ["feat.py"])
         assert result["decision"] == "COMPLETE"
         got = shared.get(t.id)
         assert got is not None and got.state == TicketState.COMPLETE

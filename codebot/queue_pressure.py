@@ -182,6 +182,12 @@ def calculate_pressure(
 
     impl_capacity = max(impl_active + free, 1)
     impl_demand = ready_count + rework_count
+    ps_local = pipeline_state if pipeline_state is not None else None
+    if ps_local is not None and hasattr(ps_local, "implementation_ready_count"):
+        try:
+            impl_demand += int(ps_local.implementation_ready_count)
+        except (ValueError, TypeError):
+            pass
     impl_pressure = impl_demand / impl_capacity if impl_demand > 0 else 0.0
 
     review_demand = reviewing_count + implementing_count

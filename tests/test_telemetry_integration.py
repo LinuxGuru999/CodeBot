@@ -26,13 +26,27 @@ def _make_control_handler(
     body: bytes = b"",
 ) -> object:
     """Create a control_server.Handler instance with mocked request."""
-    from codebot.control_server import Handler
+    from codebot.control_server import ControlHandler as Handler
+    from codebot.control_server import _rate_limiter, _health_rate_limiter
+
+    # Reset module-global rate limiter state: earlier tests in the same
+    # process (e.g. failed-auth brute-force tests from 127.0.0.1) would
+    # otherwise leak 429s into unrelated telemetry/health tests that reuse
+    # the same loopback client IP.
+    for _lim in (_rate_limiter, _health_rate_limiter):
+        try:
+            with _lim._lock:
+                _lim._failures.pop("127.0.0.1", None)
+                _lim._blocked_until.pop("127.0.0.1", None)
+        except Exception:
+            pass
 
     handler = object.__new__(Handler)
     handler.path = path  # type: ignore[attr-defined]
     handler.headers = headers or {}  # type: ignore[attr-defined]
     handler.rfile = BytesIO(body)  # type: ignore[attr-defined]
     handler.wfile = BytesIO()  # type: ignore[attr-defined]
+    handler.client_address = ("127.0.0.1", 12345)  # type: ignore[attr-defined]
     handler.connection = MagicMock()  # type: ignore[attr-defined]
     handler.command = method  # type: ignore[attr-defined]
 

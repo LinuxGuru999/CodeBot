@@ -175,7 +175,7 @@ class TestIntegrationConfig:
 class TestSchedulerConfig:
     def test_default(self):
         config = SchedulerConfig.default()
-        assert config.max_slots == 30
+        assert config.max_slots == 200
         assert config.scheduler_interval_seconds == 30
         assert config.backlog.low_watermark == 20
 
@@ -205,7 +205,7 @@ class TestSchedulerConfig:
         config = SchedulerConfig.default()
         raw = config.to_json()
         config2 = SchedulerConfig.from_json(raw)
-        assert config2.max_slots == 30
+        assert config2.max_slots == 200
 
     def test_from_dict_partial(self):
         config = SchedulerConfig.from_dict({"max_slots": 10})
@@ -290,7 +290,7 @@ class TestLoadSchedulerConfig:
     def test_default_when_no_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         config = load_scheduler_config()
-        assert config.max_slots == 30
+        assert config.max_slots == 200
 
     def test_load_json_file(self, tmp_path):
         p = tmp_path / "scheduler.json"
@@ -306,4 +306,4 @@ class TestLoadSchedulerConfig:
 
     def test_load_nonexistent_returns_default(self, tmp_path):
         config = load_scheduler_config(tmp_path / "missing.yaml")
-        assert config.max_slots == 30
+        assert config.max_slots == 200

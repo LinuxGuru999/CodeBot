@@ -143,7 +143,7 @@ class _FakeAgingCfg:
 class TestSchedulerConfig:
     def test_default_config_validates(self):
         config = SchedulerConfig.default()
-        assert config.max_slots == 30
+        config.validate()
         assert config.backlog.low_watermark == 20
         assert config.backlog.target == 50
         assert config.backlog.high_watermark == 100

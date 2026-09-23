@@ -111,6 +111,40 @@ class TestRateLimiter(unittest.TestCase):
         allowed2, _ = self.limiter.is_allowed(ip2)
         self.assertTrue(allowed2)
 
+    def test_eviction_at_capacity_boundary(self):
+        """Verify that oldest IP is evicted when capacity is exceeded."""
+        # Use a small capacity for testing
+        small_limiter = RateLimiter(max_tracked_ips=3)
+        
+        # Fill to capacity
+        ips = ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+        for ip in ips:
+            small_limiter.record_failure(ip)
+        
+        self.assertEqual(len(small_limiter._failures), 3)
+        self.assertIn("1.1.1.1", small_limiter._failures)
+        
+        # Add one more IP, should evict the oldest (1.1.1.1)
+        small_limiter.record_failure("4.4.4.4")
+        
+        self.assertEqual(len(small_limiter._failures), 3)
+        self.assertNotIn("1.1.1.1", small_limiter._failures)
+        self.assertIn("4.4.4.4", small_limiter._failures)
+        # Verify blocked_until is also evicted if present
+        self.assertNotIn("1.1.1.1", small_limiter._blocked_until)
+
+    def test_no_growth_under_unique_ip_load(self):
+        """Verify that memory usage stays bounded under sustained unique-IP load."""
+        max_ips = 5
+        limiter = RateLimiter(max_tracked_ips=max_ips)
+        
+        # Simulate 2x max_ips unique IPs
+        for i in range(max_ips * 2):
+            limiter.record_failure(f"10.0.0.{i}")
+            
+        self.assertLessEqual(len(limiter._failures), max_ips)
+        self.assertLessEqual(len(limiter._blocked_until), max_ips)
+
 
 if __name__ == "__main__":
     unittest.main()

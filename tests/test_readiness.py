@@ -596,3 +596,41 @@ class TestParseQueueIds:
             f"Expected parse_queue_ids_from_text to be significantly faster: "
             f"naive={naive_time:.4f}s, fast={fast_time:.4f}s, ratio={naive_time/max(fast_time,1e-9):.1f}x"
         )
+
+    def test_no_partial_id_matches(self):
+        """Verify exact ID matching - Q-123 should NOT match Q-1234.
+
+        This tests the critical edge case where substring matching would
+        incorrectly approve tickets due to partial ID overlaps.
+        """
+        # Text contains Q-1234 but NOT Q-123
+        text = """| ID | Source | Title |
+|---|---|---|
+| Q-1234 | bot | Extended task |
+| Q-5678 | bot | Another task |
+"""
+        result = parse_queue_ids_from_text(text)
+        # Q-1234 exists, Q-123 does not
+        assert "Q-1234" in result
+        assert "Q-123" not in result
+        assert "Q-5678" in result
+        assert "Q-567" not in result
+        assert "Q-12" not in result
+
+    def test_similar_ids_distinguished(self):
+        """Test that IDs with similar prefixes are correctly distinguished."""
+        text = """### QUEUE-DECOMP-10
+- Status: confirmed
+
+### QUEUE-DECOMP-100
+- Status: approved
+
+### QUEUE-DECOMP-1000
+- Status: deferred
+"""
+        result = parse_queue_ids_from_text(text)
+        # All three distinct IDs should be found
+        assert result == {"QUEUE-DECOMP-10", "QUEUE-DECOMP-100", "QUEUE-DECOMP-1000"}
+        # Partial matches should not appear
+        assert "QUEUE-DECOMP-1" not in result
+        assert "QUEUE-DECOMP-100" in result  # exact match exists

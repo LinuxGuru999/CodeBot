@@ -13,9 +13,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import codebot.token_budget as tb
+from codebot.file_lock import flock, LOCK_EX
 from codebot.token_budget import (
     CAP,
-    _FLUSH_AFTER_WRITES,
     _new_ledger,
     _read,
     _valid_ledger,
@@ -27,13 +27,6 @@ from codebot.token_budget import (
     record_usage,
     record_usage_locked,
 )
-
-
-@pytest.fixture(autouse=True)
-def reset_pending_writes():
-    tb._pending_writes = 0
-    yield
-    tb._pending_writes = 0
 
 
 class TestNewLedger:
@@ -480,3 +473,143 @@ class TestLedgerFlushBehavior:
         assert tb._pending_writes == 1
         record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
         assert tb._pending_writes == 0
+
+
+class TestRecordUsageExceptionHandling:
+    """Tests for record_usage exception handling during batched writes.
+    
+    Verifies that exceptions from _read or _write during the batched path
+    (_pending_writes < _FLUSH_AFTER_WRITES) are properly propagated and
+    tokens are not silently lost.
+    """
+    
+    def test_read_raises_value_error_on_corrupt_ledger_batched(self, tmp_path, monkeypatch):
+        """Verify record_usage raises ValueError when ledger is corrupt during batched write."""
+        monkeypatch.setattr(tb, "_FLUSH_AFTER_WRITES", 5)  # Enable batching
+        tb._pending_writes = 0
+        p = tmp_path / "ledger.json"
+        p.write_text("corrupt json data", encoding="utf-8")
+        
+        with pytest.raises(ValueError, match="invalid token ledger"):
+            record_usage("2026-01-01", "gpt-4", 100, 50, path=p)
+        
+        # Verify _pending_writes was incremented despite failure
+        assert tb._pending_writes == 1
+
+    def test_write_raises_oserror_on_disk_full_batched(self, tmp_path, monkeypatch):
+        """Verify record_usage raises OSError when write fails during batched write."""
+        monkeypatch.setattr(tb, "_FLUSH_AFTER_WRITES", 5)  # Enable batching
+        tb._pending_writes = 0
+        p = tmp_path / "ledger.json"
+        
+        # Mock _write to simulate disk full
+        def mock_write_fail(path, data):
+            raise OSError("No space left on device")
+        
+        monkeypatch.setattr(tb, "_write", mock_write_fail)
+        
+        with pytest.raises(OSError, match="No space left on device"):
+            record_usage("2026-01-01", "gpt-4", 100, 50, path=p)
+        
+        # Verify _pending_writes was incremented despite failure
+        assert tb._pending_writes == 1
+
+    def test_lock_timeout_raises_timeout_error_batched(self, tmp_path, monkeypatch):
+        """Verify record_usage raises TimeoutError when lock acquisition fails."""
+        monkeypatch.setattr(tb, "_FLUSH_AFTER_WRITES", 5)  # Enable batching
+        monkeypatch.setattr(tb, "LOCK_TIMEOUT", 0.1)  # Short timeout for test
+        tb._pending_writes = 0
+        p = tmp_path / "ledger.json"
+        
+        # Hold the lock in another thread to force timeout
+        ready = threading.Event()
+        hold_done = threading.Event()
+        
+        def hold_lock():
+            lock_path = Path(str(p) + ".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fp = lock_path.open("a+", encoding="utf-8")
+            try:
+                flock(fp.fileno(), LOCK_EX)
+                ready.set()
+                hold_done.wait(timeout=2)
+            finally:
+                fp.close()
+        
+        t = threading.Thread(target=hold_lock, daemon=True)
+        t.start()
+        ready.wait(timeout=2)
+        
+        try:
+            with pytest.raises(TimeoutError, match="budget-unknown"):
+                record_usage("2026-01-01", "gpt-4", 100, 50, path=p)
+        finally:
+            hold_done.set()
+            t.join(timeout=2)
+        
+        # Verify _pending_writes was incremented despite failure
+        assert tb._pending_writes == 1
+
+    def test_pending_writes_incremented_before_call_allows_retry_logic(self, tmp_path, monkeypatch):
+        """Verify _pending_writes is incremented before record_usage_locked call.
+        
+        This documents current behavior where counter increments even if write fails.
+        Callers can use this to implement retry logic or detect repeated failures.
+        """
+        monkeypatch.setattr(tb, "_FLUSH_AFTER_WRITES", 5)
+        tb._pending_writes = 0
+        p = tmp_path / "ledger.json"
+        
+        # First call succeeds
+        record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
+        assert tb._pending_writes == 1
+        
+        # Make subsequent calls fail
+        def mock_write_fail(path, data):
+            raise OSError("Simulated failure")
+        
+        monkeypatch.setattr(tb, "_write", mock_write_fail)
+        
+        # Second call fails but counter still increments
+        with pytest.raises(OSError):
+            record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
+        assert tb._pending_writes == 2
+        
+        # Third call also fails, counter increments again
+        with pytest.raises(OSError):
+            record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
+        assert tb._pending_writes == 3
+
+    def test_tokens_accounted_on_next_successful_flush(self, tmp_path, monkeypatch):
+        """Verify tokens are correctly accounted when flush eventually succeeds after failures."""
+        monkeypatch.setattr(tb, "_FLUSH_AFTER_WRITES", 3)
+        tb._pending_writes = 0
+        p = tmp_path / "ledger.json"
+        
+        # First two calls succeed (batched, not flushed yet)
+        r1 = record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
+        assert r1["total_actual"] == 10
+        assert tb._pending_writes == 1
+        
+        r2 = record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
+        assert r2["total_actual"] == 20
+        assert tb._pending_writes == 2
+        
+        # Make third call fail
+        def mock_write_fail(path, data):
+            raise OSError("Simulated failure")
+        
+        monkeypatch.setattr(tb, "_write", mock_write_fail)
+        
+        with pytest.raises(OSError):
+            record_usage("2026-01-01", "gpt-4", 10, 0, path=p)
+        assert tb._pending_writes == 0  # Reset after reaching threshold
+        
+        # Restore normal write behavior
+        monkeypatch.undo()
+        
+        r4 = record_usage("2026-01-01", "gpt-4", 50, 0, path=p)
+        assert r4["total_actual"] == 70
+
+        ledger_data = json.loads(p.read_text(encoding="utf-8"))
+        assert ledger_data["total_actual"] == 70

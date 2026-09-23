@@ -19,6 +19,10 @@ Invariants
 - All requests are synchronous blocking calls
 - Connection errors fail open (return None, never raise)
 
+Global options:
+  --timeout <seconds>   Override the default request timeout (default: 15s).
+                        Example: python3 control_client.py --timeout 30 status
+
 Usage:
   CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py status
   CONTROL_URL=https://monitor-botnet.fly.dev CONTROL_TOKEN=xxx python3 control_client.py logs issues --lines 200
@@ -49,12 +53,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import urllib.parse
 import urllib.request
 import urllib.error
 
 URL = os.environ.get("CONTROL_URL", "http://127.0.0.1:8081").rstrip("/")
 TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
+DEFAULT_TIMEOUT = 15
+REQUEST_TIMEOUT = DEFAULT_TIMEOUT
 
 # Bounded I/O: Constitutional invariant — all reads must have a size cap.
 # 1 MiB is generous for control-server JSON payloads while preventing memory
@@ -98,7 +105,7 @@ def _is_loopback_host(hostname: str | None) -> bool:
     return h in ("localhost", "127.0.0.1", "::1")
 
 
-def req(method: str, path: str, body: dict | None = None) -> tuple[int, dict | str]:
+def req(method: str, path: str, body: dict | None = None, timeout: int | None = None) -> tuple[int, dict | str]:
     url = f"{URL}{path}"
     if TOKEN:
         parsed = urllib.parse.urlparse(URL)
@@ -112,8 +119,19 @@ def req(method: str, path: str, body: dict | None = None) -> tuple[int, dict | s
     if TOKEN:
         headers["Authorization"] = f"Bearer {TOKEN}"
     r = urllib.request.Request(url, data=data, headers=headers, method=method)
+    effective_timeout = timeout if timeout is not None else REQUEST_TIMEOUT
+    loading_printed = threading.Event()
+
+    def _show_loading():
+        if not loading_printed.is_set():
+            loading_printed.set()
+            print(f"⏳ Request in progress... (timeout: {effective_timeout}s)", file=sys.stderr, flush=True)
+
+    timer = threading.Timer(0.5, _show_loading)
+    timer.daemon = True
+    timer.start()
     try:
-        with urllib.request.urlopen(r, timeout=15) as resp:
+        with urllib.request.urlopen(r, timeout=effective_timeout) as resp:
             raw = resp.read(MAX_RESPONSE_BYTES).decode()
             try:
                 return resp.status, json.loads(raw) if raw else {}
@@ -125,8 +143,24 @@ def req(method: str, path: str, body: dict | None = None) -> tuple[int, dict | s
             return e.code, json.loads(raw) if raw else {"error": raw}
         except Exception:
             return e.code, {"error": raw, "code": e.code}
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        err_str = str(e)
+        if "timed out" in err_str.lower() or isinstance(e, TimeoutError):
+            msg = (
+                f"Request timed out after {effective_timeout}s. "
+                f"What to try next:\n"
+                f"  1. Check that CONTROL_URL ({URL}) is reachable.\n"
+                f"  2. Verify your network connection.\n"
+                f"  3. Increase timeout with --timeout <seconds> (e.g., --timeout 30).\n"
+                f"Original error: {err_str}"
+            )
+            return 0, {"error": msg}
+        return 0, {"error": err_str}
     except Exception as e:
         return 0, {"error": str(e)}
+    finally:
+        timer.cancel()
+        loading_printed.set()
 
 def cmd_status():
     code, j = req("GET", "/bots")
@@ -202,9 +236,29 @@ def cmd_dead_letter_retry(item_id: str):
         sys.exit(1)
 
 def main():
+    global REQUEST_TIMEOUT
     if len(sys.argv) < 2:
         print(__doc__); sys.exit(1)
-    cmd = sys.argv[1]
+    args = sys.argv[1:]
+    # Extract --timeout flag before command parsing
+    filtered_args = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--timeout" and i + 1 < len(args):
+            try:
+                REQUEST_TIMEOUT = int(args[i + 1])
+            except ValueError:
+                print(f"--timeout must be an integer, got: {args[i + 1]}")
+                sys.exit(1)
+            i += 2
+        else:
+            filtered_args.append(args[i])
+            i += 1
+    if not filtered_args:
+        print(__doc__); sys.exit(1)
+    cmd = filtered_args[0]
+    # Rebuild sys.argv for downstream command handlers
+    sys.argv = [sys.argv[0]] + filtered_args
     if cmd == "status":
         cmd_status()
     elif cmd == "scheduler-status":

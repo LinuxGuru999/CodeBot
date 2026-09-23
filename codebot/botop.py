@@ -223,6 +223,30 @@ def _hard_wrap_ansi(text: str, max_width: int) -> list[str]:
 # Safe readers
 # ---------------------------------------------------------------------------
 
+# Tasklog tail-read window (64KB) — bounded to <100KB per CB-E05F acceptance
+_TASKLOG_TAIL_BYTES = 65536
+
+
+def _tasklog_tail_line_count(tasklog_path: Path) -> int | None:
+    """Return newline count from last _TASKLOG_TAIL_BYTES of tasklog file.
+
+    CB-E05F413D3E8A1DC08515A73567E10CD8: Bounded 64KB binary tail-read for performance.
+    Opens in binary mode, seeks to max(0, size - window), reads at most
+    window bytes, counts raw byte newlines (0x0A). Returns None on any error.
+    """
+    try:
+        with open(tasklog_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            # CB-E05F: strict 64KB binary tail-read bound
+            offset = max(0, size - _TASKLOG_TAIL_BYTES)
+            f.seek(offset)
+            data = f.read(_TASKLOG_TAIL_BYTES)
+        return data.count(b"\n")
+    except Exception:
+        return None
+
+
 def _read_text_safe(p: Path, limit: int = 1_000_000) -> str | None:
     try:
         if not p.exists():
@@ -232,6 +256,26 @@ def _read_text_safe(p: Path, limit: int = 1_000_000) -> str | None:
         if len(txt) > limit:
             txt = txt[-limit:]
         return txt
+    except Exception:
+        return None
+
+
+def _read_tasklog_bounded(p: Path, max_bytes: int = 65536) -> str | None:
+    """Read tasklog with strict byte bound (CB-7249E).
+    
+    Reads at most max_bytes from the end of the file using binary seek.
+    Returns None on any error.
+    """
+    try:
+        if not p.exists():
+            return None
+        with open(p, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            offset = max(0, size - max_bytes)
+            f.seek(offset)
+            data = f.read(max_bytes)
+        return data.decode("utf-8", errors="ignore")
     except Exception:
         return None
 
@@ -389,6 +433,7 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         # fallback list known roles? keep empty to show "No agents found"
         pass
 
+    # CB-7249E: Batch PID lookup to avoid O(n) subprocess spawns
     pid_map = _find_all_api_pids()
     agents: list[dict[str, Any]] = []
     for name in sorted(names):
@@ -407,18 +452,19 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         if hb_age is not None and hb_age < 0:
             hb_age = 0
 
-        status = _read_json_safe(status_path) if status_path.exists() else None
+        status = _read_json_safe(status_path)
         if not isinstance(status, dict):
             status = {}
-        state = _read_json_safe(state_path) if state_path.exists() else None
+        state = _read_json_safe(state_path)
         if not isinstance(state, dict):
             state = {}
-        ckpt = _read_checkpoint_file(ckpt_path) if ckpt_path.exists() else None
-        scratch = _read_json_safe(scratch_path) if scratch_path.exists() else None
+        ckpt = _read_checkpoint_file(ckpt_path)
+        scratch = _read_json_safe(scratch_path)
         if not isinstance(scratch, dict):
             scratch = {}
 
         paused = paused_path.exists()
+        # CB-7249E: Use batch map lookup instead of per-agent _find_agent_pid call
         pid = pid_map.get(name)
         running = pid is not None
 
@@ -471,18 +517,21 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         log_size = None
         tasklog_lines = None
         try:
-            if log_path.exists():
-                log_age = now - log_path.stat().st_mtime
-                log_size = log_path.stat().st_size
-            if tasklog_path.exists():
-                tasklog_age = now - tasklog_path.stat().st_mtime
-                # quick line count capped at reading tail? we approximate via read
-                try:
-                    # bounded line count
-                    txt = tasklog_path.read_text(encoding="utf-8", errors="ignore")
-                    tasklog_lines = txt.count("\n")
-                except Exception:
-                    pass
+            try:
+                st = log_path.stat()
+                log_age = now - st.st_mtime
+                log_size = st.st_size
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            # Bounded tail line count (64KB window) + mtime; None when missing.
+            try:
+                st2 = tasklog_path.stat()
+                tasklog_age = now - st2.st_mtime
+            except (FileNotFoundError, OSError):
+                pass
+            tasklog_lines = _tasklog_tail_line_count(tasklog_path)
         except Exception:
             pass
 
@@ -490,11 +539,13 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         # so try to read from status? but status doesn't have model; fallback to mission or log header not needed
         # try to infer from checkpoint or scratch? not reliable; leave blank and let live show "-"
         model = ""
-        # attempt to read from state dir's bot_metrics or rl_state later; leave for throughput section
+        # attempt to read from state dir's bot_metrics later; leave for throughput section
         # also try mission file first line?
         if mission_path.exists():
             try:
-                head = mission_path.read_text(encoding="utf-8", errors="ignore")[:2000]
+                # Bounded read: only read first 2KB for model extraction (CB-A21BD)
+                with open(mission_path, "r", encoding="utf-8", errors="ignore") as mf:
+                    head = mf.read(2000)
                 m = re.search(r"model\s+([A-Za-z0-9\.\-_]+)", head)
                 if m:
                     model = m.group(1)[:24]
@@ -537,7 +588,6 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
 
 def _collect_tickets(project_root: Path) -> tuple[Any | None, dict | None, list[Any]]:
     state_dir = _find_state_dir(project_root)
-    # try multiple locations
     tickets_file = None
     for cand in [state_dir / "tickets.json", state_dir / "codebot_tickets.json", project_root / "tickets.json", Path.cwd() / "tickets.json"]:
         if cand.exists():
@@ -545,30 +595,15 @@ def _collect_tickets(project_root: Path) -> tuple[Any | None, dict | None, list[
             break
     if tickets_file is None:
         return None, None, []
-    # try TicketStore if available
-    try:
-        from codebot.ticket_engine import TicketStore
-        store = TicketStore(tickets_file)
-        summary = store.summary()
-        # collect all tickets via internal dict if accessible
-        tickets = list(getattr(store, "_tickets", {}).values()) if hasattr(store, "_tickets") else []
-        # fallback if tickets empty but summary says total >0, read raw
-        if not tickets:
-            raw = _read_json_safe(tickets_file)
-            if isinstance(raw, dict) and isinstance(raw.get("tickets"), list):
-                tickets = raw["tickets"]
-        return store, summary, tickets
-    except Exception:
-        raw = _read_json_safe(tickets_file)
-        if isinstance(raw, dict):
-            tickets = raw.get("tickets", [])
-            # build summary manually
-            cnt: dict[str, int] = Counter()  # type: ignore
-            for t in tickets:
-                st = t.get("state", "UNKNOWN") if isinstance(t, dict) else "UNKNOWN"
-                cnt[str(st)] += 1
-            return None, dict(cnt), tickets if isinstance(tickets, list) else []
-        return None, None, []
+    raw = _read_json_safe(tickets_file)
+    if isinstance(raw, dict):
+        tickets = raw.get("tickets", [])
+        cnt: dict[str, int] = Counter()  # type: ignore
+        for t in tickets:
+            st = t.get("state", "UNKNOWN") if isinstance(t, dict) else "UNKNOWN"
+            cnt[str(st)] += 1
+        return None, dict(cnt), tickets if isinstance(tickets, list) else []
+    return None, None, []
 
 
 def _collect_claims(project_root: Path) -> list[dict[str, Any]]:
@@ -580,12 +615,20 @@ def _collect_claims(project_root: Path) -> list[dict[str, Any]]:
     now = time.time()
     for cf in sorted(claims_dir.glob("*.json")):
         try:
-            data = json.loads(cf.read_text(encoding="utf-8", errors="ignore"))
+            raw = cf.read_text(encoding="utf-8", errors="ignore").strip()
+            try:
+                data = json.loads(raw)
+            except Exception:
+                try:
+                    data = ast.literal_eval(raw)
+                    if not isinstance(data, dict):
+                        data = {}
+                except Exception:
+                    data = {}
             if not isinstance(data, dict):
                 data = {}
-            # claims from orchestrator use ticket_id/bot/at/class ; older botop expected worker/at
             ticket_id = data.get("ticket_id") or data.get("id") or cf.stem.split(".")[0]
-            worker = data.get("bot") or data.get("worker") or data.get("owner") or "?"
+            worker = data.get("bot") or data.get("worker") or data.get("agent") or data.get("owner") or "?"
             at = data.get("at") or data.get("claimed_at") or data.get("ts") or 0
             try:
                 at_f = float(at)
@@ -659,7 +702,17 @@ def _collect_orchestrator_info(project_root: Path) -> dict[str, Any]:
     state_dir = _find_state_dir(project_root)
     now = time.time()
     info: dict[str, Any] = {}
-    pid_path = state_dir / "orchestrator.pid"
+    pid_path = next(
+        (
+            candidate
+            for candidate in (
+                state_dir / ".orchestrator.pid",
+                state_dir / "orchestrator.pid",
+            )
+            if candidate.exists()
+        ),
+        state_dir / ".orchestrator.pid",
+    )
     try:
         if pid_path.exists():
             txt = pid_path.read_text(encoding="utf-8", errors="ignore").strip().split()
@@ -850,7 +903,7 @@ def _collect_findings_state(project_root: Path) -> list[dict]:
 
 def _collect_gatekeeper_state(project_root: Path) -> list[dict]:
     state_dir = _find_state_dir(project_root)
-    for cand in [state_dir / "gatekeeper_log.jsonl", Path(__file__).parent / "state" / "gatekeeper_log.jsonl"]:
+    for cand in [state_dir / "gate_results.jsonl", Path(__file__).parent / "state" / "gate_results.jsonl"]:
         if cand.exists():
             try:
                 lines = cand.read_text(encoding="utf-8", errors="ignore").splitlines()[-10:]
@@ -925,18 +978,22 @@ def _severity_color(sev: str, enabled: bool) -> str:
 
 def _state_color(st: str, enabled: bool) -> str:
     cols = {
-        "IMPLEMENTING": "yellow", "REVIEWING": "cyan", "VERIFYING": "blue",
-        "COMPLETE": "green", "READY": "green", "PLANNING": "magenta",
-        "REWORK": "red", "BLOCKED": "red", "DISCOVERED": "gray",
-        "TRIAGED": "cyan", "VALIDATING": "yellow", "DEFERRED": "gray",
-        "REJECTED": "red", "DUPLICATE": "gray",
+        "DISCOVERED": "gray", "TRIAGED": "cyan", "GOAL": "blue",
+        "DECOMP": "blue", "PLANNING": "magenta", "IMPLEMENT": "yellow",
+        "REVIEW": "cyan", "COMPLETE": "green", "REWORK": "red",
+        "DEFERRED": "gray", "LATER": "yellow", "NEVER": "red",
+        "REJECTED": "red", "DUPLICATE": "gray", "NOT_ACTIONABLE": "gray",
+        "RESOLVED": "green", "SUPERSEDED": "gray", "CANCELLED": "red",
+        "BLOCKED": "red",
     }
     symbols = {
-        "IMPLEMENTING": "\u2699", "REVIEWING": "\U0001f441", "VERIFYING": "\U0001f50d",
-        "COMPLETE": "\u2713", "READY": "\u2713", "PLANNING": "\U0001f4dd",
-        "REWORK": "\u21bb", "BLOCKED": "\u26d4", "DISCOVERED": "\U0001f50e",
-        "TRIAGED": "\U0001f4cb", "VALIDATING": "\u2705", "DEFERRED": "\u23f2",
-        "REJECTED": "\u2717", "DUPLICATE": "\u267b",
+        "DISCOVERED": "\U0001f50e", "TRIAGED": "\U0001f4cb", "GOAL": "\U0001f9ed",
+        "DECOMP": "\u2699", "PLANNING": "\U0001f4dd", "IMPLEMENT": "\u2699",
+        "REVIEW": "\U0001f441", "COMPLETE": "\u2713", "REWORK": "\u21bb",
+        "DEFERRED": "\u23f2", "LATER": "\u23f8", "NEVER": "\u2717",
+        "REJECTED": "\u2717", "DUPLICATE": "\u267b", "NOT_ACTIONABLE": "\u26d4",
+        "RESOLVED": "\u2713", "SUPERSEDED": "\u2192", "CANCELLED": "\u2717",
+        "BLOCKED": "\u26d4",
     }
     upper = st.upper()
     sym = symbols.get(upper, "")
@@ -1017,9 +1074,28 @@ def cmd_status(project_root: Path, verbose: bool = False, json_out: bool = False
             hb_c = _age_str(a["hb_age"], enabled) if a["hb_age"] is not None else _c("?", "gray", enabled)
             model = (a["model"] or "-")[:20]
             print(f"{a['name']:<24s} {_ansi_pad(bucket, 10)} {_ansi_pad(hb_c, 8, 'right')} {pid_s:>7s} {iter_s:>5s} {task:<20s} {model:<20s}")
-    # summary
+    try:
+        from codebot.scheduler_config import MAX_CONCURRENT_AGENTS as _max_slots
+        max_slots_val = _max_slots
+    except Exception:
+        max_slots_val = 200
+    active_slots = len([a for a in agents if a.get("bucket") in ("RUNNING", "STARTING")])
+    print(f"\nConcurrency: {active_slots}/{max_slots_val}  Spawn queue: {len([a for a in agents if a.get('bucket') == 'STARTING'])} starting")
+    try:
+        _, _summary, _tickets = _collect_tickets(project_root)
+        if _summary:
+            buckets = {
+                "IMPLEMENT": _summary.get("IMPLEMENT", 0),
+                "REVIEW": _summary.get("REVIEW", 0),
+                "PLANNING": _summary.get("PLANNING", 0),
+                "DECOMP": _summary.get("DECOMP", 0),
+                "TRIAGE": _summary.get("TRIAGED", 0),
+            }
+            print("Buckets: " + "  ".join(f"{k} actionable={v}" for k, v in buckets.items()))
+    except Exception:
+        pass
     cnt = Counter(a["bucket"] for a in agents)
-    print(f"\nAgents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","WAITING","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
+    print(f"Agents: {len(agents)}  " + "  ".join(f"{k}={cnt.get(k,0)}" for k in ["RUNNING","STALE","WAITING","PAUSED","DEAD","UNKNOWN"] if cnt.get(k)))
     running = [a for a in agents if a["bucket"]=="RUNNING"]
     if running:
         print(f"Running PIDs: " + ", ".join(f"{a['name']}:{a['pid']}" for a in running[:10] if a["pid"]))
@@ -1103,32 +1179,110 @@ def cmd_logs(project_root: Path, agent: str, lines: int = 50, follow: bool = Fal
         return 1
 
 
-def cmd_restart(project_root: Path, agent: str) -> int:
+def cmd_restart(project_root: Path, agent: str, force: bool = False, dry_run: bool = False) -> int:
+    """Restart an agent with confirmation and dry-run support.
+    
+    Args:
+        project_root: Project root path
+        agent: Agent name to restart
+        force: Skip confirmation prompt
+        dry_run: Show what would happen without acting
+    
+    Returns:
+        0 on success, 1 on failure
+    """
     pid = _find_agent_pid(agent)
-    if pid:
+    enabled = _supports_color()
+    
+    if not pid:
+        print(_c(f"{agent} is not running", "yellow", enabled))
+        return 0
+    
+    # Show preview
+    print(_c(f"[DRY-RUN] Would restart agent '{agent}' (PID {pid})", "cyan", enabled))
+    print(f"  - Send SIGTERM to PID {pid}")
+    print(f"  - Wait 2 seconds")
+    print(f"  - If still running, send SIGKILL to PID {pid}")
+    print(f"\nUndo: The orchestrator will automatically respawn the agent if needed.")
+    print(f"      To prevent respawning: pause the agent first with 'botop pause {agent}'")
+    
+    if dry_run:
+        return 0
+    
+    # Confirm unless --force
+    if not force:
         try:
-            os.kill(pid, signal.SIGTERM)
-            print(f"Sent SIGTERM to {agent} (PID {pid})")
-            time.sleep(2)
-            try:
-                os.kill(pid, 0)
-                os.kill(pid, signal.SIGKILL)
-                print(f"Sent SIGKILL to {agent} (PID {pid})")
-            except ProcessLookupError:
-                pass
-        except ProcessLookupError:
-            print(f"{agent} (PID {pid}) already exited")
-        except PermissionError:
-            print(f"Permission denied to kill {agent} (PID {pid})", file=sys.stderr)
+            response = input(f"\nProceed with restart of '{agent}'? [y/N] ").strip().lower()
+            if response not in ("y", "yes"):
+                print("Cancelled.")
+                return 0
+        except EOFError:
+            # Non-interactive mode requires --force
+            print("Error: Interactive confirmation required. Use --force to skip prompt.", file=sys.stderr)
             return 1
-    else:
-        print(f"{agent} is not running")
+    
+    # Execute restart
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"Sent SIGTERM to {agent} (PID {pid})")
+        time.sleep(2)
+        try:
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+            print(f"Sent SIGKILL to {agent} (PID {pid})")
+        except ProcessLookupError:
+            pass
+    except ProcessLookupError:
+        print(f"{agent} (PID {pid}) already exited")
+    except PermissionError:
+        print(f"Permission denied to kill {agent} (PID {pid})", file=sys.stderr)
+        return 1
     return 0
 
 
-def cmd_pause(project_root: Path, agent: str) -> int:
+def cmd_pause(project_root: Path, agent: str, force: bool = False, dry_run: bool = False) -> int:
+    """Pause an agent with confirmation and dry-run support.
+    
+    Args:
+        project_root: Project root path
+        agent: Agent name to pause
+        force: Skip confirmation prompt
+        dry_run: Show what would happen without acting
+    
+    Returns:
+        0 on success, 1 on failure
+    """
     state_dir = _find_state_dir(project_root)
     pause_file = state_dir / f"{agent}.paused"
+    enabled = _supports_color()
+    
+    # Check if already paused
+    if pause_file.exists():
+        print(_c(f"{agent} is already paused", "yellow", enabled))
+        return 0
+    
+    # Show preview
+    print(_c(f"[DRY-RUN] Would pause agent '{agent}'", "cyan", enabled))
+    print(f"  - Create pause flag: {pause_file}")
+    print(f"\nUndo: Run 'botop resume {agent}' to resume the agent.")
+    print(f"      Or manually remove: rm {pause_file}")
+    
+    if dry_run:
+        return 0
+    
+    # Confirm unless --force
+    if not force:
+        try:
+            response = input(f"\nProceed with pause of '{agent}'? [y/N] ").strip().lower()
+            if response not in ("y", "yes"):
+                print("Cancelled.")
+                return 0
+        except EOFError:
+            # Non-interactive mode requires --force
+            print("Error: Interactive confirmation required. Use --force to skip prompt.", file=sys.stderr)
+            return 1
+    
+    # Execute pause
     pause_file.write_text(str(time.time()))
     print(f"Paused {agent}")
     return 0
@@ -1145,10 +1299,54 @@ def cmd_resume(project_root: Path, agent: str) -> int:
     return 0
 
 
-def cmd_drain(project_root: Path, reason: str = "manual") -> int:
+def cmd_drain(project_root: Path, reason: str = "manual", force: bool = False, dry_run: bool = False) -> int:
+    """Set drain flag with confirmation and dry-run support.
+    
+    Args:
+        project_root: Project root path
+        reason: Reason for draining
+        force: Skip confirmation prompt
+        dry_run: Show what would happen without acting
+    
+    Returns:
+        0 on success, 1 on failure
+    """
     state_dir = _find_state_dir(project_root)
     state_dir.mkdir(parents=True, exist_ok=True)
     drain_file = state_dir / ".drain"
+    enabled = _supports_color()
+    
+    # Check if already draining
+    if drain_file.exists():
+        existing_reason = drain_file.read_text(encoding="utf-8", errors="ignore").strip()
+        print(_c(f"Drain is already active: {existing_reason}", "yellow", enabled))
+        print(f"Undo: Run 'botop clear-drain' to stop draining.")
+        return 0
+    
+    # Show preview
+    print(_c(f"[DRY-RUN] Would set drain flag", "cyan", enabled))
+    print(f"  - Create drain file: {drain_file}")
+    print(f"  - Reason: {reason}")
+    print(f"\nEffect: Orchestrator will stop spawning new agents and allow existing ones to complete.")
+    print(f"Undo: Run 'botop clear-drain' to resume normal operation.")
+    print(f"      Or manually remove: rm {drain_file}")
+    
+    if dry_run:
+        return 0
+    
+    # Confirm unless --force
+    if not force:
+        try:
+            response = input(f"\nProceed with setting drain (reason: '{reason}')? [y/N] ").strip().lower()
+            if response not in ("y", "yes"):
+                print("Cancelled.")
+                return 0
+        except EOFError:
+            # Non-interactive mode requires --force
+            print("Error: Interactive confirmation required. Use --force to skip prompt.", file=sys.stderr)
+            return 1
+    
+    # Execute drain
     drain_file.write_text(f"{time.time()} {reason}")
     print(f"Drain set: {reason}")
     return 0
@@ -1219,7 +1417,7 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
     print(_c(f"Tickets — total {total}", "bold", enabled))
     if summary:
         # colored state table
-        ordered_states = ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]
+        ordered_states = ["DISCOVERED","TRIAGED","GOAL","DECOMP","PLANNING","IMPLEMENT","REVIEW","COMPLETE","REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE","LATER","NEVER"]
         present = [s for s in ordered_states if summary.get(s)]
         # also include unexpected
         for k in summary:
@@ -1294,7 +1492,14 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
     filtered = tickets
     if state_filter:
         sf = state_filter.upper()
-        filtered = [t for t in tickets if _ticket_state(t).upper() == sf]
+        if sf in ("IMPLEMENTATION", "IMPLEMENT"):
+            filtered = [t for t in tickets if _ticket_state(t).upper() == "IMPLEMENT"]
+        elif sf in ("REVIEW",):
+            filtered = [t for t in tickets if _ticket_state(t).upper() == "REVIEW"]
+        elif sf in ("DECOMP",):
+            filtered = [t for t in tickets if _ticket_state(t).upper() == "DECOMP"]
+        else:
+            filtered = [t for t in tickets if _ticket_state(t).upper() == sf]
 
     if state_filter:
         print(f"\n{state_filter.upper()} tickets ({len(filtered)}):")
@@ -1304,18 +1509,34 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             rw_s = f" R{rw}" if rw else ""
             print(f"  [{_ansi_pad(_severity_color(sev, enabled), 10)}] {_ticket_id(t):<18s}{rw_s} {_ticket_title(t)}")
     else:
-        pipeline = ["DISCOVERED","VALIDATING","TRIAGED","READY","PLANNING","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE"]
-        side_states = ["REWORK","BLOCKED","DEFERRED","REJECTED","DUPLICATE"]
+        pipeline = ["DISCOVERED","TRIAGED","GOAL","DECOMP","PLANNING","IMPLEMENT","REVIEW","COMPLETE"]
+        side_states = ["REWORK","DEFERRED","LATER","NEVER","REJECTED","DUPLICATE","NOT_ACTIONABLE","RESOLVED","SUPERSEDED","CANCELLED"]
+
+        def _merged_tickets(group: str) -> list[Any]:
+            if group == "IMPLEMENT":
+                return [t for t in tickets if _ticket_state(t).upper() == "IMPLEMENT"]
+            if group == "REVIEW":
+                return [t for t in tickets if _ticket_state(t).upper() == "REVIEW"]
+            if group == "DECOMP":
+                return [t for t in tickets if _ticket_state(t).upper() == "DECOMP"]
+            return [t for t in tickets if _ticket_state(t).upper() == group]
+
+        def _breakdown(group: str) -> str:
+            if group == "IMPLEMENT":
+                ready = sum(1 for t in tickets if _ticket_state(t).upper() in ("IMPLEMENT", "IMPLEMENTING"))
+                return f" (active {ready})" if ready else ""
+            return ""
 
         def _show_state(st: str) -> None:
-            subset = [t for t in tickets if _ticket_state(t).upper() == st]
+            subset = _merged_tickets(st)
             count = len(subset)
             indicator = _c("●", "green", enabled) if count > 0 else _c("○", "gray", enabled)
-            print(f"\n{indicator} {st} ({count}):")
+            label = f"{st} ({count}){_breakdown(st)}"
+            print(f"\n{indicator} {label}:")
             if count == 0:
                 print("  (empty)")
                 return
-            if st == "READY":
+            if st in ("GOAL", "TRIAGED"):
                 sev_order = {"critical":0,"high":1,"medium":2,"low":3}
                 subset = sorted(subset, key=lambda x: sev_order.get(_ticket_sev(x).lower(), 99))
             for t in subset[:limit]:
@@ -1333,10 +1554,134 @@ def cmd_tickets(project_root: Path, json_out: bool = False, limit: int = 15, sta
             _show_state(st)
 
         print(_c("\n── Side States ──", "bold", enabled))
-        for st in side_states:
-            _show_state(st)
+FAILURE_STATES = frozenset({
+    "REWORK", "REJECTED", "DEFERRED", "DUPLICATE",
+    "BLOCKED", "NOT_ACTIONABLE", "NEVER",
+})
 
-    return 0
+
+def cmd_failures(project_root: Path, json_out: bool = False, limit: int = 50, state_filter: str | None = None) -> int:
+    store, summary, tickets = _collect_tickets(project_root)
+    if not tickets:
+        print("No ticket store found")
+        return 0
+    enabled = _supports_color()
+
+    def _tid(t: Any) -> str:
+        return str(t.get("id", "")) if isinstance(t, dict) else str(getattr(t, "id", ""))
+
+    def _tstate(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("state", ""))
+        try:
+            v = getattr(t, "state", "")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception:
+            return ""
+
+    def _tclass(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("ticket_class", "?"))
+        try:
+            v = getattr(t, "ticket_class", "?")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception:
+            return "?"
+
+    def _tsev(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("severity", "?"))
+        try:
+            v = getattr(t, "severity", "?")
+            return v.value if hasattr(v, "value") else str(v)
+        except Exception:
+            return "?"
+
+    def _trework(t: Any) -> int:
+        if isinstance(t, dict):
+            return int(t.get("rework_count", 0) or 0)
+        try:
+            return int(getattr(t, "rework_count", 0) or 0)
+        except Exception:
+            return 0
+
+    def _tattempts(t: Any) -> int:
+        if isinstance(t, dict):
+            return int(t.get("attempts", 0) or 0)
+        try:
+            return int(getattr(t, "attempts", 0) or 0)
+        except Exception:
+            return 0
+
+    def _ttitle(t: Any) -> str:
+        if isinstance(t, dict):
+            return str(t.get("title", ""))[:60]
+        return str(getattr(t, "title", ""))[:60]
+
+    def _tupdated(t: Any) -> float:
+        if isinstance(t, dict):
+            return float(t.get("updated_at", 0) or 0)
+        try:
+            return float(getattr(t, "updated_at", 0) or 0)
+        except Exception:
+            return 0.0
+
+    watch = {state_filter.upper()} if state_filter else FAILURE_STATES
+    failed = [t for t in tickets if _tstate(t).upper() in watch]
+    failed.sort(key=lambda t: (-_trework(t), _tupdated(t)))
+
+    by_state: Counter = Counter(_tstate(t).upper() for t in failed)
+    by_class: Counter = Counter(_tclass(t) for t in failed)
+
+    if json_out:
+        out = []
+        for t in failed[:limit]:
+            out.append({
+                "ticket_id": _tid(t),
+                "state": _tstate(t),
+                "class": _tclass(t),
+                "severity": _tsev(t),
+                "reworks": _trework(t),
+                "attempts": _tattempts(t),
+                "title": _ttitle(t),
+            })
+        print(json.dumps({
+            "total_failed": len(failed),
+            "by_state": dict(by_state.most_common()),
+            "by_class": dict(by_class.most_common()),
+            "tickets": out,
+        }, indent=2, default=str))
+        return 0
+
+    print(_c(f"Failed Tickets — {len(failed)} total", "bold", enabled))
+    state_line = "  ".join(
+        f"{_c(s, 'red', enabled)}={by_state[s]}" for s in sorted(by_state.keys())
+    )
+    print(f"By state: {state_line}")
+    class_line = "  ".join(f"{k}={v}" for k, v in by_class.most_common(6))
+    print(f"By class: {class_line}")
+    print(f"\nDiagnose: python3 scripts/track_lifecycle.py --view failures")
+    print(f"          python3 scripts/diagnose_tickets.py")
+    print()
+
+    hdr = f"{'TICKET':<38} {'STATE':<16} {'CLASS':<14} {'SEV':<9} {'RW':>3} {'ATT':>4}  TITLE"
+    print(hdr)
+    print("-" * len(hdr))
+    for t in failed[:limit]:
+        tid = _tid(t)
+        st = _tstate(t)
+        tc = _tclass(t)
+        sv = _tsev(t)
+        rw = _trework(t)
+        att = _tattempts(t)
+        title = _ttitle(t)
+        st_colored = _c(st, "red", enabled) if st in ("REWORK", "REJECTED", "NEVER") else _c(st, "yellow", enabled)
+        print(f"{tid:<38} {_ansi_pad(st_colored, 16)} {tc:<14} {sv:<9} {rw:>3} {att:>4}  {title}")
+
+    if len(failed) > limit:
+        print(f"\n... +{len(failed) - limit} more (use --limit {limit * 2})")
+
+    return 1 if failed else 0
 
 
 def cmd_throughput(project_root: Path, json_out: bool = False) -> int:
@@ -1406,6 +1751,33 @@ def cmd_throughput(project_root: Path, json_out: bool = False) -> int:
     leases = _collect_leases(project_root)
     if leases is not None:
         print(f"Leases: active {len(leases.get('leases',{}))}  dead_letters {len(leases.get('dead_letters',[]))}  attempts tracked {len(leases.get('attempts',{}))}")
+    return 0
+
+
+def cmd_lifecycle(project_root: Path, json_out: bool = False) -> int:
+    from codebot.review_metrics import build_lifecycle_report, load_lifecycle_events
+    state_dir = _find_state_dir(project_root)
+    events = load_lifecycle_events(state_dir)
+    report = build_lifecycle_report(events)
+    if json_out:
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    enabled = _supports_color()
+    print(_c("Lifecycle", "bold", enabled))
+    print(f"Transitions: total {report.get('total_transitions', 0)}  active {report.get('active_tickets', 0)}  terminal {report.get('terminal_tickets', 0)}")
+    per_stage = report.get("per_stage", {}) or {}
+    if per_stage:
+        print(f"{'Stage':<16s} {'Enters':>7s} {'Avg queue age':>14s}")
+        print("-" * 42)
+        for stage in sorted(per_stage):
+            row = per_stage[stage] or {}
+            print(f"{stage:<16s} {int(row.get('enter_count', 0)):>7d} {float(row.get('avg_queue_age_seconds', 0.0)):>13.3f}s")
+    else:
+        print("No lifecycle events")
+    avg_cycle = report.get("avg_cycle_time_seconds", 0.0)
+    rework_rate = report.get("rework_rate", 0.0)
+    rework_count = report.get("rework_count", 0)
+    print(f"Avg cycle time: {avg_cycle}s  rework {rework_rate * 100:.1f}% ({rework_count})")
     return 0
 
 
@@ -1576,7 +1948,7 @@ def cmd_deadletters(project_root: Path, json_out: bool = False) -> int:
 def cmd_gatekeeper(project_root: Path, json_out: bool = False) -> int:
     gk = _collect_gatekeeper_state(project_root)
     if not gk:
-        print("No gatekeeper_log.jsonl")
+        print("No gate_results.jsonl")
         return 0
     if json_out:
         print(json.dumps(gk, indent=2, default=str))
@@ -1673,9 +2045,9 @@ def cmd_health(project_root: Path, json_out: bool = False) -> int:
     if thr["total"]:
         print(f"flow: 24h +{thr['throughput_24h']}  7d +{thr['throughput_7d']}  avg age {thr['avg_age_h']}h  rework {thr['rework_rate']*100:.1f}%")
     # next ready peek
-    ready = [t for t in tickets if (t.get("state") if isinstance(t, dict) else getattr(t,"state","").value if hasattr(getattr(t,"state",""),"value") else getattr(t,"state","")) == "READY"] if tickets and isinstance(tickets[0], dict) else [t for t in tickets if str(getattr(t,"state","")).upper()=="READY"]
+    ready = [t for t in tickets if _tstate(t).upper() in ("GOAL", "TRIAGED")] if tickets else []
     if ready:
-        print(f"  ready queue peek: {[ (t.get('id') if isinstance(t, dict) else getattr(t,'id','')) for t in ready[:3]]}")
+        print(f"  actionable queue peek: {[ (t.get('id') if isinstance(t, dict) else getattr(t,'id','')) for t in ready[:3]]}")
 
     # Claims/Leases
     print(_c("\n─ Claims / Leases ─", "bold", enabled))
@@ -1884,11 +2256,18 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
                 return v.value if hasattr(v,"value") else str(v)
             except Exception:
                 return ""
-        for st_key in ["READY","IMPLEMENTING","REVIEWING","VERIFYING","COMPLETE"]:
-            subset = [t for t in tickets if _tstate(t).upper()==st_key]
+        for st_key in ["TRIAGED","GOAL","DECOMP","PLANNING","IMPLEMENT","REVIEW","COMPLETE"]:
+            if st_key == "IMPLEMENT":
+                subset = [t for t in tickets if _tstate(t).upper() in ("IMPLEMENT", "IMPLEMENTING", "IMPLEMENTATION_READY")]
+            elif st_key == "REVIEW":
+                subset = [t for t in tickets if _tstate(t).upper() in ("REVIEW", "REVIEWING")]
+            elif st_key == "DECOMP":
+                subset = [t for t in tickets if _tstate(t).upper() in ("DECOMP", "DECOMPOSE")]
+            else:
+                subset = [t for t in tickets if _tstate(t).upper()==st_key]
             if subset:
                 sev_order = {"critical":0,"high":1,"medium":2,"low":3}
-                if st_key=="READY":
+                if st_key in ("GOAL", "TRIAGED"):
                     subset = sorted(subset, key=lambda x: sev_order.get(_tsev(x).lower(),99))
                 lines.append(f"│ {st_key} ({len(subset)}):")
                 for t in subset[:3]:
@@ -1902,8 +2281,19 @@ def _render_live_snapshot(project_root: Path, enabled: bool, ticker: int, interv
     return "\n".join(lines)
 
 
-def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both", no_clear: bool = False, limit: int = 15, offset: int = 0) -> int:
+def cmd_live(project_root: Path, interval: float = 3.0, once: bool = False, static: bool = False, no_color: bool = False, json_out: bool = False, view: str = "both", no_clear: bool = False, limit: int = 15, offset: int = 0) -> int:
     """Live dashboard with view switching (1=agents, 2=tickets, 3=both)."""
+    # Alias --static to --once
+    if static:
+        once = True
+
+    # Auto-detect reduced motion / NO_COLOR for screen-reader friendly mode
+    reduced_motion_env = os.environ.get("REDUCED_MOTION") or os.environ.get("PREFERS_REDUCED_MOTION") or os.environ.get("BOTOP_REDUCED_MOTION")
+    is_reduced_motion = reduced_motion_env in ("1", "true", "reduce") if reduced_motion_env else False
+    if is_reduced_motion or _GLOBAL_NO_COLOR or os.environ.get("NO_COLOR"):
+        # Force no_clear to avoid CSI clear codes that confuse screen readers
+        no_clear = True
+
     if json_out:
         # single snapshot as json
         agents = _collect_agents(project_root)
@@ -1944,21 +2334,23 @@ def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_c
 
     print(_c("Starting live dashboard — Ctrl-C or 'q' to quit", "dim", enabled), file=sys.stderr)
     time.sleep(0.2)
+    paused = False
     while True:
-        ticker += 1
-        frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view, limit=limit, offset=offset)
-        if ticker == 1:
-            # first frame: show keyboard-discoverable help (screen-reader friendly)
-            sys.stdout.write(_c(" Keys: q quit | <enter> refresh | 1 agents | 2 tickets | 3 both | p pause (when running live loop) | --no-clear to avoid screen erase", "dim", enabled) + "\n")
-        if not no_clear:
-            if sys.stdout.isatty():
-                sys.stdout.write("\033[2J\033[H")
+        if not paused:
+            ticker += 1
+            frame = _render_live_snapshot(project_root, enabled, ticker, interval, view=current_view, limit=limit, offset=offset)
+            if ticker == 1:
+                # first frame: show keyboard-discoverable help (screen-reader friendly)
+                sys.stdout.write(_c(" Keys: q quit | <enter> refresh | 1 agents | 2 tickets | 3 both | p/space pause/resume | --no-clear to avoid screen erase", "dim", enabled) + "\n")
+            if not no_clear:
+                if sys.stdout.isatty():
+                    sys.stdout.write("\033[2J\033[H")
+                else:
+                    sys.stdout.write("\n" + "="*80 + "\n")
             else:
-                sys.stdout.write("\n" + "="*80 + "\n")
-        else:
-            sys.stdout.write("---\n")
-        sys.stdout.write(frame + "\n")
-        sys.stdout.flush()
+                sys.stdout.write("---\n")
+            sys.stdout.write(frame + "\n")
+            sys.stdout.flush()
 
         deadline = time.time() + interval
         while time.time() < deadline:
@@ -1973,6 +2365,13 @@ def cmd_live(project_root: Path, interval: float = 1.0, once: bool = False, no_c
                         if s in ("q", "quit", "exit"):
                             print(_c("\nQuit live", "dim", enabled))
                             return 0
+                        elif s in ("p", "pause", " "):
+                            paused = not paused
+                            if paused:
+                                print(_c("Paused — press p/<enter> to resume", "dim", enabled), file=sys.stderr)
+                            else:
+                                print(_c("Resumed", "dim", enabled), file=sys.stderr)
+                            break
                         elif s in ("1", "a", "agents"):
                             current_view = "agents"
                         elif s in ("2", "t", "tickets"):
@@ -2008,7 +2407,7 @@ def cmd_term(project_root: Path, no_color: bool = False) -> int:
 
     print(_c(f"\n══ CodeBot Interactive Terminal — {project_root.name} ══", "bold", enabled))
     print(_c("Type 'help' for commands, 'live' for dashboard, 'quit' to exit.", "dim", enabled))
-    print(_c("Commands: status [verbose/json], tickets [ready/implementing/...], claims, throughput, metrics, budget, events, findings, leases, deadletters, gatekeeper, health/doctor, logs <agent> [--follow], restart/pause/resume <agent>, drain/clear-drain, live [--once], clear", "dim", enabled))
+    print(_c("Commands: status [verbose/json], tickets [ready/implementing/...], claims, throughput, metrics, budget, events, findings, leases, deadletters, gatekeeper, lifecycle, health/doctor, logs <agent> [--follow], restart/pause/resume <agent>, drain/clear-drain, live [--once], clear", "dim", enabled))
     print(f"state: {_find_state_dir(project_root)}  logs: {_find_logs_dir(project_root)}\n")
 
     def _help():
@@ -2024,11 +2423,12 @@ botop term — interactive
   findings [--limit N] [--json]
   leases / deadletters [--json]
   gatekeeper [--json]
+  lifecycle [--json]                   ticket lifecycle analytics
   health / doctor [--json]            full diagnostics
   logs <agent> [--lines N] [--follow]
   restart <agent>   pause <agent>   resume <agent>
   drain [--reason X]   clear-drain
-  live [--interval S] [--once] [--json]  live dashboard (q to return)
+  live [--interval S] [--once|--static] [--no-clear] [--json]  live dashboard; --static alias for snapshot, honors NO_COLOR/REDUCED_MOTION; p/space pause
   watch ≈ live
   clear                               clear screen
   help                                this help
@@ -2087,7 +2487,7 @@ botop term — interactive
         # dispatch
         try:
             if cmd in ("live", "watch", "top", "dash"):
-                iv = 1.0
+                iv = 3.0
                 once = False
                 jout = False
                 nc = no_color
@@ -2107,6 +2507,8 @@ botop term — interactive
                         jout=True; i+=1
                     elif args[i] == "--no-color":
                         nc=True; i+=1
+                    elif args[i] == "--static":
+                        once = True; i+=1
                     elif args[i] == "--view" and i+1 < len(args):
                         vw = args[i+1]; i+=2
                     elif args[i] == "--no-clear":
@@ -2134,7 +2536,7 @@ botop term — interactive
                     try: lim = int(args[args.index("--limit")+1])
                     except: pass
                 # allow `tickets ready` shorthand
-                known_states = {"ready","implementing","reviewing","complete","discovered","rework","blocked","planning","verifying","triaged","deferred","rejected","duplicate","validating"}
+                known_states = {"ready","implementation","implementation_ready","implementing","reviewing","complete","discovered","rework","blocked","planning","verifying","triaged","deferred","rejected","duplicate","validating"}
                 for a in args:
                     if a.lower() in known_states:
                         st_filter = a
@@ -2143,6 +2545,17 @@ botop term — interactive
                     try: st_filter = args[args.index("--state")+1]
                     except: pass
                 cmd_tickets(project_root, json_out=jout, limit=lim, state_filter=st_filter)
+            elif cmd == "failures":
+                jout = "--json" in args
+                lim = 50
+                st_filter = None
+                if "--limit" in args:
+                    try: lim = int(args[args.index("--limit")+1])
+                    except: pass
+                if "--state" in args:
+                    try: st_filter = args[args.index("--state")+1]
+                    except: pass
+                cmd_failures(project_root, json_out=jout, limit=lim, state_filter=st_filter)
             elif cmd == "claims":
                 jout = "--json" in args
                 cmd_claims(project_root, json_out=jout)
@@ -2182,6 +2595,9 @@ botop term — interactive
             elif cmd in ("gatekeeper", "gates"):
                 jout = "--json" in args
                 cmd_gatekeeper(project_root, json_out=jout)
+            elif cmd == "lifecycle":
+                jout = "--json" in args
+                cmd_lifecycle(project_root, json_out=jout)
             elif cmd in ("health", "doctor", "diagnostics", "diag"):
                 jout = "--json" in args
                 cmd_health(project_root, json_out=jout)
@@ -2256,7 +2672,7 @@ def main() -> None:
         epilog="examples:\n"
                "  python -m codebot.botop status\n"
                "  python -m codebot.botop tickets --state READY\n"
-               "  python -m codebot.botop live --interval 1\n"
+               "  python -m codebot.botop live --interval 3\n"
                "  python -m codebot.botop term\n"
                "  python -m codebot.botop logs scheduler --follow\n"
                "  python -m codebot.botop health\n",
@@ -2280,6 +2696,12 @@ def main() -> None:
     p_tickets.add_argument("--json", action="store_true", help="JSON output")
     p_tickets.add_argument("--limit", type=int, default=15, help="Max tickets per state")
     p_tickets.add_argument("--state", type=str, default=None, help="Filter by state (READY, IMPLEMENTING, etc)")
+
+    # failures
+    p_fail = sub.add_parser("failures", help="Show tickets in failure states (REWORK, REJECTED, DEFERRED, DUPLICATE, BLOCKED)")
+    p_fail.add_argument("--json", action="store_true", help="JSON output")
+    p_fail.add_argument("--limit", type=int, default=50, help="Max tickets to display")
+    p_fail.add_argument("--state", type=str, default=None, help="Filter by specific failure state")
 
     # throughput
     p_thr = sub.add_parser("throughput", help="Show throughput metrics")
@@ -2319,6 +2741,10 @@ def main() -> None:
     p_gk = sub.add_parser("gatekeeper", help="Show gatekeeper log")
     p_gk.add_argument("--json", action="store_true", help="JSON output")
 
+    # lifecycle
+    p_lc = sub.add_parser("lifecycle", help="Show ticket lifecycle analytics")
+    p_lc.add_argument("--json", action="store_true", help="JSON output")
+
     # health / doctor / diagnostics (aliases)
     p_health = sub.add_parser("health", help="Show full diagnostics")
     p_health.add_argument("--json", action="store_true", help="JSON output")
@@ -2339,22 +2765,31 @@ def main() -> None:
     # restart/pause/resume
     restart_p = sub.add_parser("restart", help="Restart an agent")
     restart_p.add_argument("agent", help="Agent name")
+    restart_p.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+    restart_p.add_argument("--dry-run", action="store_true", help="Show what would happen without acting")
 
     pause_p = sub.add_parser("pause", help="Pause an agent")
     pause_p.add_argument("agent", help="Agent name")
+    pause_p.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+    pause_p.add_argument("--dry-run", action="store_true", help="Show what would happen without acting")
 
     resume_p = sub.add_parser("resume", help="Resume a paused agent")
     resume_p.add_argument("agent", help="Agent name")
 
     drain_p = sub.add_parser("drain", help="Set drain flag")
     drain_p.add_argument("--reason", type=str, default="manual", help="Drain reason")
+    drain_p.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+    drain_p.add_argument("--dry-run", action="store_true", help="Show what would happen without acting")
 
     sub.add_parser("clear-drain", help="Clear drain flag")
 
     # live dashboard
-    p_live = sub.add_parser("live", help="Live dashboard (auto-refresh)")
-    p_live.add_argument("--interval", type=float, default=1.0, help="Refresh seconds")
+    p_live = sub.add_parser("live", help="Live dashboard (auto-refresh)",
+        description="Live dashboard with auto-refresh. Honors NO_COLOR and REDUCED_MOTION env vars for screen-reader accessibility.",
+        epilog="Accessibility: Live respects NO_COLOR and REDUCED_MOTION; use --static/--once for snapshot, --no-clear to avoid screen erase, p/space to pause/resume.")
+    p_live.add_argument("--interval", type=float, default=3.0, help="Refresh seconds")
     p_live.add_argument("--once", action="store_true", help="Single snapshot, no loop")
+    p_live.add_argument("--static", action="store_true", help="Alias for --once (screen-reader/static snapshot)")
     p_live.add_argument("--json", action="store_true", help="JSON snapshot, no UI")
     p_live.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     p_live.add_argument("--no-wrap", action="store_true", help="Disable word-wrapping for long task descriptions")
@@ -2364,8 +2799,9 @@ def main() -> None:
     p_live.add_argument("--view", choices=["both", "agents", "tickets"], default="both", help="Initial view (or use 1/2/3 keys to toggle)")
     for alias in ("watch", "top", "dash", "dashboard"):
         pa = sub.add_parser(alias, help=f"Alias for live")
-        pa.add_argument("--interval", type=float, default=1.0, help="Refresh seconds")
+        pa.add_argument("--interval", type=float, default=3.0, help="Refresh seconds")
         pa.add_argument("--once", action="store_true", help="Single snapshot")
+        pa.add_argument("--static", action="store_true", help="Alias for --once (screen-reader/static snapshot)")
         pa.add_argument("--json", action="store_true", help="JSON snapshot")
         pa.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
         pa.add_argument("--no-wrap", action="store_true", help="Disable word-wrapping for long task descriptions")
@@ -2407,19 +2843,21 @@ def main() -> None:
                 pass
         sys.exit(cmd_logs(project_root, args.agent, args.lines, follow=getattr(args, "follow", False)))
     elif cmd == "restart":
-        sys.exit(cmd_restart(project_root, args.agent))
+        sys.exit(cmd_restart(project_root, args.agent, force=getattr(args, "force", False), dry_run=getattr(args, "dry_run", False)))
     elif cmd == "pause":
-        sys.exit(cmd_pause(project_root, args.agent))
+        sys.exit(cmd_pause(project_root, args.agent, force=getattr(args, "force", False), dry_run=getattr(args, "dry_run", False)))
     elif cmd == "resume":
         sys.exit(cmd_resume(project_root, args.agent))
     elif cmd == "drain":
-        sys.exit(cmd_drain(project_root, args.reason))
+        sys.exit(cmd_drain(project_root, args.reason, force=getattr(args, "force", False), dry_run=getattr(args, "dry_run", False)))
     elif cmd == "clear-drain":
         sys.exit(cmd_clear_drain(project_root))
     elif cmd == "claims":
         sys.exit(cmd_claims(project_root, json_out=getattr(args, "json", False)))
     elif cmd == "tickets":
         sys.exit(cmd_tickets(project_root, json_out=getattr(args, "json", False), limit=getattr(args, "limit", 15), state_filter=getattr(args, "state", None)))
+    elif cmd == "failures":
+        sys.exit(cmd_failures(project_root, json_out=getattr(args, "json", False), limit=getattr(args, "limit", 50), state_filter=getattr(args, "state", None)))
     elif cmd == "throughput":
         sys.exit(cmd_throughput(project_root, json_out=getattr(args, "json", False)))
     elif cmd == "metrics":
@@ -2436,10 +2874,12 @@ def main() -> None:
         sys.exit(cmd_deadletters(project_root, json_out=getattr(args, "json", False)))
     elif cmd == "gatekeeper":
         sys.exit(cmd_gatekeeper(project_root, json_out=getattr(args, "json", False)))
+    elif cmd == "lifecycle":
+        sys.exit(cmd_lifecycle(project_root, json_out=getattr(args, "json", False)))
     elif cmd in ("health", "doctor", "diagnostics", "diag"):
         sys.exit(cmd_health(project_root, json_out=getattr(args, "json", False)))
     elif cmd in ("live", "watch", "top", "dash", "dashboard"):
-        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 1.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both"), no_clear=getattr(args, "no_clear", False), limit=getattr(args, "limit", 15), offset=getattr(args, "offset", 0)))
+        sys.exit(cmd_live(project_root, interval=getattr(args, "interval", 3.0), once=getattr(args, "once", False), no_color=getattr(args, "no_color", False), json_out=getattr(args, "json", False), view=getattr(args, "view", "both"), no_clear=getattr(args, "no_clear", False), limit=getattr(args, "limit", 15), offset=getattr(args, "offset", 0)))
     elif cmd in ("term", "terminal", "shell", "repl", "interactive"):
         sys.exit(cmd_term(project_root, no_color=getattr(args, "no_color", False)))
     else:

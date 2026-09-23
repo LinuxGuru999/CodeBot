@@ -361,8 +361,8 @@ def score_ticket(
 ) -> ScoredWorkItem:
     state_val = getattr(ticket, "state", None)
     if state_val is None and isinstance(ticket, dict):
-        state_val = ticket.get("state", "READY")
-    stage = state_val.value if hasattr(state_val, "value") else str(state_val or "READY").upper()
+        state_val = ticket.get("state", "TRIAGED")
+    stage = state_val.value if hasattr(state_val, "value") else str(state_val or "TRIAGED").upper()
 
     class _AgingCfg:
         pass

@@ -1,297 +1,158 @@
-#!/usr/bin/env python3
-"""Alignment Service — Decoupled alignment pipeline.
+"""Alignment Service — RL pipeline and alignment scoring.
 
 Purpose
 -------
-Runs alignment scoring and prompt optimization for bots after they exit.
-This service is decoupled from the orchestrator to maintain architectural
-boundaries. The orchestrator calls this service via a simple interface
-without knowing about rl_engine internals.
-
-Why
----
-The orchestrator is a pure process manager and should not import rl_engine.
-This module encapsulates all RL-engine-dependent alignment logic.
+Owns the alignment/RL scoring pipeline logic. Orchestrator delegates to
+this module instead of importing rl_engine or alignment_coordinator directly.
 
 Invariants
 ----------
-- Imports rl_engine internally only
-- Atomic writes for state files
-- Fails gracefully if rl_engine is unavailable
+- Exposes run_alignment_pipeline and run_alignment_pipeline_for_all
+- Never raises exceptions to callers (fail-open)
+- Delegates all path resolution to state_manager.get_paths() (single source of truth)
 """
-
 from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
 
+from codebot.state_manager import get_paths
+
 logger = logging.getLogger(__name__)
 
-# Paths resolved relative to the package root
-_CODEBOT_PKG_DIR = Path(__file__).parent
-_project_root = _CODEBOT_PKG_DIR.parent
-STATE_DIR = _project_root / ".codebot" / "state"
-ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
-
-# T4.3 incremental adapter seam: when a ProjectAdapter is provided, its
-# state_dir overrides the static default above (mirrors findings_log.py /
-# rl_engine.py). Also honours CODEBOT_STATE_DIR / CODEBOT_PROJECT_ROOT
-# env vars so all agents resolve the same location without an adapter.
-_adapter_instance: Any | None = None
+_ALIGNMENT_SCORE_THRESHOLD = 60
 
 
-def set_project_adapter(adapter: Any) -> None:
-    """Inject a ProjectAdapter; its state_dir becomes the alignment state location."""
-    global _adapter_instance, STATE_DIR, ALIGNMENT_EVENTS_DIR
-    _adapter_instance = adapter
+def _ensure_rl_adapter() -> None:
     try:
-        p = adapter.paths()  # type: ignore[union-attr]
-        STATE_DIR = p.state_dir
-        ALIGNMENT_EVENTS_DIR = STATE_DIR / "alignment_events"
+        from codebot import rl_engine
+        if rl_engine._adapter_instance is not None:
+            return
+        paths = get_paths()
+        rl_engine.set_project_adapter(paths)
     except Exception:
         pass
 
 
-def get_adapter() -> Any | None:
-    """Return the injected ProjectAdapter, if any."""
-    return _adapter_instance
+def run_alignment_pipeline(bot_name: str) -> bool:
+    _ensure_rl_adapter()
+    paths = get_paths()
+    state_dir = paths.state_dir
+    events_dir = paths.alignment_events_dir
+    if not events_dir.exists():
+        return False
 
-
-def _resolve_state_dir() -> Path:
-    """Resolve the project state dir: adapter > env > static default."""
-    if _adapter_instance is not None:
-        try:
-            return _adapter_instance.paths().state_dir  # type: ignore[union-attr]
-        except Exception:
-            pass
-    env_state = os.environ.get("CODEBOT_STATE_DIR")
-    if env_state:
-        return Path(env_state)
-    env_root = os.environ.get("CODEBOT_PROJECT_ROOT")
-    if env_root:
-        return Path(env_root) / ".codebot" / "state"
-    return STATE_DIR
-
-
-def _resolve_events_dir() -> Path:
-    """Resolve the alignment events dir based on current state dir."""
-    return _resolve_state_dir() / "alignment_events"
-
-
-def _collect_reviewer_feedback_for_trigger(bot_name: str) -> list[dict]:
-    """Collect recent reviewer feedback for prompt evolution.
-
-    Scans review JSON files for findings related to the bot's recent work.
-    Returns a list of feedback items that can be injected into the prompt
-    optimizer to address recurring issues.
-    """
-    feedback_items = []
-    state_dir = _resolve_state_dir()
-    review_files = [
-        state_dir / "security_review.json",
-        state_dir / "architecture_review.json",
-        state_dir / "correctness_review.json",
-        state_dir / "test_review.json",
-        state_dir / "documentation_review.json",
-    ]
-    for rf in review_files:
-        if rf.exists():
-            try:
-                data = json.loads(rf.read_text())
-                if isinstance(data, dict):
-                    findings = data.get("findings", [])
-                    if isinstance(findings, list):
-                        for finding in findings[-5:]:  # Last 5 findings
-                            if isinstance(finding, dict):
-                                feedback_items.append({
-                                    "source": rf.name,
-                                    "finding": finding.get("description", ""),
-                                    "severity": finding.get("severity", "medium"),
-                                })
-            except Exception:
-                pass
-    return feedback_items
-
-
-def run_alignment_pipeline(bot_name: str, timeout: int = 120) -> bool:
-    """Run alignment scoring + prompt optimization synchronously for a bot.
-
-    Called after bot exit. Blocks until complete or timeout. Returns True if
-    prompt optimization was triggered (bot should wait for next run).
-    """
+    rl_state_path = state_dir / "rl_state.json"
     try:
         from codebot.rl_engine import (
-            list_pending_events,
-            score_event,
-            reward_from_score,
-            record_event_reward,
-            mark_event_processed,
-            write_trigger,
-            load_rl_state,
-            save_rl_state,
-            ensure_bot,
+            load_rl_state, save_rl_state, ensure_bot,
+            score_event, reward_from_score, record_event_reward,
+            choose_pattern, update_q_value, decay_epsilon,
+            write_trigger, DEFAULT_Q_VALUES,
         )
     except ImportError:
+        return False
+
+    base_role = bot_name.split("-")[0] if "-" in bot_name else bot_name
+
+    state = load_rl_state(rl_state_path)
+    processed = 0
+
+    for f in events_dir.glob(f"{bot_name}*.exit.json"):
         try:
-            from rl_engine import (
-                list_pending_events,
-                score_event,
-                reward_from_score,
-                record_event_reward,
-                mark_event_processed,
-                write_trigger,
-                load_rl_state,
-                save_rl_state,
-                ensure_bot,
-            )
-        except ImportError:
-            logger.warning("rl_engine not available, skipping alignment pipeline")
-            return False
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("processed"):
+            continue
 
-    events_dir = _resolve_events_dir()
-    event_file = events_dir / f"{bot_name}.exit.json"
-    if not event_file.exists():
-        return False
+        scored = score_event(data)
+        score = scored["score"]
+        exit_reason = data.get("exit_reason", "clean")
+        bot_state = ensure_bot(state, base_role)
+        prev_avg = bot_state.get("avg_reward", 0.0)
 
-    try:
-        event = json.loads(event_file.read_text())
-    except Exception:
-        return False
-
-    if event.get("processed"):
-        return False
-
-    # Self-target guard: never trigger optimization on prompt_opt itself
-    if bot_name == "prompt_opt":
-        mark_event_processed(event_file, event, 0, 0.5, "self_target")
-        return False
-
-    start_time = time.time()
-    logger.info(f"Alignment pipeline: scoring {bot_name} exit")
-
-    try:
-        score_result = score_event(event)
-        metrics_entry: dict = {}
-        try:
-            from codebot import metrics_collector as _mc  # type: ignore
-        except ImportError:
-            try:
-                import metrics_collector as _mc  # type: ignore
-            except ImportError:
-                _mc = None  # type: ignore
-        if _mc is not None:
-            try:
-                _snap = _mc.collect_all()
-                _bots = _snap.get("bots") or {}
-                if isinstance(_bots.get(bot_name), dict):
-                    metrics_entry = _bots[bot_name]
-            except Exception:
-                metrics_entry = {}
         reward = reward_from_score(
-            score_result["score"],
-            event.get("exit_reason", "unknown"),
-            score_result.get("rebellion_count", 0),
-            metrics=metrics_entry or None,
+            score=score,
+            exit_reason=exit_reason,
+            rebellion_count=0,
+            bot_avg_reward=prev_avg,
         )
-        rl = load_rl_state()
+
+        pattern, strategy = choose_pattern(bot_state)
+        update_q_value(bot_state, pattern, reward)
+        decay_epsilon(bot_state, reward, prev_avg)
         record_event_reward(
-            rl, bot_name, reward, score_result["score"],
-            event.get("exit_code"), event.get("exit_reason", "clean"),
+            state, base_role, reward, score,
+            failure_count=1 if exit_reason != "clean" else 0,
+            exit_reason=exit_reason,
         )
-        save_rl_state(rl)
-        bot_state = ensure_bot(rl, bot_name)
 
-        if reward < 0.6:
-            write_trigger(
-                bot_name, score_result["score"], reward,
-                score_result.get("verdict", "misaligned"),
-                score_result.get("evidence", "low reward"),
-                score_result.get("breakdown", {}),
-                event, bot_state,
-            )
-            logger.info(f"Alignment pipeline: {bot_name} reward={reward:.2f} < 0.6, trigger written")
-            mark_event_processed(
-                event_file, event,
-                score_result["score"], reward,
-                score_result.get("verdict", "misaligned"),
-            )
-            return True
+        if score < _ALIGNMENT_SCORE_THRESHOLD:
+            try:
+                triggers_dir = state_dir / "alignment_triggers"
+                triggers_dir.mkdir(parents=True, exist_ok=True)
+                trigger_path = triggers_dir / f"{base_role}.evolve.json"
+                trigger_data = {
+                    "bot": base_role,
+                    "score": score,
+                    "reward": reward,
+                    "verdict": "evolve",
+                    "reason": f"score {score} below threshold {_ALIGNMENT_SCORE_THRESHOLD}",
+                    "pattern": pattern,
+                    "strategy": strategy,
+                    "timestamp": time.time(),
+                }
+                tmp = trigger_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(trigger_data, indent=2), encoding="utf-8")
+                tmp.replace(trigger_path)
+            except OSError:
+                pass
 
-        consec = int(bot_state.get("consecutive_failures", 0))
-        if consec >= 3:
-            reviewer_feedback = _collect_reviewer_feedback_for_trigger(bot_name)
-            write_trigger(
-                bot_name, score_result["score"], reward,
-                "evolve_after_retries",
-                f"{consec} consecutive failures, evolving prompt",
-                score_result.get("breakdown", {}),
-                event, bot_state,
-                reviewer_feedback=reviewer_feedback,
-            )
-            logger.info(f"Alignment pipeline: {bot_name} {consec} consecutive failures, prompt evolution triggered with {len(reviewer_feedback)} feedback items")
-            mark_event_processed(
-                event_file, event,
-                score_result["score"], reward,
-                "evolve_after_retries",
-            )
-            return True
+        data["processed"] = True
+        data["processed_at"] = time.time()
+        data["reward"] = reward
+        data["pattern"] = pattern
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(f)
+        processed += 1
 
-        total_runs = int(bot_state.get("total_runs", 0))
-        last_improvement = float(bot_state.get("last_improvement", 0))
-        stagnation_threshold = 5
-        if total_runs >= stagnation_threshold and last_improvement > 0:
-            runs_since_improve = total_runs - int(bot_state.get("_runs_at_last_improvement", 0))
-            if runs_since_improve >= stagnation_threshold or (total_runs >= stagnation_threshold and not bot_state.get("_stagnation_triggered")):
-                write_trigger(
-                    bot_name, score_result["score"], reward,
-                    "stagnation_evolve",
-                    f"{total_runs} runs without noticeable improvement, evolving prompt",
-                    score_result.get("breakdown", {}),
-                    event, bot_state,
-                )
-                bot_state["_stagnation_triggered"] = True
-                logger.info(f"Alignment pipeline: {bot_name} stagnation after {total_runs} runs, prompt evolution triggered")
-                mark_event_processed(
-                    event_file, event,
-                    score_result["score"], reward,
-                    "stagnation_evolve",
-                )
-                save_rl_state(rl)
-                return True
+    if processed > 0:
+        save_rl_state(state, rl_state_path)
 
-        mark_event_processed(
-            event_file, event,
-            score_result["score"], reward,
-            score_result.get("verdict", "aligned"),
-        )
-        logger.info(f"Alignment pipeline: {bot_name} reward={reward:.2f} >= 0.6, no trigger needed")
-        return False
-
-    except Exception as e:
-        logger.error(f"Alignment pipeline error for {bot_name}: {e}")
-        return False
+    return processed > 0
 
 
 def run_alignment_pipeline_for_all() -> None:
-    """Run alignment scoring for all pending events (called every 30 minutes)."""
+    paths = get_paths()
+    state_dir = paths.state_dir
+    events_dir = paths.alignment_events_dir
+    if not events_dir.exists():
+        return
+
+    seen_bots: set[str] = set()
+    for f in events_dir.glob("*.exit.json"):
+        bot_name = f.stem.replace(".exit", "")
+        if bot_name not in seen_bots:
+            seen_bots.add(bot_name)
+            try:
+                run_alignment_pipeline(bot_name)
+            except Exception as e:
+                logger.warning("Alignment pipeline failed for %s: %s", bot_name, e)
+
     try:
-        from rl_engine import list_pending_events
-    except ImportError:
-        return
-
-    pending = list_pending_events()
-    if not pending:
-        return
-
-    logger.info(f"Alignment pipeline: processing {len(pending)} pending events")
-    for event_file in pending:
-        try:
-            event = json.loads(event_file.read_text())
-            bot_name = event.get("bot", "unknown")
-            run_alignment_pipeline(bot_name)
-        except Exception as e:
-            logger.error(f"Error processing event {event_file}: {e}")
+        from codebot.prompt_optimizer import consume_triggers
+        roles_dir = state_dir.parent / "roles"
+        if not roles_dir.exists():
+            from codebot.process_manager import BOTS_DIR
+            roles_dir = BOTS_DIR / "roles"
+        triggers_dir = state_dir / "alignment_triggers"
+        consumed = consume_triggers(triggers_dir, roles_dir)
+        if consumed:
+            logger.info("Prompt optimizer consumed %d triggers", consumed)
+    except Exception as e:
+        logger.debug("consume_triggers failed: %s", e)

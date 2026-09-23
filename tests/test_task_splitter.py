@@ -43,15 +43,11 @@ def make_scratchpad(remaining=None, completed=None):
 class TestShouldSplit:
     def test_terminal_state_no_split(self, tmp_path):
         for state in (TicketState.COMPLETE, TicketState.REJECTED, TicketState.DUPLICATE):
-            t = make_ticket()
-            t = t.transition(TicketState.VALIDATING)
             if state == TicketState.COMPLETE:
-                t = t.transition(TicketState.TRIAGED)
-                t = t.transition(TicketState.READY)
-                t = t.transition(TicketState.PLANNING)
-                t = t.transition(TicketState.IMPLEMENTING)
-                t = t.transition(TicketState.REVIEWING)
-                t = t.transition(TicketState.VERIFYING)
+                t = make_ticket()
+                for st in (TicketState.TRIAGED, TicketState.GOAL, TicketState.DECOMP, TicketState.PLANNING, TicketState.IMPLEMENT, TicketState.REVIEW):
+                    t = t.transition(st)
+                t = t.transition(TicketState.COMPLETE)
                 # gate approval needed for COMPLETE
                 import json, time, os
                 gate_path = tmp_path / "gate_results.jsonl"
@@ -241,50 +237,33 @@ class TestSplitTicket:
         assert result == []
 
     def test_split_handles_duplicate_sub_tickets_gracefully(self, tmp_path):
-        """When create_ticket raises duplicate ValueError, split_ticket should skip and continue."""
         store = TicketStore(tmp_path / "tickets.json")
         t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
         store.add(t)
-        # Move parent to PLANNING so BLOCKED transition is allowed
-        store.transition(t.id, TicketState.VALIDATING)
-        store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.PLANNING)
-        t_updated = store.get(t.id)
-
-        # Create scratchpad that will generate chunks
+        for _st in (TicketState.TRIAGED, TicketState.GOAL, TicketState.DECOMP, TicketState.PLANNING):
+            store.transition(t.id, _st)
+        t = store.get(t.id)
         sp = make_scratchpad(remaining=["step1", "step2", "step3", "step4", "step5", "step6"])
-
-        # Count how many chunks will be created
-        chunks = _compute_chunks(t_updated, sp)
+        chunks = _compute_chunks(t, sp)
         num_chunks = len(chunks)
-
-        # Mock create_ticket to simulate one duplicate error among successful creations
         with patch('codebot.ticket_engine.create_ticket') as mock_create:
-            # Create mock sub-tickets using MagicMock with required attributes
             mock_subs = []
             for i in range(num_chunks):
-                mock_sub = MagicMock(spec=Ticket)
-                mock_sub.id = f"CB-SUB-{i:03d}"
-                mock_sub.state = TicketState.DISCOVERED
-                mock_subs.append(mock_sub)
-            
-            # Simulate: first half succeed, middle one is duplicate (raises), rest succeed
-            side_effects = list(mock_subs)
+                tk = create_ticket(
+                    title=f"Sub {i}", ticket_class=TicketClass.BUG, severity=Severity.LOW,
+                    source=f"split:{t.id}", evidence=f"ev{i}", problem_statement=f"chunk {i}",
+                    desired_state="fixed", acceptance_criteria=[f"ac{i}"],
+                )
+                mock_subs.append(tk)
+            side_effects: list = list(mock_subs)
             if num_chunks >= 2:
-                # Insert a ValueError at position 1
                 side_effects[1] = ValueError("duplicate ticket detected")
-            
             mock_create.side_effect = side_effects
-            
-            sub_ids = split_ticket(t_updated, store, scratchpad=sp, exit_reason="timeout")
-
-            # Should have created num_chunks - 1 sub-tickets (skipped the duplicate)
+            sub_ids = split_ticket(t, store, scratchpad=sp, exit_reason="timeout")
             expected_count = num_chunks - 1 if num_chunks >= 2 else num_chunks
             assert len(sub_ids) == expected_count
-            # Parent should be blocked since sub-tickets were created
             if sub_ids:
-                assert store.get(t_updated.id).state == TicketState.BLOCKED
+                assert store.get(t.id).state == TicketState.BLOCKED
 
     def test_split_creates_exact_number_of_sub_tickets_matching_chunks(self, tmp_path):
         """Verify split_ticket creates exactly the right number of sub-tickets."""
@@ -463,41 +442,25 @@ class TestSplitTicket:
         assert len(sub_ids) == 2
 
     def test_duplicate_sub_ticket_handling(self, tmp_path):
-        """Test that duplicate sub-tickets are skipped gracefully without failing the split."""
         store = TicketStore(tmp_path / "tickets.json")
         t = make_ticket(affected_modules=[f"m{i}.py" for i in range(5)])
         store.add(t)
-        # Move parent to PLANNING so BLOCKED transition is allowed
-        store.transition(t.id, TicketState.VALIDATING)
-        store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.PLANNING)
-        t_updated = store.get(t.id)
-
-        # Count how many chunks will be created
-        chunks = _compute_chunks(t_updated, None)
+        chunks = _compute_chunks(t, None)
         num_chunks = len(chunks)
-
-        # Mock create_ticket where it's actually used (inside ticket_engine module)
         with patch('codebot.ticket_engine.create_ticket') as mock_create:
-            # Create mock sub-tickets using MagicMock with required attributes
             mock_subs = []
             for i in range(num_chunks):
-                mock_sub = MagicMock(spec=Ticket)
-                mock_sub.id = f"CB-SUB-{i:03d}"
-                mock_sub.state = TicketState.DISCOVERED
-                mock_subs.append(mock_sub)
-            
-            # Simulate: first succeeds, second raises duplicate, rest succeed
-            side_effects = list(mock_subs)
+                tk = create_ticket(
+                    title=f"Sub {i}", ticket_class=TicketClass.BUG, severity=Severity.LOW,
+                    source=f"split:{t.id}", evidence=f"ev{i}", problem_statement=f"chunk {i}",
+                    desired_state="fixed", acceptance_criteria=[f"ac{i}"],
+                )
+                mock_subs.append(tk)
+            side_effects: list = list(mock_subs)
             if num_chunks >= 2:
                 side_effects[1] = ValueError("duplicate ticket detected")
-            
             mock_create.side_effect = side_effects
-            
-            sub_ids = split_ticket(t_updated, store, exit_reason="timeout")
-            
-            # Should have created num_chunks - 1 sub-tickets (skipped the duplicate)
+            sub_ids = split_ticket(t, store, exit_reason="timeout")
             expected_count = num_chunks - 1 if num_chunks >= 2 else num_chunks
             assert len(sub_ids) == expected_count
 
