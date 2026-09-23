@@ -78,30 +78,8 @@ class ReviewConfig:
 
     # --- Review behavior ---------------------------------------------------
     blind_review_enabled: bool = True
-    adversarial_review_enabled: bool = True
-    multi_reviewer_enabled: bool = True
     cross_model_preferred: bool = True
     require_tests_for_behavior_changes: bool = True
-
-    # --- Risk-based reviewer routing ---------------------------------------
-    # Number of independent reviewers required per risk class. Monotonic by
-    # construction: CRITICAL >= HIGH >= MEDIUM >= LOW.
-    reviewers_per_risk: dict[str, int] = field(default_factory=lambda: {
-        RiskClass.LOW.value: 1,
-        RiskClass.MEDIUM.value: 1,
-        RiskClass.HIGH.value: 2,
-        RiskClass.CRITICAL.value: 2,
-    })
-
-    # Specialized reviewer roles automatically added for HIGH/CRITICAL risk.
-    # Keys are RiskClass.value; values are role basenames present in
-    # codebot/roles/. Empty list means no specialized routing for that class.
-    specialized_reviewers_per_risk: dict[str, list[str]] = field(default_factory=lambda: {
-        RiskClass.LOW.value: [],
-        RiskClass.MEDIUM.value: [],
-        RiskClass.HIGH.value: ["security_reviewer"],
-        RiskClass.CRITICAL.value: ["security_reviewer", "architecture_reviewer"],
-    })
 
     # --- Post-completion audits --------------------------------------------
     # Percentage of completed tickets re-reviewed by an independent auditor.
@@ -113,13 +91,15 @@ class ReviewConfig:
     # After this many rework cycles on the same ticket, escalate to an
     # alternate/senior reviewer or NEEDS_HUMAN instead of looping. Never
     # force-complete.
-    max_rework_cycles: int = 3
+    max_rework_cycles: int = 5
+    max_deferred_cycles: int = 2
     # After this many repetitions of the same finding across rework cycles,
     # escalate.
     repeated_finding_threshold: int = 2
 
     # --- Gatekeeper evidence requirements ----------------------------------
     require_test_evidence: bool = True
+    require_full_coverage: bool = False
     require_build_success: bool = True
     require_regression_check: bool = True
     require_checklist_complete: bool = True
@@ -128,6 +108,8 @@ class ReviewConfig:
     # Run cheap deterministic gates (build/tests/lint/type check) before
     # spending model tokens on reasoning. Almost always True.
     deterministic_gates_first: bool = True
+
+    architecture: str = "primary_specialist"
 
     # --- Review cost guards ------------------------------------------------
     # Skip expensive adversarial passes for trivially low-risk changes (e.g.
@@ -138,16 +120,7 @@ class ReviewConfig:
         "docs/", "README", ".md", "CHANGELOG",
     )
 
-    def reviewers_for_risk(self, risk: RiskClass) -> int:
-        """Number of independent reviewers required for a risk class."""
-        return max(1, int(self.reviewers_per_risk.get(risk.value, 1)))
-
-    def specialized_reviewers_for_risk(self, risk: RiskClass) -> list[str]:
-        """Specialized reviewer role basenames for a risk class."""
-        return list(self.specialized_reviewers_per_risk.get(risk.value, []))
-
     def is_trivial_path_set(self, changed_files: list[str]) -> bool:
-        """True if every changed file matches a trivial path pattern."""
         if not changed_files:
             return False
         for f in changed_files:
@@ -159,22 +132,21 @@ class ReviewConfig:
         return {
             "blocking_severities": sorted(s.value for s in self.blocking_severities),
             "blind_review_enabled": self.blind_review_enabled,
-            "adversarial_review_enabled": self.adversarial_review_enabled,
-            "multi_reviewer_enabled": self.multi_reviewer_enabled,
             "cross_model_preferred": self.cross_model_preferred,
             "require_tests_for_behavior_changes": self.require_tests_for_behavior_changes,
-            "reviewers_per_risk": dict(self.reviewers_per_risk),
-            "specialized_reviewers_per_risk": dict(self.specialized_reviewers_per_risk),
             "random_audit_percentage": self.random_audit_percentage,
             "max_rework_cycles": self.max_rework_cycles,
+            "max_deferred_cycles": self.max_deferred_cycles,
             "repeated_finding_threshold": self.repeated_finding_threshold,
             "require_test_evidence": self.require_test_evidence,
+            "require_full_coverage": self.require_full_coverage,
             "require_build_success": self.require_build_success,
             "require_regression_check": self.require_regression_check,
             "require_checklist_complete": self.require_checklist_complete,
             "deterministic_gates_first": self.deterministic_gates_first,
             "skip_adversarial_for_trivial": self.skip_adversarial_for_trivial,
             "trivial_path_patterns": list(self.trivial_path_patterns),
+            "architecture": self.architecture,
         }
 
 
@@ -279,34 +251,8 @@ def load_review_config(path: Path | None = None) -> ReviewConfig:
 
     # Review behavior booleans
     cfg.blind_review_enabled = bool(_get(review, "blind_review_enabled", cfg.blind_review_enabled))
-    cfg.adversarial_review_enabled = bool(_get(review, "adversarial_review_enabled", cfg.adversarial_review_enabled))
-    cfg.multi_reviewer_enabled = bool(_get(review, "multi_reviewer_enabled", cfg.multi_reviewer_enabled))
     cfg.cross_model_preferred = bool(_get(review, "cross_model_preferred", cfg.cross_model_preferred))
     cfg.require_tests_for_behavior_changes = bool(_get(review, "require_tests_for_behavior_changes", cfg.require_tests_for_behavior_changes))
-
-    # Risk-based routing — these live at top level in review.yaml because the
-    # 2-level YAML parser cannot represent review → reviewers_per_risk → LOW.
-    rpr = data.get("reviewers_per_risk") or _get(review, "reviewers_per_risk", None)
-    if isinstance(rpr, dict):
-        merged = dict(cfg.reviewers_per_risk)
-        for rc in RiskClass:
-            if rc.value in rpr:
-                try:
-                    merged[rc.value] = max(1, int(rpr[rc.value]))
-                except (ValueError, TypeError):
-                    pass
-        cfg.reviewers_per_risk = merged
-
-    spr = data.get("specialized_reviewers_per_risk") or _get(review, "specialized_reviewers_per_risk", None)
-    if isinstance(spr, dict):
-        merged_spec = dict(cfg.specialized_reviewers_per_risk)
-        for rc in RiskClass:
-            val = spr.get(rc.value)
-            if isinstance(val, list):
-                merged_spec[rc.value] = [str(v) for v in val]
-            elif isinstance(val, str) and val:
-                merged_spec[rc.value] = [s.strip() for s in val.split(",") if s.strip()]
-        cfg.specialized_reviewers_per_risk = merged_spec
 
     # Audits
     try:
@@ -326,18 +272,20 @@ def load_review_config(path: Path | None = None) -> ReviewConfig:
 
     # Gatekeeper evidence requirements
     cfg.require_test_evidence = bool(_get(gatekeeper, "require_test_evidence", cfg.require_test_evidence))
+    cfg.require_full_coverage = bool(_get(gatekeeper, "require_full_coverage", cfg.require_full_coverage))
     cfg.require_build_success = bool(_get(gatekeeper, "require_build_success", cfg.require_build_success))
     cfg.require_regression_check = bool(_get(gatekeeper, "require_regression_check", cfg.require_regression_check))
     cfg.require_checklist_complete = bool(_get(gatekeeper, "require_checklist_complete", cfg.require_checklist_complete))
     cfg.deterministic_gates_first = bool(_get(gatekeeper, "deterministic_gates_first", cfg.deterministic_gates_first))
     cfg.skip_adversarial_for_trivial = bool(_get(review, "skip_adversarial_for_trivial", cfg.skip_adversarial_for_trivial))
 
+    cfg.architecture = "primary_specialist"
+
     # Environment overrides (highest precedence)
     cfg.blind_review_enabled = _env_bool("CODEBOT_REVIEW_BLIND", cfg.blind_review_enabled)
-    cfg.adversarial_review_enabled = _env_bool("CODEBOT_REVIEW_ADVERSARIAL", cfg.adversarial_review_enabled)
-    cfg.multi_reviewer_enabled = _env_bool("CODEBOT_REVIEW_MULTI", cfg.multi_reviewer_enabled)
     cfg.random_audit_percentage = _env_int("CODEBOT_REVIEW_AUDIT_PCT", cfg.random_audit_percentage)
     cfg.max_rework_cycles = _env_int("CODEBOT_REWORK_MAX_CYCLES", cfg.max_rework_cycles)
+    cfg.max_deferred_cycles = _env_int("CODEBOT_DEFERRED_MAX_CYCLES", cfg.max_deferred_cycles)
 
     return cfg
 

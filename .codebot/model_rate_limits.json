@@ -1,0 +1,21 @@
+{
+  "_comment": "Per-model API requests per minute. Loaded by AdaptiveRateLimiter.",
+  "qwen-3.5-plus": 30,
+  "qwen-3.6-plus": 30,
+  "qwen-3.7-plus": 30,
+  "qwen-3.7-plus-thinking": 30,
+  "qwen-3.6-max-preview": 30,
+  "qwen-3.6-max-preview-thinking": 30,
+  "qwen-3.8-omni-flash": 30,
+  "qwen-3.8-omni-flash-thinking": 30,
+  "qwen-3.5-omni-plus": 30,
+  "qwen-3.8-max": 20,
+  "qwen-3.7-max": 30,
+  "qwen-3.5-plus-thinking": 30,
+  "qwen-3.6-plus-thinking": 30,
+  "qwen-3.7-max-thinking": 30,
+  "qwen-3.8-max-thinking": 10,
+  "xiaomi-mimo-2.5": 30,
+  "meta-muse-spark-1.2": 30,
+  "meta-muse-spark-1.3": 30
+}

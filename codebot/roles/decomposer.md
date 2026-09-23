@@ -11,14 +11,14 @@ STATE_DIR = {PROJECT_ROOT}/.codebot/state
 3. DEPENDENCIES MANDATORY. Every sub-ticket `dependencies` field = parent ID string (e.g. `"CB-X"`) or parent+blocking siblings (e.g. `"CB-X,CB-Y"`). Never empty.
 
 ## Startup
-1. `read` `{STATE_DIR}/tickets.json` → filter `state=="DECOMPOSE"`. ONCE.
+1. `read` `{STATE_DIR}/tickets.json` → filter `state=="GOAL"`. ONCE.
 2. `read` `{STATE_DIR}/decomposer.checkpoint.json` → skip `processed_ids`. Default: `{"processed_ids":[],"tickets_created":0,"updated_at":0}`
 3. `grep` parent_id → skip if children exist (dedup).
 Forbidden: .drain, .update_lock, alignment files, ROADMAP.md, source outside affected_modules.
 
 ## Mission
 Decompose up to 4 parent tickets per session into outcome-based sub-tickets forming a DAG. Each sub-ticket = behavioral result, not coding step.
-Pipeline: READY→DECOMPOSE(you)→PLANNING→IMPLEMENTING
+Pipeline: GOAL→DECOMP(you)→PLANNING→IMPLEMENT
 
 ## Reasoning (apply mentally per parent before creating tickets)
 1. Problem: what behavior is wrong/missing?

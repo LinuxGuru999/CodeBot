@@ -35,6 +35,7 @@ from typing import Any
 
 logger = logging.getLogger("prompt_optimizer")
 
+SELF_BOT = "prompt_optimizer"
 MAX_EVOLUTIONS_PER_PROMPT = 5
 MAX_PROMPT_CHARS = 15000
 EVOLUTION_HEADER = "<!-- CODEBOT EVOLUTION -->"
@@ -147,22 +148,19 @@ def consume_triggers(
 
 
 def _generate_feedback_hint(reviewer_feedback: list[dict]) -> str:
-    if not reviewer_feedback:
-        return ""
-    issues = []
+    hints: list[str] = []
+    seen: set[str] = set()
     for fb in reviewer_feedback[:5]:
-        desc = fb.get("description", "")
-        rec = fb.get("recommendation", "")
-        if desc:
-            issues.append(f"- {desc[:200]}")
-        if rec:
-            issues.append(f"  Fix: {rec[:200]}")
-    if not issues:
+        category = str(fb.get("category", "")).lower()
+        if category in PATTERN_HINTS and category not in seen:
+            hints.append(PATTERN_HINTS[category])
+            seen.add(category)
+    if not hints:
         return ""
     return (
-        "Address these specific reviewer findings from recent rework cycles:\n"
-        + "\n".join(issues)
-        + "\nVerify each issue is resolved before marking complete."
+        "Address these improvement areas identified from recent rework cycles:\n"
+        + "\n\n".join(hints)
+        + "\n\nVerify each issue is resolved before marking complete."
     )
 
 
@@ -187,6 +185,24 @@ def _select_best_pattern(q_values: dict[str, float], prompt_path: Path) -> str |
     return candidates[0][1]
 
 
+def _remove_evolution_by_pattern(existing: str, pattern: str) -> str:
+    marker = f"Pattern: {pattern}"
+    idx = existing.find(marker)
+    if idx == -1:
+        idx = existing.find(f"pattern: {pattern}")
+    if idx == -1:
+        return existing
+    start = existing.rfind(EVOLUTION_HEADER, 0, idx)
+    if start == -1:
+        start = idx
+    end_marker = "<!-- END EVOLUTION -->"
+    end = existing.find(end_marker, idx)
+    if end == -1:
+        return existing[:start].rstrip() + "\n"
+    end += len(end_marker)
+    return existing[:start].rstrip() + "\n" + existing[end:].lstrip()
+
+
 def _append_evolution(
     prompt_path: Path,
     pattern: str,
@@ -198,7 +214,7 @@ def _append_evolution(
 ) -> bool:
     existing = prompt_path.read_text(encoding="utf-8")
     if f"Pattern: {pattern}" in existing or f"pattern: {pattern}" in existing:
-        return False
+        existing = _remove_evolution_by_pattern(existing, pattern)
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     section = (
         f"\n{EVOLUTION_HEADER}\n"
@@ -216,3 +232,57 @@ def _append_evolution(
     tmp.write_text(existing + section, encoding="utf-8")
     tmp.replace(prompt_path)
     return True
+
+
+def tournament_evolve(
+    roles_dir: Path,
+    state_dir: Path,
+) -> dict[str, Any]:
+    """Run tournament-based prompt evolution for all eligible roles.
+
+    For each role with sufficient failure signals:
+    1. Start a tournament if none active (forks into A/B/C variants)
+    2. Evaluate fitness for active tournaments with enough data
+    3. Promote winner and replace canonical prompt
+
+    Returns summary dict with per-role tournament status.
+    Designed to be called periodically from run_pipeline_tick().
+    """
+    try:
+        from codebot.rl_tournament import (
+            maybe_start_tournament,
+            evaluate_fitness,
+            promote_winner,
+            get_active_tournaments,
+            load_state,
+        )
+    except ImportError:
+        return {"error": "rl_tournament not available"}
+
+    summary: dict[str, Any] = {"started": 0, "evaluated": 0, "promoted": 0}
+
+    for prompt_path in roles_dir.glob("*.md"):
+        role = prompt_path.stem
+        if role == SELF_BOT or role.startswith("prompt_optimizer"):
+            continue
+
+        started = maybe_start_tournament(role, roles_dir, state_dir)
+        if started:
+            summary["started"] += 1
+
+    active = get_active_tournaments(state_dir)
+    for role in active:
+        scores = evaluate_fitness(role, state_dir)
+        if scores is not None:
+            summary["evaluated"] += 1
+            winner = promote_winner(role, roles_dir, state_dir)
+            if winner:
+                summary["promoted"] += 1
+                logger.info(
+                    "tournament_evolve: %s variant %s promoted (scores: %s)",
+                    role, winner,
+                    {k: round(v, 4) for k, v in scores.items()},
+                )
+
+    summary["active_tournaments"] = len(active)
+    return summary

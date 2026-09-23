@@ -189,7 +189,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND, security_review=True),
         tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
         incentive="Find exploitable vulnerabilities. Adversarial to implementers.",
-        adversarial_to=("backend_implementer", "frontend_implementer", "general_implementer"),
+        adversarial_to=("implementer",),
     ),
     AgentRole(
         name="architecture_auditor",
@@ -198,7 +198,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
         incentive="Find architectural violations. Adversarial to implementers who add complexity.",
-        adversarial_to=("backend_implementer", "simplicity_reviewer"),
+        adversarial_to=("implementer",),
     ),
     AgentRole(
         name="performance_auditor",
@@ -207,7 +207,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(RESEARCH_TOOLS, READ_ONLY_COMMANDS, "project_root", network_access=True),
         incentive="Find scalability regressions and resource waste. Adversarial to implementers who add overhead.",
-        adversarial_to=("backend_implementer", "general_implementer"),
+        adversarial_to=("implementer",),
     ),
     AgentRole(
         name="test_gap_auditor",
@@ -224,7 +224,7 @@ DISCOVERY_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
         incentive="Find claims that are no longer true.",
-        adversarial_to=("documentation_implementer",),
+        adversarial_to=("implementer",),
     ),
     AgentRole(
         name="dependency_auditor",
@@ -255,133 +255,71 @@ DISCOVERY_ROLES: list[AgentRole] = [
 
 IMPLEMENTATION_ROLES: list[AgentRole] = [
     AgentRole(
-        name="general_implementer",
+        name="implementer",
         category=RoleCategory.IMPLEMENTATION,
-        description="Implements bug fixes, features, and refactors across the codebase",
+        description="Unified implementation agent for all ticket classes: bugs, features, refactors, tests, migrations, docs",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
         incentive="Make the requested change work correctly and completely.",
-        adversarial_to=("correctness_reviewer", "security_reviewer", "architecture_reviewer", "performance_reviewer", "simplicity_reviewer"),
-    ),
-    AgentRole(
-        name="backend_implementer",
-        category=RoleCategory.IMPLEMENTATION,
-        description="Implements server-side logic, APIs, data models",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
-        incentive="Implement backend changes. Defended against by security and architecture reviewers.",
-        adversarial_to=("correctness_reviewer", "security_reviewer", "architecture_reviewer", "performance_reviewer"),
-    ),
-    AgentRole(
-        name="frontend_implementer",
-        category=RoleCategory.IMPLEMENTATION,
-        description="Implements UI components, styling, client-side logic",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
-        incentive="Implement frontend changes. Defended against by UX reviewer.",
-        adversarial_to=("ux_auditor",),
-    ),
-    AgentRole(
-        name="test_implementer",
-        category=RoleCategory.IMPLEMENTATION,
-        description="Writes unit, integration, and E2E tests",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.SMALL, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
-        incentive="Maximize test coverage for the target change.",
-        adversarial_to=("test_reviewer",),
-    ),
-    AgentRole(
-        name="migration_implementer",
-        category=RoleCategory.IMPLEMENTATION,
-        description="Implements data migrations, schema changes, version transitions",
-        required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
-        incentive="Safe, reversible data transformation.",
-        adversarial_to=("correctness_reviewer", "security_reviewer"),
-    ),
-    AgentRole(
-        name="documentation_implementer",
-        category=RoleCategory.IMPLEMENTATION,
-        description="Updates module docs, API contracts, READMEs, ADRs",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.SMALL, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
-        incentive="Accurate documentation matching actual system state.",
+        adversarial_to=("reviewer", "security_reviewer", "architecture_reviewer", "performance_reviewer"),
     ),
 ]
 
 
 REVIEW_ROLES: list[AgentRole] = [
     AgentRole(
-        name="correctness_reviewer",
+        name="reviewer",
         category=RoleCategory.REVIEW,
-        description="Verifies implementation matches specification and acceptance criteria",
+        description="Default broad reviewer for all tickets. Verifies correctness, acceptance criteria, tests, scope compliance. Escalates to specialists when evidence warrants it.",
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find behavior the tests failed to cover or spec violations.",
-        adversarial_to=("general_implementer", "backend_implementer", "migration_implementer"),
+        incentive="Determine whether the implementation satisfies the ticket. Escalate when specialist expertise is needed.",
+        adversarial_to=("implementer",),
     ),
     AgentRole(
         name="security_reviewer",
         category=RoleCategory.REVIEW,
-        description="Attempts to exploit or abuse the implementation",
+        description="Specialist: evaluates security concerns escalated by primary reviewer",
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND, security_review=True),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find a way to exploit or abuse the change. Adversarial to implementer.",
-        adversarial_to=("general_implementer", "backend_implementer", "frontend_implementer", "architecture_reviewer", "migration_implementer"),
+        incentive="Answer only the specific security question escalated to you.",
+        adversarial_to=("implementer",),
     ),
     AgentRole(
         name="architecture_reviewer",
         category=RoleCategory.REVIEW,
-        description="Evaluates coupling, boundary violations, technical debt introduction",
+        description="Specialist: evaluates architecture concerns escalated by primary reviewer",
         required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find coupling, boundary violations, or technical debt.",
-        adversarial_to=("general_implementer", "backend_implementer", "simplicity_reviewer"),
-    ),
-    AgentRole(
-        name="test_reviewer",
-        category=RoleCategory.REVIEW,
-        description="Evaluates test adequacy, edge case coverage, assertion quality",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.SMALL, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find behavior the tests failed to cover.",
-        adversarial_to=("test_implementer",),
+        incentive="Answer only the specific architecture question escalated to you.",
+        adversarial_to=("implementer",),
     ),
     AgentRole(
         name="performance_reviewer",
         category=RoleCategory.REVIEW,
-        description="Evaluates scalability implications and resource usage",
+        description="Specialist: evaluates performance concerns escalated by primary reviewer",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find scalability or resource regressions.",
-        adversarial_to=("general_implementer", "backend_implementer"),
+        incentive="Answer only the specific performance question escalated to you.",
+        adversarial_to=("implementer",),
     ),
     AgentRole(
-        name="simplicity_reviewer",
+        name="concurrency_reviewer",
         category=RoleCategory.REVIEW,
-        description="Finds unnecessary complexity, over-engineering, dead code introduced",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.SMALL, CostClass.STANDARD, LatencyClass.BACKGROUND),
+        description="Evaluates lock ordering, TOCTOU races, claim contention, shared mutable state hazards",
+        required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find unnecessary complexity. Adversarial to over-engineering.",
-        adversarial_to=("general_implementer", "backend_implementer", "architecture_auditor"),
+        incentive="Find real concurrency hazards. Answer only the specific question escalated to you.",
+        adversarial_to=("implementer",),
     ),
     AgentRole(
-        name="documentation_reviewer",
+        name="data_integrity_reviewer",
         category=RoleCategory.REVIEW,
-        description="Verifies documentation accuracy against implementation",
-        required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
+        description="Evaluates database migrations, schema changes, destructive writes, state reconciliation correctness",
+        required_model=ModelProfile(ReasoningLevel.HIGH, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.PREMIUM, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS, READ_ONLY_COMMANDS, "project_root"),
-        incentive="Find claims that are no longer true.",
-        adversarial_to=("documentation_implementer",),
-    ),
-    AgentRole(
-        name="ux_reviewer",
-        category=RoleCategory.REVIEW,
-        description="Evaluates UI implementations for usability, accessibility (WCAG), visual consistency, and workflow friction",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(UX_AUDIT_TOOLS, READ_ONLY_COMMANDS | frozenset({"node", "npm", "npx"}), "project_root", network_access=True),
-        incentive="Find usability issues, accessibility violations, and visual regressions introduced by implementation.",
-        adversarial_to=("frontend_implementer", "general_implementer"),
+        incentive="Find data loss risks and migration defects. Answer only the specific question escalated to you.",
+        adversarial_to=("implementer",),
     ),
 ]
 
@@ -394,22 +332,6 @@ CONTROL_ROLES: list[AgentRole] = [
         required_model=ModelProfile(ReasoningLevel.LOW, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.INTERACTIVE),
         tool_policy=ToolPolicy(frozenset({"read"}), frozenset({"python3"}), "state_dir"),
         incentive="Optimize throughput within budget constraints.",
-    ),
-    AgentRole(
-        name="ticket_triager",
-        category=RoleCategory.CONTROL,
-        description="Validates incoming tickets: checks completeness, deduplicates via SHA-256, assigns severity, and routes to ready queue",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS | frozenset({"python3"}), "project_root"),
-        incentive="Maximize valid ticket throughput. Reject incomplete or duplicate tickets early.",
-    ),
-    AgentRole(
-        name="conflict_resolver",
-        category=RoleCategory.CONTROL,
-        description="Detects and resolves merge conflicts between concurrent agents",
-        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
-        tool_policy=ToolPolicy(STANDARD_TOOLS, STANDARD_COMMANDS, "project_root", git_write=True),
-        incentive="Resolve conflicts with minimal information loss.",
     ),
     AgentRole(
         name="budget_controller",
@@ -435,6 +357,14 @@ CONTROL_ROLES: list[AgentRole] = [
         tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "project_root", network_access=True),
         incentive="Full visibility: no completed ticket without a linked GitHub issue state.",
     ),
+    AgentRole(
+        name="ticket_triager",
+        category=RoleCategory.CONTROL,
+        description="Classifies incoming tickets by priority, complexity, and goal alignment for routing",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.INTERACTIVE),
+        tool_policy=ToolPolicy(frozenset({"read", "write"}), frozenset({"python3"}), "state_dir"),
+        incentive="Accurately classify tickets to maximize throughput and goal alignment.",
+    ),
 ]
 
 
@@ -448,12 +378,20 @@ PLANNING_ROLES: list[AgentRole] = [
         incentive="Break tickets into atomic, implementable pieces. Every decomposition feeds planning.",
     ),
     AgentRole(
-        name="implementation_planner",
+        name="planner",
         category=RoleCategory.PLANNING,
-        description="Generates implementation plans for PLANNING tickets, enabling PLANNING -> IMPLEMENTING transitions",
+        description="Generates implementation plans for PLANNING tickets, enabling PLANNING -> IMPLEMENT transitions",
         required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.ADVANCED, ContextSize.LARGE, CostClass.STANDARD, LatencyClass.BACKGROUND),
         tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), frozenset({"python3"}), "project_root"),
         incentive="Unblock the implementer fleet by generating plans for every PLANNING ticket.",
+    ),
+    AgentRole(
+        name="goal_aligner",
+        category=RoleCategory.PLANNING,
+        description="Evaluates tickets against project goals for NOW/LATER/NEVER classification",
+        required_model=ModelProfile(ReasoningLevel.MEDIUM, CodingLevel.BASIC, ContextSize.SMALL, CostClass.CHEAP, LatencyClass.BACKGROUND),
+        tool_policy=ToolPolicy(READ_ONLY_TOOLS | frozenset({"write"}), READ_ONLY_COMMANDS, "project_root"),
+        incentive="Correctly classify tickets by goal relevance. Maximize NOW→COMPLETE rate.",
     ),
 ]
 
@@ -503,44 +441,34 @@ def roles_by_category(category: RoleCategory) -> list[AgentRole]:
     return [r for r in ALL_ROLES if r.category == category]
 
 
-def find_adversarial_reviewers(implementer_role: str, ticket_id: str | None = None) -> list[AgentRole]:
-    """Find reviewers adversarial to the given implementer role with structured error logging.
-    
-    Args:
-        implementer_role: The implementer role name to find adversarial reviewers for
-        ticket_id: Optional ticket ID for context in error logs
-    
-    Returns:
-        List of adversarial reviewer roles, empty list on error
+# ---------------------------------------------------------------------------
+# Derived Role Name Sets (OCP-compliant: derived from registry, not hardcoded)
+# ---------------------------------------------------------------------------
+IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset(
+    r.name for r in ALL_ROLES if r.category == RoleCategory.IMPLEMENTATION
+)
+DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset(
+    r.name for r in ALL_ROLES if r.category == RoleCategory.DISCOVERY
+)
+REVIEWER_ROLE_NAMES: frozenset[str] = frozenset(
+    r.name for r in ALL_ROLES if r.category == RoleCategory.REVIEW
+)
+PLANNING_ROLE_NAMES: frozenset[str] = frozenset(
+    r.name for r in ALL_ROLES if r.category == RoleCategory.PLANNING
+)
+CONTROL_ROLE_NAMES: frozenset[str] = frozenset(
+    r.name for r in ALL_ROLES if r.category == RoleCategory.CONTROL
+)
+
+IMPLEMENTATION_ROLE_ORDER: tuple[str, ...] = tuple(r.name for r in IMPLEMENTATION_ROLES)
+
+_DEFAULT_IMPLEMENTER_ROLE: str = IMPLEMENTATION_ROLE_ORDER[0] if IMPLEMENTATION_ROLE_ORDER else ""
+
+
+def get_implementer_for_class(ticket_class: str) -> str:
+    """Return the implementer role name for a ticket class.
+
+    The default is derived from the registered implementation roles, so adding
+    or renaming an implementation role only requires changing the registry.
     """
-    try:
-        # Check if the implementer role exists first
-        if implementer_role not in ROLE_REGISTRY:
-            context = {"implementer_role": implementer_role}
-            if ticket_id:
-                context["ticket_id"] = ticket_id
-            logger.warning(
-                "Implementer role not found for adversarial lookup: implementer_role=%s, ticket_id=%s",
-                implementer_role,
-                ticket_id
-            )
-            return []
-        
-        reviewers = []
-        for role in REVIEW_ROLES:
-            if implementer_role in role.adversarial_to:
-                reviewers.append(role)
-        return reviewers
-    except Exception as e:
-        context = {"implementer_role": implementer_role}
-        if ticket_id:
-            context["ticket_id"] = ticket_id
-        logger.error(
-            "Finding adversarial reviewers failed: implementer_role=%s, ticket_id=%s, exception_type=%s, message=%s\nTraceback:\n%s",
-            implementer_role,
-            ticket_id,
-            type(e).__name__,
-            str(e),
-            traceback.format_exc()
-        )
-        return []
+    return _DEFAULT_IMPLEMENTER_ROLE

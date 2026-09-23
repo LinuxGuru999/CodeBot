@@ -486,6 +486,49 @@ class TestCreateHandoffNote:
 # Round-trip: save → load preserves data
 # ---------------------------------------------------------------------------
 
+class TestScratchpadPathTraversal:
+    """Security tests for path traversal prevention in scratchpad file paths."""
+
+    def test_rejects_traversal_dotdot(self, tmp_path):
+        """Ticket IDs containing '..' must be rejected."""
+        with pytest.raises(ValueError, match="Invalid ticket_id"):
+            sp.load_scratchpad(tmp_path, "../../../tmp/evil")
+
+    def test_rejects_slash(self, tmp_path):
+        """Ticket IDs containing '/' must be rejected."""
+        with pytest.raises(ValueError, match="Invalid ticket_id"):
+            sp.load_scratchpad(tmp_path, "foo/bar")
+
+    def test_rejects_backslash(self, tmp_path):
+        """Ticket IDs containing '\\' must be rejected."""
+        with pytest.raises(ValueError, match="Invalid ticket_id"):
+            sp.load_scratchpad(tmp_path, "a\\b")
+
+    def test_rejects_empty_string(self, tmp_path):
+        """Empty ticket IDs must be rejected."""
+        with pytest.raises(ValueError, match="Invalid ticket_id"):
+            sp.load_scratchpad(tmp_path, "")
+
+    def test_accepts_valid_ids(self, tmp_path):
+        """Standard ticket IDs should work without error."""
+        # Should not raise
+        state = sp.load_scratchpad(tmp_path, "CB-2458958-B5EF")
+        assert state.ticket_id == "CB-2458958-B5EF"
+
+        state2 = sp.load_scratchpad(tmp_path, "test_ticket_1")
+        assert state2.ticket_id == "test_ticket_1"
+
+    def test_no_file_written_outside_state_dir(self, tmp_path):
+        """Verify that malicious ticket IDs do not create files outside state dir."""
+        malicious_id = "../../../tmp/evil"
+        with pytest.raises(ValueError):
+            sp.save_scratchpad(tmp_path, sp.ScratchpadState(ticket_id=malicious_id))
+
+        # Verify no evil file was created in /tmp or parent directories
+        evil_path = Path("/tmp/evil.scratchpad.json")
+        assert not evil_path.exists(), f"Security breach: {evil_path} was created"
+
+
 class TestSaveLoadRoundTrip:
     def test_full_roundtrip(self, tmp_path):
         original = sp.ScratchpadState(

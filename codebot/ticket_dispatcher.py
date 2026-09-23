@@ -1383,40 +1383,69 @@ def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> 
                     except (json.JSONDecodeError, ValueError, OSError):
                         pass
         if not review_claims:
-            continue
+            verdicts_dir = STATE_DIR / "reviews" / tid
+            has_verdicts = verdicts_dir.exists() and any(
+                p.suffix == ".json" and p.parent.name != "quarantine"
+                for p in verdicts_dir.iterdir()
+            ) if verdicts_dir.exists() else False
+            if not has_verdicts:
+                continue
 
         all_reviewers_done = True
-        for claim_file in review_claims:
-            bot_name = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
-            base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
-            if base_name not in REVIEWER_ROLE_NAMES:
-                continue
-            bot = bots.get(bot_name)
-            if bot is None:
-                continue
-            is_running = bot.process is not None and bot.process.poll() is None
-            assigned = getattr(bot, '_assigned_ticket_id', '')
-            if is_running and assigned == tid:
-                all_reviewers_done = False
-                break
+        if review_claims:
+            for claim_file in review_claims:
+                bot_name = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
+                base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
+                if base_name not in REVIEWER_ROLE_NAMES:
+                    continue
+                bot = bots.get(bot_name)
+                if bot is None:
+                    continue
+                is_running = bot.process is not None and bot.process.poll() is None
+                assigned = getattr(bot, '_assigned_ticket_id', '')
+                if is_running and assigned == tid:
+                    all_reviewers_done = False
+                    break
 
         if not all_reviewers_done:
             continue
 
         review_decisions: list[ReviewDecision] = []
-        for pattern in review_file_patterns:
-            review_path = STATE_DIR / pattern
-            if not review_path.exists():
-                continue
-            try:
-                data = json.loads(review_path.read_text(encoding="utf-8"))
+        verdicts_dir = STATE_DIR / "reviews" / tid
+        if verdicts_dir.exists():
+            for vf in verdicts_dir.glob("*.json"):
+                if vf.parent.name == "quarantine":
+                    continue
+                try:
+                    data = json.loads(vf.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    import ast as _ast
+                    try:
+                        data = _ast.literal_eval(vf.read_text(encoding="utf-8"))
+                    except (ValueError, SyntaxError):
+                        continue
                 if not isinstance(data, dict):
                     continue
                 if data.get("ticket_id", "") != tid:
                     continue
-                review_decisions.append(ReviewDecision.from_dict(data))
-            except (json.JSONDecodeError, OSError, ValueError, KeyError):
-                continue
+                try:
+                    review_decisions.append(ReviewDecision.from_dict(data))
+                except (ValueError, KeyError):
+                    continue
+        if not review_decisions:
+            for pattern in review_file_patterns:
+                review_path = STATE_DIR / pattern
+                if not review_path.exists():
+                    continue
+                try:
+                    data = json.loads(review_path.read_text(encoding="utf-8"))
+                    if not isinstance(data, dict):
+                        continue
+                    if data.get("ticket_id", "") != tid:
+                        continue
+                    review_decisions.append(ReviewDecision.from_dict(data))
+                except (json.JSONDecodeError, OSError, ValueError, KeyError):
+                    continue
 
         all_findings: list[StructuredFinding] = []
         for rd in review_decisions:
@@ -1431,11 +1460,13 @@ def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> 
 
         if not review_decisions:
             has_rework_flag = False
+            has_reviewer_claims = bool(review_claims)
             for claim_file in review_claims:
                 bot_name = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
                 base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
                 if base_name not in REVIEWER_ROLE_NAMES:
                     continue
+                has_reviewer_claims = True
                 tasklog = LOGS_DIR / f"{bot_name}.tasklog"
                 if tasklog.exists():
                     try:
@@ -1446,10 +1477,36 @@ def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> 
                             has_rework_flag = True
                     except OSError:
                         pass
-            target_state = TicketState.REWORK if has_rework_flag else TicketState.VERIFYING
+            target_state = TicketState.REWORK if has_rework_flag else TicketState.COMPLETE
+            if not has_reviewer_claims and not has_rework_flag:
+                verdicts_dir = STATE_DIR / "reviews" / tid
+                if verdicts_dir.exists():
+                    for vf in verdicts_dir.glob("*.json"):
+                        if vf.parent.name == "quarantine":
+                            continue
+                        try:
+                            vdata = json.loads(vf.read_text(encoding="utf-8"))
+                        except (json.JSONDecodeError, OSError):
+                            import ast as _ast
+                            try:
+                                vdata = _ast.literal_eval(vf.read_text(encoding="utf-8"))
+                            except (ValueError, SyntaxError):
+                                continue
+                        if isinstance(vdata, dict):
+                            v = str(vdata.get("verdict", "")).upper()
+                            if v in ("REWORK", "ESCALATE", "BLOCK"):
+                                target_state = TicketState.REWORK
+                                break
+                            elif v in ("APPROVE", "PASS", "COMPLETE"):
+                                target_state = TicketState.COMPLETE
+                    if target_state == TicketState.COMPLETE and any(
+                        p.suffix == ".json" and p.parent.name != "quarantine"
+                        for p in verdicts_dir.iterdir()
+                    ):
+                        target_state = TicketState.COMPLETE
             reviewer_feedback = None
         else:
-            target_state = TicketState.REWORK if (unresolved_blocking or has_rework_verdict) else TicketState.VERIFYING
+            target_state = TicketState.REWORK if (unresolved_blocking or has_rework_verdict) else TicketState.COMPLETE
             reviewer_feedback = [
                 {
                     "reviewer": f.reviewer,
@@ -1463,6 +1520,21 @@ def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> 
                 }
                 for f in unresolved_blocking
             ] if unresolved_blocking else None
+            if reviewer_feedback is None and has_rework_verdict:
+                reviewer_feedback = [
+                    {
+                        "reviewer": rd.reviewer,
+                        "file": "",
+                        "severity": "medium",
+                        "category": "general",
+                        "description": rd.summary[:500] if rd.summary else "Reviewer requested rework without blocking findings",
+                        "recommendation": "Address reviewer concerns from verdict summary",
+                        "evidence": "",
+                        "reproduction": "",
+                    }
+                    for rd in review_decisions
+                    if rd.effective_verdict(blocking) == "REWORK"
+                ] or None
 
         if target_state == TicketState.REWORK:
             try:
@@ -1510,6 +1582,13 @@ def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> 
     if not transitions:
         return 0
 
+    for tid, target_state, _ in transitions:
+        if target_state == TicketState.COMPLETE:
+            try:
+                ts.record_gate_result(tid, True)
+            except Exception:
+                pass
+
     advanced = 0
     results = ts.batch_transition(transitions)
     advanced = len(results)
@@ -1549,7 +1628,16 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
     if ts is None:
         return 0
 
-    verifying = ts.list_by_state(TicketState.VERIFYING)
+    try:
+        from codebot.review_config import get_review_config
+        max_rework = get_review_config().max_rework_cycles
+    except Exception:
+        max_rework = 5
+
+    try:
+        verifying = ts.list_by_state(TicketState.VERIFYING)
+    except Exception:
+        return 0
     if not verifying:
         return 0
 
@@ -1601,7 +1689,7 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
                             pass
                 if not files_actually_modified:
                     rework_count = getattr(ticket, 'rework_count', 0)
-                    if rework_count < 3:
+                    if rework_count < max_rework:
                         transitions.append((tid, TicketState.REWORK, None))
                         log_messages.append(("info", f"Gatekeeper: {tid} -> REWORK (gates passed but no files modified in git)"))
                     else:
@@ -1613,7 +1701,7 @@ def gatekeeper_verify_tickets(store: Any | None = None) -> int:
                 log_messages.append(("info", f"Gatekeeper: {tid} -> COMPLETE (all gates passed)"))
             else:
                 rework_count = getattr(ticket, 'rework_count', 0)
-                if rework_count < 3:
+                if rework_count < max_rework:
                     transitions.append((tid, TicketState.REWORK, None))
                     log_messages.append(("info", f"Gatekeeper: {tid} -> REWORK (gates failed, attempt {rework_count + 1})"))
                 else:
@@ -1775,7 +1863,10 @@ def route_ready_tickets(store: Any | None = None, skip_tids: set[str] | None = N
 
 
 def process_rework_tickets(bots: dict[str, Any], store: Any | None = None) -> int:
-    """Process REWORK tickets by routing them back to PLANNING or DECOMPOSE.
+    """Process REWORK tickets by routing them back to IMPLEMENT.
+
+    Tickets with rework_count >= 5 are routed to DEFERRED for cooling off.
+    Claims are released before transition so the V2 scheduler can re-dispatch cleanly.
 
     Uses batch_transition to apply all state changes in memory and save once,
     avoiding O(K*N) serialization cost per dispatch cycle.
@@ -1794,28 +1885,43 @@ def process_rework_tickets(bots: dict[str, Any], store: Any | None = None) -> in
         return 0
     if not rework:
         return 0
-    plans_dir = STATE_DIR / "plans"
 
-    # Collect transitions into batches; high-rework tickets need special handling
+    try:
+        from codebot.review_config import get_review_config
+        max_rework = get_review_config().max_rework_cycles
+    except Exception:
+        max_rework = 5
+
     transitions: list[tuple[str, Any, list[dict] | None]] = []
-    reject_fallbacks: list[str] = []
 
     for ticket in rework:
         tid = ticket.id
         rework_count = getattr(ticket, 'rework_count', 0)
-        if rework_count >= 3:
-            transitions.append((tid, TicketState.DECOMPOSE, None))
-            reject_fallbacks.append(tid)
+        if rework_count >= max_rework:
+            transitions.append((tid, TicketState.DEFERRED, None))
         else:
-            plan_file = plans_dir / f"{tid}.plan.json"
-            current_state = getattr(ticket, 'state', None)
-            if current_state == TicketState.PLANNING:
-                continue
-            target_state = TicketState.PLANNING if plan_file.exists() else TicketState.DECOMPOSE
-            transitions.append((tid, target_state, None))
+            transitions.append((tid, TicketState.IMPLEMENT, None))
 
     if not transitions:
         return 0
+
+    claims_dir = STATE_DIR / "claims"
+    tids_to_clean = {tid for tid, _, _ in transitions}
+    for tid in tids_to_clean:
+        for cf in claims_dir.glob(f"{tid}*.json"):
+            try:
+                release_claim(cf.name)
+            except Exception:
+                pass
+            try:
+                cf.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for lf in claims_dir.glob(f"{tid}*.lock"):
+            try:
+                lf.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     advanced = 0
     results = ts.batch_transition(transitions)
@@ -1824,16 +1930,20 @@ def process_rework_tickets(bots: dict[str, Any], store: Any | None = None) -> in
     for i, (tid, target_state, _) in enumerate(transitions):
         if tid in result_ids:
             rc = getattr(rework[i], 'rework_count', 0) if i < len(rework) else 0
-            if target_state == TicketState.DECOMPOSE and rc >= 3:
-                logger.warning(f"Rework ticket {tid} -> DECOMPOSE (failed {rc} implementations, needs fresh decomposition)")
+            if target_state == TicketState.DEFERRED:
+                logger.warning(f"Rework ticket {tid} -> DEFERRED (failed {rc} implementations, needs cooling off)")
             else:
-                logger.info(f"Rework ticket {tid} -> {target_state.value} (rework_count={rc})")
+                logger.info(f"Rework ticket {tid} -> IMPLEMENT (rework_count={rc})")
+
+    for name, bot in bots.items():
+        if getattr(bot, '_assigned_ticket_id', '') in tids_to_clean:
+            bot._assigned_ticket_id = ''
 
     return advanced
 
 
 def recover_deferred_tickets(store: Any | None = None) -> int:
-    """Recover DEFERRED tickets back to READY or DECOMPOSE.
+    """Recover DEFERRED tickets back to IMPLEMENT or DECOMP.
 
     Uses batch_transition to apply all state changes in memory and save once,
     avoiding O(K*N) serialization cost per dispatch cycle.
@@ -1854,8 +1964,7 @@ def recover_deferred_tickets(store: Any | None = None) -> int:
     if not deferred:
         return 0
 
-    # Collect all transitions, then apply in a single batch
-    target_state = TicketState.DECOMPOSE if decompose_count == 0 else TicketState.READY
+    target_state = TicketState.DECOMP if decompose_count == 0 else TicketState.IMPLEMENT
     transitions: list[tuple[str, Any, list[dict] | None]] = [
         (ticket.id, target_state, None) for ticket in deferred
     ]
@@ -1880,3 +1989,126 @@ def recover_deferred_tickets(store: Any | None = None) -> int:
                 logger.warning(f"Deferred ticket {ticket.id} recovery failed: {ve}")
 
     return recovered
+
+
+def process_deferred_gates(store: Any | None = None, timeout_per_gate: int = 15, max_budget_seconds: float = 10.0) -> int:
+    try:
+        from codebot.ticket_engine import TicketState
+    except ImportError:
+        return 0
+    ts = store if store is not None else get_ticket_store()
+    if ts is None:
+        return 0
+    advanced = 0
+    for state_name in ("REVIEW", "VERIFYING"):
+        target_tickets = [t for t in ts._tickets.values() if getattr(t.state, "value", str(t.state)) == state_name]
+        for ticket in target_tickets:
+            tid = getattr(ticket, "id", "")
+            if not tid:
+                continue
+            verdicts_dir = STATE_DIR / "reviews" / tid
+            if not verdicts_dir.exists():
+                continue
+            verdicts = [f for f in verdicts_dir.glob("*.json") if f.parent.name != "quarantine"]
+            if not verdicts:
+                continue
+            has_rework = False
+            has_approve = False
+            for vf in verdicts:
+                try:
+                    data = json.loads(vf.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    import ast as _ast
+                    try:
+                        data = _ast.literal_eval(vf.read_text(encoding="utf-8"))
+                    except (ValueError, SyntaxError):
+                        continue
+                if not isinstance(data, dict):
+                    continue
+                v = str(data.get("verdict", "")).upper()
+                if v in ("REWORK", "ESCALATE", "BLOCK"):
+                    has_rework = True
+                elif v in ("APPROVE", "PASS", "COMPLETE"):
+                    has_approve = True
+            target = TicketState.REWORK if has_rework else TicketState.COMPLETE
+            if target == TicketState.COMPLETE:
+                try:
+                    ts.record_gate_result(tid, True)
+                except Exception:
+                    pass
+            try:
+                ts.transition(tid, target)
+                advanced += 1
+                logger.info("Deferred gate: %s -> %s (rework=%s approve=%s)", tid, target.value, has_rework, has_approve)
+            except ValueError as ve:
+                logger.debug("Deferred gate transition failed for %s: %s", tid, ve)
+    return advanced
+
+
+def process_deferred_tickets(store: Any | None = None) -> int:
+    """Process DEFERRED tickets: route to DECOMP, or BLOCK after max cycles.
+
+    Pipeline: REWORK(×5) → DEFERRED → DECOMP → DEFERRED(×2) → BLOCKED
+    Each time a ticket enters DEFERRED, deferred_count increments.
+    After max_deferred_cycles (default 2), ticket is permanently BLOCKED.
+    Otherwise routes to DECOMP for fresh decomposition.
+    """
+    try:
+        from codebot.ticket_engine import TicketState
+    except ImportError:
+        return 0
+
+    ts = store if store is not None else get_ticket_store()
+    if ts is None:
+        return 0
+    try:
+        deferred = ts.list_by_state(TicketState.DEFERRED)
+    except Exception:
+        return 0
+    if not deferred:
+        return 0
+
+    try:
+        from codebot.review_config import get_review_config
+        max_deferred = get_review_config().max_deferred_cycles
+    except Exception:
+        max_deferred = 2
+
+    transitions: list[tuple[str, Any, list[dict] | None]] = []
+
+    for ticket in deferred:
+        tid = ticket.id
+        deferred_count = getattr(ticket, 'deferred_count', 0)
+        if deferred_count >= max_deferred:
+            transitions.append((tid, TicketState.BLOCKED, None))
+        else:
+            transitions.append((tid, TicketState.DECOMP, None))
+
+    if not transitions:
+        return 0
+
+    for tid, target_state, _ in transitions:
+        if target_state == TicketState.DECOMP:
+            try:
+                tkt = ts._tickets.get(tid)
+                if tkt is not None:
+                    dc = getattr(tkt, 'deferred_count', 0)
+                    updates = {'deferred_count': dc + 1}
+                    updated_tkt = type(tkt)(**{**tkt.__dict__, **updates}) if hasattr(tkt, '__dict__') else tkt
+                    ts._tickets[tid] = updated_tkt
+            except Exception:
+                pass
+
+    advanced = 0
+    results = ts.batch_transition(transitions)
+    advanced = len(results)
+    result_ids = {r.id for r in results}
+    for i, (tid, target_state, _) in enumerate(transitions):
+        if tid in result_ids:
+            dc = getattr(deferred[i], 'deferred_count', 0) if i < len(deferred) else 0
+            if target_state == TicketState.BLOCKED:
+                logger.warning(f"Deferred ticket {tid} -> BLOCKED (deferred {dc} times, exceeded max)")
+            else:
+                logger.info(f"Deferred ticket {tid} -> DECOMP (deferred_count={dc + 1})")
+
+    return advanced

@@ -28,27 +28,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
-try:
-    from codebot.locks import LOCK_EX, LOCK_UN, flock as _shared_flock
-    fcntl = type("fcntl", (), {"flock": staticmethod(_shared_flock)})()
-except ImportError:  # pragma: no cover - locks module must exist
-    try:
-        import fcntl  # type: ignore[no-redef]
-        LOCK_EX = fcntl.LOCK_EX
-        LOCK_UN = fcntl.LOCK_UN
-    except ImportError:
-        LOCK_EX = 2  # fcntl.LOCK_EX value on Linux; used for exclusive state-file locking
-        LOCK_UN = 8  # fcntl.LOCK_UN value on Linux; used to release the flock
-        def _noop_flock(fd: int, operation: int) -> None:
-            """No-op flock on platforms without fcntl (e.g. Windows)."""
-            pass
-        fcntl = type('fcntl', (), {'flock': _noop_flock})()  # type: ignore[assignment]
+from codebot.file_lock import LOCK_EX, LOCK_UN, flock
 
 logger = logging.getLogger(__name__)
 
 # Default paths (overridden by set_state_dir)
 _STATE_DIR: Path = Path(".codebot/state")
 _MAX_CHECKPOINT_BYTES = 4096
+_MAX_READ_CHECKPOINT_BYTES = 8192  # hard memory ceiling for reads (2× write limit)
 
 
 def set_state_dir(state_dir: Path) -> None:
@@ -91,6 +78,24 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     tmp.replace(path)
 
 
+def _bounded_read_text(path: Path, max_bytes: int) -> Optional[str]:
+    """Read *path* as UTF-8 text, returning ``None`` if the file exceeds *max_bytes*.
+
+    Opens in binary mode and reads at most ``max_bytes + 1`` bytes so that
+    oversize files are detected without loading them entirely into memory.
+    This is TOCTOU-safe: unlike a ``stat()`` guard followed by ``read_text()``,
+    the kernel enforces the byte ceiling on the file descriptor itself.
+
+    Raises ``OSError`` / ``UnicodeDecodeError`` on I/O or encoding failures
+    (callers already handle these).
+    """
+    with open(path, "rb") as fh:
+        data = fh.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        return None
+    return data.decode("utf-8")
+
+
 @contextmanager
 def _state_write_lock(bot_name: str) -> Iterator[None]:
     """Acquire an exclusive advisory lock on a bot's state file.
@@ -118,11 +123,11 @@ def _state_write_lock(bot_name: str) -> Iterator[None]:
     lock_fd = None
     try:
         lock_fd = lock_path.open("a+", encoding="utf-8")
-        fcntl.flock(lock_fd.fileno(), LOCK_EX)
+        flock(lock_fd.fileno(), LOCK_EX)
         yield
     finally:
         if lock_fd:
-            fcntl.flock(lock_fd.fileno(), LOCK_UN)
+            flock(lock_fd.fileno(), LOCK_UN)
             lock_fd.close()
 
 
@@ -166,23 +171,24 @@ def init_checkpoint(bot_name: str, scan_iteration: int = 0) -> None:
     })
 
 
+def checkpoint_backup_path(path: Path) -> Path:
+    if path.suffix == ".json":
+        return path.with_name(f"{path.stem}.checkpoint.bak")
+    return Path(f"{path}.bak")
+
+
 def read_checkpoint(bot_name: str) -> Optional[Dict[str, Any]]:
-    """Read bot's checkpoint with fallback to backup file.
-    
-    Args:
-        bot_name: Name of the bot
-    
-    Returns:
-        Parsed checkpoint dict, or None if missing/corrupt.
-        Falls back to .bak file if primary is corrupt.
-    """
     p = checkpoint_path(bot_name)
-    bak = p.with_suffix(".checkpoint.bak")
+    bak = checkpoint_backup_path(p)
     
     if not p.exists():
         if bak.exists():
             try:
-                raw = bak.read_text(encoding="utf-8")
+                # Bounded read — TOCTOU-safe, no full-file load
+                raw = _bounded_read_text(bak, _MAX_READ_CHECKPOINT_BYTES)
+                if raw is None:
+                    logger.warning(f"Backup checkpoint for '{bot_name}' exceeds {_MAX_READ_CHECKPOINT_BYTES}B — rejecting")
+                    return None
                 data = json.loads(raw)
                 if isinstance(data, dict):
                     logger.info(f"Restored last-good checkpoint for '{bot_name}' from .bak")
@@ -191,13 +197,20 @@ def read_checkpoint(bot_name: str) -> Optional[Dict[str, Any]]:
                 pass
         return None
     
+    # CRITICAL: Use bounded read to prevent memory exhaustion from malicious/corrupt files.
+    # This is TOCTOU-safe as the kernel enforces the byte ceiling on the file descriptor.
     try:
-        raw = p.read_text(encoding="utf-8")
+        raw = _bounded_read_text(p, _MAX_READ_CHECKPOINT_BYTES)
+        if raw is None:
+            logger.warning(f"Checkpoint for '{bot_name}' exceeds {_MAX_READ_CHECKPOINT_BYTES}B — rejecting to prevent memory exhaustion")
+            return None
         data = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         logger.warning(f"Checkpoint corrupt for '{bot_name}': {exc} — falling back to .bak")
         try:
-            p.rename(bak)
+            quarantine = p.parent / "checkpoint_quarantine"
+            quarantine.mkdir(parents=True, exist_ok=True)
+            p.replace(quarantine / f"{p.stem}-corrupt.json")
         except OSError:
             try:
                 p.unlink()
@@ -205,6 +218,10 @@ def read_checkpoint(bot_name: str) -> Optional[Dict[str, Any]]:
                 pass
         if bak.exists():
             try:
+                # Size-check backup before reading
+                if bak.stat().st_size > _MAX_CHECKPOINT_BYTES:
+                    logger.warning(f"Backup checkpoint for '{bot_name}' exceeds {_MAX_CHECKPOINT_BYTES}B — rejecting")
+                    return None
                 fallback_raw = bak.read_text(encoding="utf-8")
                 fallback_data = json.loads(fallback_raw)
                 if isinstance(fallback_data, dict):
@@ -218,7 +235,9 @@ def read_checkpoint(bot_name: str) -> Optional[Dict[str, Any]]:
     if not isinstance(data, dict):
         logger.warning(f"Checkpoint for '{bot_name}' is not a JSON object — falling back to .bak")
         try:
-            p.rename(bak)
+            quarantine = p.parent / "checkpoint_quarantine"
+            quarantine.mkdir(parents=True, exist_ok=True)
+            p.replace(quarantine / f"{p.stem}-non-dict.json")
         except OSError:
             try:
                 p.unlink()
@@ -226,6 +245,10 @@ def read_checkpoint(bot_name: str) -> Optional[Dict[str, Any]]:
                 pass
         if bak.exists():
             try:
+                # Size-check backup before reading
+                if bak.stat().st_size > _MAX_CHECKPOINT_BYTES:
+                    logger.warning(f"Backup checkpoint for '{bot_name}' exceeds {_MAX_CHECKPOINT_BYTES}B — rejecting")
+                    return None
                 fallback_raw = bak.read_text(encoding="utf-8")
                 fallback_data = json.loads(fallback_raw)
                 if isinstance(fallback_data, dict):
@@ -234,8 +257,10 @@ def read_checkpoint(bot_name: str) -> Optional[Dict[str, Any]]:
                 pass
         return None
     
+    # Size check already done via stat() above, but keep this as defense-in-depth
     if len(raw.encode("utf-8")) > _MAX_CHECKPOINT_BYTES:
-        logger.warning(f"Checkpoint for '{bot_name}' exceeds {_MAX_CHECKPOINT_BYTES}B ({len(raw.encode('utf-8'))} bytes) — truncating")
+        logger.warning(f"Checkpoint for '{bot_name}' exceeds {_MAX_CHECKPOINT_BYTES}B after read — this should not happen")
+        return None
     
     try:
         bak.write_text(raw, encoding="utf-8")

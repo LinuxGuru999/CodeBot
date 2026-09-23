@@ -22,6 +22,7 @@ import pytest
 
 import codebot.botop as botop_mod
 import codebot.botop as _botop
+import codebot.ticket_engine as ticket_engine
 from codebot.botop import (
     _find_state_dir,
     _find_logs_dir,
@@ -575,7 +576,7 @@ def test_collect_tickets_missing_Given_no_file_When_collect_Then_empty(tmp_path:
         store,summary,tickets=_collect_tickets(tmp_path)
         assert store is None and summary is None and tickets==[]
 
-def test_collect_tickets_via_store_Given_tickets_json_When_collect_Then_store(tmp_path: Path):
+def test_collect_tickets_via_store_Given_repeated_dashboard_polls_When_collecting_Then_threads_remain_stable(tmp_path: Path):
     """Given tickets.json When _collect_tickets Then TicketStore and summary."""
     sd,_=_make_state_dirs(tmp_path)
     tf=sd/"tickets.json"
@@ -585,12 +586,36 @@ def test_collect_tickets_via_store_Given_tickets_json_When_collect_Then_store(tm
     store.add(t)
     store.flush()
     store.close()
-    # now collect
+    before_threads = {thread.ident for thread in threading.enumerate()}
+    before_store_refs = len(ticket_engine._active_stores)
     with patch("codebot.botop._find_state_dir", return_value=sd):
-        s, summary, tickets = _collect_tickets(tmp_path)
-        assert summary is not None
-        assert isinstance(tickets, list)
-        assert len(tickets)>=1
+        snapshots = [_collect_tickets(tmp_path) for _ in range(5)]
+    _, summary, tickets = snapshots[-1]
+    assert summary is not None
+    assert isinstance(tickets, list)
+    assert len(tickets)>=1
+    assert {thread.ident for thread in threading.enumerate()} == before_threads
+    assert len(ticket_engine._active_stores) == before_store_refs
+
+def test_collect_tickets_Given_dashboard_snapshot_When_collecting_Then_disables_background_workers(tmp_path: Path):
+    sd,_ = _make_state_dirs(tmp_path)
+    tickets_file = sd / "tickets.json"
+    tickets_file.write_text(json.dumps({"tickets": []}), encoding="utf-8")
+    temporary_store = MagicMock()
+    temporary_store.summary.return_value = {"READY": 1}
+    temporary_store._tickets = {"CB-1": _make_ticket_dict("CB-1", "READY")}
+
+    with (
+        patch("codebot.ticket_engine.TicketStore", return_value=temporary_store) as ticket_store,
+        patch("codebot.botop._find_state_dir", return_value=sd),
+    ):
+        store, summary, tickets = _collect_tickets(tmp_path)
+
+    assert store is None
+    assert summary == {"READY": 1}
+    assert len(tickets) == 1
+    ticket_store.assert_called_once_with(tickets_file, start_background_workers=False)
+    temporary_store.close.assert_not_called()
 
 def test_collect_tickets_raw_fallback_Given_corrupt_store_When_collect_Then_manual(tmp_path: Path):
     """Given tickets.json with raw dict When store fails Then manual counter."""
@@ -1855,4 +1880,3 @@ def test_ordered_states_pipeline_Given_tickets_pipeline_When_tickets_flow_Then_o
     import pathlib
     src=pathlib.Path(m.__file__).read_text()
     assert "ordered_states" in src or "DISCOVERED" in src and "IMPLEMENTATION" in src
-

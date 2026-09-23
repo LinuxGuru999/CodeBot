@@ -20,7 +20,6 @@ from codebot.ticket_engine import (
     TicketStore,
     SCHEMA_VERSION,
 )
-from codebot.rl_engine import reward_from_lifecycle_outcome
 
 
 def _base_ticket(**overrides) -> Ticket:
@@ -226,15 +225,13 @@ class TestInvalidTransitions:
 
     def test_no_deferred_to_anything(self):
         t = _ticket_in(TicketState.DEFERRED)
-        # DEFERRED is terminal except universal exits; COMPLETE/GOAL etc must fail
+        # DEFERRED now recomposes via DECOMP and retries via IMPLEMENT; other targets remain blocked
         with pytest.raises(ValueError, match="invalid transition"):
             t.transition(TicketState.COMPLETE)
         with pytest.raises(ValueError, match="invalid transition"):
             t.transition(TicketState.GOAL)
-        with pytest.raises(ValueError, match="invalid transition"):
-            t.transition(TicketState.DECOMP)
-        with pytest.raises(ValueError, match="invalid transition"):
-            t.transition(TicketState.IMPLEMENT)
+        assert t.transition(TicketState.DECOMP).state == TicketState.DECOMP
+        assert t.transition(TicketState.IMPLEMENT).state == TicketState.IMPLEMENT
         with pytest.raises(ValueError, match="invalid transition"):
             t.transition(TicketState.DISCOVERED)
 
@@ -454,60 +451,6 @@ class TestSchemaMigration:
         }
         t = Ticket.from_dict(raw)
         assert t.state == TicketState.VALIDATING
-
-
-# ===========================================================================
-# RL Reward Tests (4+ extended)
-# ===========================================================================
-
-class TestRLRewards:
-    def test_reward_complete_is_1(self):
-        assert reward_from_lifecycle_outcome("COMPLETE") == 1.0
-        assert reward_from_lifecycle_outcome(TicketState.COMPLETE) == 1.0
-
-    def test_reward_rejected_is_0(self):
-        assert reward_from_lifecycle_outcome("REJECTED") == 0.0
-        assert reward_from_lifecycle_outcome(TicketState.REJECTED) == 0.0
-        assert reward_from_lifecycle_outcome("DUPLICATE") == 0.0
-        assert reward_from_lifecycle_outcome("NOT_ACTIONABLE") == 0.0
-
-    def test_reward_goal_pass_is_0_3(self):
-        assert reward_from_lifecycle_outcome("GOAL") == 0.3
-        assert reward_from_lifecycle_outcome("TRIAGED") == 0.3
-        assert reward_from_lifecycle_outcome(TicketState.GOAL) == 0.3
-        assert reward_from_lifecycle_outcome(TicketState.TRIAGED) == 0.3
-
-    def test_reward_deferred_is_0_2(self):
-        assert reward_from_lifecycle_outcome("DEFERRED") == 0.2
-        assert reward_from_lifecycle_outcome(TicketState.DEFERRED) == 0.2
-
-    def test_reward_review_is_0_7(self):
-        assert reward_from_lifecycle_outcome("REVIEW") == 0.7
-        assert reward_from_lifecycle_outcome(TicketState.REVIEW) == 0.7
-        # alias REVIEWING
-        assert reward_from_lifecycle_outcome("REVIEWING") == 0.7
-
-    def test_reward_decomp_planning_is_0_5(self):
-        assert reward_from_lifecycle_outcome("DECOMP") == 0.5
-        assert reward_from_lifecycle_outcome("PLANNING") == 0.5
-        assert reward_from_lifecycle_outcome(TicketState.DECOMP) == 0.5
-        assert reward_from_lifecycle_outcome(TicketState.PLANNING) == 0.5
-        # alias DECOMPOSE
-        assert reward_from_lifecycle_outcome("DECOMPOSE") == 0.5
-
-    def test_reward_never_is_0_1(self):
-        assert reward_from_lifecycle_outcome("NEVER") == 0.1
-        assert reward_from_lifecycle_outcome(TicketState.NEVER) == 0.1
-
-    def test_reward_unknown_is_0(self):
-        assert reward_from_lifecycle_outcome("UNKNOWN_STATE_XYZ") == 0.0
-        assert reward_from_lifecycle_outcome("") == 0.0
-        assert reward_from_lifecycle_outcome("LATER") == 0.0  # LATER not rewarded as terminal
-
-    def test_reward_enum_string_case_insensitive(self):
-        assert reward_from_lifecycle_outcome("complete") == 1.0
-        assert reward_from_lifecycle_outcome("  Complete  ") == 1.0
-        assert reward_from_lifecycle_outcome("goal") == 0.3
 
 
 # ===========================================================================

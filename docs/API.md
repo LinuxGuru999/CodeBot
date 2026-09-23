@@ -38,6 +38,15 @@ Entry point: `python -m codebot <command> --project <path>`
 
 Default port: 8081. Auth: `Authorization: Bearer <CONTROL_TOKEN>`.
 
+### Bot Name Validation
+
+All endpoints accepting `{name}` in the path (e.g., `/bots/{name}/restart`) enforce strict bot name validation to prevent command injection and ensure safe process management.
+
+- **Allowed Pattern**: `^[a-zA-Z0-9_-]+$`
+- **Invalid Format**: Returns `400 Bad Request` with `{"error": "invalid bot name format"}`
+- **Unknown Bot**: If the name is valid but not registered, returns `404 Not Found` with `{"error": "unknown bot"}`
+- **Process Safety**: Bot names are escaped using `re.escape()` before being used in process search patterns (`pgrep -f`). This prevents regex injection attacks via bot names containing special characters.
+
 ### GET /health
 
 Returns orchestrator health status.

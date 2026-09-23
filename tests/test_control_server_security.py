@@ -558,41 +558,20 @@ class TestBotRegistryValidation:
 
 
 # ---------------------------------------------------------------------------
-# Pkill pattern injection — crafted names cannot kill arbitrary processes
+# PID-file-based process termination — verifies secure kill path
 # ---------------------------------------------------------------------------
-class TestPkillPatternInjection:
-    """Verify pkill with escaped patterns cannot terminate unrelated processes."""
+class TestPidFileBasedKill:
+    """Verify process termination uses PID files + cmdline verification, not pkill."""
 
-    def test_pkill_with_escaped_dot_star_does_not_kill_sleep(self):
-        """Escaped '.*' must not match 'sleep' process."""
-        proc = subprocess.Popen(
-            ["sleep", "10"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            escaped = re.escape(".*")
-            pattern = f"api_runner\\.py {escaped}"
-            subprocess.run(["pkill", "-f", pattern], capture_output=True, timeout=5)
-            assert proc.poll() is None, (
-                f"Unrelated process killed by escaped pattern '{pattern}'"
-            )
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-
-    def test_restart_endpoint_applies_re_escape(self):
+    def test_restart_endpoint_uses_pid_file_kill(self):
+        """Restart endpoint must use _safe_kill_bot_process with PID file verification."""
         from codebot.control_server import ControlHandler
 
         mock_bot = MagicMock()
         mock_bot.name = "valid-bot"
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
-            with patch("codebot.control_server.subprocess.run") as mock_run:
+            with patch("codebot.control_server._safe_kill_bot_process", return_value=(True, [1234])) as mock_safe_kill:
                 with patch("codebot.control_server.subprocess.Popen"):
                     handler = MagicMock(spec=ControlHandler)
                     handler.path = "/bots/valid-bot/restart"
@@ -602,19 +581,19 @@ class TestPkillPatternInjection:
                     handler._read_json_body = lambda: ({"force": True}, None, None)
                     # use real do_POST binding
                     ControlHandler.do_POST(handler)
-                    assert mock_run.called
-                    cmd = mock_run.call_args[0][0]
-                    assert f"api_runner\\.py {re.escape('valid-bot')}" in cmd[2]
+                    # Verify _safe_kill_bot_process was called with validated bot name
+                    mock_safe_kill.assert_called_once_with("valid-bot", timeout=5)
 
-    def test_pause_endpoint_applies_re_escape(self):
+    def test_pause_endpoint_uses_pid_file_kill(self):
+        """Pause endpoint must use _safe_kill_bot_process with PID file verification."""
         from codebot.control_server import ControlHandler
 
         mock_bot = MagicMock()
         mock_bot.name = "valid-bot"
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
-            with patch("codebot.control_server.STATE_DIR") as mock_state:
-                with patch("codebot.control_server.subprocess.run") as mock_run:
+            with patch("codebot.control_server._safe_kill_bot_process", return_value=(True, [1234])) as mock_safe_kill:
+                with patch("codebot.control_server.STATE_DIR") as mock_state:
                     mock_file = MagicMock()
                     mock_state.__truediv__ = MagicMock(return_value=mock_file)
 
@@ -627,12 +606,11 @@ class TestPkillPatternInjection:
 
                     ControlHandler.do_POST(handler)
 
-                    assert mock_run.called
-                    cmd = mock_run.call_args[0][0]
-                    assert f"api_runner\\.py {re.escape('valid-bot')}" in cmd[2]
+                    # Verify _safe_kill_bot_process was called with validated bot name
+                    mock_safe_kill.assert_called_once_with("valid-bot", timeout=5)
 
-    def test_bot_status_pgrep_uses_re_escape(self):
-        """bot_status pgrep pattern must use re.escape."""
+    def test_bot_status_uses_pid_file_verification(self):
+        """bot_status must use PID file + cmdline verification, not pgrep."""
         from codebot.control_server import bot_status
 
         mock_cfg = MagicMock()
@@ -642,19 +620,15 @@ class TestPkillPatternInjection:
         mock_cfg.heartbeat_timeout = 300
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_cfg]):
-            with patch("codebot.control_server.subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(stdout="", returncode=1)
-                with patch("codebot.control_server.heartbeat_age", return_value=None):
-                    bot_status("test-bot")
-                    # Find pgrep call for api_runner — inspect actual pattern arg, not str(list)
-                    found = False
-                    for call in mock_run.call_args_list:
-                        args = call[0][0]
-                        if isinstance(args, list) and len(args) >= 3 and "api_runner" in args[2]:
-                            assert re.escape("test-bot") in args[2]
-                            found = True
-                            break
-                    assert found, "pgrep api_runner pattern not found"
+            with patch("codebot.control_server._read_pid_file", return_value=1234) as mock_rpf, \
+                 patch("codebot.control_server._verify_cmdline", return_value=True) as mock_vc, \
+                 patch("codebot.control_server.heartbeat_age", return_value=None):
+                result = bot_status("test-bot")
+                # Verify PID file was read and cmdline verified
+                mock_rpf.assert_called_with("test-bot")
+                mock_vc.assert_called_with(1234, "test-bot")
+                assert result["running"] is True
+                assert result["pid"] == "1234"
 
     def test_injection_payloads_never_reach_subprocess(self):
         """All injection payloads must be rejected before any subprocess call."""
@@ -692,3 +666,143 @@ class TestPkillPatternInjection:
                             mock_run.assert_not_called()
                             mock_popen.assert_not_called()
                             assert responses[0][0] == 400
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU and Unicode Digit Security Tests for _read_pid_file (CB-43585)
+# ---------------------------------------------------------------------------
+class TestPidFileSecurityHardening:
+    """Verify _read_pid_file resists TOCTOU races and rejects Unicode digits."""
+
+    def test_read_pid_file_unicode_digit_rejection(self, tmp_path):
+        """PIDs containing Unicode digits (e.g., U+0661) must be rejected.
+        
+        str.isdigit() accepts Unicode digits which int() may handle unexpectedly.
+        Strict ASCII validation via regex ^[0-9]+$ is required.
+        """
+        from codebot.control_server import _read_pid_file
+        import os
+
+        # Patch STATE_DIR to use tmp_path
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            pid_file = tmp_path / "unicode_bot.pid"
+            # Write a PID using Arabic-Indic digit one (U+0661) mixed with ASCII
+            # U+0661 is '١' which str.isdigit() returns True for
+            malicious_content = "12١45"  # Contains U+0661
+            pid_file.write_text(malicious_content)
+            os.chmod(pid_file, 0o600)
+            
+            result = _read_pid_file("unicode_bot")
+            assert result is None, f"Unicode digit PID should be rejected, got {result}"
+
+    def test_read_pid_file_pure_unicode_digits_rejected(self, tmp_path):
+        """Pure Unicode digit strings must be rejected even if they look numeric."""
+        from codebot.control_server import _read_pid_file
+        import os
+
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            pid_file = tmp_path / "pure_unicode.pid"
+            # All Arabic-Indic digits
+            pid_file.write_text("١٢٣٤٥")
+            os.chmod(pid_file, 0o600)
+            
+            result = _read_pid_file("pure_unicode")
+            assert result is None
+
+    def test_read_pid_file_valid_ascii_accepted(self, tmp_path):
+        """Valid ASCII-only PIDs must still be accepted."""
+        from codebot.control_server import _read_pid_file
+        import os
+
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            pid_file = tmp_path / "valid_bot.pid"
+            pid_file.write_text("12345\n")
+            os.chmod(pid_file, 0o600)
+            
+            result = _read_pid_file("valid_bot")
+            assert result == 12345
+
+    def test_read_pid_file_symlink_rejected(self, tmp_path):
+        """Symlinks must be rejected at open time via O_NOFOLLOW.
+        
+        This verifies TOCTOU resistance: even if an attacker swaps the file
+        for a symlink between stat and read, O_NOFOLLOW prevents following it.
+        """
+        from codebot.control_server import _read_pid_file
+        import os
+
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            # Create a target file that would leak content if followed
+            target_file = tmp_path / "secret_target.txt"
+            target_file.write_text("99999")
+            os.chmod(target_file, 0o600)
+            
+            # Create a symlink pointing to the target
+            pid_file = tmp_path / "symlink_bot.pid"
+            try:
+                os.symlink(target_file, pid_file)
+            except OSError:
+                pytest.skip("Symlink creation not supported on this platform")
+            
+            result = _read_pid_file("symlink_bot")
+            assert result is None, "Symlinked PID file must be rejected (O_NOFOLLOW)"
+
+    def test_read_pid_file_insecure_permissions_rejected(self, tmp_path):
+        """PID files with permissions other than 0o600 must be rejected."""
+        from codebot.control_server import _read_pid_file
+        import os
+
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            pid_file = tmp_path / "insecure_bot.pid"
+            pid_file.write_text("12345")
+            # World-readable permissions
+            os.chmod(pid_file, 0o644)
+            
+            result = _read_pid_file("insecure_bot")
+            assert result is None, "World-readable PID file must be rejected"
+
+    def test_read_pid_file_non_regular_file_rejected(self, tmp_path):
+        """Non-regular files (directories, devices) must be rejected via fstat check."""
+        from codebot.control_server import _read_pid_file
+        import os
+
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            # Create a directory instead of a file
+            dir_path = tmp_path / "dir_bot.pid"
+            dir_path.mkdir()
+            os.chmod(dir_path, 0o600)
+            
+            result = _read_pid_file("dir_bot")
+            assert result is None, "Directory masquerading as PID file must be rejected"
+
+    def test_read_orchestrator_pid_file_unicode_rejected(self, tmp_path):
+        """Orchestrator PID file must also reject Unicode digits."""
+        from codebot.control_server import _read_orchestrator_pid_file
+        import os
+
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            pid_file = tmp_path / ".orchestrator.pid"
+            pid_file.write_text("١٢٣")  # Unicode digits
+            os.chmod(pid_file, 0o600)
+            
+            result = _read_orchestrator_pid_file()
+            assert result is None
+
+    def test_read_orchestrator_pid_file_symlink_rejected(self, tmp_path):
+        """Orchestrator PID file must reject symlinks via O_NOFOLLOW."""
+        from codebot.control_server import _read_orchestrator_pid_file
+        import os
+
+        with patch("codebot.control_server.STATE_DIR", tmp_path):
+            target = tmp_path / "real_orch.pid"
+            target.write_text("999")
+            os.chmod(target, 0o600)
+            
+            pid_file = tmp_path / ".orchestrator.pid"
+            try:
+                os.symlink(target, pid_file)
+            except OSError:
+                pytest.skip("Symlink creation not supported")
+            
+            result = _read_orchestrator_pid_file()
+            assert result is None

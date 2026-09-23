@@ -1964,3 +1964,249 @@ class TestDoPostBranches:
             handler._json.assert_called_once()
             call_args = handler._json.call_args
             assert call_args[0][0] == 400
+
+
+class TestBotNameInjectionPrevention:
+    """Security tests for bot name injection in restart/pause endpoints (CB-A0E739BF97E7DBD6E0467558C2EF5E2D).
+
+    Verifies that POST /bots/{name}/restart and /bots/{name}/pause validate the bot name
+    against a strict alphanumeric pattern BEFORE attempting any process operations.
+    This prevents regex injection via pkill -f and shell command injection.
+    """
+
+    def _make_bot_action_handler(self, path: str, body: dict | None = None):
+        """Create a mock ControlHandler for bot action endpoints."""
+        from codebot.control_server import ControlHandler
+
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = path
+        handler.command = "POST"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._json = MagicMock()
+        handler._auth = lambda: True  # type: ignore[assignment]
+        handler._read_json_body = MagicMock(return_value=(body or {"force": True}, None, None))
+        handler.rfile = io.BytesIO(json.dumps(body or {"force": True}).encode())
+        handler.wfile = io.BytesIO()
+        return handler
+
+    def _test_injection_payload(self, payload: str, endpoint: str):
+        """Helper to test a specific injection payload on an endpoint."""
+        from codebot.control_server import ControlHandler
+
+        # Registry contains a valid bot, but we are attacking with a crafted name in the URL
+        mock_bot = MagicMock()
+        mock_bot.name = "valid-bot"
+
+        handler = self._make_bot_action_handler(endpoint, {"force": True})
+        responses: list[tuple[int, dict]] = []
+        handler._json = lambda code, data, r=responses, **kw: r.append((code, data))  # type: ignore[assignment]
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]), \
+             patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server.subprocess") as mock_sub:
+            ControlHandler.do_POST(handler)
+
+            # Must return 400 Bad Request
+            assert len(responses) == 1
+            code, data = responses[0]
+            assert code == 400, f"Expected 400 for payload {payload!r} on {endpoint}, got {code}: {data}"
+            assert "invalid bot name" in data.get("error", "").lower(), f"Error message should mention invalid name: {data}"
+
+            # CRITICAL: No subprocess calls (pkill, kill, etc.) should occur
+            mock_sub.Popen.assert_not_called()
+            mock_sub.run.assert_not_called()
+
+    def test_restart_rejects_regex_injection(self):
+        """POST /bots/{name}/restart must reject regex injection payloads like '.*'."""
+        # Regex that matches everything
+        self._test_injection_payload(".*", "/bots/./restart")
+        # More complex regex
+        self._test_injection_payload("a.*b", "/bots/a.*b/restart")
+
+    def test_restart_rejects_shell_metacharacters(self):
+        """POST /bots/{name}/restart must reject shell metacharacter payloads."""
+        # Command chaining
+        self._test_injection_payload("bot; rm -rf /", "/bots/bot; rm -rf //restart")
+        # Command substitution
+        self._test_injection_payload("$(whoami)", "/bots/$(whoami)/restart")
+        # Backtick substitution
+        self._test_injection_payload("`id`", "/bots/`id`/restart")
+        # Pipe injection
+        self._test_injection_payload("bot | cat /etc/passwd", "/bots/bot | cat /etc/passwd/restart")
+        # Redirect injection
+        self._test_injection_payload("bot > /dev/null", "/bots/bot > /dev/null/restart")
+
+    def test_pause_rejects_regex_injection(self):
+        """POST /bots/{name}/pause must reject regex injection payloads."""
+        self._test_injection_payload(".*", "/bots/./pause")
+
+    def test_pause_rejects_shell_metacharacters(self):
+        """POST /bots/{name}/pause must reject shell metacharacter payloads."""
+        self._test_injection_payload("bot; rm -rf /", "/bots/bot; rm -rf //pause")
+        self._test_injection_payload("$(whoami)", "/bots/$(whoami)/pause")
+
+    def test_valid_names_still_work(self):
+        """Ensure valid alphanumeric names with hyphens/underscores still pass validation."""
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "my-valid_bot-123"
+
+        handler = self._make_bot_action_handler("/bots/my-valid_bot-123/restart", {"force": True})
+        responses: list[tuple[int, dict]] = []
+        handler._json = lambda code, data, r=responses, **kw: r.append((code, data))  # type: ignore[assignment]
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]), \
+             patch("codebot.control_server.CONTROL_TOKEN", "test-token"), \
+             patch("codebot.control_server._safe_kill_bot_process") as mock_kill, \
+             patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            mock_kill.return_value = (True, [1234])
+            mock_popen.return_value = MagicMock(pid=5678)
+
+            ControlHandler.do_POST(handler)
+
+            # Should succeed (200)
+            assert len(responses) == 1
+            code, data = responses[0]
+            assert code == 200, f"Valid name should succeed, got {code}: {data}"
+            assert data.get("ok") is True
+
+            # Subprocess should be called for restart
+            mock_popen.assert_called_once()
+
+
+class TestSecurityHeaders:
+    '''Tests for Constitution Section 2 security headers.'''
+
+    @staticmethod
+    def _make_handler(path, auth_result=True):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.path = path
+        handler.command = 'GET'
+        handler.client_address = ('127.0.0.1', 12345)
+        handler.headers = {}
+        handler.rfile = io.BytesIO(b'')
+        handler.wfile = io.BytesIO(b'')
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler._json = ControlHandler._json.__get__(handler, ControlHandler)
+        handler._auth = MagicMock(return_value=auth_result)
+        return handler
+
+    @staticmethod
+    def _assert_security_headers(send_header):
+        send_header.assert_any_call('X-Content-Type-Options', 'nosniff')
+        send_header.assert_any_call('X-Frame-Options', 'DENY')
+        send_header.assert_any_call('Referrer-Policy', 'no-referrer')
+
+    def test_json_method_includes_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.wfile = io.BytesIO(b'')
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        ControlHandler._json(handler, 200, {'status': 'ok'})
+        self._assert_security_headers(handler.send_header)
+
+    def test_json_304_method_includes_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.wfile = io.BytesIO(b'')
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        ControlHandler._json_304(handler, 'abc123')
+        self._assert_security_headers(handler.send_header)
+
+    def test_html_method_includes_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.wfile = io.BytesIO(b'')
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        ControlHandler._html(handler, 200, b'<html>test</html>')
+        self._assert_security_headers(handler.send_header)
+
+    def test_json_with_cache_headers_includes_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock(spec=ControlHandler)
+        handler.wfile = io.BytesIO(b'')
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        ControlHandler._json_with_cache_headers(handler, 200, {'status': 'ok'}, 'etag123', time.time())
+        self._assert_security_headers(handler.send_header)
+
+    def test_health_endpoint_has_security_headers(self):
+        from codebot.control_server import ControlHandler, _health_rate_limiter
+        handler = self._make_handler('/health')
+        with patch.object(_health_rate_limiter, 'is_allowed', return_value=(True, None)):
+            with patch.object(_health_rate_limiter, 'record_failure', return_value=None):
+                with patch('codebot.control_server.time') as mock_time:
+                    mock_time.time.return_value = 1000.0
+                    ControlHandler.do_GET(handler)
+        handler.send_response.assert_called_once_with(200)
+        self._assert_security_headers(handler.send_header)
+        assert b'ok' in handler.wfile.getvalue()
+
+    def test_bots_endpoint_has_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = self._make_handler('/bots', True)
+        with patch('codebot.control_server.BOT_REGISTRY', []):
+            ControlHandler.do_GET(handler)
+        handler.send_response.assert_called_once_with(200)
+        self._assert_security_headers(handler.send_header)
+        assert handler.wfile.getvalue() == b'[]'
+
+    def test_error_response_has_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = self._make_handler('/nope', True)
+        ControlHandler.do_GET(handler)
+        handler.send_response.assert_called_once_with(404)
+        self._assert_security_headers(handler.send_header)
+        assert b'not found' in handler.wfile.getvalue()
+
+    def test_unauthorized_response_has_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = self._make_handler('/bots', False)
+        ControlHandler.do_GET(handler)
+        handler.send_response.assert_called_once_with(401)
+        self._assert_security_headers(handler.send_header)
+        assert b'unauthorized' in handler.wfile.getvalue()
+
+    def test_send_error_has_security_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock()
+        handler.wfile = io.BytesIO(b'')
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.request_version = 'HTTP/1.1'
+        ControlHandler.send_error(handler, 404, 'Not Found', 'missing')
+        handler.send_response.assert_called_once_with(404, 'Not Found')
+        self._assert_security_headers(handler.send_header)
+        handler.send_header.assert_any_call('Connection', 'close')
+        body = handler.wfile.getvalue()
+        assert b'Not Found' in body
+        assert b'missing' in body
+        assert handler.close_connection is True
+
+    def test_send_error_http_09_does_not_send_headers(self):
+        from codebot.control_server import ControlHandler
+        handler = MagicMock()
+        handler.wfile = io.BytesIO(b'')
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.request_version = 'HTTP/0.9'
+        ControlHandler.send_error(handler, 400)
+        handler.send_response.assert_not_called()
+        handler.send_header.assert_not_called()
+        handler.end_headers.assert_not_called()
+        assert handler.wfile.getvalue() == b''
+        assert handler.close_connection is True

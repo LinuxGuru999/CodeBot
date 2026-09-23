@@ -25,7 +25,10 @@ def test_aa_cleanup():
     assert "CONTROL_TOKEN" not in cs.TELEMETRY_UNAUTHORIZED_HINT
     assert "CONTROL_TOKEN" not in cs.TELEMETRY_NOT_CONFIGURED_HINT
     assert "CODEBOT_TELEMETRY_TOKEN" in cs.TELEMETRY_UNAUTHORIZED_HINT
-    assert hasattr(cs, "CONTROL_ALLOW_UNAUTHENTICATED")
+    # CB-B4086: CONTROL_ALLOW_UNAUTHENTICATED bypass removed from production code
+    import pathlib as _pl
+    _src = (_pl.Path(__file__).parent.parent / "codebot" / "control_server.py").read_text()
+    assert "CONTROL_ALLOW_UNAUTHENTICATED" not in _src
     # ensure security test still present
     assert (base / "test_telemetry_hints_security.py").exists()
     print("cleanup step1 done")

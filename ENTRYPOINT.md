@@ -23,11 +23,12 @@ Stdlib-only. No runtime dependencies beyond Python 3.14+ (pytest for dev).
 ## Read In This Order
 
 1. **This file** — orientation
-2. **README.md** — architecture overview and quick start
-3. **docs/GOALS.md** — what we're building and why (49 goals)
-4. **docs/ARCHITECTURE.md** — module inventory and data flow
-5. **ROADMAP.md** — the full engineering path (86 sections)
-6. **.codebot/constitution.md** — invariants you must not weaken
+2. **README.md** — product vision and quick start
+3. **docs/PRODUCT.md** — complete product definition
+4. **docs/GOALS.md** — what we're building and why (49 goals)
+5. **docs/ARCHITECTURE.md** — module inventory and data flow
+6. **ROADMAP.md** — the full engineering path (86 sections)
+7. **.codebot/constitution.md** — invariants you must not weaken
 
 ## The Core Loop
 

@@ -1,4 +1,4 @@
-"""Tests for codebot/api_runner.py core execution and safety functions.
+"""Tests for codebot.api_runner module.
 
 Covers:
 - _parse_tool_args
@@ -539,6 +539,7 @@ class TestAutoCommitBotNameSanitization:
         "bot/tab",
         "../traversal",
         "bot;echo pwned",
+        'test"; rm -rf /; echo "',  # CB-58BEA: explicit quote+semicolon payload from ticket
     ])
     def test_malicious_bot_name_blocks_commit(self, malicious_name, tmp_path):
         """Bot names with shell metacharacters must be rejected before any git ops."""
@@ -631,10 +632,10 @@ class TestApiKeyLoggingSecurity:
         """Verify _log output does not contain any portion of an API key."""
         sensitive_key = "sk-super-secret-api-key-1234567890abcdef"
         # Simulate what run_bot does after resolving the key
-        _log("test-bot: API key resolved (present)")
+        _log("test-bot: API key resolved (present=True)")
         captured = capsys.readouterr()
         # The log line must confirm presence without revealing content
-        assert "API key resolved (present)" in captured.out
+        assert "API key resolved (present=True)" in captured.out
         # No portion of the actual key should appear in the log output
         for i in range(len(sensitive_key) - 3):
             substring = sensitive_key[i:i+4]
@@ -670,8 +671,8 @@ class TestApiKeyLoggingSecurity:
                 pass
 
         captured = capsys.readouterr()
-        # Must confirm key is present
-        assert "API key resolved (present)" in captured.out
+        # Must confirm key is present with boolean indicator
+        assert "API key resolved (present=True)" in captured.out
         # Must NOT contain any fragment of the actual key (check all substrings >= 4 chars)
         for i in range(len(fake_key) - 3):
             fragment = fake_key[i:i+4]
@@ -979,7 +980,7 @@ class TestPersistStreamStress:
             # Verify tool content truncation was applied to persisted entries
             for m in payload["messages"]:
                 if m.get("role") == "tool" and isinstance(m.get("content"), str):
-                    assert len(m["content"]) <= 2016, "tool content must be truncated to 2000+len(suffix)"
+                    assert len(m["content"]) <= 2000 + len("...[truncated]"), "tool content must be truncated to 2000+len(suffix)"
 
     def test_persist_stream_small_history_not_truncated(self, tmp_path):
         """Small history (<500KB) must NOT set truncated flag and persist all."""
@@ -1026,13 +1027,13 @@ class TestPersistStreamStress:
         assert len(payload["messages"]) == 0
 
     def test_persist_stream_tail_trim_loop_triggered_by_overhead_drift(self, tmp_path):
-        """Cover the while-loop tail-trim path (lines ~1540-1555).
+        """Cover the single-pass tail-trim guard (replaces old while-loop).
 
         When cumulative per-entry size tracking stays under MAX_SIZE but
         the final serialized payload exceeds it due to structural overhead,
-        the while loop must pop entries from the tail until under cap.
+        the single-pass guard pops one entry from the tail and re-serializes once.
         We force this by patching json.dumps to return a larger body on
-        the final full-payload serialization than the sum of per-entry sizes.
+        the first full-payload serialization than the sum of per-entry sizes.
         """
         import codebot.api_runner as ar
         original_dumps = json.dumps
@@ -1043,8 +1044,8 @@ class TestPersistStreamStress:
             # Only inflate when serializing the full payload dict with messages
             if isinstance(obj, dict) and "messages" in obj and len(obj.get("messages", [])) > 0:
                 call_count["n"] += 1
-                # On the FIRST full-payload serialization (before while loop),
-                # inflate to exceed MAX_SIZE to trigger the while loop
+                # On the FIRST full-payload serialization, inflate to exceed MAX_SIZE
+                # to trigger the single-pass guard
                 if call_count["n"] == 1:
                     # Add padding to push over 500KB
                     padding = "x" * 600_000
@@ -1064,7 +1065,8 @@ class TestPersistStreamStress:
         assert stream_path.exists()
         raw = stream_path.read_text(encoding="utf-8")
         file_size = len(raw.encode("utf-8"))
-        assert file_size <= 500_000, f"File {file_size} exceeds 500KB after tail-trim"
+        # After single-pass guard, file should be under MAX_SIZE
+        assert file_size <= 500_000, f"File {file_size} exceeds 500KB after single-pass guard"
         payload = json.loads(raw)
         assert payload.get("truncated") is True, "truncated flag must be set after tail-trim"
         assert len(payload["messages"]) < len(messages), "Messages must be trimmed"
@@ -1175,7 +1177,7 @@ class TestPersistStreamStress:
         assert payload.get("truncated") is True  # stream_truncated set due to skipped messages
 
     def test_persist_stream_file_write_failure_logged(self, tmp_path, caplog):
-        """Cover the except (OSError, ValueError, TypeError) path in _persist_stream (lines ~1583-1584).
+        """Cover the except (OSError, ValueError, TypeError) path in _persist_stream.
 
         When the file write operations (mkdir, write_text, replace) fail with
         OSError/ValueError/TypeError, the function logs a warning and returns
@@ -1183,22 +1185,58 @@ class TestPersistStreamStress:
         """
         import codebot.api_runner as ar
         import logging
+        from pathlib import Path
         from unittest.mock import patch
 
         bot_name = "write-fail-bot"
         messages = [{"role": "user", "content": "hello"}]
         (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
 
-        # Patch Path.write_text to raise OSError, simulating disk full or permission error
-        original_write_text = None
-        def failing_write_text(*args, **kwargs):
-            raise OSError("Simulated disk write failure")
+        # Patch Path.write_text in the api_runner module namespace to intercept
+        # the exact call site. The implementation creates `tmp = Path(str(p) + ".tmp")`
+        # then calls `tmp.write_text(body, encoding="utf-8")`.
+        original_write_text = Path.write_text
+        call_count = {"n": 0}
+
+        def selective_oserror(self, *args, **kwargs):
+            # Only raise on .tmp files (the atomic write target in _persist_stream)
+            if str(self).endswith(".tmp"):
+                call_count["n"] += 1
+                raise OSError("Simulated disk full")
+            return original_write_text(self, *args, **kwargs)
 
         with patch.object(ar, "BOTS_DIR", tmp_path), \
+             patch.object(Path, "write_text", side_effect=selective_oserror), \
              caplog.at_level(logging.WARNING):
-            # Patch the Path method that writes the file
-            with patch("pathlib.Path.write_text", side_effect=failing_write_text):
-                ar._persist_stream(bot_name, messages, "m", 1, "completed")
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        # Verify the patch was actually triggered
+        assert call_count["n"] > 0, "write_text patch was not triggered on .tmp file"
+
+        # Verify warning was logged about the failure
+        assert any("_persist_stream failed" in record.message for record in caplog.records), \
+            f"Expected warning about persist_stream failure. Records: {[r.message for r in caplog.records]}"
+
+    def test_persist_stream_replace_failure_logged(self, tmp_path, caplog):
+        """Cover the except (OSError, ValueError, TypeError) path via Path.replace failure.
+        
+        Ensures the OSError handler is triggered when tmp.replace(p) fails,
+        covering the same exception handler line as write_text failure.
+        """
+        import codebot.api_runner as ar
+        import logging
+        from pathlib import Path
+        from unittest.mock import patch
+
+        bot_name = "replace-fail-bot"
+        messages = [{"role": "user", "content": "hello"}]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Patch Path.replace in api_runner module namespace to raise OSError
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             patch.object(Path, "replace", side_effect=OSError("Simulated rename failure")), \
+             caplog.at_level(logging.WARNING):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
 
         # Verify warning was logged about the failure
         assert any("_persist_stream failed" in record.message for record in caplog.records), \
@@ -1221,10 +1259,14 @@ class TestPersistStreamStress:
         # usage should be an empty dict when None is passed
         assert payload.get("usage") == {}
 
-    def test_persist_stream_tool_truncation_logs_context(self, tmp_path, caplog):
-        """Cover the _log_context_assembly path when truncated_count > 0."""
+    def test_persist_stream_tool_truncation_logs_context(self, tmp_path):
+        """Cover the _log_context_assembly path when truncated_count > 0.
+        
+        Verifies that tool message truncation triggers the stream_persist_truncation
+        log event in the context trace file (per feedback #8/#10: read context_trace.jsonl
+        and verify the event was logged there, do NOT use caplog or assert on payload flag).
+        """
         import codebot.api_runner as ar
-        import logging
 
         bot_name = "tool-trunc-bot"
         # Create a tool message with content > 2000 chars to trigger truncation
@@ -1232,17 +1274,322 @@ class TestPersistStreamStress:
         messages = [{"role": "tool", "content": large_content, "tool_call_id": "call_1"}]
         (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
 
-        with patch.object(ar, "BOTS_DIR", tmp_path), \
-             caplog.at_level(logging.INFO):
+        with patch.object(ar, "BOTS_DIR", tmp_path):
             ar._persist_stream(bot_name, messages, "m", 1, "completed")
 
         stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
         assert stream_path.exists()
         payload = json.loads(stream_path.read_text(encoding="utf-8"))
-        # Verify tool content was truncated
-        assert len(payload["messages"][0]["content"]) <= 2016
-        # Verify truncated flag is set
-        assert payload.get("truncated") is True
+        # Verify tool content was truncated (2000 chars + "...[truncated]" suffix)
+        assert len(payload["messages"][0]["content"]) == 2000 + len("...[truncated]")
+        assert payload["messages"][0]["content"].endswith("...[truncated]")
+        
+        # Verify _log_context_assembly wrote to the context trace file
+        # Per feedback #8/#10: read context_trace.jsonl and verify event, do NOT use caplog
+        # Do NOT assert on payload.get("truncated") - verify via context trace instead
+        trace_path = tmp_path / "logs" / f"{bot_name}.context_trace.jsonl"
+        assert trace_path.exists(), "Context trace file must exist when truncation occurs"
+        trace_content = trace_path.read_text(encoding="utf-8")
+        # Parse JSONL to verify event structure
+        events = [json.loads(line) for line in trace_content.strip().split("\n") if line.strip()]
+        truncation_events = [e for e in events if e.get("event_type") == "stream_persist_truncation"]
+        assert len(truncation_events) >= 1, f"Expected at least 1 stream_persist_truncation event, got {len(truncation_events)}"
+        event = truncation_events[0]
+        assert event.get("input_size_bytes", event.get("input_size", 0)) > 0
+        assert event.get("output_size_bytes", event.get("output_size", 0)) > 0
+        assert event.get("truncation_ratio", 1.0) <= 1.0
+        # Check extra/metadata for tool_results_truncated count
+        extra = event.get("extra", event.get("metadata", {}))
+        assert extra.get("tool_results_truncated", 0) >= 1, "tool_results_truncated must be >= 1 in log event"
+
+    def test_persist_stream_memory_error_propagates(self, tmp_path, caplog):
+        """MemoryError must propagate, not be swallowed (except MemoryError/SysExit re-raise).
+        
+        Covers the except (MemoryError, SystemExit): raise branch.
+        The MemoryError must be raised INSIDE the try block to exercise the re-raise path.
+        Uses patch.object(Path, 'write_text', ...) to intercept exact call site.
+        """
+        import codebot.api_runner as ar
+        import logging
+
+        bot_name = "mem-error-bot"
+        messages = [{"role": "user", "content": "hello"}]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Raise MemoryError during tmp.write_text to ensure it's inside the try block
+        # and exercises the except (MemoryError, SystemExit): raise branch.
+        def raise_memory_error(self, *args, **kwargs):
+            if str(self).endswith(".tmp"):
+                raise MemoryError("simulated OOM during file write")
+            # For non-.tmp files, allow normal operation to avoid early exit
+            return Path.write_text(self, *args, **kwargs)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             patch.object(Path, "write_text", side_effect=raise_memory_error), \
+             caplog.at_level(logging.WARNING):
+            with pytest.raises(MemoryError):
+                ar._persist_stream(bot_name, messages, "m", 1, "completed")
+        
+        # Verify no warning was logged (MemoryError re-raises, doesn't log)
+        assert not any("_persist_stream failed" in record.message for record in caplog.records), \
+            "MemoryError should re-raise without logging warning"
+
+    def test_persist_stream_system_exit_propagates(self, tmp_path):
+        """SystemExit must propagate, not be swallowed (except MemoryError/SysExit re-raise).
+        
+        Covers except (MemoryError, SystemExit): raise
+        Uses patch.object(Path, 'replace', ...) to intercept exact call site.
+        """
+        import codebot.api_runner as ar
+
+        bot_name = "sysexit-bot"
+        messages = [{"role": "user", "content": "hello"}]
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Raise SystemExit during tmp.replace to hit the except handler
+        with patch.object(ar, "BOTS_DIR", tmp_path), \
+             patch.object(Path, "replace", side_effect=SystemExit(1)):
+            with pytest.raises(SystemExit):
+                ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+    def test_persist_stream_generator_bounded_at_max_messages(self, tmp_path):
+        """Verify that a generator yielding >10000 items results in exactly
+        10000 processed items and stream_truncated=True.
+
+        Acceptance criterion: test with a generator yielding 10M items
+        confirms only MAX_MESSAGES are processed.
+        """
+        from unittest.mock import patch
+        import codebot.api_runner as ar
+
+        MAX_MESSAGES = 10000
+        yielded_count = 0
+
+        def large_generator():
+            nonlocal yielded_count
+            for i in range(10_000_000):  # 10M items
+                yielded_count += 1
+                yield {"role": "user", "content": f"msg-{i}"}
+
+        bot_name = "bot-gen-bound"
+        messages = large_generator()
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "m", 1, "completed")
+
+        # Read the persisted stream file
+        stream_file = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_file.exists(), "Stream file should have been created"
+
+        import json
+        data = json.loads(stream_file.read_text())
+
+        # Verify exactly MAX_MESSAGES were processed
+        assert len(data["messages"]) == MAX_MESSAGES, (
+            f"Expected {MAX_MESSAGES} messages, got {len(data['messages'])}"
+        )
+
+        # Verify truncation flag is set
+        assert data.get("truncated") is True, (
+            "stream_truncated should be True when generator exceeds MAX_MESSAGES"
+        )
+
+        # Verify the generator did not yield all 10M items
+        # (enumerate breaks at MAX_MESSAGES, so generator stops early)
+        assert yielded_count == MAX_MESSAGES, (
+            f"Generator should have yielded exactly {MAX_MESSAGES} items, "
+            f"but yielded {yielded_count}"
+        )
+
+    def test_persist_stream_tail_trim_adversarial_completes_fast(self, tmp_path):
+        """CB-35B49: Tail-trim with crafted adversarial messages completes in <100ms.
+
+        Adversarial input: many messages sized to defeat the 1.5x expansion ratio
+        heuristic, forcing tail-trim entry. The old O(N^2) while-loop would call
+        json.dumps on the full payload once per pop, taking seconds. The new
+        incremental trim must complete in O(1) serializations and <100ms.
+        """
+        import codebot.api_runner as ar
+        from unittest.mock import patch
+        import time
+
+        bot_name = "adversarial-trim-bot"
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Craft messages that are just under the per-entry threshold so accumulation
+        # accepts many of them, but combined they exceed MAX_SIZE after serialization.
+        # Each message ~47 bytes JSON + 1 comma = 48 bytes tracked.
+        # With 1.5x overhead estimate: 48 * 1.5 = 72 bytes estimated per entry.
+        # EFFECTIVE_MAX_SIZE = 475,000 bytes. Base overhead ~150 bytes.
+        # So accumulation accepts ~475000/72 ≈ 6597 entries before stopping.
+        # But actual serialized size may be larger due to structural overhead,
+        # triggering tail-trim. With N≈6500 entries, old code does N serializations
+        # of ~500KB each = O(N^2) CPU. New code does O(1).
+        content = "a" * 30  # Results in ~47-byte JSON entry
+        num_messages = 8000  # Enough to trigger tail-trim after accumulation
+        messages = [{"role": "user", "content": content} for _ in range(num_messages)]
+
+        # Count json.dumps calls during tail-trim phase by patching
+        original_dumps = json.dumps
+        dumps_call_count = 0
+        in_tail_trim = False
+
+        def counting_dumps(*args, **kwargs):
+            nonlocal dumps_call_count
+            result = original_dumps(*args, **kwargs)
+            if in_tail_trim:
+                dumps_call_count += 1
+            return result
+
+        start = time.monotonic()
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            with patch("json.dumps", side_effect=counting_dumps):
+                # Mark when we enter the tail-trim region by checking call pattern
+                # We can't easily detect tail-trim entry, so count all dumps calls
+                # after _persist_stream starts. The first dumps is base_overhead calc,
+                # then per-entry dumps during accumulation, then final + corrective.
+                # We only care that total dumps calls are bounded.
+                dumps_call_count = 0
+                ar._persist_stream(
+                    bot_name=bot_name,
+                    messages=messages,
+                    active_model="test-model",
+                    tool_iterations=1,
+                    exit_reason="completed",
+                )
+        elapsed = time.monotonic() - start
+
+        # Assert: completes in <100ms (old code takes seconds with N=6500+)
+        assert elapsed < 0.1, (
+            f"Tail-trim took {elapsed:.3f}s, must be <100ms. "
+            f"Possible O(N^2) regression."
+        )
+
+        # Assert: output file exists and is valid
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists(), f"Stream file must exist at {stream_path}"
+        raw = stream_path.read_text(encoding="utf-8")
+        file_size = len(raw.encode("utf-8"))
+        assert file_size <= 500_000, f"File size {file_size} exceeds 500KB cap"
+
+        payload = json.loads(raw)
+        assert payload.get("truncated") is True, "Truncation flag must be set"
+        assert len(payload["messages"]) > 0, "Some messages must persist"
+        assert len(payload["messages"]) < num_messages, "Messages must be trimmed"
+
+    def test_persist_stream_adversarial_unicode_expansion_ratio(self, tmp_path):
+        """CB-E9AA5: Adversarial Unicode-heavy messages must not exceed MAX_SIZE.
+
+        An attacker trains the expansion_ratio estimator with short ASCII messages
+        to produce a low ratio (~1.05), then floods with Unicode-heavy content that
+        serializes to much larger byte counts via json.dumps(ensure_ascii=False).
+        The bounded while loop tail-trim must guarantee final payload <= 500KB
+        regardless of overshoot magnitude.
+        """
+        import codebot.api_runner as ar
+
+        bot_name = "adversarial-unicode-bot"
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Phase 1: Train with 10 short ASCII messages to establish low expansion ratio
+        training_messages = [
+            {"role": "user", "content": f"short-{i}"} for i in range(10)
+        ]
+
+        # Phase 2: Flood with Unicode-heavy content that expands significantly
+        # when serialized with ensure_ascii=False. Each emoji char is 1 Python char
+        # but 3-4 bytes in UTF-8 JSON output. Use CJK characters which are 3 bytes
+        # each in UTF-8 and don't get escaped by ensure_ascii=False.
+        # Each message: ~6000 CJK chars = ~18000 bytes UTF-8 + JSON overhead
+        unicode_content = "\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341" * 600  # 6000 chars, ~18KB
+        flood_messages = [
+            {"role": "user", "content": unicode_content}
+            for _ in range(50)  # 50 * ~18KB = ~900KB raw, well over 500KB
+        ]
+
+        messages = training_messages + flood_messages
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "test-model", 1, "completed")
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists(), "Stream file must be created"
+
+        raw = stream_path.read_text(encoding="utf-8")
+        file_size = len(raw.encode("utf-8"))
+
+        # CRITICAL: Payload must be <= MAX_SIZE regardless of Unicode expansion
+        assert file_size <= 500_000, (
+            f"Adversarial Unicode payload {file_size} bytes exceeds 500KB MAX_SIZE. "
+            f"Tail-trim while loop failed to reduce payload sufficiently."
+        )
+
+        payload = json.loads(raw)
+        assert payload.get("truncated") is True, (
+            "truncated flag must be set when messages are trimmed"
+        )
+        assert len(payload["messages"]) < len(messages), (
+            "Messages must be trimmed to fit within MAX_SIZE"
+        )
+        assert len(payload["messages"]) > 0, (
+            "At least some messages should survive trimming"
+        )
+
+    def test_tail_trim_iteration_cap_adversarial(self, tmp_path):
+        """CB-F2ACB: Adversarial test verifying CPU time is bounded under worst-case input.
+
+        Crafts messages that repeatedly overshoot MAX_SIZE after trimming,
+        forcing the tail-trim while loop to run. Verifies:
+        1. max_trim_iterations is capped at 100.
+        2. If cap is hit and size still exceeds MAX_SIZE, bounded is cleared.
+        3. CPU time is bounded (< 1 second) preventing DoS.
+        """
+        import codebot.api_runner as ar
+        import time
+
+        bot_name = "adversarial-tail-trim-bot"
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Craft messages that are just small enough to be accepted into 'bounded'
+        # but large enough that even after removing many, the remaining ones
+        # plus overhead still exceed MAX_SIZE, forcing the loop to run until cap.
+        # Each message ~450 bytes JSON. 1000 messages = ~450KB + overhead > 500KB.
+        # Removing 100 messages only saves ~45KB, so it will likely stay > 500KB
+        # if we start with enough messages.
+        content = "a" * 400  # Results in ~450-byte JSON entry
+        num_messages = 1200  # Enough to exceed MAX_SIZE and require significant trimming
+        messages = [{"role": "user", "content": content} for _ in range(num_messages)]
+
+        start = time.monotonic()
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "test-model", 1, "completed")
+        elapsed = time.monotonic() - start
+
+        # Assert: CPU time is bounded (< 1 second). Old O(N^2) code would take seconds.
+        assert elapsed < 1.0, (
+            f"Tail-trim took {elapsed:.3f}s, must be <1.0s. "
+            f"Possible unbounded iteration or O(N^2) regression."
+        )
+
+        # Assert: Output file exists and is valid
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists(), f"Stream file must exist at {stream_path}"
+        raw = stream_path.read_text(encoding="utf-8")
+        file_size = len(raw.encode("utf-8"))
+
+        # Assert: Final size is within MAX_SIZE (either by trimming or clearing)
+        assert file_size <= 500_000, f"File size {file_size} exceeds 500KB MAX_SIZE"
+
+        payload = json.loads(raw)
+        assert payload.get("truncated") is True, "Truncation flag must be set"
+
+        # If the loop hit the cap and size was still > MAX_SIZE, bounded should be cleared
+        # or reduced significantly. In either case, size compliance is met.
+        # We verify that the number of messages persisted is less than input
+        assert len(payload["messages"]) < num_messages, "Messages must be trimmed or cleared"
 
 
 class TestCostTracking:

@@ -222,6 +222,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     }),
     TicketState.DECOMP: frozenset({
         TicketState.PLANNING,
+        TicketState.BLOCKED,
         TicketState.RESOLVED,
         TicketState.SUPERSEDED,
         TicketState.CANCELLED,
@@ -269,6 +270,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.CANCELLED,
         TicketState.DECOMP,
         TicketState.IMPLEMENT,
+        TicketState.BLOCKED,
     }),
     TicketState.COMPLETE: frozenset(),
     TicketState.REJECTED: frozenset(),
@@ -463,6 +465,8 @@ def create_ticket(
         raise ValueError("at least one acceptance criterion is required")
     if not problem_statement or not problem_statement.strip():
         raise ValueError("problem_statement is required")
+    if not evidence or not str(evidence).strip():
+        raise ValueError("evidence is required (file:line reference or code snippet proving the issue)")
 
     now = time.time()
     return Ticket(
@@ -1052,7 +1056,8 @@ class TicketStore:
         Periodically queues a backup-prune task to clean up old backups
         (pruning remains async as it does not affect data integrity).
 
-        Raises OSError if backup fails, allowing caller to handle gracefully.
+        Logs OSError if backup fails rather than swallowing it silently.
+        Caller handles the exception appropriately.
         """
         backup_dir = self._path.parent / "ticket_backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1118,6 +1123,16 @@ class TicketStore:
             return False
         latest = backups[-1]
         try:
+            # Check file size before reading to prevent OOM from oversized or corrupted backups
+            file_size = latest.stat().st_size
+            if file_size > self.MAX_TICKETS_FILE_SIZE:
+                logger.warning(
+                    "backup file %s is oversized (%.1f MB > %d MB limit); skipping to prevent memory exhaustion",
+                    latest.name,
+                    file_size / (1024 * 1024),
+                    self.MAX_TICKETS_FILE_SIZE // (1024 * 1024),
+                )
+                return False
             data = json.loads(latest.read_text(encoding="utf-8"))
             if "tickets" not in data:
                 return False
@@ -1296,21 +1311,6 @@ class TicketStore:
                     flock(lock_fd, LOCK_EX)
                     try:
                         if needs_compaction:
-                            # CRITICAL: Backup is performed INSIDE the lock context.
-                            # If _backup() raises an exception, the lock is still held
-                            # and the exception propagates, but the retry loop catches
-                            # OSError and retries WITH THE LOCK STILL HELD during the
-                            # next iteration. This prevents the race condition where
-                            # backup failure could cause lock release before write
-                            # completes (CB-1835532-11DC).
-                            try:
-                                self._backup()
-                                self.prune_stale_sibling_backups()
-                            except OSError as exc:
-                                logger.warning("backup failed, proceeding with atomic write: %s", exc)
-                                # Continue with atomic write even if backup fails.
-                                # The lock is still held, ensuring no other process
-                                # can interfere during the write operation.
                             # Hold RLock during replay + payload build to ensure
                             # a consistent snapshot. New mutations arriving after
                             # release will go to WAL and survive crash.
@@ -1334,7 +1334,16 @@ class TicketStore:
                                 # fsync MUST propagate: silent failure violates
                                 # crash durability guarantee during compaction.
                                 os.fsync(tf.fileno())
-                            tmp.replace(self._path)
+                            # Verify atomic replace succeeded by checking file exists and is valid JSON
+                            try:
+                                tmp.replace(self._path)
+                                # Post-replace verification: ensure the file is readable
+                                # This catches rare cases where replace succeeds but file is corrupted
+                                with open(self._path, "r", encoding="utf-8") as verify_fd:
+                                    json.load(verify_fd)  # Raises on corrupt JSON
+                            except (OSError, json.JSONDecodeError) as exc:
+                                logger.error("atomic replace or verification failed: %s", exc)
+                                raise RuntimeError(f"atomic replace failed: {exc}") from exc
                             # fsync the directory so the rename itself is
                             # durable before _save() returns to the caller.
                             # Directory fsync failures MUST propagate: silent failure
@@ -1358,6 +1367,20 @@ class TicketStore:
                                         pass
                                 # Discard flushed IDs from _pending_flush.
                                 self._pending_flush -= pending_ids_snapshot
+                            # CRITICAL: Backup is performed AFTER the atomic write completes
+                            # and the lock is still held. This ensures that backup failure
+                            # cannot cause lock release before the write completes,
+                            # preventing the race condition where backup failure could
+                            # allow another process to acquire the lock during exception
+                            # handling (CB-5492279F973917EF8DDD9F1F9EA1B071).
+                            try:
+                                self._backup()
+                                self.prune_stale_sibling_backups()
+                            except OSError as exc:
+                                logger.warning("backup failed after compaction: %s", exc)
+                                # Continue even if backup fails.
+                                # Backup is best-effort; durability is guaranteed by WAL.
+                                # The atomic write already completed successfully.
                         else:
                             # Append-only WAL write: O(K) serialization.
                             # fsync ensures durability before return so a crash
@@ -1376,18 +1399,26 @@ class TicketStore:
                             # _dirty_ids will be flushed in the next cycle.
                             with self._lock:
                                 self._pending_flush -= pending_ids_snapshot
+                        return
+                    except OSError as e:
+                        # Write failed: merge pending_ids_snapshot back into _dirty_ids so
+                        # the mutations are not lost and will be retried.
+                        with self._lock:
+                            self._dirty_ids |= pending_ids_snapshot
+                            self._pending_flush -= pending_ids_snapshot
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt)
+                            time.sleep(delay)
+                        else:
+                            raise RuntimeError(
+                                f"TicketStore._save failed after {max_retries} lock retries: {e}. "
+                                f"Data may be at risk if concurrent writes occurred."
+                            ) from e
                     finally:
                         flock(lock_fd, LOCK_UN)
-                return
             except OSError as e:
-                # Write failed: merge pending_ids_snapshot back into _dirty_ids so
-                # the mutations are not lost and will be retried.
-                with self._lock:
-                    self._dirty_ids |= pending_ids_snapshot
-                    self._pending_flush -= pending_ids_snapshot
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    time.sleep(delay)
+                    time.sleep(base_delay * (2 ** attempt))
                 else:
                     raise RuntimeError(
                         f"TicketStore._save failed after {max_retries} lock retries: {e}. "
@@ -1909,26 +1940,24 @@ class TicketStore:
                 self._dirty_ids = dirty_ids_snapshot
                 raise
 
-            # Atomic persistence: call _save() synchronously while holding the
-            # lock to ensure all batch mutations are persisted before any other
-            # thread can observe or modify the store. This prevents the window
-            # where concurrent mutations could interleave and cause atomicity
-            # violations (CB-DBC95833172C93A7A81781B7BDF3DD70).
+            # Atomic persistence: Write WAL synchronously under the lock to ensure
+            # all batch mutations are durable before any other thread can observe
+            # or modify the store. This prevents the window where concurrent
+            # mutations could interleave and cause atomicity violations.
             # CRITICAL: Only WAL-write IDs modified in THIS batch to preserve
             # atomicity and prevent cross-transaction state leakage on crash.
+            # NOTE: We do NOT call _save() (compaction) here to avoid holding the
+            # lock during expensive I/O (Feedback #6/#9/#12). Durability is guaranteed
+            # by the WAL append; compaction is deferred to the background worker.
             batch_specific_ids = {t.id for t in results}
             try:
                 self._append_wal_locked(batch_specific_ids)
             except Exception as exc:
                 logger.error("WAL append failed in batch_transition(): %s", exc)
                 raise
-            # Synchronously persist to ensure durability before lock release.
-            # _save() is reentrant-safe because self._lock is an RLock.
-            try:
-                self._save()
-            except Exception as exc:
-                logger.error("Save failed in batch_transition(): %s", exc)
-                raise
+            # Defer compaction to background worker to release lock quickly.
+            # The WAL entries above ensure crash safety.
+            self._queue_save()
 
         for event in pending_events:
             self._emit_lifecycle_event(event)

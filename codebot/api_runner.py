@@ -29,6 +29,7 @@ Security
 """
 
 import concurrent.futures
+import itertools
 import json
 import logging
 import os
@@ -189,18 +190,12 @@ def _is_implementation_bot(bot_name: str) -> bool:
 
 
 def _wait_for_rate_limit(model: str) -> float:
-    """Wait according to adaptive rate limiter, return actual delay."""
     if not _HAS_RATE_LIMITER or not _rate_limiter:
         return 0.0
-    can_spawn, reason = _rate_limiter.can_spawn_now(model)
-    if can_spawn:
+    try:
+        return _rate_limiter.acquire_slot(model)
+    except Exception:
         return 0.0
-    state = _rate_limiter._get_state(model)
-    delay = state.effective_interval - (time.time() - state.last_request)
-    if delay > 0:
-        time.sleep(delay)
-        return delay
-    return 0.0
 
 
 def _record_rate_limit(model: str, retry_after: float | None = None) -> None:
@@ -913,7 +908,15 @@ PLANNING_ROLE_TIMEOUT = 90
 _PLANNING_BASES = frozenset({"decomposer", "planner"})
 
 
-def _timeout_for_bot(bot_name: str) -> int:
+def _timeout_for_bot(bot_name: str, model: str = "") -> int:
+    if model:
+        try:
+            from codebot.model_manager import model_profile
+            prof = model_profile(model)
+            if prof:
+                return int(API_TIMEOUT * prof.heartbeat_multiplier)
+        except Exception:
+            pass
     return API_TIMEOUT
 
 
@@ -1269,7 +1272,7 @@ def _create_ticket_tool(
             ticket_class=tc,
             severity=sv,
             source=source,
-            evidence=evidence or title,
+            evidence=(evidence.strip() if isinstance(evidence, str) else "") or f"[no-evidence-fallback] {title}" if not (isinstance(evidence, str) and evidence.strip()) else evidence,
             problem_statement=problem_statement,
             desired_state=desired_state,
             acceptance_criteria=ac_list,
@@ -1459,7 +1462,13 @@ def _write_checkpoint(ckpt_file, bot_name, reason):
 def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reason, usage=None):
     try:
         MAX_SIZE = 500_000
+        # Safety margin: use 95% of MAX_SIZE during accumulation to account for
+        # JSON structural overhead that per-entry tracking may underestimate.
+        # This prevents adversarial expansion ratio manipulation (feedback #32/#36).
+        EFFECTIVE_MAX_SIZE = int(MAX_SIZE * 0.95)  # 475,000 bytes
+        MAX_MESSAGES = 10000
         bounded = []
+        entry_sizes = []
         truncated_count = 0
         skipped_count = 0
         stream_truncated = False
@@ -1477,11 +1486,77 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
             "messages": [],
         }
         # Estimate overhead: length of JSON structure without messages array content
-        # We add 2 for the '[]' brackets of the messages array which will be filled
         base_overhead = len(json.dumps(base_payload, ensure_ascii=False))
         cumulative_size = base_overhead
 
-        for m in messages:
+        # Bound iteration at source using itertools.islice - prevents generator exhaustion
+        # before MAX_MESSAGES check. Generator is never advanced beyond MAX_MESSAGES items.
+        
+        # Wrap messages in an iterator so we can peek for truncation after islice
+        msg_iter = iter(messages)
+        bounded_iter = itertools.islice(msg_iter, MAX_MESSAGES)
+        
+        for m in bounded_iter:
+            # CB-9C1D0: Bounded memory accumulation. Avoid creating dict copies
+            # for messages that will be rejected due to size. First, perform a
+            # lightweight pre-check on content length to skip obviously oversized
+            # messages without allocating a new dict.
+            content_val = None
+            try:
+                content_val = m.get("content") if hasattr(m, "get") else None
+            except (AttributeError, TypeError):
+                pass
+            
+            if isinstance(content_val, str):
+                # Fast-path: len > MAX_SIZE => bytes > MAX_SIZE even at 1 byte/char,
+                # so reject without encoding or copying.
+                if len(content_val) > MAX_SIZE:
+                    skipped_count += 1
+                    stream_truncated = True
+                    logger.warning(
+                        "%s: _persist_stream skipped oversized message (%d chars > %d threshold)",
+                        bot_name, len(content_val), MAX_SIZE,
+                    )
+                    continue
+                # Ambiguous UTF-8 zone: only encode if length is in [MAX_SIZE//4, MAX_SIZE]
+                if len(content_val) > MAX_SIZE // 4:
+                    byte_len = len(content_val.encode("utf-8"))
+                    if byte_len > MAX_SIZE:
+                        skipped_count += 1
+                        stream_truncated = True
+                        logger.warning(
+                            "%s: _persist_stream skipped oversized message (%d bytes > %d threshold)",
+                            bot_name, byte_len, MAX_SIZE,
+                        )
+                        continue
+            
+            # Serialize FIRST to determine exact size before committing to dict copy.
+            # This avoids allocating dict objects for messages that would exceed the
+            # cumulative size cap. We serialize the original message directly.
+            try:
+                entry_json = json.dumps(m, ensure_ascii=False)
+                entry_size = len(entry_json.encode("utf-8")) + 1  # +1 for comma separator
+            except (TypeError, ValueError) as exc:
+                skipped_count += 1
+                stream_truncated = True
+                logger.warning(
+                    "%s: _persist_stream skipped non-serializable message: %s",
+                    bot_name, exc,
+                )
+                continue
+
+            # Check cumulative size BEFORE creating dict copy. If this message
+            # would exceed the effective cap, stop accumulation entirely.
+            # Use exact size (no expansion ratio) to avoid premature termination
+            # with many small messages; final size check + tail-trim handles overhead.
+            if cumulative_size + entry_size > EFFECTIVE_MAX_SIZE:
+                stream_truncated = True
+                break
+
+            # Now that we know the message fits, create the dict copy for
+            # potential tool truncation and storage. Store the serialized JSON
+            # string instead of the dict to reduce memory overhead (avoids
+            # keeping both Python dict objects and their serialized forms).
             try:
                 entry = dict(m)
             except (TypeError, ValueError) as exc:
@@ -1493,31 +1568,37 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
                 )
                 continue
 
-            # Apply tool message truncation if necessary
+            # Apply tool message truncation if necessary. If truncated, we must
+            # re-serialize to get the correct size and stored representation.
             if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
                 orig_len = len(entry["content"])
                 if orig_len > 2000:
                     entry["content"] = entry["content"][:2000] + "...[truncated]"
                     truncated_count += 1
+                    stream_truncated = True
+                    # Re-serialize after truncation to get accurate size and stored JSON
+                    try:
+                        entry_json = json.dumps(entry, ensure_ascii=False)
+                        entry_size = len(entry_json.encode("utf-8")) + 1
+                    except (TypeError, ValueError):
+                        # Should not happen since we serialized successfully above,
+                        # but fail-safe: skip this entry if re-serialization fails
+                        skipped_count += 1
+                        continue
 
-            try:
-                entry_size = len(json.dumps(entry, ensure_ascii=False)) + 1
-            except (TypeError, ValueError) as exc:
-                skipped_count += 1
-                stream_truncated = True
-                logger.warning(
-                    "%s: _persist_stream skipped non-serializable message: %s",
-                    bot_name, exc,
-                )
-                continue
-
-            # Check if adding this entry would exceed the limit
-            if cumulative_size + entry_size > MAX_SIZE:
-                stream_truncated = True
-                break
-
-            bounded.append(entry)
+            # Store serialized JSON string instead of dict to bound memory usage.
+            # This avoids keeping Python dict objects in the bounded list.
+            bounded.append(entry_json)
+            entry_sizes.append(entry_size)
             cumulative_size += entry_size
+
+        # Detect if there were more messages than MAX_MESSAGES by peeking at the iterator
+        # This handles the case where islice stopped at MAX_MESSAGES but more items exist
+        try:
+            next(msg_iter)
+            stream_truncated = True
+        except StopIteration:
+            pass
 
         payload = {
             "bot": bot_name,
@@ -1533,34 +1614,59 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
             payload["truncated"] = True
 
         body = json.dumps(payload, ensure_ascii=False)
-        final_size = len(body)
-        # Guard against estimate drift (timestamp repr growth, comma
-        # counting): enforce the cap on the serialized body itself while
-        # staying streaming — only trim from the already-bounded tail.
-        # bounded holds O(500KB), so this loop is O(500KB), not O(input).
-        while final_size > MAX_SIZE and bounded:
-            bounded.pop()
+        # Use byte length for accurate size bound since file is written as UTF-8.
+        # len(body) counts chars, but multi-byte Unicode can make bytes > chars,
+        # violating the 500KB disk cap even when char count is within bounds.
+        final_size = len(body.encode("utf-8"))
+        # Optimized tail-trim: use tracked entry_sizes to estimate how many
+        # messages to remove, then verify with a single re-serialization.
+        # entry_sizes tracks JSON char length, but final_size is UTF-8 bytes.
+        # For Unicode-heavy content, bytes can be up to 4x chars, so we apply
+        # a conservative 4x multiplier to entry_sizes when estimating reduction.
+        # This prevents over-removal while still achieving O(1) serializations.
+        max_trim_iterations = min(len(bounded), 100)
+        trim_iterations = 0
+        while final_size > MAX_SIZE and bounded and trim_iterations < max_trim_iterations:
+            # Estimate how many entries to remove based on tracked sizes.
+            # Apply 4x multiplier to account for worst-case UTF-8 expansion.
+            overshoot = final_size - MAX_SIZE
+            estimated_reduction = 0
+            entries_to_remove = 0
+            # Walk backwards through entry_sizes to find how many to pop
+            for i in range(len(entry_sizes) - 1, -1, -1):
+                # Conservative estimate: each char could be up to 4 UTF-8 bytes
+                estimated_reduction += entry_sizes[i] * 4
+                entries_to_remove += 1
+                if estimated_reduction >= overshoot:
+                    break
+            # Ensure we remove at least one entry if overshoot exists
+            if entries_to_remove == 0 and bounded:
+                entries_to_remove = 1
+            # Pop the estimated number of entries
+            for _ in range(entries_to_remove):
+                if bounded:
+                    bounded.pop()
+                if entry_sizes:
+                    entry_sizes.pop()
+            trim_iterations += entries_to_remove
             stream_truncated = True
-            payload = {
-                "bot": bot_name,
-                "model": active_model,
-                "tool_iterations": tool_iterations,
-                "exit_reason": exit_reason,
-                "persisted_at": persisted_at,
-                "usage": usage_dict,
-                "messages": bounded,
-                "truncated": True,
-            }
+            payload["messages"] = bounded
+            payload["truncated"] = True
             body = json.dumps(payload, ensure_ascii=False)
-            final_size = len(body)
-        # Note: truncated flag is already included in body from either:
-        # 1. Pre-serialization addition (line ~1531) when stream_truncated was set
-        #    during accumulation/skip or tool-content truncation
-        # 2. While-loop rebuild which includes truncated:True in payload
-        # No additional re-serialization needed here.
-        
+            final_size = len(body.encode("utf-8"))
+
+        # Safety cap: if trim iterations exhausted and size still exceeds MAX_SIZE,
+        # clear bounded to guarantee compliance and prevent CPU DoS.
+        if final_size > MAX_SIZE and bounded:
+            bounded.clear()
+            entry_sizes.clear()
+            payload["messages"] = []
+            payload["truncated"] = True
+            stream_truncated = True
+            body = json.dumps(payload, ensure_ascii=False)
+            final_size = len(body.encode("utf-8"))
+
         # For logging, we use cumulative_size as an approximation of input size processed
-        # original_total_size is no longer calculated to avoid O(N) pre-computation
         input_size_for_log = cumulative_size
         truncation_ratio = final_size / max(1, input_size_for_log) if input_size_for_log > 0 else 1.0
         
@@ -1598,19 +1704,107 @@ def _contract(heartbeat_file, ckpt_file):
     )
 
 
+_THINKING_MODEL_KEYWORDS = frozenset({"thinking"})
+_STREAM_CHUNK_IDLE_TIMEOUT = 60
+
+
+def _is_thinking_model(model: str) -> bool:
+    m = model.lower()
+    return any(kw in m for kw in _THINKING_MODEL_KEYWORDS)
+
+
+def _call_api_stream(messages, model, api_key, schemas, timeout):
+    body = {
+        "model": model,
+        "messages": messages,
+        "tools": schemas,
+        "max_tokens": 8000,
+        "stream": True,
+    }
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        API_URL,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    content_parts: list[str] = []
+    tool_calls_map: dict[int, dict] = {}
+    finish_reason = "stop"
+    buffer = ""
+    last_chunk_at = time.monotonic()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        while True:
+            try:
+                piece = resp.read(4096)
+            except Exception:
+                if time.monotonic() - last_chunk_at > _STREAM_CHUNK_IDLE_TIMEOUT:
+                    raise urllib.error.URLError("stream idle timeout exceeded")
+                raise
+            if not piece:
+                break
+            last_chunk_at = time.monotonic()
+            buffer += piece.decode("utf-8", errors="replace")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta", {})
+                fr = choice.get("finish_reason")
+                if fr:
+                    finish_reason = fr
+                content = delta.get("content")
+                if content:
+                    content_parts.append(content)
+                tc_list = delta.get("tool_calls") or []
+                for tc in tc_list:
+                    idx = tc.get("index", 0)
+                    if idx not in tool_calls_map:
+                        tool_calls_map[idx] = {"id": tc.get("id", ""), "type": "function", "function": {"name": "", "arguments": ""}}
+                    entry = tool_calls_map[idx]
+                    if tc.get("id"):
+                        entry["id"] = tc["id"]
+                    fn = tc.get("function", {})
+                    if fn.get("name"):
+                        entry["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        entry["function"]["arguments"] += fn["arguments"]
+    result: dict[str, Any] = {"choices": [{"message": {"role": "assistant", "content": "".join(content_parts)}, "finish_reason": finish_reason}]}
+    if tool_calls_map:
+        ordered = [tool_calls_map[i] for i in sorted(tool_calls_map)]
+        result["choices"][0]["message"]["tool_calls"] = ordered
+    return result
+
+
 def _call_api(messages, model, api_key, timeout=None, bot_name=None):
-    """Chunked POST read to dialagram; raises on HTTP/timeout for caller retry."""
     if timeout is None:
         timeout = API_TIMEOUT
     schemas = TOOL_SCHEMAS
     if bot_name:
         base = bot_name.split("-")[0] if "-" in bot_name else bot_name
         no_bash_roles = frozenset({"decomposer", "planner",
-            "correctness_reviewer", "security_reviewer", "architecture_reviewer",
-            "test_reviewer", "performance_reviewer", "simplicity_reviewer",
-            "documentation_reviewer", "ux_reviewer"})
+            "reviewer", "security_reviewer", "architecture_reviewer",
+            "performance_reviewer", "concurrency_reviewer",
+            "data_integrity_reviewer", "ux_reviewer"})
         if base in no_bash_roles:
             schemas = [s for s in TOOL_SCHEMAS if s.get("function", {}).get("name") != "bash"]
+    if _is_thinking_model(model):
+        return _call_api_stream(messages, model, api_key, schemas, timeout)
     body = {
         "model": model,
         "messages": messages,
@@ -1632,8 +1826,19 @@ def _call_api(messages, model, api_key, timeout=None, bot_name=None):
         chunks: list[bytes] = []
         remaining = 2_000_000
         while remaining > 0:
-            if time.monotonic() > deadline:
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
                 raise urllib.error.URLError("API read deadline exceeded")
+            # Set socket timeout to remaining time to prevent slow-trickle attacks.
+            # A malicious server could send 1 byte every few seconds, keeping the
+            # connection alive indefinitely. By updating the socket timeout before
+            # each read, we ensure the total elapsed time never exceeds the deadline.
+            try:
+                sock = resp.fp._sock if hasattr(resp.fp, '_sock') else None
+                if sock is not None:
+                    sock.settimeout(remaining_time)
+            except Exception:
+                pass  # Fail-open: if we can't set timeout, proceed with read
             piece = resp.read(min(65536, remaining))
             if not piece:
                 break
@@ -2733,7 +2938,8 @@ def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_ite
                     _write_bot_status(bot_name, state_dir, f"tool:{name}", f"executing {name} on {touched or 'N/A'}", files_touched, iterations + 1)
                 except Exception:
                     pass
-            iterations += 1
+            _has_mutating = any(pc["name"] not in _READ_ONLY_TOOLS for pc in parsed_calls)
+            iterations += 1.0 if _has_mutating else 0.25
             continue_nudges = 0
             continue
         if has_content:
@@ -2798,7 +3004,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
     if not api_key:
         _log(f"{bot_name}: FATAL — no API key found (env DIALAGRAM_API_KEY or opencode.jsonc)")
         sys.exit(1)
-    _log(f'{bot_name}: API key resolved (present)')
+    _log(f'{bot_name}: API key resolved (present={bool(api_key)})')
 
     active_model = model
     used_fallback = False
@@ -2883,7 +3089,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
                 try:
                     _wait_for_rate_limit(active_model)
                     _record_request(active_model)
-                    result = _call_api(msgs, active_model, api_key, timeout=_timeout_for_bot(bot_name), bot_name=bot_name)
+                    result = _call_api(msgs, active_model, api_key, timeout=_timeout_for_bot(bot_name, active_model), bot_name=bot_name)
                     _record_success(active_model)
                     return result
                 except urllib.error.HTTPError as exc:

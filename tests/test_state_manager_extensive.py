@@ -492,7 +492,7 @@ def test_check_self_restart_returns_false_when_no_file_Given_no_restart_file_Whe
     mock_supervisor = MagicMock()
     result = check_self_restart({}, lambda b, r: None, supervisor=mock_supervisor)
     assert result is False
-    mock_supervisor.restart_self.assert_not_called()
+    mock_supervisor.restart.assert_not_called()
 
 
 def test_check_self_restart_stops_running_bots_and_restarts_Given_restart_file_and_running_bot_When_check_Then_stops_and_restarts(
@@ -500,7 +500,7 @@ def test_check_self_restart_stops_running_bots_and_restarts_Given_restart_file_a
 ) -> None:
     """Given a restart file and a running bot
     When check_self_restart() is called
-    Then it stops running bots, removes the file, and calls supervisor.restart_self()."""
+    Then it stops running bots, removes the file, and calls supervisor.restart()."""
     cfg = _isolated_config(tmp_path)
     cfg.restart_file.write_text("upgrade")
 
@@ -529,7 +529,7 @@ def test_check_self_restart_stops_running_bots_and_restarts_Given_restart_file_a
     assert stop_calls[0][0] is bot_running
     assert stop_calls[0][1] == "self-restart"
     assert not cfg.restart_file.exists()
-    mock_supervisor.restart_self.assert_called_once()
+    mock_supervisor.restart.assert_called_once()
 
 
 def test_check_self_restart_handles_oses_on_read_Given_restart_file_When_read_raises_Then_uses_manual(tmp_path: Path) -> None:
@@ -548,7 +548,7 @@ def test_check_self_restart_handles_oses_on_read_Given_restart_file_When_read_ra
         result = check_self_restart({"b": bot}, lambda b, r: None, supervisor=mock_supervisor)
 
     assert result is True
-    mock_supervisor.restart_self.assert_called_once()
+    mock_supervisor.restart.assert_called_once()
 
 
 def test_check_self_restart_removes_file_after_Given_restart_file_When_check_Then_file_gone(tmp_path: Path) -> None:
@@ -567,7 +567,7 @@ def test_check_self_restart_removes_file_after_Given_restart_file_When_check_The
 def test_check_self_restart_handles_unlink_oses_Given_restart_file_When_unlink_raises_Then_still_restarts(tmp_path: Path) -> None:
     """Given a restart file whose unlink raises OSError
     When check_self_restart() is called
-    Then it still calls supervisor.restart_self() despite unlink failure."""
+    Then it still calls supervisor.restart() despite unlink failure."""
     cfg = _isolated_config(tmp_path)
     cfg.restart_file.write_text("reason")
 
@@ -577,23 +577,23 @@ def test_check_self_restart_handles_unlink_oses_Given_restart_file_When_unlink_r
         result = check_self_restart({}, lambda b, r: None, supervisor=mock_supervisor)
 
     assert result is True
-    mock_supervisor.restart_self.assert_called_once()
+    mock_supervisor.restart.assert_called_once()
 
 
 def test_check_self_restart_uses_default_supervisor_when_none_Given_no_supervisor_When_check_Then_default_used(tmp_path: Path) -> None:
     """Given no explicit supervisor
     When check_self_restart() is called with a restart file
-    Then it instantiates DefaultProcessSupervisor."""
+    Then it instantiates UnixProcessSupervisor."""
     cfg = _isolated_config(tmp_path)
     cfg.restart_file.write_text("auto")
 
-    with patch("codebot.process_supervisor.DefaultProcessSupervisor") as mock_cls:
+    with patch("codebot.process_supervisor.UnixProcessSupervisor") as mock_cls:
         mock_instance = MagicMock()
         mock_cls.return_value = mock_instance
         result = check_self_restart({}, lambda b, r: None)
 
     assert result is True
-    mock_instance.restart_self.assert_called_once()
+    mock_instance.restart.assert_called_once()
 
 
 def test_check_self_restart_does_not_stop_non_running_Given_mixed_bots_When_check_Then_only_running_stopped(tmp_path: Path) -> None:

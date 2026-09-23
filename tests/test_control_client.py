@@ -180,6 +180,67 @@ class TestReqFunction(unittest.TestCase):
         self.assertEqual(status, 204)
         self.assertEqual(body, {})
 
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_http_error_with_raw_body(self, mock_urlopen):
+        """Test req() handles HTTPError with non-JSON raw body gracefully."""
+        from urllib.error import HTTPError
+        mock_fp = MagicMock()
+        mock_fp.read.return_value = b'Internal Server Error - plain text'
+        http_error = HTTPError(
+            url="http://127.0.0.1:8081/error",
+            code=500,
+            msg="Internal Server Error",
+            hdrs={},
+            fp=mock_fp
+        )
+        mock_urlopen.side_effect = http_error
+
+        status, body = control_client.req("GET", "/error")
+
+        self.assertEqual(status, 500)
+        self.assertIsInstance(body, dict)
+        self.assertIn("error", body)
+        self.assertIn("Internal Server Error", body["error"])
+        self.assertEqual(body.get("code"), 500)
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_connection_exception_returns_fail_open(self, mock_urlopen):
+        """Test req() returns (0, error_dict) on connection exceptions like URLError."""
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+
+        status, body = control_client.req("GET", "/bots")
+
+        self.assertEqual(status, 0)
+        self.assertIsInstance(body, dict)
+        self.assertIn("error", body)
+        self.assertIn("Connection refused", body["error"])
+
+    @patch('codebot.control_client.urllib.request.urlopen')
+    def test_req_url_trailing_slash_normalization(self, mock_urlopen):
+        """Test req() normalizes URL by stripping trailing slash from CONTROL_URL."""
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081/"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+        importlib.reload(control_client)
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"status": "ok"}'
+        mock_response.status = 200
+        mock_response.__enter__ = lambda self: self
+        mock_response.__exit__ = lambda self, *args: None
+        mock_urlopen.return_value = mock_response
+
+        status, body = control_client.req("GET", "/health")
+
+        call_args = mock_urlopen.call_args
+        request_obj = call_args[0][0]
+        # URL should not have double slashes
+        self.assertEqual(request_obj.full_url, "http://127.0.0.1:8081/health")
+
+        # Restore
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        importlib.reload(control_client)
+
 
 class TestCmdStatus(unittest.TestCase):
     """Test cmd_status() output parsing."""
@@ -692,6 +753,525 @@ class TestTimeoutFlag(unittest.TestCase):
         sys.argv = ['control_client.py', '--timeout', 'abc', 'status']
         with self.assertRaises(SystemExit) as cm:
             control_client.main()
+        self.assertEqual(cm.exception.code, 1)
+
+
+class TestPrintResult(unittest.TestCase):
+    """Test _print_result helper function."""
+
+    def setUp(self):
+        self.held_output = StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.held_output
+
+    def tearDown(self):
+        sys.stdout = self.original_stdout
+
+    def test_print_result_dict_with_undo(self):
+        """Test _print_result displays undo info when present."""
+        response = {"status": "ok", "undo": "Run clear-drain to resume"}
+        control_client._print_result(response)
+        output = self.held_output.getvalue()
+        self.assertIn("status", output)
+        self.assertIn("Recovery", output)
+        self.assertIn("clear-drain", output)
+
+    def test_print_result_dict_with_dry_run_preview(self):
+        """Test _print_result displays preview and undo for dry-run."""
+        response = {
+            "dry_run": True,
+            "preview": {
+                "description": "Would restart bug_hunter",
+                "undo": "No action taken"
+            }
+        }
+        control_client._print_result(response)
+        output = self.held_output.getvalue()
+        self.assertIn("Preview", output)
+        self.assertIn("Would restart", output)
+        self.assertIn("Recovery", output)
+
+    def test_print_result_string(self):
+        """Test _print_result handles string responses."""
+        control_client._print_result("Plain text response")
+        output = self.held_output.getvalue()
+        self.assertEqual(output.strip(), "Plain text response")
+
+    def test_print_result_dict_no_extra_info(self):
+        """Test _print_result handles dict without undo or preview."""
+        response = {"status": "ok"}
+        control_client._print_result(response)
+        output = self.held_output.getvalue()
+        self.assertIn("status", output)
+        self.assertNotIn("Recovery", output)
+        self.assertNotIn("Preview", output)
+
+
+class TestIsLoopbackHost(unittest.TestCase):
+    """Test _is_loopback_host helper function."""
+
+    def test_loopback_localhost(self):
+        self.assertTrue(control_client._is_loopback_host("localhost"))
+
+    def test_loopback_ipv4(self):
+        self.assertTrue(control_client._is_loopback_host("127.0.0.1"))
+
+    def test_loopback_ipv6(self):
+        self.assertTrue(control_client._is_loopback_host("[::1]"))
+        self.assertTrue(control_client._is_loopback_host("::1"))
+
+    def test_non_loopback(self):
+        self.assertFalse(control_client._is_loopback_host("192.168.1.1"))
+        self.assertFalse(control_client._is_loopback_host("example.com"))
+
+    def test_none_hostname(self):
+        self.assertFalse(control_client._is_loopback_host(None))
+
+    def test_case_insensitive(self):
+        self.assertTrue(control_client._is_loopback_host("LOCALHOST"))
+        self.assertTrue(control_client._is_loopback_host("LocalHost"))
+
+
+class TestCmdStatusCoverage(unittest.TestCase):
+    """Additional tests for cmd_status to improve coverage."""
+
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+        importlib.reload(control_client)
+        self.held_output = StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.held_output
+
+    def tearDown(self):
+        sys.stdout = self.original_stdout
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
+
+    @patch('codebot.control_client.req')
+    def test_cmd_status_with_missing_optional_fields(self, mock_req):
+        """Test cmd_status handles bots with missing optional fields."""
+        mock_req.return_value = (200, [
+            {"name": "minimal_bot"}  # Missing running, heartbeat_age_seconds, etc.
+        ])
+
+        control_client.cmd_status()
+        output = self.held_output.getvalue()
+        self.assertIn("minimal_bot", output)
+
+
+class TestCmdSchedulerStatusCoverage(unittest.TestCase):
+    """Additional tests for cmd_scheduler_status to improve coverage."""
+
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+        importlib.reload(control_client)
+        self.held_output = StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.held_output
+
+    def tearDown(self):
+        sys.stdout = self.original_stdout
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
+
+    @patch('codebot.control_client.req')
+    def test_cmd_scheduler_status_error_exit(self, mock_req):
+        """Test cmd_scheduler_status exits on non-200 response."""
+        mock_req.return_value = (500, {"error": "Server error"})
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.cmd_scheduler_status()
+
+        self.assertEqual(cm.exception.code, 1)
+        output = self.held_output.getvalue()
+        self.assertIn("error", output.lower())
+
+    @patch('codebot.control_client.req')
+    def test_cmd_scheduler_status_with_missing_fields(self, mock_req):
+        """Test cmd_scheduler_status handles payload with missing optional fields."""
+        mock_req.return_value = (200, {"version": "1.0"})  # Minimal payload
+
+        control_client.cmd_scheduler_status()
+        output = self.held_output.getvalue()
+        result = json.loads(output)
+
+        self.assertEqual(result["version"], "1.0")
+        # All bounded fields should exist even if source was missing
+        self.assertIn("budget_state", result)
+        self.assertIn("dead_letter_ids", result)
+        self.assertEqual(result["dead_letter_ids"], [])
+
+    @patch('codebot.control_client.req')
+    def test_cmd_scheduler_status_disabled_details_not_list(self, mock_req):
+        """Test cmd_scheduler_status handles disabled_details that is not a list."""
+        mock_req.return_value = (200, {"disabled_details": "not-a-list"})
+
+        control_client.cmd_scheduler_status()
+        output = self.held_output.getvalue()
+        result = json.loads(output)
+
+        self.assertEqual(result["disabled_details"], [])
+
+
+class TestMainCLICoverage(unittest.TestCase):
+    """Additional tests for main() CLI to improve coverage."""
+
+    def setUp(self):
+        self.original_url = os.environ.get("CONTROL_URL")
+        self.original_token = os.environ.get("CONTROL_TOKEN")
+        self.original_argv = sys.argv
+        os.environ["CONTROL_URL"] = "http://127.0.0.1:8081"
+        os.environ["CONTROL_TOKEN"] = "test-token"
+        importlib.reload(control_client)
+        self.held_output = StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.held_output
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        sys.stdout = self.original_stdout
+        if self.original_url is None:
+            os.environ.pop("CONTROL_URL", None)
+        else:
+            os.environ["CONTROL_URL"] = self.original_url
+        if self.original_token is None:
+            os.environ.pop("CONTROL_TOKEN", None)
+        else:
+            os.environ["CONTROL_TOKEN"] = self.original_token
+        importlib.reload(control_client)
+
+    @patch('codebot.control_client.req')
+    def test_main_health_command(self, mock_req):
+        """Test main() routes 'health' command."""
+        mock_req.return_value = (200, {"status": "healthy"})
+        sys.argv = ['control_client.py', 'health']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("GET", "/health")
+
+    @patch('codebot.control_client.req')
+    def test_main_logs_command(self, mock_req):
+        """Test main() routes 'logs' command with --lines option."""
+        mock_req.return_value = (200, {"tail": ["log line 1", "log line 2"]})
+        sys.argv = ['control_client.py', 'logs', 'bug_hunter', '--lines', '50']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("GET", "/bots/bug_hunter/logs?lines=50")
+
+    @patch('codebot.control_client.req')
+    def test_main_logs_command_default_lines(self, mock_req):
+        """Test main() routes 'logs' command with default lines."""
+        mock_req.return_value = (200, {"tail": ["log line 1"]})
+        sys.argv = ['control_client.py', 'logs', 'bug_hunter']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("GET", "/bots/bug_hunter/logs?lines=200")
+
+    @patch('codebot.control_client.req')
+    def test_main_resume_command(self, mock_req):
+        """Test main() routes 'resume' command."""
+        mock_req.return_value = (200, {"status": "resumed"})
+        sys.argv = ['control_client.py', 'resume', 'bug_hunter']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/bots/bug_hunter/resume", {})
+
+    @patch('codebot.control_client.req')
+    def test_main_clear_drain_command(self, mock_req):
+        """Test main() routes 'clear-drain' command."""
+        mock_req.return_value = (200, {"status": "drain cleared"})
+        sys.argv = ['control_client.py', 'clear-drain']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/control/clear-drain", {})
+
+    @patch('codebot.control_client.req')
+    def test_main_undrain_command(self, mock_req):
+        """Test main() routes 'undrain' command (alias)."""
+        mock_req.return_value = (200, {"status": "drain cleared"})
+        sys.argv = ['control_client.py', 'undrain']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/control/clear-drain", {})
+
+    @patch('codebot.control_client.req')
+    def test_main_state_command(self, mock_req):
+        """Test main() routes 'state' command."""
+        mock_req.return_value = (200, {"state": "active"})
+        sys.argv = ['control_client.py', 'state']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("GET", "/state")
+
+    @patch('codebot.control_client.input', return_value='yes')
+    @patch('codebot.control_client.req')
+    def test_main_restart_command_interactive(self, mock_req, mock_input):
+        """Test main() routes 'restart' command with interactive confirmation."""
+        mock_req.return_value = (200, {"status": "restarting"})
+        sys.argv = ['control_client.py', 'restart', 'bug_hunter']
+
+        control_client.main()
+
+        mock_input.assert_called_once()
+        mock_req.assert_called_once_with("POST", "/bots/bug_hunter/restart", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_restart_command_force(self, mock_req):
+        """Test main() routes 'restart' command with --force flag."""
+        mock_req.return_value = (200, {"status": "restarting"})
+        sys.argv = ['control_client.py', 'restart', 'bug_hunter', '--force']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/bots/bug_hunter/restart", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_restart_command_dry_run(self, mock_req):
+        """Test main() routes 'restart' command with --dry-run flag."""
+        mock_req.return_value = (200, {"dry_run": True, "preview": {}})
+        sys.argv = ['control_client.py', 'restart', 'bug_hunter', '--dry-run']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/bots/bug_hunter/restart", {"dry_run": True})
+
+    @patch('codebot.control_client.validate_bot_name_simple', return_value=False)
+    def test_main_restart_invalid_bot_name(self, mock_validate):
+        """Test main() rejects invalid bot name for restart."""
+        sys.argv = ['control_client.py', 'restart', 'invalid!name']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    @patch('codebot.control_client.input', return_value='yes')
+    @patch('codebot.control_client.req')
+    def test_main_pause_command_interactive(self, mock_req, mock_input):
+        """Test main() routes 'pause' command with interactive confirmation."""
+        mock_req.return_value = (200, {"status": "paused"})
+        sys.argv = ['control_client.py', 'pause', 'bug_hunter']
+
+        control_client.main()
+
+        mock_input.assert_called_once()
+        mock_req.assert_called_once_with("POST", "/bots/bug_hunter/pause", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_pause_command_force(self, mock_req):
+        """Test main() routes 'pause' command with --force flag."""
+        mock_req.return_value = (200, {"status": "paused"})
+        sys.argv = ['control_client.py', 'pause', 'bug_hunter', '--force']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/bots/bug_hunter/pause", {"force": True})
+
+    @patch('codebot.control_client.input', return_value='yes')
+    @patch('codebot.control_client.req')
+    def test_main_stop_command_with_bots_interactive(self, mock_req, mock_input):
+        """Test main() routes 'stop' command with specific bots."""
+        mock_req.return_value = (200, {"status": "stopped"})
+        sys.argv = ['control_client.py', 'stop', 'bot1', 'bot2']
+
+        control_client.main()
+
+        mock_input.assert_called_once()
+        call_args = mock_req.call_args
+        self.assertEqual(call_args[0][1], "/bots/stop")
+        self.assertIn("bots", call_args[0][2])
+
+    @patch('codebot.control_client.req')
+    def test_main_stop_command_force(self, mock_req):
+        """Test main() routes 'stop' command with --force flag."""
+        mock_req.return_value = (200, {"status": "stopped"})
+        sys.argv = ['control_client.py', 'stop', '--force']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/bots/stop", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_stop_command_dry_run(self, mock_req):
+        """Test main() routes 'stop' command with --dry-run flag."""
+        mock_req.return_value = (200, {"dry_run": True})
+        sys.argv = ['control_client.py', 'stop', '--dry-run']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/bots/stop", {"dry_run": True})
+
+    @patch('codebot.control_client.input', return_value='no')
+    def test_main_stop_command_aborted(self, mock_input):
+        """Test main() aborts stop command on negative confirmation."""
+        sys.argv = ['control_client.py', 'stop', 'bot1']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
+        self.assertEqual(cm.exception.code, 0)
+
+    @patch('codebot.control_client.input', return_value='yes')
+    @patch('codebot.control_client.req')
+    def test_main_drain_command_interactive(self, mock_req, mock_input):
+        """Test main() routes 'drain' command with interactive confirmation."""
+        mock_req.return_value = (200, {"status": "draining"})
+        sys.argv = ['control_client.py', 'drain']
+
+        control_client.main()
+
+        mock_input.assert_called_once()
+        mock_req.assert_called_once_with("POST", "/control/drain", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_drain_command_force(self, mock_req):
+        """Test main() routes 'drain' command with --force flag."""
+        mock_req.return_value = (200, {"status": "draining"})
+        sys.argv = ['control_client.py', 'drain', '--force']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/control/drain", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_safe_stop_command(self, mock_req):
+        """Test main() routes 'safe-stop' command (alias for drain)."""
+        mock_req.return_value = (200, {"status": "draining"})
+        sys.argv = ['control_client.py', 'safe-stop', '--force']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/control/drain", {"force": True})
+
+    @patch('codebot.control_client.input', return_value='yes')
+    @patch('codebot.control_client.req')
+    def test_main_update_command_interactive(self, mock_req, mock_input):
+        """Test main() routes 'update' command with interactive confirmation."""
+        mock_req.return_value = (200, {"status": "updating"})
+        sys.argv = ['control_client.py', 'update']
+
+        control_client.main()
+
+        mock_input.assert_called_once()
+        mock_req.assert_called_once_with("POST", "/control/update", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_update_command_force(self, mock_req):
+        """Test main() routes 'update' command with --force flag."""
+        mock_req.return_value = (200, {"status": "updating"})
+        sys.argv = ['control_client.py', 'update', '--force']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/control/update", {"force": True})
+
+    @patch('codebot.control_client.req')
+    def test_main_update_command_dry_run(self, mock_req):
+        """Test main() routes 'update' command with --dry-run flag."""
+        mock_req.return_value = (200, {"dry_run": True})
+        sys.argv = ['control_client.py', 'update', '--dry-run']
+
+        control_client.main()
+
+        mock_req.assert_called_once_with("POST", "/control/update", {"dry_run": True})
+
+    @patch('codebot.control_client.cmd_scheduler_events')
+    def test_main_scheduler_events_command(self, mock_cmd_events):
+        """Test main() routes 'scheduler-events' command."""
+        sys.argv = ['control_client.py', 'scheduler-events', '--limit', '50']
+
+        control_client.main()
+
+        mock_cmd_events.assert_called_once_with("50", None)
+
+    @patch('codebot.control_client.cmd_dead_letters')
+    def test_main_dead_letters_command(self, mock_cmd_dl):
+        """Test main() routes 'dead-letters' command."""
+        sys.argv = ['control_client.py', 'dead-letters']
+
+        control_client.main()
+
+        mock_cmd_dl.assert_called_once()
+
+    def test_main_scheduler_events_invalid_limit(self):
+        """Test main() handles invalid --limit for scheduler-events."""
+        sys.argv = ['control_client.py', 'scheduler-events', '--limit', 'abc']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_main_scheduler_events_unknown_option(self):
+        """Test main() handles unknown option for scheduler-events."""
+        sys.argv = ['control_client.py', 'scheduler-events', '--unknown']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_main_scheduler_events_unknown_argument(self):
+        """Test main() handles unknown argument for scheduler-events."""
+        sys.argv = ['control_client.py', 'scheduler-events', 'extra-arg']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_main_logs_invalid_lines(self):
+        """Test main() handles invalid --lines value."""
+        sys.argv = ['control_client.py', 'logs', 'bug_hunter', '--lines', 'abc']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_main_logs_missing_lines_value(self):
+        """Test main() handles missing --lines value."""
+        sys.argv = ['control_client.py', 'logs', 'bug_hunter', '--lines']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_main_retry_dead_letter_missing_id(self):
+        """Test main() requires item ID for retry-dead-letter."""
+        sys.argv = ['control_client.py', 'retry-dead-letter']
+
+        with self.assertRaises(SystemExit) as cm:
+            control_client.main()
+
         self.assertEqual(cm.exception.code, 1)
 
 

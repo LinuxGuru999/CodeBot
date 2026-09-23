@@ -1889,7 +1889,15 @@ def test_api_tools_batch_grep_extra_branches_Given_filters_When_batch_grep_Then_
 
 
 def test_api_tools_import_fallback_Given_import_error_When_reload_Then_fallback() -> None:
-    """Given ImportError for tool_policy When api_tools fallback Then definitions."""
+    """Given ImportError for tool_policy When api_tools reload Then fail-closed ImportError.
+
+    SECURITY (CB-4872958E7257722FFFCC2E7755728104): api_tools.py uses direct
+    ``from codebot.tool_policy import ...`` with NO try/except fallback. If
+    tool_policy is unimportable the module must fail to load entirely
+    (fail-closed, acceptance criteria option 2) rather than silently
+    providing weaker path-resolution guarantees. This test verifies that
+    ImportError propagates instead of a degraded fallback being installed.
+    """
     import importlib.util
     import sys
     orig_tool_policy = sys.modules.get("codebot.tool_policy")
@@ -1901,30 +1909,152 @@ def test_api_tools_import_fallback_Given_import_error_When_reload_Then_fallback(
     def fake_import(name, *a, **kw):
         if name in ("codebot.tool_policy", "tool_policy"):
             raise ImportError("mocked missing")
-        if name in ("codebot.file_lock", "codebot.locks"):
-            raise ImportError("mocked missing")
         return original_import(name, *a, **kw)
 
     try:
         with patch("builtins.__import__", side_effect=fake_import):
             spec = importlib.util.spec_from_file_location("codebot.api_tools_fallback", str(Path("codebot/api_tools.py").resolve()))
             mod = importlib.util.module_from_spec(spec)  # type: ignore
-            spec.loader.exec_module(mod)  # type: ignore
-            assert hasattr(mod, "allowlisted_command")
-            assert hasattr(mod, "resolve_workspace_path")
-            assert mod.allowlisted_command("echo hi") is not None
-            assert mod.allowlisted_command("unclosed 'quote") is None
-            import tempfile
-            with tempfile.TemporaryDirectory() as td:
-                w = Path(td) / "ws"
-                w.mkdir()
-                res = mod.resolve_workspace_path("a.txt", w)
-                assert res is not None
-                assert mod.resolve_workspace_path("/etc/passwd", w) is None
-                assert mod.resolve_workspace_path("../escape", w) is None
-            assert mod.flock(123, 1) is None
+            with pytest.raises(ImportError):
+                spec.loader.exec_module(mod)  # type: ignore
     finally:
         if orig_tool_policy is not None:
             sys.modules["codebot.tool_policy"] = orig_tool_policy
         if orig_api_tools is not None:
             sys.modules["codebot.api_tools"] = orig_api_tools
+
+
+# --- Tool Policy Coverage Tests for Missing Lines ---
+
+from codebot.tool_policy import _validate_bare_command_paths, WORKSPACE_ROOT
+
+
+def test_tool_policy_find_exec_blocked_Given_find_exec_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given find -exec When validate Then blocked (line 89)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    # Direct call to _validate_bare_command_paths to exercise the branch
+    assert _validate_bare_command_paths(["find", ".", "-exec", "cat", "{}", "\\;"], w) is False
+    assert _validate_bare_command_paths(["find", ".", "-execdir", "ls", "{}", "\\;"], w) is False
+    assert _validate_bare_command_paths(["find", ".", "-ok", "rm", "{}", "\\;"], w) is False
+    assert _validate_bare_command_paths(["find", ".", "-okdir", "ls", "{}", "\\;"], w) is False
+    # Also via validate_command
+    assert validate_command("find . -exec cat {} \\;", workspace_root=w) is None
+
+
+def test_tool_policy_skip_next_is_path_dotdot_Given_f_with_dotdot_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given -f with .. in path When validate Then blocked (line 97)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert _validate_bare_command_paths(["grep", "-f", "../secret/file"], w) is False
+    assert _validate_bare_command_paths(["awk", "-f", "../../etc/passwd"], w) is False
+
+
+def test_tool_policy_skip_next_is_path_glob_Given_f_with_glob_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given -f with glob chars When validate Then blocked (line 97)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert _validate_bare_command_paths(["grep", "-f", "*.txt"], w) is False
+    assert _validate_bare_command_paths(["awk", "-f", "file?.txt"], w) is False
+
+
+def test_tool_policy_skip_next_is_path_resolve_fail_Given_f_outside_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given -f with path outside workspace When validate Then blocked (line 97)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert _validate_bare_command_paths(["grep", "-f", "/etc/passwd"], w) is False
+
+
+def test_tool_policy_double_dash_separator_Given_ddash_When_validate_Then_ok(tmp_path: Path) -> None:
+    """Given -- separator When validate Then pattern_skipped set (line 113)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    (w / "src").mkdir()
+    (w / "src" / "file.txt").write_text("hello")
+    # -- marks end of options, next token is treated as path
+    assert validate_command("grep -- hello src/file.txt", workspace_root=w) is not None
+
+
+def test_tool_policy_key_value_smuggling_dotdot_Given_eq_dotdot_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given --key=../path When validate Then blocked (line 122)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert validate_command("cat --file=../secret", workspace_root=w) is None
+    assert validate_command("grep --regexp=../pattern", workspace_root=w) is None
+
+
+def test_tool_policy_key_value_smuggling_glob_Given_eq_glob_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given --key=*.txt When validate Then blocked (line 116/122)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert validate_command("cat --output=*.txt", workspace_root=w) is None
+
+
+def test_tool_policy_key_value_smuggling_resolve_fail_Given_eq_outside_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given --key=/etc/passwd When validate Then blocked (line 122)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert validate_command("cat --file=/etc/passwd", workspace_root=w) is None
+
+
+def test_tool_policy_sed_i_blocked_Given_sed_i_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given sed -i When validate Then blocked (line 148)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert validate_command("sed -i 's/a/b/' file.txt", workspace_root=w) is None
+    assert validate_command("sed --in-place 's/a/b/' file.txt", workspace_root=w) is None
+
+
+def test_tool_policy_ln_hardlink_blocked_Given_ln_no_s_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given ln without -s When validate Then blocked (line 181)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert validate_command("ln src/file.txt dest/link", workspace_root=w) is None
+    assert validate_command("ln file.txt link", workspace_root=w) is None
+    # With -s should be allowed (if path is valid)
+    (w / "src").mkdir()
+    (w / "src" / "file.txt").write_text("hello")
+    assert validate_command("ln -s src/file.txt dest/link", workspace_root=w) is not None
+
+
+def test_tool_policy_glob_chars_in_path_Given_glob_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given glob chars in path position When validate Then blocked (lines 195, 196)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    assert validate_command("cat *.txt", workspace_root=w) is None
+    assert validate_command("ls file?.txt", workspace_root=w) is None
+    assert validate_command("rm [abc].txt", workspace_root=w) is None
+    assert validate_command("cp {a,b}.txt dest/", workspace_root=w) is None
+    assert validate_command("ls ~/file.txt", workspace_root=w) is None
+
+
+def test_tool_policy_resolve_fail_in_loop_Given_abs_outside_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given absolute path outside workspace in main loop When validate Then blocked (line 264)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    # This exercises the main loop in validate_command that checks absolute paths
+    assert validate_command("echo /etc/passwd", workspace_root=w) is None
+    assert validate_command("cat /etc/shadow", workspace_root=w) is None
+
+
+def test_tool_policy_git_reset_hard_defensive_Given_git_reset_hard_When_validate_Then_none(tmp_path: Path) -> None:
+    """Given git reset --hard When validate Then blocked (line 237, pragma no cover)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    # This line is technically shadowed by DANGEROUS_GIT_ARGS check, but we exercise it
+    # by ensuring the command is blocked. The specific line 237 is inside a pragma no cover block.
+    assert validate_command("git reset --hard", workspace_root=w) is None
+
+
+def test_tool_policy_pipe_break_in_bare_validation_Given_pipe_in_segment_When_validate_Then_ok(tmp_path: Path) -> None:
+    """Given pipe token in segment When _validate_bare_command_paths Then break (line 216)."""
+    w = tmp_path / "ws"
+    w.mkdir()
+    # The break on pipe tokens is exercised when _validate_bare_command_paths is called
+    # with a segment that somehow contains a pipe (though validate_command splits them).
+    # We can test this by calling _validate_bare_command_paths directly with a pipe in argv.
+    # This simulates the defensive break.
+    assert _validate_bare_command_paths(["cat", "file.txt", "|", "grep", "foo"], w) is True
+    # The function returns True because it breaks out of the loop at '|', skipping further validation
+    # of tokens after the pipe in this segment. The next segment is validated separately.
+

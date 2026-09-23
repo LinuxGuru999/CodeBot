@@ -89,8 +89,7 @@ ALIGNMENT_EVENTS_DIR = _paths.alignment_events_dir
 # ---------------------------------------------------------------------------
 
 IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
-    "general_implementer", "backend_implementer", "frontend_implementer",
-    "test_implementer", "migration_implementer", "documentation_implementer",
+    "implementer",
 })
 
 DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
@@ -100,13 +99,13 @@ DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
 })
 
 REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
-    "correctness_reviewer", "security_reviewer", "architecture_reviewer",
-    "test_reviewer", "performance_reviewer", "simplicity_reviewer",
-    "documentation_reviewer",
+    "reviewer", "security_reviewer", "architecture_reviewer",
+    "performance_reviewer", "concurrency_reviewer",
+    "data_integrity_reviewer",
 })
 
 PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
-    "implementation_planner",
+    "planner",
 })
 
 DECOMPOSER_ROLE_NAMES: frozenset[str] = frozenset({
@@ -161,7 +160,7 @@ def load_bot_registry() -> list[BotConfig]:
             logger.warning("Failed to load registry from adapter: %s", e)
     return [
         BotConfig("discovery", "bug_hunter.md", 1800, 3600, "default", clean_exit_wait=True),
-        BotConfig("implementer", "general_implementer.md", 300, 750, "default", clean_exit_wait=True),
+        BotConfig("implementer", "implementer.md", 300, 750, "default", clean_exit_wait=True),
         BotConfig("reviewer", "correctness_reviewer.md", 600, 1500, "default", clean_exit_wait=True),
     ]
 
@@ -200,8 +199,10 @@ def drain_status() -> dict:
     }
 
 
-def check_self_restart(bots: dict[str, BotState]) -> bool:
+def check_self_restart(bots: dict[str, BotState], *, supervisor=None) -> bool:
     """Check for self-restart signal and execute if found."""
+    from codebot.process_supervisor import UnixProcessSupervisor
+
     if not _paths_restart_file.exists():
         return False
     try:
@@ -216,11 +217,9 @@ def check_self_restart(bots: dict[str, BotState]) -> bool:
         _paths_restart_file.unlink(missing_ok=True)
     except OSError:
         pass
-    import sys
-    python = sys.executable
-    args = [python] + sys.argv
-    logger.info(f"Executing self-restart: {' '.join(args)}")
-    os.execv(python, args)
+    if supervisor is None:
+        supervisor = UnixProcessSupervisor()
+    supervisor.restart()
     return True
 
 # ---------------------------------------------------------------------------
@@ -327,41 +326,43 @@ def get_pipeline_state(store: Any | None = None) -> dict[str, int]:
 
 def is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
     """Check if a bot is needed based on pipeline state."""
-    ready = pipeline.get("READY", 0)
-    decompose = pipeline.get("DECOMPOSE", 0)
+    triaged = pipeline.get("TRIAGED", 0)
+    goal = pipeline.get("GOAL", 0)
+    decomp = pipeline.get("DECOMP", 0) + pipeline.get("DECOMPOSE", 0)
     planning = pipeline.get("PLANNING", 0)
-    implementing = pipeline.get("IMPLEMENTING", 0)
-    reviewing = pipeline.get("REVIEWING", 0)
-    verifying = pipeline.get("VERIFYING", 0)
+    implement = pipeline.get("IMPLEMENT", 0) + pipeline.get("IMPLEMENTING", 0)
+    review = pipeline.get("REVIEW", 0) + pipeline.get("REVIEWING", 0)
 
     always_on: set[str] = set()
     if name in always_on:
         return True
     base_name = name.split("-")[0] if "-" in name else name
     if base_name in DECOMPOSER_ROLE_NAMES:
-        return decompose > 0 or ready > 0
+        return decomp > 0 or goal > 0
     if base_name in PLANNING_ROLE_NAMES:
         return planning > 0
     if base_name in IMPLEMENTER_ROLE_NAMES:
-        return implementing > 0
+        return implement > 0
     if base_name in REVIEWER_ROLE_NAMES or base_name == "ux_reviewer":
-        return reviewing > 0
+        return review > 0
     if name == "quality_gate":
-        return verifying > 0
+        return review > 0
     if name == "ticket_triager":
-        discovered = pipeline.get("DISCOVERED", 0) + pipeline.get("VALIDATING", 0) + pipeline.get("TRIAGED", 0)
-        return discovered > 0
+        return pipeline.get("DISCOVERED", 0) > 0
+    if name == "goal_aligner":
+        return triaged > 0
     return False
 
 
 def apply_agent_availability(bots: dict[str, BotState], store: Any | None = None) -> None:
     """Enable or suppress bot spawns based on current ticket queue state."""
     pipeline = get_pipeline_state(store=store)
-    ready = pipeline.get("READY", 0)
-    decompose = pipeline.get("DECOMPOSE", 0)
+    triaged = pipeline.get("TRIAGED", 0)
+    goal = pipeline.get("GOAL", 0)
+    decomp = pipeline.get("DECOMP", 0) + pipeline.get("DECOMPOSE", 0)
     planning = pipeline.get("PLANNING", 0)
-    implementing = pipeline.get("IMPLEMENTING", 0)
-    reviewing = pipeline.get("REVIEWING", 0)
+    implement = pipeline.get("IMPLEMENT", 0) + pipeline.get("IMPLEMENTING", 0)
+    review = pipeline.get("REVIEW", 0) + pipeline.get("REVIEWING", 0)
 
     always_on: set[str] = set()
 
@@ -369,18 +370,24 @@ def apply_agent_availability(bots: dict[str, BotState], store: Any | None = None
         base_name = name.split("-")[0] if "-" in name else name
         if base_name in always_on:
             continue
+        if base_name in DISCOVERY_ROLE_NAMES:
+            continue
 
         should_enable = False
         if base_name in DECOMPOSER_ROLE_NAMES:
-            should_enable = decompose > 0 or ready > 0
+            should_enable = decomp > 0 or goal > 0
         elif base_name in PLANNING_ROLE_NAMES:
             should_enable = planning > 0
         elif base_name in IMPLEMENTER_ROLE_NAMES:
-            should_enable = implementing > 0
+            should_enable = implement > 0
         elif base_name in REVIEWER_ROLE_NAMES or base_name == "ux_reviewer":
-            should_enable = reviewing > 0
-        elif base_name in DISCOVERY_ROLE_NAMES:
-            should_enable = False  # Discovery is demand-driven
+            should_enable = review > 0
+        elif name == "quality_gate":
+            should_enable = review > 0
+        elif name == "ticket_triager":
+            should_enable = pipeline.get("DISCOVERED", 0) > 0
+        elif name == "goal_aligner":
+            should_enable = triaged > 0
         else:
             continue
 
@@ -490,40 +497,93 @@ def restore_botnet(backup_dir: Path) -> None:
 # Backward Compatibility & State Utilities
 # ---------------------------------------------------------------------------
 
-def _manifest_error_disabled(bot_name: str) -> bool:
-    """Check if a bot manifest indicates disabled status."""
-    state_file = STATE_DIR / f"{bot_name}.state.json"
+def _manifest_error_disabled(manifest, max_consecutive: int = 3) -> bool:
+    """Check if a bot manifest indicates disabled status.
+    
+    Accepts either a bot_name string or a manifest dict for test compatibility.
+    """
+    if isinstance(manifest, str):
+        bot_name = manifest
+        state_file = STATE_DIR / f"{bot_name}.state.json"
+        try:
+            if state_file.exists():
+                data = json.loads(state_file.read_text())
+                return data.get("status") == "disabled"
+        except Exception:
+            pass
+        return False
+    
+    # Handle dict input (test compatibility)
+    if not isinstance(manifest, dict) or not manifest:
+        return False
+    name = manifest.get("name", "")
+    state_file = STATE_DIR / f"{name}.state.json" if name else None
     try:
-        if state_file.exists():
+        if state_file and state_file.exists():
             data = json.loads(state_file.read_text())
-            return data.get("status") == "disabled"
+            if data.get("_state_error"):
+                return True
+            errors = data.get("consecutive_errors", 0)
+            try:
+                errors = int(errors)
+            except (TypeError, ValueError):
+                return True
+            return errors >= max_consecutive
     except Exception:
         pass
     return False
 
 
-def is_error_disabled(bot_name: str) -> bool:
+def is_error_disabled(manifest, max_consecutive: int = 3) -> bool:
     """Check if a bot is disabled due to errors."""
-    return _manifest_error_disabled(bot_name)
+    return _manifest_error_disabled(manifest, max_consecutive)
 
 
-def _manifest_restart_budget_exceeded(bot_name: str) -> bool:
-    """Check if restart budget is exceeded based on state file."""
-    state_file = STATE_DIR / f"{bot_name}.state.json"
+def _manifest_restart_budget_exceeded(manifest, now=None) -> bool:
+    """Check if restart budget is exceeded based on state file.
+    
+    Accepts either a bot_name string or a manifest dict for test compatibility.
+    """
+    if now is None:
+        now = time.time()
+    
+    if isinstance(manifest, str):
+        bot_name = manifest
+        state_file = STATE_DIR / f"{bot_name}.state.json"
+        try:
+            if state_file.exists():
+                data = json.loads(state_file.read_text())
+                restart_count = data.get("restart_count", 0)
+                max_restarts = 5
+                return restart_count >= max_restarts
+        except Exception:
+            pass
+        return False
+    
+    # Handle dict input (test compatibility)
+    max_restarts = manifest.get("max_restarts", 5) if isinstance(manifest, dict) else 5
+    if max_restarts == 0:
+        return False
+    name = manifest.get("name", "") if isinstance(manifest, dict) else ""
+    state_file = STATE_DIR / f"{name}.state.json" if name else None
     try:
-        if state_file.exists():
+        if state_file and state_file.exists():
             data = json.loads(state_file.read_text())
-            restart_count = data.get("restart_count", 0)
-            max_restarts = 5
-            return restart_count >= max_restarts
+            if data.get("_state_error"):
+                return True
+            timestamps = data.get("restart_timestamps", [])
+            if not isinstance(timestamps, list):
+                return True
+            recent = [t for t in timestamps if isinstance(t, (int, float)) and (now - t) < 3600]
+            return len(recent) >= max_restarts
     except Exception:
         pass
     return False
 
 
-def is_restart_budget_exceeded(bot_name: str) -> bool:
+def is_restart_budget_exceeded(manifest, now=None) -> bool:
     """Check if restart budget is exceeded for a bot."""
-    return _manifest_restart_budget_exceeded(bot_name)
+    return _manifest_restart_budget_exceeded(manifest, now)
 
 
 def rotating_slots(max_concurrent: int = 26) -> int:

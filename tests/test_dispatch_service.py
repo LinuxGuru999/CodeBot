@@ -111,9 +111,8 @@ class TestTransitionTicketOnError:
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
+        store.transition(t.id, TicketState.GOAL)
         store.flush()
 
         bot = self._make_bot(t.id)
@@ -123,7 +122,8 @@ class TestTransitionTicketOnError:
         transition_ticket_on_error(bot, bots, exit_code=1, store=store)
 
         updated = store.get(t.id)
-        assert updated.state == TicketState.READY
+        # Ticket should remain in GOAL state since it's not in IMPLEMENT
+        assert updated.state == TicketState.GOAL
         store.close()
 
     def test_error_exit_cleans_claims(self, tmp_path):
@@ -263,12 +263,12 @@ class TestTransitionTicketOnSuccess:
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.IMPLEMENTATION_READY)
-        store.transition(t.id, TicketState.IMPLEMENTING)
-        store.transition(t.id, TicketState.REVIEWING)
+        store.transition(t.id, TicketState.GOAL)
+        store.transition(t.id, TicketState.DECOMP)
+        store.transition(t.id, TicketState.PLANNING)
+        store.transition(t.id, TicketState.IMPLEMENT)
+        store.transition(t.id, TicketState.REVIEW)
         store.flush()
 
         bot = self._make_bot(t.id, name="correctness_reviewer")
@@ -278,7 +278,7 @@ class TestTransitionTicketOnSuccess:
         transition_ticket_on_success(bot, bots, store=store)
 
         updated = store.get(t.id)
-        assert updated.state == TicketState.REVIEWING
+        assert updated.state == TicketState.REVIEW
         store.close()
 
 
@@ -339,3 +339,38 @@ class TestBatchReadBotStatuses:
             result = batch_read_bot_statuses(["exists", "missing"])
         assert result["exists"]["status"] == "running"
         assert result["missing"] is None
+
+    def test_batch_read_bot_statuses_with_sample_size(self, tmp_path):
+        """batch_read_bot_statuses respects sample_size parameter."""
+        # Create 10 status files
+        for i in range(10):
+            data = {"current_task": f"task-{i}", "iteration": i}
+            (tmp_path / f"bot-{i}.status.json").write_text(json.dumps(data))
+        
+        bot_names = [f"bot-{i}" for i in range(10)]
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            # Sample only 3 bots
+            result = batch_read_bot_statuses(bot_names, sample_size=3)
+        
+        # Should only read 3 bots
+        assert len(result) == 3
+        # All results should be valid
+        for name, data in result.items():
+            assert data is not None
+            assert "current_task" in data
+
+    def test_batch_read_bot_statuses_sample_size_none_reads_all(self, tmp_path):
+        """batch_read_bot_statuses with sample_size=None reads all bots."""
+        # Create 5 status files
+        for i in range(5):
+            data = {"current_task": f"task-{i}"}
+            (tmp_path / f"bot-{i}.status.json").write_text(json.dumps(data))
+        
+        bot_names = [f"bot-{i}" for i in range(5)]
+        import codebot.dispatch_service as ds
+        with patch.object(ds, "STATE_DIR", tmp_path):
+            result = batch_read_bot_statuses(bot_names, sample_size=None)
+        
+        # Should read all 5 bots
+        assert len(result) == 5

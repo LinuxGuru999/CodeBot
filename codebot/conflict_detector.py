@@ -27,9 +27,12 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any
+
+
+_EMPTY_NEIGHBORS: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -45,50 +48,55 @@ class ConflictEdge:
 class ConflictMatrix:
     """Complete conflict graph for a set of tickets."""
     edges: tuple[ConflictEdge, ...] = ()
+    _adjacency: dict[str, frozenset[str]] = field(
+        init=False, repr=False, compare=False, hash=False, default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        """Build an immutable adjacency index for O(1) conflict lookups."""
+        adjacency: dict[str, set[str]] = {}
+        for edge in self.edges:
+            adjacency.setdefault(edge.ticket_a, set()).add(edge.ticket_b)
+            adjacency.setdefault(edge.ticket_b, set()).add(edge.ticket_a)
+        object.__setattr__(
+            self,
+            "_adjacency",
+            {
+                ticket_id: frozenset(neighbors)
+                for ticket_id, neighbors in adjacency.items()
+            },
+        )
 
     def conflicts_with(self, ticket_id: str) -> frozenset[str]:
         """Return all ticket IDs that conflict with the given ticket."""
-        result: set[str] = set()
-        for edge in self.edges:
-            if edge.ticket_a == ticket_id:
-                result.add(edge.ticket_b)
-            elif edge.ticket_b == ticket_id:
-                result.add(edge.ticket_a)
-        return frozenset(result)
+        return self._adjacency.get(ticket_id, _EMPTY_NEIGHBORS)
 
     def has_any_conflict(self, ticket_id: str) -> bool:
-        return any(
-            e.ticket_a == ticket_id or e.ticket_b == ticket_id
-            for e in self.edges
-        )
+        """Return whether the ticket participates in any conflict edge."""
+        return bool(self._adjacency.get(ticket_id, _EMPTY_NEIGHBORS))
 
     def conflict_groups(self) -> list[frozenset[str]]:
         """Compute connected components of the conflict graph.
 
         Tickets in the same group cannot run concurrently.
-        Uses iterative BFS to avoid recursion limits.
+        Uses the pre-built adjacency index and iterative BFS to avoid
+        recursion limits and repeated edge scans.
         """
-        adjacency: dict[str, set[str]] = {}
-        for edge in self.edges:
-            adjacency.setdefault(edge.ticket_a, set()).add(edge.ticket_b)
-            adjacency.setdefault(edge.ticket_b, set()).add(edge.ticket_a)
-
         visited: set[str] = set()
         groups: list[frozenset[str]] = []
 
-        for node in adjacency:
+        for node in self._adjacency:
             if node in visited:
                 continue
             component: set[str] = set()
-            queue = [node]
+            queue = deque([node])
+            visited.add(node)
             while queue:
-                current = queue.pop(0)
-                if current in visited:
-                    continue
-                visited.add(current)
+                current = queue.popleft()
                 component.add(current)
-                for neighbor in adjacency.get(current, ()):
+                for neighbor in self._adjacency[current]:
                     if neighbor not in visited:
+                        visited.add(neighbor)
                         queue.append(neighbor)
             if len(component) > 1:
                 groups.append(frozenset(component))
@@ -99,9 +107,7 @@ class ConflictMatrix:
         return {
             "total_edges": len(self.edges),
             "conflict_groups": len(self.conflict_groups()),
-            "tickets_involved": len({
-                t for e in self.edges for t in (e.ticket_a, e.ticket_b)
-            }),
+            "tickets_involved": len(self._adjacency),
         }
 
 

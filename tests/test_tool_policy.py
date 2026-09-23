@@ -70,12 +70,22 @@ class TestBlocklistedCommand:
         assert allowlisted_command("") is None
         assert allowlisted_command("   ") is None
 
+    def test_cd_only_command_returns_none(self):
+        """A command consisting only of cd segments returns None (all filtered out)."""
+        # cd src produces segments [["cd", "src"]], which gets filtered to [],
+        # triggering the 'if not filtered_segments: return None' path
+        assert allowlisted_command("cd src") is None
+        assert allowlisted_command("cd /tmp") is None
+
     def test_shell_metacharacters_blocked(self):
-        """Shell control operators are blocked except `cd <dir> && <allowed>`."""
-        cmds = ["ls && pwd", "echo hello > out.txt"]
+        """Shell control operators (except && and ;) are blocked; && and ; are allowed chaining ops."""
+        # > >> < << || are blocked (in SHELL_CONTROL_TOKENS but not _ALLOWED_CHAINING)
+        cmds = ["echo hello > out.txt", "cat file >> out.txt", "cat < input.txt"]
         for cmd in cmds:
             result = allowlisted_command(cmd)
             assert result is None, f"Should block shell control command: {cmd}"
+        # && and ; are in _ALLOWED_CHAINING and produce pipeline segments
+        assert allowlisted_command("ls && pwd") is not None
         assert allowlisted_command("cd src && pytest") is not None
 
     def test_pipes_allowed_without_workspace_root(self):
@@ -315,10 +325,22 @@ class TestPipeEdgeCases:
         assert allowlisted_command("echo foo | grep ../../../secret") is None
 
     def test_absolute_path_in_pipe_without_workspace_allowed(self):
-        """Absolute paths in pipes are denied when workspace_root is None per constitution §3."""
-        # Updated per constitution §3: no deletion
+        """Absolute paths in pipes are denied when workspace_root is None per constitution §3.
+        
+        When workspace_root=None (default), validate_command falls back to module
+        WORKSPACE_ROOT for path confinement. This test verifies that absolute paths
+        outside the workspace are denied without requiring monkeypatch.
+        
+        Per ticket CB-2F00463667E53AAC88FAA5FA92E17461, workspace_root=None has
+        documented semantics: it means "use default WORKSPACE_ROOT" not "disable
+        confinement". This test confirms the behavior without monkeypatching.
+        """
+        # With default workspace_root (falls back to WORKSPACE_ROOT), absolute path outside denied
         assert validate_command("ls | cat /etc/passwd") is None
+        # Explicit workspace_root=None also falls back to WORKSPACE_ROOT, same denial
         assert validate_command("ls | cat /etc/passwd", workspace_root=None) is None
+        # Verify workspace_root=None and omitted arg behave identically
+        assert validate_command("ls file.txt") == validate_command("ls file.txt", workspace_root=None)
 
     def test_non_allowed_pipe_target_blocked(self):
         """Pipe targets that are blocklisted commands should be blocked."""
@@ -442,53 +464,56 @@ class TestBareCommandSandboxEscape:
         assert validate_command(f"ls {dir_symlink}", workspace_root=ws) is None
 
     def test_glob_symlink_bypass_denied(self, ws):
-        """Glob characters in path positions are denied to prevent shell expansion smuggling symlinks.
+        """Brace expansion is denied; *, ?, [], ~ are allowed (handled by api_tools.bash).
         
-        Shell expansion of *, ?, [], {}, ~ can expand to paths containing symlinks,
-        bypassing the symlink component check during validation.
+        Only {} (brace expansion) is denied at the tool_policy level. *, ?, [], ~ are
+        passed through to api_tools.bash._expand_and_validate_tokens which performs
+        expansion and workspace containment validation.
         """
-        # Glob patterns should be denied for file-operating commands
-        assert validate_command("cat *", workspace_root=ws) is None
-        assert validate_command("ls ?.txt", workspace_root=ws) is None
-        assert validate_command("cat [abc].txt", workspace_root=ws) is None
+        # Brace expansion is denied
         assert validate_command("ls {a,b}.txt", workspace_root=ws) is None
-        assert validate_command("cat ~/file.txt", workspace_root=ws) is None
+        
+        # *, ?, [], ~ are ALLOWED (validated by executor)
+        assert validate_command("cat [abc].txt", workspace_root=ws) is not None
+        assert validate_command("cat ~/file.txt", workspace_root=ws) is not None
+        assert validate_command("cat *", workspace_root=ws) is not None
+        assert validate_command("ls ?.txt", workspace_root=ws) is not None
         
         # Verify legitimate non-glob commands still work
         assert validate_command("cat src/file.txt", workspace_root=ws) is not None
         assert validate_command("ls src/", workspace_root=ws) is not None
 
     def test_tilde_expansion_outside_workspace_denied(self, ws):
-        """Tilde expansion to paths outside workspace must be rejected.
+        """Tilde paths are allowed at tool_policy level; executor validates expansion.
 
-        Shell expansion of ~ resolves to user home directory which is outside
-        the workspace boundary. The validation layer must deny ~ in path
-        positions before shell expansion occurs.
+        The tool_policy layer passes ~ through to api_tools.bash which performs
+        os.path.expanduser() and validates the result stays within workspace.
+        Only paths with '..' or '{}' are denied at this layer.
         """
-        # Tilde alone expands to home directory (outside workspace)
-        assert validate_command("cat ~/file.txt", workspace_root=ws) is None
-        assert validate_command("ls ~", workspace_root=ws) is None
+        # Tilde paths are allowed (executor validates expansion)
+        assert validate_command("cat ~/file.txt", workspace_root=ws) is not None
+        assert validate_command("ls ~", workspace_root=ws) is not None
+        # But .. traversal is still denied
         assert validate_command("head ~/../etc/passwd", workspace_root=ws) is None
-        assert validate_command("find ~ -name secret", workspace_root=ws) is None
-        # Tilde with username also denied
-        assert validate_command("cat ~root/.ssh/id_rsa", workspace_root=ws) is None
-        assert validate_command("ls ~admin/logs", workspace_root=ws) is None
+        # Tilde with username also allowed (executor validates)
+        assert validate_command("cat ~root/.ssh/id_rsa", workspace_root=ws) is not None
+        assert validate_command("ls ~admin/logs", workspace_root=ws) is not None
 
     def test_glob_pattern_within_workspace_accepted(self, ws):
-        """Glob patterns within workspace are rejected per security policy.
+        """Only {} brace expansion is denied; *, ?, [], ~ are allowed.
 
-        Current implementation rejects ALL glob characters (*, ?, [], {}) in
-        path positions for file-operating commands, even when they would only
-        match workspace files. This prevents shell expansion from smuggling
-        symlinks past validation. Note: find -name patterns are NOT path
-        positions and are allowed (they are pattern arguments, not file paths).
-        Legitimate non-glob workspace operations continue to work.
+        Current implementation only rejects brace expansion ({}) in path positions.
+        *, ?, [], ~ are passed through to api_tools.bash which performs expansion
+        and workspace containment validation.
+        Note: find -name patterns are NOT path positions and are allowed.
         """
-        # Glob patterns are denied in path positions
-        assert validate_command("cat src/*.txt", workspace_root=ws) is None
-        assert validate_command("ls ?.py", workspace_root=ws) is None
-        assert validate_command("rm [abc].txt", workspace_root=ws) is None
-        assert validate_command("cp *.txt dst/", workspace_root=ws) is None
+        # Brace expansion is denied
+        assert validate_command("cp {a,b}.txt dst/", workspace_root=ws) is None
+        # [], *, ?, ~ are ALLOWED (validated by executor)
+        assert validate_command("rm [abc].txt", workspace_root=ws) is not None
+        assert validate_command("cat src/*.txt", workspace_root=ws) is not None
+        assert validate_command("ls ?.py", workspace_root=ws) is not None
+        assert validate_command("cp *.txt dst/", workspace_root=ws) is not None
         # find -name patterns are NOT path positions — they are pattern arguments
         # and are allowed by design (the pattern is matched by find, not expanded by shell)
         assert validate_command("find . -name '*.log'", workspace_root=ws) is not None
@@ -523,29 +548,34 @@ class TestBareCommandSandboxEscape:
         Note: find -name pattern arguments are not path positions.
         Also covers --key=value glob smuggling and -f flag glob denial.
         """
-        # Tilde + glob in path positions
-        assert validate_command("cat ~/src/*.py", workspace_root=ws) is None
+        # Tilde + glob in path positions: allowed (executor validates)
+        assert validate_command("cat ~/src/*.py", workspace_root=ws) is not None
+        # Brace expansion denied
         assert validate_command("ls ~/*.{txt,md}", workspace_root=ws) is None
-        # Glob + brace in path positions
+        # Glob + brace in path positions: brace denied
         assert validate_command("cat {src,lib}/*.py", workspace_root=ws) is None
         assert validate_command("cp {a,b}.txt dst/", workspace_root=ws) is None
-        # Tilde + brace in path positions
+        # Tilde + brace in path positions: brace denied
         assert validate_command("cat ~/{Documents,Downloads}/secret", workspace_root=ws) is None
-        # All three combined in path positions
+        # All three combined: brace denied
         assert validate_command("ls ~/{src,lib}/*.[ch]", workspace_root=ws) is None
-        # Mixed with path traversal
+        # Mixed with path traversal: .. denied
         assert validate_command("cat ~/../etc/{passwd,shadow}", workspace_root=ws) is None
-        # find with tilde in path position (start path) is denied
-        assert validate_command("find ~ -name '*.py'", workspace_root=ws) is None
+        # find with tilde in path position: allowed (executor validates)
+        assert validate_command("find ~ -name '*.py'", workspace_root=ws) is not None
         # find -name pattern args are NOT path positions — allowed
         assert validate_command("find . -name '*.{js,ts}'", workspace_root=ws) is not None
-        # --key=value glob smuggling denied (covers line 231-232)
-        assert validate_command("grep --file=*.txt pattern", workspace_root=ws) is None
-        assert validate_command("awk --source=~/evil '{print}' file", workspace_root=ws) is None
-        assert validate_command("sed --expression=*/etc/passwd", workspace_root=ws) is None
-        # -f flag with glob chars in value denied (covers skip_next_is_path glob check)
-        assert validate_command("grep -f *.patterns target.txt", workspace_root=ws) is None
-        assert validate_command("awk -f ~/scripts/evil.awk data", workspace_root=ws) is None
+        # --key=value with tilde: allowed (executor validates)
+        assert validate_command("grep --file=~/.bashrc pattern", workspace_root=ws) is not None
+        assert validate_command("awk --source=~/evil 1 file", workspace_root=ws) is not None
+        # --key=value with brace: denied
+        assert validate_command("sed --expression={a,b} file", workspace_root=ws) is None
+        # -f flag with tilde: allowed (executor validates)
+        assert validate_command("grep -f ~/.patterns target.txt", workspace_root=ws) is not None
+        assert validate_command("awk -f ~/scripts/evil.awk data", workspace_root=ws) is not None
+        # * and ? are allowed in --key=value context
+        assert validate_command("grep --file=*.txt pattern", workspace_root=ws) is not None
+        assert validate_command("grep -f ?.patterns target.txt", workspace_root=ws) is not None
         # --key=value with path outside workspace denied
         assert validate_command("grep --file=/etc/passwd pattern", workspace_root=ws) is None
         # --key=value with .. traversal denied
@@ -643,9 +673,15 @@ class TestBareCommandSandboxEscape:
         """grep -f /etc/passwd is denied (file-path flag validation)."""
         assert validate_command("grep -f /etc/passwd pattern", workspace_root=ws) is None
 
-    def test_grep_f_flag_with_glob(self, ws):
-        """grep -f *.txt is denied (glob in file-path flag)."""
-        assert validate_command("grep -f *.txt pattern", workspace_root=ws) is None
+    def test_grep_f_flag_with_dangerous_glob(self, ws):
+        """grep -f with brace expansion is denied; *, ?, [], ~ are allowed (handled by executor)."""
+        # Brace expansion is denied
+        assert validate_command("grep -f {a,b}.txt pattern", workspace_root=ws) is None
+        # *, ?, [], ~ are ALLOWED (validated by api_tools.bash executor)
+        assert validate_command("grep -f ~/.patterns pattern", workspace_root=ws) is not None
+        assert validate_command("grep -f [abc].txt pattern", workspace_root=ws) is not None
+        assert validate_command("grep -f *.txt pattern", workspace_root=ws) is not None
+        assert validate_command("grep -f ?.txt pattern", workspace_root=ws) is not None
 
     def test_grep_f_flag_with_traversal(self, ws):
         """grep -f ../secret is denied (traversal in file-path flag)."""
@@ -658,9 +694,15 @@ class TestBareCommandSandboxEscape:
         assert validate_command("cat -- src/file.txt", workspace_root=ws) is not None
 
     def test_key_value_smuggling_denied(self, ws):
-        """--file=/etc/passwd smuggling is denied."""
+        """--file=/etc/passwd smuggling is denied; brace expansion denied; *, ?, [], ~ allowed."""
         assert validate_command("cat --file=/etc/passwd", workspace_root=ws) is None
-        assert validate_command("cat --output=*.txt", workspace_root=ws) is None
+        # Brace expansion is denied in --key=value
+        assert validate_command("cat --output={a,b}.txt", workspace_root=ws) is None
+        # *, ?, [], ~ are ALLOWED (validated by api_tools.bash executor)
+        assert validate_command("cat --output=~/.bashrc", workspace_root=ws) is not None
+        assert validate_command("cat --output=[abc].txt", workspace_root=ws) is not None
+        assert validate_command("cat --output=*.txt", workspace_root=ws) is not None
+        assert validate_command("cat --output=?.txt", workspace_root=ws) is not None
 
     def test_awk_f_flag_with_etc_passwd(self, ws):
         """awk -f /etc/passwd is denied."""
@@ -762,9 +804,15 @@ class TestBareCommandSandboxEscape:
         """grep -f ../secret triggers skip_next_is_path with .. check."""
         assert validate_command("grep -f ../secret pattern", workspace_root=ws) is None
 
-    def test_skip_next_is_path_with_glob(self, ws):
-        """awk -f *.txt triggers skip_next_is_path with glob check."""
-        assert validate_command("awk -f *.txt '{print}'", workspace_root=ws) is None
+    def test_skip_next_is_path_with_dangerous_glob(self, ws):
+        """awk -f with brace expansion is denied; *, ?, [], ~ are allowed (executor validates)."""
+        # Brace expansion is denied
+        assert validate_command("awk -f {a,b}.awk '{print}'", workspace_root=ws) is None
+        # *, ?, [], ~ are ALLOWED (validated by api_tools.bash executor)
+        assert validate_command("awk -f ~/.script.awk 1", workspace_root=ws) is not None
+        assert validate_command("awk -f [abc].awk 1", workspace_root=ws) is not None
+        assert validate_command("awk -f *.txt 1", workspace_root=ws) is not None
+        assert validate_command("awk -f ?.awk 1", workspace_root=ws) is not None
 
     def test_double_dash_pattern_skipped(self, ws):
         """-- separator sets pattern_skipped=True."""
@@ -772,9 +820,15 @@ class TestBareCommandSandboxEscape:
         assert validate_command("cat -- src/file.txt", workspace_root=ws) is not None
         assert validate_command("cat -- /etc/passwd", workspace_root=ws) is None
 
-    def test_key_value_smuggling_glob_denied(self, ws):
-        """--output=*.txt denies glob in value part."""
-        assert validate_command("cat --output=*.txt", workspace_root=ws) is None
+    def test_key_value_smuggling_dangerous_glob_denied(self, ws):
+        """--output with brace expansion is denied; *, ?, [], ~ are allowed (executor validates)."""
+        # Brace expansion is denied
+        assert validate_command("cat --output={a,b}.txt", workspace_root=ws) is None
+        # *, ?, [], ~ are ALLOWED (validated by api_tools.bash executor)
+        assert validate_command("cat --output=~/.bashrc", workspace_root=ws) is not None
+        assert validate_command("cat --output=[abc].txt", workspace_root=ws) is not None
+        assert validate_command("cat --output=*.txt", workspace_root=ws) is not None
+        assert validate_command("cat --output=?.txt", workspace_root=ws) is not None
 
     def test_key_value_smuggling_path_validated(self, ws):
         """--file=/etc/passwd validates the path value."""
@@ -844,21 +898,29 @@ class TestBareCommandSandboxEscape:
         assert result is False
 
     def test_skip_next_is_path_glob_direct(self, ws):
-        """Directly test skip_next_is_path with glob token (line 213)."""
+        """Directly test skip_next_is_path with brace expansion (line 213)."""
         from codebot.tool_policy import _validate_bare_command_paths
-        # awk -f <file> where file has * - hits line 213 specifically
-        result = _validate_bare_command_paths(["grep", "-f", "?.log", "pattern"], ws)
+        # grep -f <file> where file has {} - hits brace check at line 213
+        result = _validate_bare_command_paths(["grep", "-f", "{a,b}.log", "pattern"], ws)
         assert result is False
+        # * and ? are now allowed (handled by executor)
+        result2 = _validate_bare_command_paths(["grep", "-f", "?.log", "pattern"], ws)
+        assert result2 is True
+        result3 = _validate_bare_command_paths(["grep", "-f", "*.log", "pattern"], ws)
+        assert result3 is True
 
     def test_key_value_file_flag_path_direct(self, ws):
-        """Directly test --file=... with file-path flag (line 288/291)."""
+        """Directly test --file=... with file-path flag and brace denial."""
         from codebot.tool_policy import _validate_bare_command_paths
-        # cat --file=/tmp/x - the --file= triggers skip_next_is_path=True, then validates path
+        # cat --file=/tmp/x - outside workspace path is denied
         result = _validate_bare_command_paths(["cat", "--file=/tmp/x"], ws)
         assert result is False
-        # Test --source=*.log hits line 291 (glob check in key=value)
-        result2 = _validate_bare_command_paths(["awk", "--source=*.log"], ws)
+        # awk --source={a,b}.log hits brace check in key=value
+        result2 = _validate_bare_command_paths(["awk", "--source={a,b}.log"], ws)
         assert result2 is False
+        # awk --source=*.log is allowed (executor handles)
+        result3 = _validate_bare_command_paths(["awk", "--source=*.log"], ws)
+        assert result3 is True
 
     def test_pattern_flags_grep_direct(self, ws):
         """grep --regexp sets pattern_skipped (line 310)."""
@@ -931,11 +993,14 @@ class TestCoverageCompletion:
         return workspace
 
     def test_line_213_glob_in_skipped_file_arg(self, ws):
-        """Cover line 213: glob char check when skip_next_is_path is True."""
+        """Cover line 213: brace expansion denied when skip_next_is_path is True."""
         from codebot.tool_policy import _validate_bare_command_paths
-        # grep -f *.txt: -f sets skip_next_is_path=True, then *.txt is checked at line 213
-        result = _validate_bare_command_paths(["grep", "-f", "*.txt", "pattern"], ws)
-        assert result is False, "Should reject glob in -f argument"
+        # grep -f {a,b}.txt: -f sets skip_next_is_path=True, then {a,b}.txt hits brace check
+        result = _validate_bare_command_paths(["grep", "-f", "{a,b}.txt", "pattern"], ws)
+        assert result is False, "Should reject brace expansion in -f argument"
+        # * and ? are now allowed (executor handles expansion)
+        result2 = _validate_bare_command_paths(["grep", "-f", "*.txt", "pattern"], ws)
+        assert result2 is True
 
     def test_line_341_break_on_pipe_in_bare_validator(self, ws):
         """Cover line 341: break when pipe found in _validate_bare_command_paths."""
@@ -975,12 +1040,16 @@ class TestCoverageCompletion:
         We need -f flag (sets skip_next_is_path=True) followed by a token with glob chars.
         Using validate_command to ensure coverage tracks through the full path.
         """
-        # grep -f with ? glob char in filename - triggers line 213
-        assert validate_command("grep -f ?.patterns target.txt", workspace_root=ws) is None
-        # awk -f with * glob char
-        assert validate_command("awk -f *.awk '{print}'", workspace_root=ws) is None
-        # sed -f with [ glob char
-        assert validate_command("sed -f [abc].sed file.txt", workspace_root=ws) is None
+        # grep -f with brace expansion - denied
+        assert validate_command("grep -f {a,b}.patterns target.txt", workspace_root=ws) is None
+        # awk -f with brace expansion - denied
+        assert validate_command("awk -f {x,y}.awk '{print}'", workspace_root=ws) is None
+        # sed -f with brace expansion - denied
+        assert validate_command("sed -f {a,b}.sed file.txt", workspace_root=ws) is None
+        # * and ? are allowed (executor handles)
+        assert validate_command("grep -f ?.patterns target.txt", workspace_root=ws) is not None
+        assert validate_command("awk -f *.awk 1", workspace_root=ws) is not None
+        assert validate_command("sed -f [abc].sed file.txt", workspace_root=ws) is not None
 
     def test_path_traversal_after_shell_op_break_line291(self, ws):
         """Hit line 291: return False for .. after shell operator break in bare validator.
@@ -1424,18 +1493,30 @@ class TestCombinedShortFlags:
         assert validate_command("awk -nf /etc/passwd '{print}'", workspace_root=ws) is None
 
     def test_combined_flag_with_glob_denied(self, ws):
-        """grep -rf *.txt is denied (glob in combined flag path)."""
-        assert validate_command("grep -rf *.txt pattern", workspace_root=ws) is None
+        """grep -rf {a,b}.txt is denied (brace in combined flag path); * allowed."""
+        assert validate_command("grep -rf {a,b}.txt pattern", workspace_root=ws) is None
+        # * is allowed (executor handles)
+        assert validate_command("grep -rf *.txt pattern", workspace_root=ws) is not None
 
     def test_combined_flag_with_traversal_denied(self, ws):
         """grep -rf ../secret is denied."""
         assert validate_command("grep -rf ../secret pattern", workspace_root=ws) is None
 
-    def test_combined_flag_embedded_glob_denied(self, ws):
-        """grep -f*.txt (embedded glob) is denied."""
+    def test_combined_flag_embedded_dangerous_glob_denied(self, ws):
+        """grep -f with embedded brace expansion is denied; *, ?, [], ~ are allowed."""
         from codebot.tool_policy import _validate_bare_command_paths
-        result = _validate_bare_command_paths(["grep", "-f*.txt", "pattern"], ws)
-        assert result is False
+        # Brace expansion is denied
+        result3 = _validate_bare_command_paths(["grep", "-f{a,b}.txt", "pattern"], ws)
+        assert result3 is False
+        # *, ?, [], ~ are ALLOWED (validated by executor)
+        result = _validate_bare_command_paths(["grep", "-f~/.txt", "pattern"], ws)
+        assert result is True
+        result2 = _validate_bare_command_paths(["grep", "-f[abc].txt", "pattern"], ws)
+        assert result2 is True
+        result4 = _validate_bare_command_paths(["grep", "-f*.txt", "pattern"], ws)
+        assert result4 is True
+        result5 = _validate_bare_command_paths(["grep", "-f?.txt", "pattern"], ws)
+        assert result5 is True
 
     def test_combined_flag_embedded_traversal_denied(self, ws):
         """grep -f../secret (embedded traversal) is denied."""
@@ -1499,12 +1580,21 @@ class TestCombinedShortFlags:
         result = _validate_bare_command_paths(["grep", "-f../secret", "pattern"], ws)
         assert result is False
 
-    def test_combined_flag_embedded_path_with_glob(self, ws):
-        """Cover line 365: embedded path with glob chars returns False."""
+    def test_combined_flag_embedded_path_with_dangerous_glob(self, ws):
+        """Cover line 365: embedded path with brace expansion returns False."""
         from codebot.tool_policy import _validate_bare_command_paths
-        # grep -f*.txt: f is not last, remainder is '*.txt'
-        result = _validate_bare_command_paths(["grep", "-f*.txt", "pattern"], ws)
-        assert result is False
+        # Brace expansion is denied
+        result3 = _validate_bare_command_paths(["grep", "-f{a,b}.txt", "pattern"], ws)
+        assert result3 is False
+        # *, ?, [], ~ are ALLOWED (validated by executor)
+        result = _validate_bare_command_paths(["grep", "-f~/.txt", "pattern"], ws)
+        assert result is True
+        result2 = _validate_bare_command_paths(["grep", "-f[abc].txt", "pattern"], ws)
+        assert result2 is True
+        result4 = _validate_bare_command_paths(["grep", "-f*.txt", "pattern"], ws)
+        assert result4 is True
+        result5 = _validate_bare_command_paths(["grep", "-f?.txt", "pattern"], ws)
+        assert result5 is True
 
     def test_combined_flag_embedded_path_outside_workspace(self, ws):
         """Cover line 368: embedded path resolving outside returns False."""

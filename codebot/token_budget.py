@@ -1,16 +1,11 @@
-"""Maintain the daily actual token ledger used by the bot scheduler.
+"""Token ledger — decoupled from scheduling.
 
-Purpose
--------
-Provides atomic, UTC-day token accounting and pure budget-state decisions for
-the scheduler.
-
-Why
----
-The budget must measure provider-reported actuals, not prompt-size estimates.
-An exclusive lock and replace-based writes prevent concurrent runners from
-overwriting one another, while malformed data fails closed to avoid overspend.
+MAX_CONCURRENCY is the sole scheduling capacity limit. This module only
+records token usage for reporting; no scheduling gate should consult it
+for admission decisions.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -25,7 +20,6 @@ from codebot.file_lock import flock, LOCK_EX, LOCK_UN, LOCK_NB
 CAP = 4_000_000_000
 LOCK_TIMEOUT = 5.0
 
-# T4.3 incremental adapter seam
 _adapter_instance: object | None = None
 
 
@@ -89,14 +83,11 @@ def _new_ledger(day_utc: str) -> dict[str, Any]:
     return {"day_utc": day_utc, "by_model": {}, "total_actual": 0}
 
 
-_FLUSH_AFTER_WRITES = max(1, int(os.getenv("CODEBOT_LEDGER_FLUSH_EVERY", "1")))
-_pending_writes = 0
 _thread_locks: dict[Path, threading.Lock] = {}
 _thread_locks_guard = threading.Lock()
 
 
 def _thread_lock(path: Path) -> threading.Lock:
-    """Return the process-local lock paired with the ledger's file lock."""
     with _thread_locks_guard:
         return _thread_locks.setdefault(path, threading.Lock())
 
@@ -111,14 +102,20 @@ def record_usage(
     prompt_estimated: int = 0,
     completion_estimated: int = 0,
 ) -> dict[str, Any]:
-    """Add provider-reported actual usage for one model and UTC day."""
-    if prompt_tokens < 0 or completion_tokens < 0:
-        raise ValueError("actual token counts must be non-negative")
-    global _pending_writes
-    _pending_writes += 1
-    if _pending_writes >= _FLUSH_AFTER_WRITES:
-        _pending_writes = 0
-    return record_usage_locked(day_utc, model, prompt_tokens, completion_tokens, path=path, prompt_estimated=prompt_estimated, completion_estimated=completion_estimated)
+    """Record token usage with proper file locking.
+    
+    All writes are protected by both threading and file locks to prevent
+    race conditions when multiple subprocesses write concurrently.
+    """
+    return record_usage_locked(
+        day_utc,
+        model,
+        prompt_tokens,
+        completion_tokens,
+        path=path,
+        prompt_estimated=prompt_estimated,
+        completion_estimated=completion_estimated,
+    )
 
 
 def record_usage_locked(
@@ -131,7 +128,6 @@ def record_usage_locked(
     prompt_estimated: int = 0,
     completion_estimated: int = 0,
 ) -> dict[str, Any]:
-    """Locked ledger write; merges the accumulated pending in-memory delta."""
     if prompt_tokens < 0 or completion_tokens < 0:
         raise ValueError("actual token counts must be non-negative")
     ledger_path = _ledger_path(path)
@@ -163,7 +159,6 @@ def record_usage_locked(
 
 
 def day_total(day_utc: str, *, path: str | os.PathLike[str] | None = None) -> int:
-    """Return actual usage for a UTC day, failing closed on corruption."""
     ledger_path = _ledger_path(path)
     if not ledger_path.exists():
         return 0
@@ -177,7 +172,6 @@ def day_total(day_utc: str, *, path: str | os.PathLike[str] | None = None) -> in
 
 
 def get_budget_state(total: int, cap: int = CAP) -> str:
-    """Return ok, warn, shed_tier3, or stop for actual usage total."""
     if total >= cap:
         return "stop"
     if total >= cap * 0.9:
@@ -188,5 +182,4 @@ def get_budget_state(total: int, cap: int = CAP) -> str:
 
 
 def current_day_utc() -> str:
-    """Return the current UTC calendar date in ISO format."""
     return datetime.now(timezone.utc).date().isoformat()

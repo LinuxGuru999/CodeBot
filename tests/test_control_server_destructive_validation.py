@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import unittest
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -559,45 +560,44 @@ class TestStopAllSafeKill(unittest.TestCase):
                     )
 
     def test_stop_all_kills_orchestrator_via_pid_verification(self):
-        """stop-all must kill orchestrator using pgrep + /proc verification, not pkill."""
-        from codebot.control_server import ControlHandler
+        """stop-all must kill orchestrator using PID file + /proc verification, not pkill."""
+        from codebot.control_server import ControlHandler, STATE_DIR
+        import signal
+        import tempfile
 
-        with patch("codebot.control_server.BOT_REGISTRY", []), \
-             patch("codebot.control_server.subprocess.run") as mock_run, \
-             patch("codebot.control_server.os.kill") as mock_kill, \
-             patch("builtins.open", create=True) as mock_open:
+        # Create a temporary directory for PID files to isolate this test
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_state = Path(tmpdir)
+        # Write a fake orchestrator PID file with secure perms so the
+            # hardened _read_orchestrator_pid_file trusts it (Feedback #48/#51).
+            orch_pid_file = tmp_state / ".orchestrator.pid"
+            orch_pid_file.write_text("12345")
+            try:
+                import os as _os_chmod_stopall
+                _os_chmod_stopall.chmod(orch_pid_file, 0o600)
+            except OSError:
+                pass
 
-            # Mock pgrep finding orchestrator PID
-            mock_run.return_value = MagicMock(
-                stdout="12345\n",
-                returncode=0
-            )
+            # Patch STATE_DIR so the helper reads our temp PID file
+            with patch("codebot.control_server.STATE_DIR", tmp_state), \
+                 patch("codebot.control_server._resolve_control_state_dir", return_value=tmp_state), \
+                 patch("codebot.control_server.BOT_REGISTRY", []), \
+                 patch("codebot.control_server._atomic_signal_pid") as mock_signal, \
+                 patch("codebot.control_server._verify_orchestrator_cmdline", return_value=True):
 
-            # Mock /proc/PID/cmdline read
-            mock_file = MagicMock()
-            mock_file.read.return_value = b"python3\x00orchestrator.py\x00"
-            mock_file.__enter__ = lambda s: s
-            mock_file.__exit__ = MagicMock(return_value=False)
-            mock_open.return_value = mock_file
+                handler = self._make_handler("POST", "/bots/stop", body={"force": True})
+                responses = []
+                handler._json = lambda code, data, r=responses: r.append((code, data))
+                handler._auth = lambda: True
+                handler._read_json_body = lambda: ({"force": True}, None, None)
 
-            handler = self._make_handler("POST", "/bots/stop", body={"force": True})
-            responses = []
-            handler._json = lambda code, data, r=responses: r.append((code, data))
-            handler._auth = lambda: True
-            handler._read_json_body = lambda: ({"force": True}, None, None)
+                ControlHandler.do_POST(handler)
 
-            ControlHandler.do_POST(handler)
-
-            # Verify os.kill was called with SIGTERM for verified PID
-            import signal
-            mock_kill.assert_called()
-            # Check that at least one call was SIGTERM to PID 12345
-            kill_calls = mock_kill.call_args_list
-            found_sigterm = any(
-                call[0][0] == 12345 and call[0][1] == signal.SIGTERM
-                for call in kill_calls
-            )
-            self.assertTrue(found_sigterm, f"Expected SIGTERM to PID 12345, got calls: {kill_calls}")
+                # Verify _atomic_signal_pid was called with SIGTERM for PID 12345
+                mock_signal.assert_called_once()
+                call_args = mock_signal.call_args
+                self.assertEqual(call_args[0][0], 12345)
+                self.assertEqual(call_args[0][1], signal.SIGTERM)
 
     def test_stop_all_does_not_kill_unrelated_decoy_process(self):
         """Adversarial: stop-all must NOT kill unrelated processes that contain
@@ -642,12 +642,14 @@ class TestStopAllSafeKill(unittest.TestCase):
             # Verify decoy is alive before stop-all
             self.assertIsNone(decoy_proc.poll(), "Decoy process should be alive before stop-all")
             
-            # Invoke stop-all with empty BOT_REGISTRY so only orchestrator kill path runs
+            # Invoke stop-all with empty BOT_REGISTRY so only orchestrator kill path runs.
+            # The PID-file implementation never scans cmdlines, so a decoy with a
+            # similar cmdline cannot be touched. Patch the kill helpers to observe
+            # they are invoked without touching real processes.
             with patch("codebot.control_server.BOT_REGISTRY", []), \
+                 patch("codebot.control_server._safe_kill_orchestrator", return_value=(True, [])) as mock_orch_kill, \
                  patch("codebot.control_server.subprocess.run") as mock_run:
-                # Mock pgrep to return empty (no real orchestrator found)
-                mock_run.return_value = MagicMock(stdout="", returncode=1)
-                
+                mock_run.return_value = MagicMock(stdout="", returncode=0)
                 handler = self._make_handler("POST", "/bots/stop", body={"force": True})
                 responses = []
                 handler._json = lambda code, data, r=responses: r.append((code, data))

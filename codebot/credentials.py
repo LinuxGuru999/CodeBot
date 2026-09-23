@@ -22,10 +22,14 @@ Invariants
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
+import stat
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def get_github_token() -> str:
@@ -103,15 +107,31 @@ def setup_git_environment() -> dict[str, str]:
 def _read_secret_file(name: str) -> str:
     """Read secret from file with 4KB size bound to prevent memory exhaustion."""
     max_size = 4096  # 4KB limit
-    candidates = [
-        Path.home() / ".config" / "opencode" / "botnet.env",
-        Path.home() / ".config" / "codebot" / f"{name}.txt",
-    ]
+    custom_secret_path = os.environ.get("CODEBOT_SECRET_PATH")
+    if custom_secret_path:
+        candidates = [Path(custom_secret_path) / f"{name}.txt"]
+    else:
+        candidates = [
+            Path.home() / ".config" / "opencode" / "botnet.env",
+            Path.home() / ".config" / "codebot" / f"{name}.txt",
+        ]
     for path in candidates:
         if path.exists():
             try:
+                file_stat = path.stat()
+
+                # Validate file permissions: warn if group/other can access
+                mode = stat.S_IMODE(file_stat.st_mode)
+                insecure_mask = stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
+                if mode & insecure_mask:
+                    logger.warning(
+                        "Secret file %s has insecure permissions: %s (expected 0o600 or stricter)",
+                        path,
+                        oct(mode),
+                    )
+
                 # Check file size before reading
-                file_size = path.stat().st_size
+                file_size = file_stat.st_size
                 if file_size > max_size:
                     # Reject oversized files to prevent partial reads and potential memory issues
                     continue
@@ -119,7 +139,7 @@ def _read_secret_file(name: str) -> str:
                 # Read with size bound
                 with open(path, "r", encoding="utf-8") as f:
                     text = f.read(max_size)
-                    
+
                 text = text.strip()
                 if text:
                     for line in text.splitlines():

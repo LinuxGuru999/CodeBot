@@ -20,12 +20,12 @@ not assume identical behaviour across operating systems:
   multiple concurrent readers; LOCK_EX is exclusive; LOCK_NB makes either
   non-blocking (raises BlockingIOError/OSError on contention). Locks are
   associated with the open file description and released on close.
-- Windows (msvcrt.locking): mandatory byte-range locks. Only the first byte
-  (``LK_LOCK``/``LK_UNLCK`` over 1 byte) is locked as a proxy for the whole
-  file, so a non-cooperating reader that ignores locking can still read.
+- Windows (msvcrt.locking): mandatory byte-range locks. The lock is applied
+  to a fixed region starting at position 0. `flock()` saves the current
+  file pointer, seeks to 0 before acquiring or releasing the lock, and
+  restores the previous position in a finally block to prevent corruption.
   LOCK_SH is NOT natively supported and is treated as LOCK_EX (exclusive).
   LOCK_NB maps to a non-blocking attempt that raises OSError on contention.
-  Lock/unlock regions must match exactly or unlock silently fails.
 - Other platforms (no fcntl, no msvcrt): fail-open no-op with a one-time
   RuntimeWarning. Concurrent read-modify-write cycles are NOT serialized;
   callers relying on mutual exclusion must use the atomic tmp+replace write
@@ -55,7 +55,7 @@ try:
 except ImportError:
     _fcntl = None  # type: ignore[assignment]
 
-if _IS_WINDOWS:
+if _IS_WINDOWS:  # pragma: no cover (Windows-only)
     try:
         import msvcrt as _msvcrt
         _MSCRT_AVAILABLE = True
@@ -95,12 +95,14 @@ def flock(fd: int | TextIO, operation: int) -> None:
     if _FLOCK_AVAILABLE:
         # Unix path: use fcntl.flock directly
         _fcntl.flock(fd, operation)  # type: ignore[union-attr]
-    elif _MSCRT_AVAILABLE and _IS_WINDOWS:
+    elif _MSCRT_AVAILABLE and _IS_WINDOWS:  # pragma: no cover (Windows-only)
         # Windows path: use msvcrt.locking
         # Note: msvcrt.locking has different semantics than fcntl.flock:
         # - It locks a byte range, not the whole file
-        # - We lock a large region starting at current position
+        # - We lock a large region starting at position 0
         # - LOCK_SH is not supported; we treat it as LOCK_EX
+        # - File position is NOT preserved across lock/unlock calls on Windows.
+        #   Callers must not rely on file pointer position being maintained.
         non_blocking = bool(operation & LOCK_NB)
         op = operation & ~LOCK_NB
 
@@ -110,11 +112,13 @@ def flock(fd: int | TextIO, operation: int) -> None:
                 # msvcrt.LK_UNLCK unlocks previously locked region
                 _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)  # type: ignore[union-attr]
             else:
-                # Lock: try to lock bytes
-                # Save and restore position since locking affects it
-                pos = os.lseek(fd, 0, os.SEEK_CUR)
-                os.lseek(fd, 0, os.SEEK_SET)
+                # Lock: try to lock bytes from position 0
+                # Save current position and seek to 0 for the fixed-region lock.
+                # Position MUST be restored in a finally block to prevent corruption
+                # if locking fails or is interrupted (CB-406700-F085).
+                original_pos = os.lseek(fd, 0, os.SEEK_CUR)
                 try:
+                    os.lseek(fd, 0, os.SEEK_SET)
                     # Use LK_LOCK for exclusive lock. msvcrt does not have a separate
                     # non-blocking constant like LK_NBLCK. Instead, LK_LOCK raises
                     # OSError (errno 36, EDEADLOCK) if the lock would block.
@@ -130,17 +134,21 @@ def flock(fd: int | TextIO, operation: int) -> None:
                     # If it raised here, it's a real error (e.g., invalid fd), so re-raise.
                     raise
                 finally:
-                    os.lseek(fd, pos, os.SEEK_SET)
+                    # Always restore file position, even if locking raised OSError.
+                    # This prevents silent data corruption from a displaced fd offset.
+                    os.lseek(fd, original_pos, os.SEEK_SET)
         except OSError:
             raise
     else:
-        # Unsupported platform: warn once and proceed without locking
-        if not hasattr(flock, '_warned'):
+        # Unsupported platform: fail-open no-op with a one-time warning.
+        # Advisory locking cannot be provided here; callers still use atomic
+        # tmp+replace writes, but concurrent read-modify-write cycles are not
+        # serialized. Warn once so operators can see the degraded guarantee.
+        if not getattr(flock, "_warned", False):
             warnings.warn(
-                "File locking not available on this platform. "
-                "Concurrent access to state files may cause corruption.",
+                "File locking not available on this platform; continuing without advisory locks",
                 RuntimeWarning,
-                stacklevel=2
+                stacklevel=2,
             )
-            flock._warned = True  # type: ignore[attr-defined]
-        # No-op: allow operation to proceed without actual locking
+            setattr(flock, "_warned", True)
+        return

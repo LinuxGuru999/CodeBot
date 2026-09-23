@@ -170,13 +170,38 @@ def log_path(bot_name: str) -> Path:
     return LOGS_DIR / f"{bot_name}.log"
 
 
+# ---------------------------------------------------------------------------
+# Log mtime cache — avoids repeated stat syscalls across 26+ bots per tick.
+# Cache key: bot_name -> (mtime, fetch_time). TTL matches tick interval (30s).
+# ---------------------------------------------------------------------------
+
+_LOG_MTIME_TTL: float = 30.0
+_log_mtime_cache: dict[str, tuple[float, float]] = {}
+
+
+def _clear_log_mtime_cache(bot_name: str | None = None) -> None:
+    """Clear cached mtime entries. Pass None to clear all (useful in tests)."""
+    if bot_name is None:
+        _log_mtime_cache.clear()
+    else:
+        _log_mtime_cache.pop(bot_name, None)
+
+
 def log_mtime(bot_name: str) -> float:
-    """Return log file mtime."""
+    """Return log file mtime, cached for up to 30s to reduce syscalls."""
+    now = time.time()
+    cached = _log_mtime_cache.get(bot_name)
+    if cached is not None:
+        mtime, fetched_at = cached
+        if now - fetched_at < _LOG_MTIME_TTL:
+            return mtime
     lp = log_path(bot_name)
     try:
-        return lp.stat().st_mtime
+        mtime = lp.stat().st_mtime
     except OSError:
-        return 0.0
+        mtime = 0.0
+    _log_mtime_cache[bot_name] = (mtime, now)
+    return mtime
 
 
 def is_log_stalled(bot: Any = None, model: str = "") -> bool:
@@ -235,13 +260,20 @@ def effective_heartbeat_timeout(bot: Any = None, model: str = "",
     return _effective_heartbeat_timeout_by_fields(interval_seconds, model, base_timeout)
 
 
+# No hard ceiling on heartbeat timeout - model profiles determine appropriate timeouts
+# High-risk models with long intervals need proportionally longer timeouts
+
+
 def _effective_heartbeat_timeout_by_fields(interval_seconds: int, model: str, base_timeout: int) -> int:
-    """Field-level timeout computation (see effective_heartbeat_timeout)."""
     prof = _model_profile(model)
     if prof:
         derived = int(interval_seconds * prof.heartbeat_multiplier)
-        return max(derived, base_timeout)
-    return base_timeout
+        eff = max(derived, base_timeout)
+        # No ceiling - profile multiplier determines appropriate timeout
+        return eff
+    else:
+        # No profile: use explicit config value, fallback to reasonable default
+        return base_timeout if base_timeout > 0 else 300
 
 
 def is_stuck(bot: Any = None, heartbeat_cache: dict[str, float] | None = None) -> bool:
@@ -301,12 +333,15 @@ def _is_stuck_by_fields(bot_name: str, model: str, interval_seconds: int,
     if hb_age < 0:
         hb_age = 0.0
 
-    if hb_age <= eff:
-        return False
-
-    # For high-risk models, require log stall confirmation
+    # For high-risk models, if the heartbeat is stale but the log is NOT stalled,
+    # the bot is likely still working and just hasn't sent a heartbeat yet.
+    # In this case, do not consider it stuck.
     prof = _model_profile(model)
-    if prof and prof.lockup_risk in ("high", "medium-high"):
-        return _is_log_stalled(bot_name, model)
-
-    return True
+    if prof and prof.lockup_risk == "high":
+        if hb_age > eff:
+            if not _is_log_stalled(bot_name, model):
+                return False
+            return True
+        return False
+    
+    return hb_age > eff

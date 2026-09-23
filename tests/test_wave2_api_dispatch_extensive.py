@@ -467,6 +467,44 @@ def test_auto_commit_gatekeeper_blocked_Given_gatekeeper_When_verify_not_complet
             res = ar._auto_commit("bot-a", ["Monitor-Manager-Python/file.py"], "CB-1")
             assert res is False
 
+def test_auto_commit_gatekeeper_exception_Given_RuntimeError_When_verify_Then_blocked(tmp_path: Path, monkeypatch):
+    """Given gatekeeper raises RuntimeError
+    When _auto_commit
+    Then commit is blocked (False) and logs blocking message."""
+    mock_adapter = MagicMock()
+    mock_paths = MagicMock()
+    mock_paths.state_dir = tmp_path
+    mock_paths.repository_root = tmp_path
+    mock_adapter.paths.return_value = mock_paths
+    monkeypatch.setattr(ar, "_adapter_instance", mock_adapter)
+    mock_gk = MagicMock()
+    mock_gk.verify_ticket.side_effect = RuntimeError("gatekeeper failure")
+    with patch.dict("sys.modules", {"codebot.gatekeeper": MagicMock(Gatekeeper=lambda **kw: mock_gk)}):
+        import codebot.gatekeeper as gk_mod
+        with patch.object(gk_mod, "Gatekeeper", lambda **kw: mock_gk):
+            (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+            res = ar._auto_commit("bot-a", ["Monitor-Manager-Python/file.py"], "CB-1")
+            assert res is False
+
+def test_auto_commit_only_on_complete_decision_Given_non_complete_When_verify_Then_blocked(tmp_path: Path, monkeypatch):
+    """Given gatekeeper returns non-COMPLETE decision (e.g., REWORK)
+    When _auto_commit
+    Then commit is blocked - only explicit COMPLETE allows commit."""
+    mock_adapter = MagicMock()
+    mock_paths = MagicMock()
+    mock_paths.state_dir = tmp_path
+    mock_paths.repository_root = tmp_path
+    mock_adapter.paths.return_value = mock_paths
+    monkeypatch.setattr(ar, "_adapter_instance", mock_adapter)
+    mock_gk = MagicMock()
+    mock_gk.verify_ticket.return_value = {"decision": "REWORK", "failed_gates": ["quality"]}
+    with patch.dict("sys.modules", {"codebot.gatekeeper": MagicMock(Gatekeeper=lambda **kw: mock_gk)}):
+        import codebot.gatekeeper as gk_mod
+        with patch.object(gk_mod, "Gatekeeper", lambda **kw: mock_gk):
+            (tmp_path / "Monitor-Manager-Python").mkdir(parents=True, exist_ok=True)
+            res = ar._auto_commit("bot-a", ["Monitor-Manager-Python/file.py"], "CB-1")
+            assert res is False
+
 # ===========================================================================
 # set_project_adapter + _resolve_api_url + _resolve_api_key etc.
 # ===========================================================================
@@ -2168,6 +2206,52 @@ def test_log_bot_statuses_preloaded_Given_preloaded_When_log_Then_uses_it(tmp_pa
     with caplog.at_level(logging.INFO):
         ds.log_bot_statuses(bots, preloaded_statuses=pre)
         assert any("bot-pre" in r.message for r in caplog.records)
+
+
+def test_log_bot_statuses_with_sample_size(tmp_path: Path, caplog):
+    """Given sample_size
+    When log_bot_statuses
+    Then only logs sampled subset."""
+    # Create 10 alive bots with status files
+    bots = {}
+    for i in range(10):
+        bot = FakeBot(f"bot-{i}", alive=True)
+        bot.process = FakeProcess(alive=True)
+        bots[f"bot-{i}"] = bot
+        status = tmp_path / f"bot-{i}.status.json"
+        status.write_text(json.dumps({"current_task": f"task-{i}", "iteration": i, "files_touched": [], "updated_at": time.time()}))
+    
+    with patch.object(ds, "STATE_DIR", tmp_path):
+        import logging
+        with caplog.at_level(logging.INFO):
+            ds.log_bot_statuses(bots, sample_size=3)
+    
+    # Should only log 3 bots
+    status_logs = [r for r in caplog.records if "[status]" in r.message]
+    assert len(status_logs) == 3
+
+
+def test_log_bot_statuses_sample_size_none_logs_all(tmp_path: Path, caplog):
+    """Given sample_size=None
+    When log_bot_statuses
+    Then logs all bots (backward compatible)."""
+    # Create 5 alive bots with status files
+    bots = {}
+    for i in range(5):
+        bot = FakeBot(f"bot-{i}", alive=True)
+        bot.process = FakeProcess(alive=True)
+        bots[f"bot-{i}"] = bot
+        status = tmp_path / f"bot-{i}.status.json"
+        status.write_text(json.dumps({"current_task": f"task-{i}", "iteration": i, "files_touched": [], "updated_at": time.time()}))
+    
+    with patch.object(ds, "STATE_DIR", tmp_path):
+        import logging
+        with caplog.at_level(logging.INFO):
+            ds.log_bot_statuses(bots, sample_size=None)
+    
+    # Should log all 5 bots
+    status_logs = [r for r in caplog.records if "[status]" in r.message]
+    assert len(status_logs) == 5
 
 def test_run_all_dispatchers_Given_mock_When_call_Then_delegates(monkeypatch):
     """Given mock workforce

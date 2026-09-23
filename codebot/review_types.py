@@ -32,9 +32,15 @@ Invariants
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any
+
+
+def generate_review_attempt_id() -> str:
+    """Generate a unique review attempt identifier."""
+    return f"ra_{uuid.uuid4().hex[:12]}"
 
 
 class FindingSeverity(str, Enum):
@@ -193,6 +199,15 @@ def risk_class_for_score(score: int) -> RiskClass:
     return RiskClass.LOW
 
 
+class FailureOrigin(str, Enum):
+    """Where the defect originated, for rework routing."""
+
+    IMPLEMENTATION_ERROR = "IMPLEMENTATION_ERROR"
+    PLANNING_ERROR = "PLANNING_ERROR"
+    DECOMPOSITION_ERROR = "DECOMPOSITION_ERROR"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass
 class StructuredFinding:
     """A single evidence-backed review finding.
@@ -214,6 +229,7 @@ class StructuredFinding:
     recommended_fix: str = ""
     resolved: bool = False
     reviewer: str = ""
+    failure_origin: str = ""  # FailureOrigin value or empty
     created_at: float = field(default_factory=time.time)
 
     def is_blocking(self, blocking: frozenset[FindingSeverity] = DEFAULT_BLOCKING_SEVERITIES) -> bool:
@@ -228,6 +244,8 @@ class StructuredFinding:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> StructuredFinding:
         data = dict(data)
+        if "finding" not in data and "description" in data:
+            data["finding"] = data["description"]
         data["severity"] = parse_severity(str(data.get("severity", "")))
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in valid_keys}
@@ -343,21 +361,35 @@ class CompletionEvidence:
 
 @dataclass
 class ReviewDecision:
-    """Aggregate verdict from one reviewer pass (independent or adversarial).
+    """Aggregate verdict from one reviewer pass (primary or specialist).
 
     The verdict string alone is insufficient for gating; consumers must inspect
     `findings`, `checklist`, and `phase`. A verdict of APPROVE that still
     carries an unresolved BLOCKER finding is invalid and must be treated as
-    REWORK by the gatekeeper.
+    REWORK by the completion gate.
+
+    Reviews are scoped to a specific implementation artifact via
+    `implementation_attempt_id` and `implementation_revision` (SHA/hash).
+    Stale reviews from prior attempts cannot satisfy current completion.
     """
 
     verdict: str  # "APPROVE" | "REWORK" | "ESCALATE"
     phase: ReviewPhase
     reviewer: str
     ticket_id: str = ""
+    review_attempt_id: str = ""
+    implementation_attempt_id: int = 0
+    implementation_revision: str = ""  # SHA or content hash, NOT ticket.updated_at
     findings: list[StructuredFinding] = field(default_factory=list)
     checklist: ReviewChecklist = field(default_factory=ReviewChecklist)
     summary: str = ""
+    specialist_type: str = ""  # For ESCALATE: which specialist is needed
+    specialist_reason: str = ""  # For ESCALATE: why
+    specialist_evidence: str = ""  # For ESCALATE: what evidence
+    specialist_question: str = ""  # For ESCALATE: question for specialist
+    rework_target: str = ""  # IMPLEMENT | PLANNING | DECOMP
+    failure_origin: str = ""  # FailureOrigin value
+    is_legacy: bool = False  # True if missing implementation_revision
     completed_at: float = field(default_factory=time.time)
 
     def blocking_findings(self, blocking: frozenset[FindingSeverity] = DEFAULT_BLOCKING_SEVERITIES) -> list[StructuredFinding]:
@@ -377,9 +409,19 @@ class ReviewDecision:
             "phase": self.phase.value,
             "reviewer": self.reviewer,
             "ticket_id": self.ticket_id,
+            "review_attempt_id": self.review_attempt_id,
+            "implementation_attempt_id": self.implementation_attempt_id,
+            "implementation_revision": self.implementation_revision,
             "findings": [f.to_dict() for f in self.findings],
             "checklist": self.checklist.to_dict(),
             "summary": self.summary,
+            "specialist_type": self.specialist_type,
+            "specialist_reason": self.specialist_reason,
+            "specialist_evidence": self.specialist_evidence,
+            "specialist_question": self.specialist_question,
+            "rework_target": self.rework_target,
+            "failure_origin": self.failure_origin,
+            "is_legacy": self.is_legacy,
             "completed_at": self.completed_at,
         }
 
@@ -392,14 +434,26 @@ class ReviewDecision:
             phase = ReviewPhase.INDEPENDENT_REVIEW
         findings = [StructuredFinding.from_dict(f) for f in (data.get("findings") or []) if isinstance(f, dict)]
         checklist = ReviewChecklist.from_dict(data.get("checklist") or {})
+        impl_revision = str(data.get("implementation_revision", ""))
+        is_legacy = not bool(impl_revision)
         return cls(
             verdict=str(data.get("verdict", "REWORK")),
             phase=phase,
             reviewer=str(data.get("reviewer", "")),
             ticket_id=str(data.get("ticket_id", "")),
+            review_attempt_id=str(data.get("review_attempt_id", "")),
+            implementation_attempt_id=int(data.get("implementation_attempt_id", 0)),
+            implementation_revision=impl_revision,
             findings=findings,
             checklist=checklist,
             summary=str(data.get("summary", "")),
+            specialist_type=str(data.get("specialist_type", "")),
+            specialist_reason=str(data.get("specialist_reason", "")),
+            specialist_evidence=str(data.get("specialist_evidence", "")),
+            specialist_question=str(data.get("specialist_question", "")),
+            rework_target=str(data.get("rework_target", "")),
+            failure_origin=str(data.get("failure_origin", "")),
+            is_legacy=bool(data.get("is_legacy", is_legacy)),
             completed_at=float(data.get("completed_at", time.time())),
         )
 

@@ -59,11 +59,11 @@ def test_tasklog_tail_capped_at_100kb(agent_env):
     tasklog_path = logs_dir / f"{name}.tasklog"
     # Count actual total newlines in the full file
     total_lines = _count_newlines_in_file(tasklog_path)
-    # Count actual newlines in last 64KB using same decode logic as impl
+    # Count actual newlines in last 64KB using raw byte counting per spec
     with open(tasklog_path, "rb") as f:
         f.seek(max(0, size_1mb - 65536))
         tail_data = f.read(65536)
-    expected_tail_lines = tail_data.decode("utf-8", errors="ignore").count("\n")
+    expected_tail_lines = tail_data.count(b"\n")
 
     # The count must NOT equal total lines (proving we didn't read all)
     assert agent["tasklog_lines"] != total_lines, (
@@ -93,8 +93,12 @@ def test_small_tasklog_exact_count(agent_env):
     )
 
 
-def test_collect_agents_under_500ms_with_26x1MB(agent_env):
+def test_collect_agents_under_500ms_with_26x1MB(agent_env, monkeypatch):
     """26 agents x 1MB tasklogs must complete in <500ms."""
+    from codebot import botop
+
+    monkeypatch.setattr(botop, "_find_all_api_pids", lambda: {})
+
     project_root, state_dir, logs_dir = agent_env
     size_1mb = 1024 * 1024
     for i in range(26):

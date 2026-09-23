@@ -99,7 +99,7 @@ def load_bot_registry(adapter: Any | None = None) -> list:
             logger.warning("Failed to load registry from adapter: %s", e)
     return [
         BotConfig("discovery", "bug_hunter.md", 1800, 3600, "default", clean_exit_wait=True),
-        BotConfig("implementer", "general_implementer.md", 300, 750, "default", clean_exit_wait=True),
+        BotConfig("implementer", "implementer.md", 300, 750, "default", clean_exit_wait=True),
         BotConfig("reviewer", "correctness_reviewer.md", 600, 1500, "default", clean_exit_wait=True),
     ]
 

@@ -250,7 +250,7 @@ class TestGatekeeperCommitsOnComplete:
         store.close()
 
         passing = [__import__("codebot.quality_gate", fromlist=["GateEvaluation"]).GateEvaluation(
-            "build", __import__("codebot.quality_gate", fromlist=["GateResult"]).GateResult.PASS,
+            "build", __import__("codebot.quality_gate", fromlist=["GateStatus"]).GateStatus.PASS,
             "echo", "ok", 1.0, True)]
         shared = TSStore(state_dir / "tickets.json")
         with patch("codebot.quality_gate.run_quality_gates_with_cache", return_value=(True, passing)):

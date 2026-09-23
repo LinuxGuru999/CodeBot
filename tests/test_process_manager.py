@@ -19,6 +19,7 @@ from codebot.process_manager import (
     read_heartbeat,
     _is_queued,
     _count_queued_bots,
+    _launch_bot_subprocess,
 )
 from codebot.dispatch_service import batch_read_bot_states
 
@@ -217,6 +218,66 @@ def test_prepare_prompt_with_context_locks_file(tmp_path):
 
     # Should get the content (may have git context appended)
     assert "locked content test" in content
+
+
+def test_pid_file_atomic_write_no_partial_reads(tmp_path, monkeypatch):
+    """Verify PID file is written atomically via tmp+chmod+rename pattern.
+    
+    This ensures readers never see partial content or wrong permissions.
+    """
+    import stat
+    from unittest.mock import MagicMock, patch
+    import subprocess as sp_module
+
+    monkeypatch.setattr("codebot.process_manager._resolve_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("codebot.process_manager._resolve_bots_dir", lambda: tmp_path / "bots")
+    monkeypatch.setattr("codebot.process_manager.LOGS_DIR", tmp_path / "logs")
+
+    # Create necessary directories
+    (tmp_path / "bots").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+
+    bot_config = BotConfig(
+        name="atomic_test_bot",
+        prompt_file="test.md",
+        interval_seconds=60,
+        heartbeat_timeout=120,
+    )
+    bot_state = BotState(config=bot_config)
+
+    # Prepare required files
+    heartbeat_file = tmp_path / "atomic_test_bot.heartbeat"
+    ckpt_file = tmp_path / "atomic_test_bot.checkpoint.json"
+    message = "test mission message"
+
+    # Mock subprocess.Popen to avoid actually launching a process
+    mock_process = MagicMock()
+    mock_process.pid = 12345
+
+    with patch("codebot.process_manager.subprocess.Popen", return_value=mock_process):
+        with patch("codebot.process_manager.logger"):
+            result = _launch_bot_subprocess(
+                bot_state, message, heartbeat_file, ckpt_file, state_data={}
+            )
+
+    assert result is True
+
+    pid_file = tmp_path / "atomic_test_bot.pid"
+    
+    # Verify PID file exists and contains correct PID
+    assert pid_file.exists(), "PID file should exist after launch"
+    content = pid_file.read_text(encoding="utf-8")
+    assert content == "12345", f"PID file should contain '12345', got '{content}'"
+
+    # Verify permissions are 0o600
+    file_stat = pid_file.stat()
+    expected_mode = stat.S_IRUSR | stat.S_IWUSR  # 0o600
+    actual_mode = stat.S_IMODE(file_stat.st_mode)
+    assert actual_mode == expected_mode, f"PID file mode should be 0o600, got {oct(actual_mode)}"
+
+    # Verify no tmp file remains
+    tmp_pid = tmp_path / "atomic_test_bot.pid.tmp"
+    assert not tmp_pid.exists(), "Temp PID file should not remain after atomic write"
 
 
 # -----------------------------------------------------------------------

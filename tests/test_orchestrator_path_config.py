@@ -241,6 +241,34 @@ class TestGlobalsNotMutatedByAdapter:
             f"set_project_adapter created new module attrs: {new_attrs}"
         )
 
+    def test_set_project_adapter_does_not_mutate_module_globals(self, tmp_path):
+        """Calling set_project_adapter must not create module-level BOTS_DIR attribute.
+        
+        Verifies that orchestrator.BOTS_DIR is proxied via __getattr__, not directly
+        assigned to the module __dict__. This proves dependency injection works
+        without global mutation.
+        """
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        mock_paths = MagicMock()
+        mock_paths.repository_root = tmp_path / "repo"
+        mock_paths.state_dir = tmp_path / "state"
+        mock_paths.logs_dir = tmp_path / "logs"
+
+        mock_adapter = MagicMock()
+        mock_adapter.paths.return_value = mock_paths
+
+        orch.set_project_adapter(mock_adapter)
+
+        # BOTS_DIR should be accessible via __getattr__
+        assert orch.BOTS_DIR == tmp_path / "repo"
+        # But BOTS_DIR must NOT be in the module's __dict__ (proves __getattr__ proxy)
+        assert "BOTS_DIR" not in orch.__dict__, (
+            "BOTS_DIR should not be in orchestrator.__dict__; "
+            "it must be resolved via __getattr__ proxy"
+        )
+
     def test_set_adapter_does_not_touch_process_manager_globals(self, tmp_path):
         """set_project_adapter must not change any global in process_manager."""
         import codebot.process_manager as pm

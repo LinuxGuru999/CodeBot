@@ -425,15 +425,16 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         self.assertIn("unknown bot", body.get("error", "").lower())
 
     def test_stop_pkill_pattern_is_anchored_for_valid_bot(self):
-        """Stop kill path must target the PID file, never a pgrep regex sweep."""
+        """Stop kill path must use PID-file verified kill, never a pgrep regex sweep."""
         from codebot.control_server import ControlHandler
-        import re
 
         mock_bot = MagicMock()
         mock_bot.name = "my-bot"
 
         with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]):
-            with patch("codebot.control_server.subprocess.run") as mock_run:
+            with patch("codebot.control_server._safe_kill_bot_process",
+                       return_value=(True, [1234])) as mock_kill, \
+                 patch("codebot.control_server.subprocess.run") as mock_run:
                 handler = self._make_handler(
                     "POST", "/bots/stop", body={"bots": ["my-bot"], "force": True}
                 )
@@ -444,12 +445,11 @@ class TestCommandInjectionPrevention(unittest.TestCase):
 
                 ControlHandler.do_POST(handler)
 
-                mock_run.assert_called()
-                call_args = mock_run.call_args
-                cmd = call_args[0][0]
-                # Pattern should be anchored with api_runner\.py prefix and escaped name
-                expected_pattern = f"api_runner\\.py {re.escape('my-bot')}"
-                self.assertIn(expected_pattern, cmd[2])
+                # PID-verified kill path is used; no shell/pgrep sweep.
+                mock_kill.assert_called_once_with("my-bot", timeout=5)
+                mock_run.assert_not_called()
+                self.assertEqual(responses[0][0], 200)
+                self.assertIn(1234, responses[0][1].get("killed_pids", []))
 
     def test_stop_pkill_escapes_regex_metachars_literal_match(self):
         """Stop must escape regex metacharacters so 'test.*' matches literally, not 'testXprocess'."""

@@ -113,6 +113,119 @@ class TestPlanStore:
         assert reused.reused_from_ticket_id == "CB-source"
         assert reused.fresh_verification_required
 
+    def test_save_dict_with_depth(self, tmp_path):
+        """save(dict) with depth+ticket_id writes primary and loads as ImplementationPlan."""
+        store = PlanStore(tmp_path)
+        plan_dict = generate_plan("CB-DICT-1", "medium", ["b.py"], [], ["dict test"]).to_dict()
+        store.save(plan_dict)
+        loaded = store.load("CB-DICT-1")
+        assert loaded is not None
+        assert not isinstance(loaded, dict)
+        assert loaded.ticket_id == "CB-DICT-1"
+        assert loaded.depth == PlanDepth.STANDARD
+        # Verify legacy sync
+        assert (tmp_path / "plans" / "CB-DICT-1.plan.json").exists()
+        assert (tmp_path / "plans" / "CB-DICT-1.json").exists()
+
+    def test_save_dict_without_depth_wrapper_fallback(self, tmp_path):
+        """save(dict) without depth uses fallback/wrapper logic."""
+        store = PlanStore(tmp_path)
+        # Bare dict without depth/ticket_id structure expected by ImplPlan
+        bare_dict = {"custom_key": "value", "ticket_id": "CB-BARE-1"}
+        store.save(bare_dict)
+        loaded = store.load("CB-BARE-1")
+        assert loaded is not None
+        # Bare dicts are stored as-is or wrapped depending on branch; load returns dict if not ImplPlan
+        assert isinstance(loaded, dict) or (hasattr(loaded, 'ticket_id') and loaded.ticket_id == "CB-BARE-1")
+        
+        # Wrapper style {ticket_id, plan: {...}}
+        wrapper_dict = {"ticket_id": "CB-WRAP-1", "plan": {"foo": "bar"}}
+        store.save(wrapper_dict)
+        loaded_wrap = store.load("CB-WRAP-1")
+        assert loaded_wrap is not None
+        # Verify files exist
+        assert (tmp_path / "plans" / "CB-BARE-1.plan.json").exists()
+        assert (tmp_path / "plans" / "CB-WRAP-1.plan.json").exists()
+        # Check legacy sync for these paths (if implemented/fixed)
+        assert (tmp_path / "plans" / "CB-BARE-1.json").exists()
+        assert (tmp_path / "plans" / "CB-WRAP-1.json").exists()
+
+    def test_save_two_arg_dict_with_depth(self, tmp_path):
+        """save(ticket_id, dict) with depth writes primary+legacy."""
+        store = PlanStore(tmp_path)
+        plan_dict = generate_plan("CB-2ARG-D", "high", ["c.py"], [], ["two arg dict"]).to_dict()
+        store.save("CB-2ARG-D", plan_dict)
+        loaded = store.load("CB-2ARG-D")
+        assert loaded is not None
+        assert not isinstance(loaded, dict)
+        assert loaded.ticket_id == "CB-2ARG-D"
+        assert (tmp_path / "plans" / "CB-2ARG-D.plan.json").exists()
+        assert (tmp_path / "plans" / "CB-2ARG-D.json").exists()
+
+    def test_save_two_arg_dict_without_depth(self, tmp_path):
+        """save(ticket_id, dict) without depth creates wrapper."""
+        store = PlanStore(tmp_path)
+        arbitrary_dict = {"step": 1, "action": "do something"}
+        store.save("CB-2ARG-W", arbitrary_dict)
+        loaded = store.load("CB-2ARG-W")
+        assert loaded is not None
+        # Load returns the inner plan dict or wrapper depending on implementation
+        # The ticket requires legacy sync for this path too
+        assert (tmp_path / "plans" / "CB-2ARG-W.plan.json").exists()
+        assert (tmp_path / "plans" / "CB-2ARG-W.json").exists()
+
+    def test_save_two_arg_implementation_plan(self, tmp_path):
+        """save(ticket_id, ImplementationPlan) writes primary+legacy."""
+        store = PlanStore(tmp_path)
+        plan = generate_plan("CB-2ARG-IP", "low", ["d.py"], [], ["two arg ip"])
+        store.save("CB-2ARG-IP", plan)
+        loaded = store.load("CB-2ARG-IP")
+        assert loaded is not None
+        assert not isinstance(loaded, dict)
+        assert loaded.ticket_id == "CB-2ARG-IP"
+        assert (tmp_path / "plans" / "CB-2ARG-IP.plan.json").exists()
+        assert (tmp_path / "plans" / "CB-2ARG-IP.json").exists()
+
+    def test_save_raises_type_error(self, tmp_path):
+        """save raises TypeError on unsupported types."""
+        store = PlanStore(tmp_path)
+        with pytest.raises(TypeError):
+            store.save(123)
+        with pytest.raises(TypeError):
+            store.save(None)
+        with pytest.raises(TypeError):
+            store.save("CB-ID", 123)
+        with pytest.raises(TypeError):
+            store.save("CB-ID", "bad")
+
+    def test_legacy_path_sync_on_all_save_paths(self, tmp_path):
+        """Comprehensive check that legacy .json is synced for all valid save signatures."""
+        store = PlanStore(tmp_path)
+        
+        # 1. ImplementationPlan single arg
+        p1 = generate_plan("CB-SYNC-1", "low", ["e.py"], [], ["sync 1"])
+        store.save(p1)
+        assert (tmp_path / "plans" / "CB-SYNC-1.json").exists()
+        
+        # 2. Dict with depth single arg
+        p2_dict = generate_plan("CB-SYNC-2", "medium", ["f.py"], [], ["sync 2"]).to_dict()
+        store.save(p2_dict)
+        assert (tmp_path / "plans" / "CB-SYNC-2.json").exists()
+        
+        # 3. Two-arg ImplementationPlan
+        p3 = generate_plan("CB-SYNC-3", "high", ["g.py"], [], ["sync 3"])
+        store.save("CB-SYNC-3", p3)
+        assert (tmp_path / "plans" / "CB-SYNC-3.json").exists()
+        
+        # 4. Two-arg dict with depth
+        p4_dict = generate_plan("CB-SYNC-4", "critical", ["h.py"], [], ["sync 4"]).to_dict()
+        store.save("CB-SYNC-4", p4_dict)
+        assert (tmp_path / "plans" / "CB-SYNC-4.json").exists()
+        
+        # 5. Two-arg dict without depth (wrapper style)
+        store.save("CB-SYNC-5", {"action": "test"})
+        assert (tmp_path / "plans" / "CB-SYNC-5.json").exists()
+
 
 class TestPlanningTelemetry:
     def test_summary_reports_duration_and_rework_rate(self, tmp_path):

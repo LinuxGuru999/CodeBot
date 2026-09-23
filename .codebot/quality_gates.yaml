@@ -1,6 +1,11 @@
 # CodeBot Quality Gate Policy
 # Defines required and conditional verification gates for ticket completion.
 # Per CODEBOT-ROADMAP.md §5: no ticket reaches COMPLETE without passing these.
+#
+# Gate execution: exit code 0 = PASS, non-zero = FAIL.
+# Gates with `required: false` are advisory — they log results but do not
+# block the REVIEW→COMPLETE transition. Use this for checks that require
+# tooling not always available (Playwright, axe-core) or human judgment.
 
 required:
   - name: build
@@ -10,8 +15,8 @@ required:
 
 conditional:
   security_boundary:
-    - name: security_review
-      command: "echo 'requires adversarial security review'"
+    - name: security_review_verdict
+      command: "python3 scripts/gate_checks.py reviewer_verdict {ticket_id} security_reviewer {state_dir}"
     - name: adversarial_test
       command: "python3 -m pytest -q -k security {test_dirs}"
 
@@ -31,31 +36,36 @@ conditional:
 
   documentation_impact:
     - name: documentation_review
-      command: "echo 'verify docs updated per Same-PR rule'"
+      command: "python3 scripts/gate_checks.py docs_changed {changed_files}"
+      required: false
 
   frontend_change:
-    - name: ui_review
-      command: "echo 'requires UI quality review'"
+    - name: ui_review_verdict
+      command: "python3 scripts/gate_checks.py reviewer_verdict {ticket_id} ux_reviewer {state_dir}"
+      required: false
     - name: responsive_test
       command: "python3 -m pytest -q -k responsive {test_dirs}"
     - name: visual_regression
-      command: "echo 'requires visual regression baseline comparison'"
+      command: "python3 -m pytest -q -k visual {test_dirs}"
+      required: false
 
   accessibility_scan:
     - name: a11y_check
-      command: "echo 'requires WCAG accessibility scan'"
+      command: "python3 -m pytest -q -k a11y {test_dirs}"
+      required: false
 
   e2e_browser:
     - name: browser_e2e
-      command: "echo 'requires Playwright E2E test run'"
+      command: "python3 -m pytest -q -k e2e {test_dirs}"
+      required: false
 
   deployment_smoke:
     - name: smoke_test
-      command: "echo 'requires deployment smoke test'"
+      command: "python3 scripts/gate_checks.py smoke_import {changed_files}"
 
   auth_security_review:
-    - name: auth_review
-      command: "echo 'requires adversarial auth security review'"
+    - name: auth_review_verdict
+      command: "python3 scripts/gate_checks.py reviewer_verdict {ticket_id} security_reviewer {state_dir}"
 
   tenant_scope_change:
     - name: isolation_tests
@@ -63,4 +73,5 @@ conditional:
 
   performance_budget:
     - name: budget_check
-      command: "echo 'requires performance budget verification'"
+      command: "python3 -m pytest -q -k performance {test_dirs}"
+      required: false

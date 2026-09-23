@@ -15,6 +15,32 @@ every accepted change meets minimum standards (build, tests, lint, types)
 and conditional standards (security review for boundary changes, migration
 tests for data changes, benchmarks for performance-sensitive code).
 
+YAML Schema
+-----------
+Gate definitions are loaded from YAML files with the following structure:
+
+    gates:
+      - name: build                    # Required: unique gate identifier
+        check_type: command            # Optional: 'command', 'lint', 'test' (default: 'command')
+        command: make build            # Required: shell command to execute
+        timeout: 120                   # Optional: seconds before timeout (default: 120)
+        pass_criteria: exit_code==0    # Optional: success condition (default: 'exit_code==0')
+
+Example policy file (.codebot/quality_gates.yaml):
+
+    required:
+      - name: build
+        command: python3 -m py_compile {file}
+      - name: unit_tests
+        command: python3 -m pytest -q {test_dirs}
+    conditional:
+      security_boundary:
+        - name: security_review_verdict
+          command: python3 scripts/gate_checks.py reviewer_verdict {ticket_id}
+      data_migration:
+        - name: migration_test
+          command: python3 -m pytest -q -k migration {test_dirs}
+
 Invariants
 ----------
 - stdlib-only (json, subprocess, re, pathlib, time, enum, dataclasses)
@@ -79,11 +105,33 @@ def _sigchld_dfl():
                 pass
 
 
-class GateResult(str, Enum):
+class GateStatus(str, Enum):
+    """Enumeration of possible gate execution statuses."""
     PASS = "pass"
     FAIL = "fail"
     SKIP = "skip"
     ERROR = "error"
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """Simplified result of a quality gate evaluation.
+    
+    This is the foundational data structure for gate results, containing
+    the essential information needed to determine if a gate passed.
+    
+    Attributes:
+        gate_name: Name of the gate (e.g., 'build', 'unit_tests')
+        passed: Whether the gate passed
+        output: Captured stdout/stderr from gate execution
+        duration_ms: Execution time in milliseconds
+        error: Error message if gate failed or errored, empty string otherwise
+    """
+    gate_name: str
+    passed: bool
+    output: str
+    duration_ms: float
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,7 +149,7 @@ class GateEvaluation:
         error_message: Error details if result is ERROR
     """
     gate_name: str
-    result: GateResult
+    result: GateStatus
     command: str
     output: str
     duration_ms: float
@@ -112,6 +160,108 @@ class GateEvaluation:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         return d
+
+
+@dataclass(frozen=True)
+class GateReport:
+    """Aggregated report of multiple gate evaluations.
+    
+    Attributes:
+        gate_results: List of individual gate evaluation results
+        total_gates: Total number of gates executed
+        passed_gates: Number of gates that passed
+        failed_gates: Number of gates that failed
+        error_gates: Number of gates that errored
+        skipped_gates: Number of gates that were skipped
+        all_passed: Whether all required gates passed
+        duration_ms: Total execution time in milliseconds
+        summary: Human-readable summary string with counts (e.g., '5 passed, 0 failed, 1 warning')
+    """
+    gate_results: list[GateEvaluation]
+    total_gates: int
+    passed_gates: int
+    failed_gates: int
+    error_gates: int
+    skipped_gates: int
+    all_passed: bool
+    duration_ms: float
+    summary: str = ""
+
+    @classmethod
+    def from_evaluations(cls, evaluations: list[GateEvaluation], duration_ms: float) -> GateReport:
+        """Create a GateReport from a list of GateEvaluation objects."""
+        total = len(evaluations)
+        passed = sum(1 for e in evaluations if e.result == GateStatus.PASS)
+        failed = sum(1 for e in evaluations if e.result == GateStatus.FAIL)
+        errors = sum(1 for e in evaluations if e.result == GateStatus.ERROR)
+        skipped = sum(1 for e in evaluations if e.result == GateStatus.SKIP)
+        all_passed = all(e.passed for e in evaluations if e.required)
+        
+        # Build summary string
+        parts = []
+        if passed:
+            parts.append(f"{passed} passed")
+        if failed:
+            parts.append(f"{failed} failed")
+        if errors:
+            parts.append(f"{errors} error" + ("s" if errors != 1 else ""))
+        if skipped:
+            parts.append(f"{skipped} skipped")
+        summary = ", ".join(parts) if parts else "0 passed"
+        
+        return cls(
+            gate_results=evaluations,
+            total_gates=total,
+            passed_gates=passed,
+            failed_gates=failed,
+            error_gates=errors,
+            skipped_gates=skipped,
+            all_passed=all_passed,
+            duration_ms=duration_ms,
+            summary=summary,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert GateReport to dictionary representation."""
+        return {
+            "gate_results": [e.to_dict() for e in self.gate_results],
+            "total_gates": self.total_gates,
+            "passed_gates": self.passed_gates,
+            "failed_gates": self.failed_gates,
+            "error_gates": self.error_gates,
+            "skipped_gates": self.skipped_gates,
+            "all_passed": self.all_passed,
+            "duration_ms": self.duration_ms,
+            "summary": self.summary,
+        }
+
+
+def aggregate_verdict(gate_results: list[GateResult]) -> str:
+    """Compute overall verdict from a list of GateResult objects.
+    
+    Returns:
+        'PASS' if all gates pass
+        'FAIL' if any gate fails (required gate failure)
+        'WARN' if only non-blocking gates fail (i.e., no required gate failures but some failures exist)
+    
+    Args:
+        gate_results: List of GateResult objects to evaluate.
+    
+    Returns:
+        One of 'PASS', 'FAIL', or 'WARN'.
+    """
+    if not gate_results:
+        return "PASS"
+    
+    has_failure = any(not r.passed for r in gate_results)
+    has_required_failure = any(not r.passed and r.required for r in gate_results)
+    
+    if has_required_failure:
+        return "FAIL"
+    elif has_failure:
+        return "WARN"
+    else:
+        return "PASS"
 
 
 @dataclass(frozen=True)
@@ -193,16 +343,75 @@ def load_gates_from_dict(data: dict[str, Any]) -> list[Gate]:
     return gates
 
 
+def _parse_gates_yaml(text: str) -> dict[str, Any]:
+    """Parse a simple YAML file containing a 'gates:' list.
+
+    Supports format:
+        gates:
+          - name: foo
+            command: bar
+            timeout: 120
+
+    Returns dict with 'gates' key containing list of gate dicts.
+    Falls back to empty gates list if format not recognized.
+    """
+    result: dict[str, Any] = {"gates": []}
+    in_gates = False
+    current_gate: dict[str, str] | None = None
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+
+        if indent == 0 and stripped.startswith("gates:"):
+            in_gates = True
+            current_gate = None
+            continue
+
+        if in_gates:
+            if indent == 0 and not stripped.startswith("-"):
+                # New top-level key, stop parsing gates
+                in_gates = False
+                current_gate = None
+                continue
+
+            if stripped.startswith("- "):
+                # Start of new gate item
+                item_text = stripped[2:].strip()
+                if ":" in item_text:
+                    key, _, value = item_text.partition(":")
+                    current_gate = {key.strip(): value.strip().strip('"').strip("'")}
+                    result["gates"].append(current_gate)
+                else:
+                    current_gate = None
+                continue
+
+            if ":" in stripped and current_gate is not None and indent > 0:
+                # Continuation of current gate
+                key, _, value = stripped.partition(":")
+                current_gate[key.strip()] = value.strip().strip('"').strip("'")
+                continue
+
+    return result
+
+
 def load_gates_yaml(path: Path) -> list[Gate]:
     """Load gates from a YAML file.
     
-    Uses the existing _parse_simple_yaml stdlib-only parser.
+    Supports both policy format (required/conditional) and direct gate list format (gates:).
     Raises ValueError if file cannot be parsed or gates are invalid.
     """
     if not path.exists():
         raise ValueError(f"Gate file not found: {path}")
     
     text = path.read_text(encoding="utf-8")
+    # Try parsing as gate list first
+    parsed = _parse_gates_yaml(text)
+    if parsed.get("gates"):
+        return load_gates_from_dict(parsed)
+    # Fall back to policy format parser
     parsed = _parse_simple_yaml(text)
     return load_gates_from_dict(parsed)
 
@@ -218,6 +427,123 @@ def load_gates(path: Path | None = None) -> list[Gate]:
     if not path.exists():
         return []
     return load_gates_yaml(path)
+
+
+def parse_gates(gates_dir: Path) -> list[Gate]:
+    """Load all gates from YAML files in a directory.
+
+    Recursively finds all .yaml and .yml files in the directory and loads
+    gates from each file. Returns a combined list of all gates found.
+
+    Args:
+        gates_dir: Directory containing gate definition YAML files.
+
+    Returns:
+        List of Gate objects loaded from all YAML files in the directory.
+        Returns empty list if directory doesn't exist or contains no valid gate files.
+    """
+    if not gates_dir.exists() or not gates_dir.is_dir():
+        return []
+
+    all_gates: list[Gate] = []
+    for pattern in ["*.yaml", "*.yml"]:
+        for yaml_file in gates_dir.glob(pattern):
+            try:
+                gates = load_gates_yaml(yaml_file)
+                all_gates.extend(gates)
+            except (ValueError, OSError):
+                # Skip invalid files but continue processing others
+                continue
+
+    return all_gates
+
+
+def run_all_gates(
+    gates_dir: Path,
+    max_concurrent: int = 4,
+    workspace: Path | None = None,
+    default_timeout: int = 120,
+) -> GateReport:
+    """Execute all gates from a directory concurrently with configurable concurrency.
+
+    Loads gate definitions from YAML files in the specified directory, executes them
+    concurrently using ThreadPoolExecutor with the specified maximum number of workers,
+    enforces per-gate timeout via evaluate_gate(), and aggregates results into a GateReport.
+
+    Args:
+        gates_dir: Directory containing gate definition YAML files.
+        max_concurrent: Maximum number of gates to execute simultaneously (default 4).
+        workspace: Working directory for gate execution. Defaults to current directory.
+        default_timeout: Default timeout in seconds for each gate (default 120).
+
+    Returns:
+        GateReport containing all gate results and aggregated statistics.
+
+    Note:
+        All I/O operations are bounded per Constitution §4. Gates are executed
+        concurrently but never exceed max_concurrent simultaneous executions.
+    """
+    if workspace is None:
+        workspace = Path.cwd()
+
+    # Load all gates from the directory
+    gates = parse_gates(gates_dir)
+    if not gates:
+        return GateReport(
+            gate_results=[],
+            total_gates=0,
+            passed_gates=0,
+            failed_gates=0,
+            error_gates=0,
+            skipped_gates=0,
+            all_passed=True,
+            duration_ms=0.0,
+        )
+
+    start_time = time.monotonic()
+
+    def _execute_gate(gate: Gate) -> GateEvaluation:
+        """Execute a single gate and return its evaluation."""
+        gate_dict = gate.to_dict()
+        return evaluate_gate(
+            gate_dict,
+            workspace=workspace,
+            timeout=min(gate.timeout, default_timeout),
+        )
+
+    evaluations: list[GateEvaluation] = []
+
+    # Execute gates concurrently with limited parallelism
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+        futures = {
+            executor.submit(_execute_gate, gate): gate
+            for gate in gates
+        }
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+                evaluations.append(result)
+            except Exception as e:
+                # Should not happen as evaluate_gate catches all exceptions,
+                # but handle it gracefully just in case
+                evaluations.append(GateEvaluation(
+                    gate_name="unknown",
+                    result=GateStatus.ERROR,
+                    command="",
+                    output=str(e)[:2000],
+                    duration_ms=0.0,
+                    passed=False,
+                    required=True,
+                    error_message=f"Unexpected error: {e}",
+                ))
+
+    end_time = time.monotonic()
+    duration_ms = (end_time - start_time) * 1000
+
+    # Sort evaluations by gate name for consistent ordering
+    evaluations.sort(key=lambda ev: ev.gate_name)
+
+    return GateReport.from_evaluations(evaluations, duration_ms)
 
 
 @dataclass
@@ -331,13 +657,21 @@ def evaluate_gate(
     else:
         required = str(is_required).lower() not in ("false", "no", "0")
     command_template = gate.get("command", "true")
+    def _q(s: str) -> str:
+        if not s:
+            return ""
+        try:
+            parts = shlex.split(s)
+        except ValueError:
+            return shlex.quote(s)
+        return " ".join(shlex.quote(p) for p in parts)
     command = (
         command_template
-        .replace("{file}", file_context)
-        .replace("{test_dirs}", test_dirs)
-        .replace("{ticket_id}", ticket_id)
-        .replace("{state_dir}", state_dir)
-        .replace("{changed_files}", changed_files)
+        .replace("{file}", _q(file_context))
+        .replace("{test_dirs}", _q(test_dirs))
+        .replace("{ticket_id}", _q(ticket_id))
+        .replace("{state_dir}", _q(state_dir))
+        .replace("{changed_files}", _q(changed_files))
     )
     start = time.monotonic()
     try:
@@ -354,18 +688,21 @@ def evaluate_gate(
         duration = time.monotonic() - start
         output = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0:
-            return GateEvaluation(name, GateResult.PASS, command, output[:2000], duration, True, required)
-        return GateEvaluation(name, GateResult.FAIL, command, output[:2000], duration, False, required,
+            return GateEvaluation(name, GateStatus.PASS, command, output[:2000], duration, True, required)
+        if proc.returncode == 5:
+            return GateEvaluation(name, GateStatus.ERROR, command, output[:2000], duration, False, required,
+                                  "infrastructure: no tests collected (exit code 5)")
+        return GateEvaluation(name, GateStatus.FAIL, command, output[:2000], duration, False, required,
                               f"exit code {proc.returncode}")
     except subprocess.TimeoutExpired:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, required, "timeout")
+        return GateEvaluation(name, GateStatus.ERROR, command, "", duration, False, required, "timeout")
     except FileNotFoundError:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, required, "command not found")
+        return GateEvaluation(name, GateStatus.ERROR, command, "", duration, False, required, "command not found")
     except Exception as e:
         duration = time.monotonic() - start
-        return GateEvaluation(name, GateResult.ERROR, command, "", duration, False, required, str(e)[:500])
+        return GateEvaluation(name, GateStatus.ERROR, command, "", duration, False, required, str(e)[:500])
 
 
 _GATE_PASS_CACHE = "gate_pass_cache.json"
@@ -475,7 +812,7 @@ def check_gate_pass_cache(
             return None
     return GateEvaluation(
         "cached-pass",
-        GateResult.PASS,
+        GateStatus.PASS,
         "cache-hit",
         f"all gates previously passed for unchanged files (ticket {ticket_id})",
         0.0,
@@ -532,50 +869,41 @@ def _workspace_revision(workspace: Path) -> str:
 
 
 _review_evidence_cache: dict[str, tuple[float, int, str]] = {}
-_REVIEW_PATTERNS = (
-    "correctness_review.json", "security_review.json",
-    "architecture_review.json", "performance_review.json",
-    "simplicity_review.json", "test_review.json",
-    "documentation_review.json", "adversarial_review.json",
-)
 
 
 def _review_evidence_hash(state_dir: Path, ticket_id: str) -> str:
-    """Hash all structured review evidence files for a ticket.
-
-    Memoized by (state_dir, ticket_id) keyed on file mtime+size so the
-    hash is recomputed only when review files actually change on disk.
-    """
     cache_key = f"{state_dir}:{ticket_id}"
+    try:
+        from codebot.review_store import ticket_reviews_dir as _trd
+        review_dir = _trd(state_dir, ticket_id)
+    except Exception:
+        review_dir = state_dir / "reviews" / ticket_id.replace("/", "_").replace("\\", "_")
     file_keys: list[tuple[str, float, int]] = []
-    for pattern in _REVIEW_PATTERNS:
-        for search_dir in (state_dir, state_dir.parent / "state"):
-            review_path = search_dir / pattern
-            if review_path.exists():
-                try:
-                    st = review_path.stat()
-                    file_keys.append((pattern, st.st_mtime, st.st_size))
-                except OSError:
-                    file_keys.append((pattern, 0.0, -1))
-                break
+    if review_dir.exists():
+        for path in sorted(review_dir.glob("*.json")):
+            if path.parent.name == "quarantine":
+                continue
+            try:
+                st = path.stat()
+                file_keys.append((path.name, st.st_mtime, st.st_size))
+            except OSError:
+                file_keys.append((path.name, 0.0, -1))
     fingerprint = str(file_keys)
     cached = _review_evidence_cache.get(cache_key)
     if cached is not None and cached[0] == hash(fingerprint):
         return cached[2]
     digest = hashlib.sha256()
-    for pattern in _REVIEW_PATTERNS:
-        for search_dir in (state_dir, state_dir.parent / "state"):
-            review_path = search_dir / pattern
-            if review_path.exists():
-                try:
-                    data = review_path.read_text(encoding="utf-8")
-                    if ticket_id in data:
-                        digest.update(pattern.encode("utf-8"))
-                        digest.update(data.encode("utf-8"))
-                except OSError:
-                    digest.update(pattern.encode("utf-8"))
-                    digest.update(b"<unreadable>")
-                break
+    if review_dir.exists():
+        for path in sorted(review_dir.glob("*.json")):
+            if path.parent.name == "quarantine":
+                continue
+            try:
+                data = path.read_text(encoding="utf-8")
+                digest.update(path.name.encode("utf-8"))
+                digest.update(data.encode("utf-8"))
+            except OSError:
+                digest.update(path.name.encode("utf-8"))
+                digest.update(b"<unreadable>")
     result = digest.hexdigest()[:16]
     _review_evidence_cache[cache_key] = (hash(fingerprint), 0, result)
     return result
@@ -675,10 +1003,12 @@ def run_quality_gates(
         f for f in (changed_files or [])
         if f.endswith(".py") and not f.startswith("tests/")
     ]
-    file_ctx = " ".join(shlex.quote(f) for f in python_files[:5]) if python_files else ""
-    changed_files_str = " ".join(shlex.quote(f) for f in (changed_files or []))
+    # Pass raw space-joined strings; evaluate_gate's _q() handles all quoting.
+    # Pre-quoting here would cause double-quoting when _q() re-quotes.
+    file_ctx = " ".join(python_files[:5]) if python_files else ""
+    changed_files_str = " ".join(changed_files or [])
 
-    scoped_test_dirs = test_dirs
+    # Build scoped test_dirs as raw space-joined string; _q() quotes safely.
     if changed_files:
         test_modules = set()
         for f in changed_files:
@@ -690,7 +1020,11 @@ def run_quality_gates(
                 if (workspace / candidate).exists():
                     test_modules.add(candidate)
         if test_modules:
-            scoped_test_dirs = " ".join(shlex.quote(t) for t in sorted(test_modules)[:5])
+            scoped_test_dirs = " ".join(sorted(test_modules)[:5])
+        else:
+            scoped_test_dirs = test_dirs or ""
+    else:
+        scoped_test_dirs = test_dirs or ""
 
     gates_to_run: list[dict[str, str]] = []
     for gate in policy.required:

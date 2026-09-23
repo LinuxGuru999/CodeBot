@@ -18,7 +18,7 @@ project.yaml, constitution.md, or ROADMAP.md.
 Your VERY FIRST action must be:
 read path={STATE_DIR}/tickets.json
 
-Find tickets in IMPLEMENTING state that touch overlapping files.
+Find tickets in IMPLEMENT state that touch overlapping files.
 
 Your SECOND action must be:
 read path={STATE_DIR}/conflict_resolver.checkpoint.json

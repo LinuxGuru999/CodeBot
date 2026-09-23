@@ -20,6 +20,8 @@ from codebot.adapters.flask_app_adapter import (
     DependencyPolicy,
     AutonomyConfig,
     ComponentDef,
+    migrate_forward,
+    migrate_rollback,
 )
 
 
@@ -189,3 +191,42 @@ class TestFlaskAppAdapterInstantiation:
     def test_relative_root_resolved(self):
         adapter = FlaskAppAdapter(Path("./my-app"))
         assert adapter.paths().repository_root.is_absolute()
+
+
+class TestFlaskAppAdapterMigration:
+    """Test standalone migration functions and stub methods for full coverage."""
+
+    def test_migrate_forward_with_source(self):
+        """migrate_forward with 'source' in store is a no-op (idempotent)."""
+        store = {"source": "something", "other": 42}
+        migrate_forward(store)
+        # Store should be unchanged
+        assert store == {"source": "something", "other": 42}
+
+    def test_migrate_forward_without_source(self):
+        """migrate_forward without 'source' in store is also a no-op."""
+        store = {"other": 42}
+        migrate_forward(store)
+        assert store == {"other": 42}
+
+    def test_migrate_rollback_with_source(self):
+        """migrate_rollback with 'source' in store is a no-op (idempotent)."""
+        store = {"source": "something", "other": 42}
+        migrate_rollback(store)
+        assert store == {"source": "something", "other": 42}
+
+    def test_migrate_rollback_without_source(self):
+        """migrate_rollback without 'source' in store is also a no-op."""
+        store = {"other": 42}
+        migrate_rollback(store)
+        assert store == {"other": 42}
+
+    def test_queue_depth_returns_zero(self):
+        """queue_depth stub always returns 0 (no TicketStore access)."""
+        adapter = FlaskAppAdapter(Path("/tmp/flask-demo-app"))
+        assert adapter.queue_depth() == 0
+
+    def test_ticket_class_counts_returns_empty(self):
+        """ticket_class_counts stub always returns empty dict (no TicketStore access)."""
+        adapter = FlaskAppAdapter(Path("/tmp/flask-demo-app"))
+        assert adapter.ticket_class_counts() == {}

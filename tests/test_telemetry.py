@@ -431,6 +431,38 @@ class TestTelemetryHandlerAuth:
                     f"hmac.compare_digest instead to avoid timing side-channels."
                 )
 
+    def test_telemetry_auth_uses_hmac_compare_digest(self) -> None:
+        """Source-inspection test enforcing hmac.compare_digest in TelemetryHandler._auth.
+
+        Mirrors TestTimingSafeComparison.test_auth_method_uses_hmac_compare_digest
+        in test_control_server_auth.py. Guards against silent regression to
+        timing-unsafe == comparison on bearer-token material.
+        """
+        from pathlib import Path
+
+        telemetry_path = Path(__file__).parent.parent / "codebot" / "telemetry.py"
+        source = telemetry_path.read_text(encoding="utf-8")
+
+        auth_start = source.find("def _auth(self)")
+        assert auth_start != -1, "_auth method not found in telemetry.py"
+
+        auth_body_end = source.find("\n    def ", auth_start + 1)
+        if auth_body_end == -1:
+            auth_body_end = source.find("\n\nclass ", auth_start + 1)
+        if auth_body_end == -1:
+            auth_body_end = source.find("\ndef ", auth_start + 1)
+        if auth_body_end == -1:
+            auth_body_end = len(source)
+        auth_body = source[auth_start:auth_body_end]
+
+        assert "hmac.compare_digest" in auth_body, (
+            "TelemetryHandler._auth must use hmac.compare_digest for "
+            "constant-time bearer-token comparison"
+        )
+        assert '== f"Bearer' not in auth_body, (
+            "TelemetryHandler._auth must not use == for token comparison"
+        )
+
 
 class TestCreateTicketFromSignalErrors:
     """Tests for error paths in _create_ticket_from_signal."""

@@ -34,8 +34,14 @@ class _FakeTicket:
         self.state = SimpleNamespace(value=state_val)
         self.priority = "high"
         self.created_at = time.time()
+        self.updated_at = time.time()
         self.ticket_class = SimpleNamespace(value="feature")
+        self.risk = SimpleNamespace(value="low")
         self.blocked_by = []
+        self.acceptance_criteria = []
+        self.affected_modules = []
+        self.required_tests = []
+        self.reviewer_feedback = []
 
 
 class _FakeStore:

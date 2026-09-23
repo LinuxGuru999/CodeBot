@@ -310,9 +310,10 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
         new_req.add_header('Host', host)
         
         # Copy over essential headers from the original request if needed (e.g., cookies, auth)
-        # But be careful not to copy the old X-Pinned-IP
+        # Explicitly filter out X-Pinned-IP to prevent internal infrastructure leakage
         for key, value in req.headers.items():
-            new_req.add_header(key, value)
+            if key.lower() != 'x-pinned-ip':
+                new_req.add_header(key, value)
 
         # All checks passed — allow redirect with pinned IP
         return new_req
@@ -400,8 +401,12 @@ class _PinnedURLHandler(urllib.request.AbstractHTTPHandler):
 
     It extracts the pinned IP from the request's '_pinned_ip' attribute
     (injected by _safe_open_url) and uses the appropriate connection class.
-    To prevent leakage of internal infrastructure details, it also strips
-    the 'X-Pinned-IP' header from the request if present before sending.
+    
+    Security: As a defense-in-depth measure, this handler strips any
+    'X-Pinned-IP' header from the request before transmission to prevent
+    leakage of internal infrastructure details (resolved IP addresses) to
+    external servers. The pinned IP is passed via the '_pinned_ip' attribute,
+    never as a header.
     """
     # Lower handler_order than default HTTPHandler/HTTPSHandler (500)
     # ensures this handler processes requests before defaults, preventing
@@ -409,9 +414,18 @@ class _PinnedURLHandler(urllib.request.AbstractHTTPHandler):
     handler_order = 400
 
     def _strip_pinned_ip_header(self, req: urllib.request.Request) -> None:
-        """Remove X-Pinned-IP header if present to prevent wire leakage."""
-        if 'X-Pinned-IP' in req.headers:
-            del req.headers['X-Pinned-IP']
+        """Remove X-Pinned-IP header if present to prevent wire leakage.
+        
+        Performs case-insensitive removal to handle variations in header
+        capitalization (e.g., 'x-pinned-ip', 'X-Pinned-IP').
+        """
+        # Build a list of keys to delete to avoid modifying dict during iteration
+        keys_to_delete = [
+            key for key in req.headers
+            if key.lower() == 'x-pinned-ip'
+        ]
+        for key in keys_to_delete:
+            del req.headers[key]
 
     def http_open(self, req: urllib.request.Request) -> Any:
         self._strip_pinned_ip_header(req)
@@ -691,12 +705,116 @@ class _FallbackStripper(HTMLParser):
         return "".join(self._parts)
 
 
+def _sanitize_html_for_parser(html: str) -> str:
+    """Preprocess HTML to close parser bypass vectors before feeding to HTMLParser.
+
+    Addresses known stdlib html.parser limitations where null bytes or newlines
+    in tag names cause the parser to fail to recognize skip-tags, leaking
+    script/style content into extracted text.
+
+    Also applies a regex-based defense-in-depth strip for script/style tags
+    to catch malformed variants that even a sanitized parser might miss.
+    """
+    # 1. Remove null bytes which break tag recognition
+    html = html.replace('\x00', '')
+
+    # 2. Remove ALL whitespace characters (including \n, \r, \t, spaces) inside
+    #    opening/closing tag brackets to prevent tag name fragmentation.
+    #    e.g., <scr\nipt> becomes <script>, <sty\tle> becomes <style>
+    #    e.g., </scr ipt> becomes </script>
+    #    Attribute values inside quotes are not affected because we only strip
+    #    whitespace from the raw tag string; however, this is acceptable because
+    #    the primary goal is ensuring skip-tag names are recognized. For
+    #    attribute preservation, we only strip whitespace that appears between
+    #    '<' and the first non-whitespace/non-slash character sequence that
+    #    forms the tag name, and within the tag name itself.
+    #
+    #    Strategy: find all <...> sequences, remove whitespace from the tag
+    #    name portion (between < or </ and the first space or >).
+    def _fix_tag_name(m: re.Match) -> str:
+        tag_content = m.group(0)
+        # Match: < optional_slash optional_whitespace tag_name rest
+        inner_match = re.match(r'<(/?)(\s*)([a-zA-Z][a-zA-Z0-9]*)(.*)', tag_content, re.DOTALL)
+        if inner_match:
+            slash = inner_match.group(1)
+            # group(2) is whitespace between < and tag name - remove it
+            tag_name = inner_match.group(3).lower()
+            rest = inner_match.group(4)
+            # Also remove any whitespace embedded within what should be the tag name
+            # But since we already captured [a-zA-Z0-9]+, the name is clean.
+            # The issue is whitespace INSIDE the name like <scr\nipt> which our
+            # regex won't capture as a single tag name.
+            return f'<{slash}{tag_name}{rest}'
+        # If we can't parse it cleanly, try removing all whitespace between < and >
+        # as a fallback for heavily malformed tags
+        cleaned = re.sub(r'\s+', '', tag_content[1:-1])
+        return f'<{cleaned}>'
+
+    # First pass: handle tags where whitespace splits the tag name
+    # We need to match < followed by chars/spaces/newlines until >
+    html = re.sub(r'<[^>]*>', _fix_tag_name, html, flags=re.DOTALL)
+
+    # Second pass: handle the case where whitespace is INSIDE what should be
+    # a contiguous tag name (e.g., <scr\nipt>). The above regex captures
+    # [a-zA-Z][a-zA-Z0-9]* which won't match 'scr\nipt'. So we need a more
+    # aggressive approach: extract potential tag names by stripping all
+    # whitespace from inside angle brackets for the purpose of tag identification.
+    def _aggressive_tag_fix(m: re.Match) -> str:
+        tag_content = m.group(0)
+        # Strip all whitespace from inside the tag to identify the tag name
+        stripped = re.sub(r'\s+', '', tag_content)
+        # Check if this looks like a script or style tag
+        lower_stripped = stripped.lower()
+        if lower_stripped.startswith('<script') or lower_stripped.startswith('</script'):
+            # Reconstruct with proper tag name but keep original attributes if possible
+            # For security, just ensure the tag name is correct
+            if lower_stripped.startswith('</'):
+                return '</script>'
+            # Opening tag: preserve attributes after the tag name
+            attr_match = re.match(r'<\s*script(.*)', tag_content, re.IGNORECASE | re.DOTALL)
+            if attr_match:
+                attrs = attr_match.group(1)
+                return f'<script{attrs}'
+            return '<script>'
+        elif lower_stripped.startswith('<style') or lower_stripped.startswith('</style'):
+            if lower_stripped.startswith('</'):
+                return '</style>'
+            attr_match = re.match(r'<\s*style(.*)', tag_content, re.IGNORECASE | re.DOTALL)
+            if attr_match:
+                attrs = attr_match.group(1)
+                return f'<style{attrs}'
+            return '<style>'
+        return tag_content
+
+    html = re.sub(r'<[^>]*>', _aggressive_tag_fix, html, flags=re.DOTALL)
+
+    # 3. Defense-in-depth: regex strip for script/style (closed and unclosed)
+    #    This catches cases where parser still fails despite sanitization
+    #    Pattern matches <script...>...</script> including malformed attributes
+    html = re.sub(
+        r'<\s*(script|style)\b[^>]*>.*?<\s*/\s*\1\s*>',
+        '',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Strip unclosed script/style tags and everything after them
+    html = re.sub(
+        r'<\s*(script|style)\b[^>]*>.*',
+        '',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    return html
+
+
 def extract_text_from_html(html: str) -> str:
     """Extract readable text from HTML using stdlib HTMLParser.
 
     Uses a custom HTMLParser subclass to robustly strip script/style and other
     non-content tags, including malformed or unclosed variants that defeat
-    naive regex approaches.
+    naive regex approaches. Includes preprocessing to defend against parser
+    bypass via null bytes or whitespace injection in tag names.
 
     Args:
         html: Raw HTML string.
@@ -704,9 +822,11 @@ def extract_text_from_html(html: str) -> str:
     Returns:
         Extracted plain text.
     """
+    sanitized = _sanitize_html_for_parser(html)
+
     stripper = _FallbackStripper()
     try:
-        stripper.feed(html)
+        stripper.feed(sanitized)
         stripper.close()
     except Exception:
         # Fail open to empty rather than leaking raw HTML/script content

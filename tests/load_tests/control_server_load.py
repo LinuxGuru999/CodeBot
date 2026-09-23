@@ -42,24 +42,34 @@ def find_free_port() -> int:
 
 
 class EphemeralServer:
-    """Context manager for ephemeral control server."""
-    
-    def __init__(self, allow_unauthenticated: bool = False):
-        self.allow_unauthenticated = allow_unauthenticated
+    """Context manager for ephemeral control server (CB-B4086: fail-closed).
+
+    The CONTROL_ALLOW_UNAUTHENTICATED bypass was removed; this harness
+    boots the server with a throwaway CONTROL_TOKEN and returns a matching
+    Authorization header via ``auth_headers`` so load tests exercise
+    authenticated endpoints.
+    """
+
+    def __init__(self, token: str = "load-test-token"):
+        self.token = token
         self.port: Optional[int] = None
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
-    
+
+    @property
+    def auth_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}"}
+
     def __enter__(self):
         if not HAS_CONTROL_SERVER:
             raise RuntimeError("control_server module not available")
-        
+
         self.port = find_free_port()
-        
+
         # Set up environment for ephemeral server
-        os.environ['CONTROL_ALLOW_UNAUTHENTICATED'] = '1' if self.allow_unauthenticated else ''
-        os.environ['CONTROL_TOKEN'] = ''
-        os.environ['PORT'] = str(self.port)
+        os.environ.pop("CONTROL_ALLOW_UNAUTHENTICATED", None)
+        os.environ["CONTROL_TOKEN"] = self.token
+        os.environ["PORT"] = str(self.port)
         
         self.server = ThreadingHTTPServer(('127.0.0.1', self.port), ControlHandler)
         self.thread = threading.Thread(target=self.server.serve_forever)
@@ -141,15 +151,13 @@ def main():
             sys.exit(1)
         
         try:
-            with EphemeralServer(allow_unauthenticated=True) as server:
+            with EphemeralServer() as server:
                 base_url = f"http://127.0.0.1:{server.port}"
                 print(f"Started ephemeral server on {base_url}")
-                
-                headers = {}
+
+                headers = dict(server.auth_headers)
                 if args.token:
                     headers['Authorization'] = f'Bearer {args.token}'
-                elif os.environ.get('CONTROL_TOKEN'):
-                    headers['Authorization'] = f'Bearer {os.environ["CONTROL_TOKEN"]}'
                 
                 results = run_scenarios(base_url, headers, args.concurrency, args.requests)
                 

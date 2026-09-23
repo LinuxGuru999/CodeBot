@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from codebot.quality_gate import (
     GateEvaluation,
-    GateResult,
+    GateStatus,
     QualityGatePolicy,
     load_policy,
     record_gate_results,
@@ -123,7 +123,7 @@ class TestGateRecordIntegrity:
     """§58.B — Gate evaluation records should have integrity checksum."""
 
     def test_record_includes_checksum(self, tmp_path):
-        evals = [GateEvaluation("build", GateResult.PASS, "echo ok", "ok", 1, True)]
+        evals = [GateEvaluation("build", GateStatus.PASS, "echo ok", "ok", 1, True)]
         record_gate_results(tmp_path, "CB-TEST-1", True, evals)
         data = json.loads((tmp_path / "gate_results.jsonl").read_text().strip().split("\n")[0])
         assert "checksum" in data, "Record must include integrity checksum"
@@ -134,7 +134,7 @@ class TestGateRecordIntegrity:
 
     def test_corrupt_record_detected(self, tmp_path):
         """§58.B — Tampered records should be detected via checksum."""
-        evals = [GateEvaluation("test", GateResult.PASS, "pytest", "ok", 1, True)]
+        evals = [GateEvaluation("test", GateStatus.PASS, "pytest", "ok", 1, True)]
         record_gate_results(tmp_path, "CB-TEST-2", True, evals)
         path = tmp_path / "gate_results.jsonl"
         lines = path.read_text().strip().split("\n")
@@ -153,7 +153,7 @@ class TestSoftDelete:
 
     def test_soft_delete_preserves_record(self, tmp_path):
         from codebot.quality_gate import record_gate_results, read_gate_results
-        evals = [GateEvaluation("lint", GateResult.PASS, "flake8", "ok", 1, True)]
+        evals = [GateEvaluation("lint", GateStatus.PASS, "flake8", "ok", 1, True)]
         record_gate_results(tmp_path, "CB-DEL-1", True, evals)
         # Soft delete
         from codebot.quality_gate import soft_delete_gate_record
@@ -166,7 +166,7 @@ class TestSoftDelete:
 
     def test_soft_deleted_excluded_by_default(self, tmp_path):
         from codebot.quality_gate import record_gate_results, read_gate_results, soft_delete_gate_record
-        evals = [GateEvaluation("ok", GateResult.PASS, "true", "", 1, True)]
+        evals = [GateEvaluation("ok", GateStatus.PASS, "true", "", 1, True)]
         record_gate_results(tmp_path, "CB-DEL-2", True, evals)
         soft_delete_gate_record(tmp_path, "CB-DEL-2")
         # Should not appear in default read
@@ -175,7 +175,7 @@ class TestSoftDelete:
 
     def test_soft_deleted_included_when_asked(self, tmp_path):
         from codebot.quality_gate import record_gate_results, read_gate_results, soft_delete_gate_record
-        evals = [GateEvaluation("ok", GateResult.PASS, "true", "", 1, True)]
+        evals = [GateEvaluation("ok", GateStatus.PASS, "true", "", 1, True)]
         record_gate_results(tmp_path, "CB-DEL-3", True, evals)
         soft_delete_gate_record(tmp_path, "CB-DEL-3")
         results = read_gate_results(tmp_path, ticket_id="CB-DEL-3", include_deleted=True)
@@ -189,14 +189,14 @@ class TestReadGateResults:
     def test_read_all(self, tmp_path):
         from codebot.quality_gate import record_gate_results, read_gate_results
         for i in range(5):
-            evals = [GateEvaluation("g", GateResult.PASS, "echo", "", 1, True)]
+            evals = [GateEvaluation("g", GateStatus.PASS, "echo", "", 1, True)]
             record_gate_results(tmp_path, f"CB-{i}", True, evals)
         results = read_gate_results(tmp_path)
         assert len(results) == 5
 
     def test_read_by_ticket_id(self, tmp_path):
         from codebot.quality_gate import record_gate_results, read_gate_results
-        evals = [GateEvaluation("g", GateResult.PASS, "echo", "", 1, True)]
+        evals = [GateEvaluation("g", GateStatus.PASS, "echo", "", 1, True)]
         record_gate_results(tmp_path, "CB-FILTER", True, evals)
         record_gate_results(tmp_path, "CB-OTHER", True, evals)
         results = read_gate_results(tmp_path, ticket_id="CB-FILTER")
@@ -205,7 +205,7 @@ class TestReadGateResults:
     def test_read_pagination(self, tmp_path):
         from codebot.quality_gate import record_gate_results, read_gate_results
         for i in range(10):
-            evals = [GateEvaluation("g", GateResult.PASS, "echo", "", 1, True)]
+            evals = [GateEvaluation("g", GateStatus.PASS, "echo", "", 1, True)]
             record_gate_results(tmp_path, f"CB-PAG-{i}", True, evals)
         page1 = read_gate_results(tmp_path, limit=3, offset=0)
         page2 = read_gate_results(tmp_path, limit=3, offset=3)
@@ -228,7 +228,7 @@ class TestBackupRecovery:
 
     def test_backup_creates_timestamped_copy(self, tmp_path):
         from codebot.quality_gate import record_gate_results, backup_gate_results
-        evals = [GateEvaluation("g", GateResult.PASS, "echo", "", 1, True)]
+        evals = [GateEvaluation("g", GateStatus.PASS, "echo", "", 1, True)]
         record_gate_results(tmp_path, "CB-BKP-1", True, evals)
         backup_path = backup_gate_results(tmp_path)
         assert backup_path is not None
@@ -242,14 +242,14 @@ class TestBackupRecovery:
 
     def test_backup_checksum_verification(self, tmp_path):
         from codebot.quality_gate import record_gate_results, backup_gate_results, verify_backup_integrity
-        evals = [GateEvaluation("g", GateResult.PASS, "echo", "", 1, True)]
+        evals = [GateEvaluation("g", GateStatus.PASS, "echo", "", 1, True)]
         record_gate_results(tmp_path, "CB-BKP-2", True, evals)
         backup_path = backup_gate_results(tmp_path)
         assert verify_backup_integrity(backup_path) is True
 
     def test_backup_detects_tampering(self, tmp_path):
         from codebot.quality_gate import record_gate_results, backup_gate_results, verify_backup_integrity
-        evals = [GateEvaluation("g", GateResult.PASS, "echo", "", 1, True)]
+        evals = [GateEvaluation("g", GateStatus.PASS, "echo", "", 1, True)]
         record_gate_results(tmp_path, "CB-BKP-3", True, evals)
         backup_path = backup_gate_results(tmp_path)
         # Tamper with backup
@@ -261,7 +261,7 @@ class TestBackupRecovery:
             record_gate_results, backup_gate_results,
             restore_gate_results, read_gate_results,
         )
-        evals = [GateEvaluation("g", GateResult.PASS, "echo", "", 1, True)]
+        evals = [GateEvaluation("g", GateStatus.PASS, "echo", "", 1, True)]
         record_gate_results(tmp_path, "CB-RST-1", True, evals)
         backup_path = backup_gate_results(tmp_path)
         # Overwrite original

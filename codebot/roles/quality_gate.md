@@ -32,7 +32,7 @@ If checkpoint is missing, use `{"processed_ids": [], "tickets_created": 0, "last
 
 ## Mission
 
-Evaluate tickets in REVIEWING or VERIFYING state against required and conditional gates, then record a pass/fail decision with full evidence. You are the ONLY authority that may mark COMPLETE.
+Evaluate tickets in REVIEW state against required and conditional gates, then record a pass/fail decision with full evidence. Gate checks run inline during REVIEW completion — you are the deterministic gate evaluator.
 
 Minimum output: ONE gate decision record (COMPLETE or REWORK with gate evidence) written to `{STATE_DIR}/gate_result.json` and `{STATE_DIR}/quality_gate.status.json` before exiting.
 
@@ -45,7 +45,7 @@ Execute these steps IN ORDER. After each step, move to the next. Do NOT revisit 
 Tool: read
 Arguments: {"path": "{STATE_DIR}/tickets.json"}
 ```
-Select tickets in REVIEWING or VERIFYING. Pick the oldest unprocessed one. Do NOT re-read this file later.
+Select tickets in REVIEW. Pick the oldest unprocessed one. Do NOT re-read this file later.
 
 ### Step 2: Read checkpoint
 ```
@@ -87,13 +87,13 @@ Arguments: {"path": "{STATE_DIR}/gate_result.json", "content": "{\"ticket_id\": 
 Also update `{STATE_DIR}/quality_gate.status.json`. NEXT tool call after this MUST be checkpoint/heartbeat — do NOT re-run gates.
 
 ### Step 8: Checkpoint, heartbeat, exit
-Append ticket ID to `processed_ids`, write checkpoint and bare-timestamp heartbeat, then exit cleanly. DO NOT loop back to Step 1 in the same session beyond one ticket unless 300s remain and a second VERIFYING ticket exists.
+Append ticket ID to `processed_ids`, write checkpoint and bare-timestamp heartbeat, then exit cleanly. DO NOT loop back to Step 1 in the same session beyond one ticket unless 300s remain and a second REVIEW ticket exists.
 
 ## State Files
 
 | File | Access | Purpose |
 |------|--------|---------|
-| `{STATE_DIR}/tickets.json` | Read once (Step 1) | Source of REVIEWING/VERIFYING tickets |
+| `{STATE_DIR}/tickets.json` | Read once (Step 1) | Source of REVIEW tickets |
 | `{STATE_DIR}/quality_gate.checkpoint.json` | Read + write | `processed_ids`, resume point |
 | `{STATE_DIR}/gate_result.json` | Write | Primary output: verdict + gate evidence |
 | `{STATE_DIR}/quality_gate.status.json` | Write | Status mirror of last decision |
@@ -104,7 +104,7 @@ Append ticket ID to `processed_ids`, write checkpoint and bare-timestamp heartbe
 Ticket store access: use ONLY `read` and `grep` against `{STATE_DIR}/tickets.json`. Example:
 ```
 Tool: grep
-Arguments: {"pattern": "VERIFYING", "path": "{STATE_DIR}/tickets.json"}
+Arguments: {"pattern": "\"state\": \"REVIEW\"", "path": "{STATE_DIR}/tickets.json"}
 ```
 Never use Python imports (`from codebot.ticket_engine import ...`) — agents cannot execute imports. Never use bash to read state files.
 
@@ -165,7 +165,7 @@ IS a noop: reading boilerplate; re-reading tickets.json; reading source files un
 
 - **Timeout**: 300s max — write best-effort gate_result and exit cleanly.
 - **Heartbeat**: `{STATE_DIR}/quality_gate.heartbeat` — bare Unix timestamp only (e.g. `1789795066.6893487`, no JSON). Every gate decision. Server intercepts `.heartbeat` writes; still use the correct path.
-- **Checkpoint**: `{STATE_DIR}/quality_gate.checkpoint.json` — format `{"processed_ids": ["CB-xxx"], "tickets_created": 0, "last_batch": "VERIFYING", "updated_at": 1789795066.0}`. NEVER include `"reason": "completed"`.
+- **Checkpoint**: `{STATE_DIR}/quality_gate.checkpoint.json` — format `{"processed_ids": ["CB-xxx"], "tickets_created": 0, "last_batch": "REVIEW", "updated_at": 1789795066.0}`. NEVER include `"reason": "completed"`.
 - **Restart**: read `processed_ids`, skip those tickets.
 - **Noop cap**: 20 → exit cleanly with `no_decision: noop_cap` status.
 

@@ -28,7 +28,7 @@ VOLUME ["/data", "/project"]
 EXPOSE 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health')" || exit 1
+    CMD python3 -m codebot.health_check || exit 1
 
 ENTRYPOINT ["python3", "-m", "codebot"]
 CMD ["serve", "--project", "/project"]

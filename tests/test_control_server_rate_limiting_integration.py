@@ -40,7 +40,7 @@ class TestControlServerRateLimitingIntegration(unittest.TestCase):
         os.environ['RATE_LIMIT_WINDOW_SECONDS'] = '60'
         os.environ['RATE_LIMIT_COOLDOWN_SECONDS'] = '5'
         os.environ['CONTROL_TOKEN'] = 'test-token-12345'
-        os.environ['CONTROL_ALLOW_UNAUTHENTICATED'] = ''
+        os.environ.pop('CONTROL_ALLOW_UNAUTHENTICATED', None)
         os.environ['PORT'] = '0'  # Let OS pick available port
         
         # Reload to pick up env vars
@@ -85,25 +85,41 @@ class TestControlServerRateLimitingIntegration(unittest.TestCase):
 
     def test_rate_limiting_blocks_after_threshold(self):
         """Verify that rate limiting returns 429 after exceeding threshold.
-        
+
         Acceptance criteria:
         - test_control_server.py contains test_rate_limiting_blocks_after_threshold
         - test verifies 429 status
+
+        NOTE: /health is intentionally PUBLIC (no auth) with its own
+        _health_rate_limiter, so failed-auth counting uses the protected
+        /bots endpoint (guarded by _rate_limiter via _auth()).
         """
-        # Make RATE_LIMIT_MAX_ATTEMPTS failed auth requests
-        for i in range(RATE_LIMIT_MAX_ATTEMPTS):
-            status, body = self._make_request('/health', token='wrong-token')
+        # Make RATE_LIMIT_MAX_ATTEMPTS failed auth requests against /bots.
+        # NOTE: RATE_LIMIT_MAX_ATTEMPTS is read at import time; the reloaded
+        # test server uses env RATE_LIMIT_MAX_ATTEMPTS=3 while this process
+        # may have the production default (5). Use the server's live limiter
+        # config (3) via env, falling back to the imported constant.
+        import control_server as _cs_live
+        _live_max = 3
+        try:
+            _live_max = int(os.environ.get("RATE_LIMIT_MAX_ATTEMPTS", str(RATE_LIMIT_MAX_ATTEMPTS)))
+        except (TypeError, ValueError):
+            _live_max = RATE_LIMIT_MAX_ATTEMPTS
+        for i in range(_live_max):
+            status, body = self._make_request('/bots', token='wrong-token')
             # First few should be 401 (auth failure), not yet rate limited
             self.assertEqual(status, 401, f"Request {i+1} should return 401, got {status}")
-        
+
         # Next request should be rate limited (429)
-        status, body = self._make_request('/health', token='wrong-token')
+        status, body = self._make_request('/bots', token='wrong-token')
         self.assertEqual(status, 429, f"Request after threshold should return 429, got {status}")
         self.assertIn('error', body)
-        self.assertIn('rate limit', body.get('error', '').lower())
-        
+        # 429 payload is {"error": "too many requests", "reason": "rate limit exceeded ..."}
+        combined = (body.get('error', '') + ' ' + body.get('reason', '')).lower()
+        self.assertIn('rate limit', combined)
+
         # Verify Retry-After header is present
-        req = urllib.request.Request(f'{self.base_url}/health')
+        req = urllib.request.Request(f'{self.base_url}/bots')
         req.add_header('Authorization', 'Bearer wrong-token')
         try:
             urllib.request.urlopen(req, timeout=5)
@@ -120,14 +136,14 @@ class TestControlServerRateLimitingIntegration(unittest.TestCase):
         self.skipTest("Cooldown test requires waiting for RATE_LIMIT_COOLDOWN_SECONDS")
 
     def test_rate_limiting_per_ip(self):
-        """Verify rate limiting is per-IP, not global."""
+        """Verify rate limiting is per-IP, not global (via protected /bots)."""
         # Exhaust rate limit for one "IP" (simulated via server's client_address)
         for _ in range(RATE_LIMIT_MAX_ATTEMPTS + 1):
-            self._make_request('/health', token='wrong-token')
-        
+            self._make_request('/bots', token='wrong-token')
+
         # Server is single-threaded in test, so this verifies the limiter tracks failures
         # In production, each IP would be tracked independently
-        status, body = self._make_request('/health', token='wrong-token')
+        status, body = self._make_request('/bots', token='wrong-token')
         self.assertEqual(status, 429, "Should be rate limited after max attempts")
 
 

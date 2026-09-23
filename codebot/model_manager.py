@@ -34,8 +34,12 @@ logger = logging.getLogger(__name__)
 # Model Profiles for Lockup Detection
 # ---------------------------------------------------------------------------
 
-MODEL_TIER_CHEAP = frozenset({"xiaomi-mimo-2.5"})
-MODEL_TIER_EXPENSIVE = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen-3.7-max", "qwen-3.7-max-thinking"})
+from codebot.model_registry import (
+    ALL_MODELS as ALL_MODELS_UNIFIED,
+    MODEL_TIER_EXPENSIVE,
+)
+
+MODEL_TIER_CHEAP = frozenset(ALL_MODELS_UNIFIED)
 
 
 @dataclass
@@ -104,10 +108,60 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
 }
 
 
-ALL_MODELS = [
-    "xiaomi-mimo-2.5", "qwen-3.5-plus", "qwen-3.6-plus", "qwen-3.7-plus",
-    "qwen-3.7-max", "qwen-3.8-max",
-]
+ALL_MODELS = list(ALL_MODELS_UNIFIED)
+
+from typing import NamedTuple
+
+
+class ModelAssignment(NamedTuple):
+    model: str
+    fallback: str
+
+
+TIERED_MODEL_POOLS: dict[str, tuple[str, ...]] = {
+    "unified": ALL_MODELS_UNIFIED,
+}
+
+TIER_FALLBACK: dict[str, str] = {
+    "unified": "qwen-3.7-plus",
+}
+
+MODEL_FALLBACKS: dict[str, str] = {
+    "qwen-3.8-max": "qwen-3.7-plus",
+    "qwen-3.8-max-thinking": "qwen-3.7-max-thinking",
+    "qwen-3.7-max": "qwen-3.6-plus",
+    "qwen-3.7-max-thinking": "qwen-3.7-plus",
+    "qwen-3.7-plus": "qwen-3.6-plus",
+    "qwen-3.6-plus": "qwen-3.5-plus",
+    "qwen-3.6-plus-thinking": "qwen-3.7-max-thinking",
+    "qwen-3.5-plus": "xiaomi-mimo-2.5",
+    "qwen-3.5-plus-thinking": "qwen-3.7-max-thinking",
+    "meta-muse-spark-1.3": "qwen-3.6-plus",
+    "meta-muse-spark-1.2": "qwen-3.5-plus",
+    "xiaomi-mimo-2.5": "qwen-3.5-plus",
+}
+
+_unified_rotation_index: int = 0
+
+
+def _tier_for_role(role_name: str) -> str:
+    return "unified"
+
+
+def next_model_for_role(
+    role_name: str,
+    *,
+    ticket_class: str = "",
+    severity: str = "",
+    risk: str = "",
+) -> ModelAssignment:
+    global _unified_rotation_index
+    pool = ALL_MODELS_UNIFIED
+    idx = _unified_rotation_index % len(pool)
+    model = pool[idx]
+    fallback_model = MODEL_FALLBACKS.get(model, "qwen-3.7-plus")
+    _unified_rotation_index = idx + 1
+    return ModelAssignment(model=model, fallback=fallback_model)
 
 
 def model_profile(model: str) -> ModelProfile | None:

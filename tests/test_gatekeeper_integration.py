@@ -17,7 +17,7 @@ import pytest
 
 # Import the modules under test
 from codebot.gatekeeper import Gatekeeper
-from codebot.quality_gate import QualityGatePolicy, GateResult, run_quality_gates, GateEvaluation
+from codebot.quality_gate import QualityGatePolicy, GateStatus, run_quality_gates, GateEvaluation
 from codebot.ticket_engine import TicketStore, TicketState
 
 
@@ -83,7 +83,7 @@ class TestGatekeeperBlocking:
         # Create a proper GateEvaluation object
         eval_fail = GateEvaluation(
             gate_name="unit_tests",
-            result=GateResult.FAIL,
+            result=GateStatus.FAIL,
             command="pytest",
             output="failed",
             duration_ms=10.0,
@@ -220,7 +220,7 @@ class TestGateFailureDetection:
 
         test_evals = [ev for ev in evaluations if ev.gate_name == "unit_tests"]
         assert len(test_evals) == 1
-        assert test_evals[0].result == GateResult.FAIL, f"Expected FAIL, got {test_evals[0].result}. Output: {test_evals[0].output}"
+        assert test_evals[0].result == GateStatus.FAIL, f"Expected FAIL, got {test_evals[0].result}. Output: {test_evals[0].output}"
 
     def test_passing_pytest_detected_as_pass(self, temp_workspace):
         """If pytest passes, gate result should be PASS."""
@@ -240,4 +240,4 @@ class TestGateFailureDetection:
 
         test_evals = [ev for ev in evaluations if ev.gate_name == "unit_tests"]
         assert len(test_evals) == 1
-        assert test_evals[0].result == GateResult.PASS, f"Expected PASS, got {test_evals[0].result}. Output: {test_evals[0].output}"
+        assert test_evals[0].result == GateStatus.PASS, f"Expected PASS, got {test_evals[0].result}. Output: {test_evals[0].output}"

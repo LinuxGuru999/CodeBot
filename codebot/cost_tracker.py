@@ -56,11 +56,11 @@ class CostTracker:
         self._state_dir = state_dir
         self._costs_path = state_dir / "ticket_costs.jsonl"
         self._summary_path = state_dir / "ticket_cost_summary.json"
-        # Cache for build_summary results
+        # Cache infrastructure for build_summary results.
+        self._cache_lock = threading.Lock()
         self._summary_cache: dict[str, Any] | None = None
         self._cache_file_mtime: float | None = None
         self._cache_file_size: int | None = None
-        self._cache_lock = threading.Lock()
 
     def record_phase_cost(
         self,

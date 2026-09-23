@@ -15,6 +15,17 @@ class TestTelemetryEndpoint:
     def _make_handler(self, method: str = "POST", path: str = "/telemetry", body: dict | None = None):
         """Create a mock handler for testing."""
         from codebot.control_server import ControlHandler as Handler
+        from codebot.control_server import _rate_limiter
+
+        # Reset global rate limiter for the shared loopback test IP so
+        # earlier failed-auth tests in the same process do not leak 429s
+        # into telemetry validation tests.
+        try:
+            with _rate_limiter._lock:
+                _rate_limiter._failures.pop("127.0.0.1", None)
+                _rate_limiter._blocked_until.pop("127.0.0.1", None)
+        except Exception:
+            pass
 
         handler = MagicMock()
         handler.path = path
@@ -35,6 +46,20 @@ class TestTelemetryEndpoint:
         handler._read_json_body = MagicMock(return_value=(body or {}, None, None))
         handler._handle_telemetry = types.MethodType(Handler._handle_telemetry, handler)
         return handler
+
+    @pytest.fixture(autouse=True)
+    def _telemetry_tokens(self):
+        """CB-B4086: _handle_telemetry fail-closes when CONTROL_TOKEN is empty.
+
+        These tests target telemetry-signal validation, so both tokens are
+        set to a known value for the duration of each test (restored after).
+        """
+        from codebot import control_server as _cs
+        orig_control, orig_tele = _cs.CONTROL_TOKEN, _cs.TELEMETRY_TOKEN
+        _cs.CONTROL_TOKEN = "test-token"
+        _cs.TELEMETRY_TOKEN = "test-token"
+        yield
+        _cs.CONTROL_TOKEN, _cs.TELEMETRY_TOKEN = orig_control, orig_tele
 
     def test_telemetry_accepts_valid_json(self, tmp_path: Path) -> None:
         from codebot.control_server import ControlHandler as Handler

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from enum import Enum
@@ -35,6 +36,48 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("gatekeeper")
+
+# Patchable aliases for tests (allow mocking via codebot.gatekeeper.*)
+try:
+    from codebot.ticket_dispatcher import get_ticket_store as _get_ticket_store  # type: ignore
+
+    get_ticket_store = _get_ticket_store  # noqa: F811  patchable
+except Exception:  # pragma: no cover
+
+    def get_ticket_store():  # type: ignore
+        return None
+
+try:
+    from codebot.completion_commit import (  # type: ignore
+        commit_ticket_files as _commit_ticket_files,
+        open_pull_request as _open_pull_request,
+        auto_merge_pull_request as _auto_merge_pull_request,
+        push_current_branch as _push_current_branch,
+        sync_ticket_issue as _sync_ticket_issue,
+    )
+
+    commit_ticket_files = _commit_ticket_files  # noqa: F811 patchable
+    open_pull_request = _open_pull_request  # noqa: F811
+    auto_merge_pull_request = _auto_merge_pull_request  # noqa: F811
+    push_current_branch = _push_current_branch  # noqa: F811
+    sync_ticket_issue = _sync_ticket_issue  # noqa: F811
+except Exception:  # pragma: no cover
+    commit_ticket_files = None  # type: ignore
+    open_pull_request = None  # type: ignore
+    auto_merge_pull_request = None  # type: ignore
+    push_current_branch = None  # type: ignore
+    sync_ticket_issue = None  # type: ignore
+
+try:
+    from codebot.coverage_runner import run_coverage as _run_coverage  # type: ignore
+
+    run_coverage = _run_coverage  # noqa: F811 patchable via codebot.gatekeeper.run_coverage
+except Exception:  # pragma: no cover
+
+    def run_coverage(*args, **kwargs):  # type: ignore
+        from codebot.coverage_runner import CoverageReport
+
+        return CoverageReport(0, 0, 0.0, {}, 0.0, -1, error="run_coverage unavailable")
 
 
 class Decision(str, Enum):
@@ -58,7 +101,7 @@ def _push_enabled_for_prs() -> bool:
     except Exception:
         return False
 
-MAX_REWORK_ATTEMPTS = 3
+MAX_REWORK_ATTEMPTS = 5
 
 
 class Gatekeeper:
@@ -93,37 +136,16 @@ class Gatekeeper:
         Only runs build/test gates. Reviewer verdicts are trusted —
         no re-checking of findings, checklists, or tampering detection.
         """
-        # Input validation: prevent path traversal in ticket_id and changed_files
-        if not re.match(r'^[A-Za-z0-9_-]+$', ticket_id):
-            logger.error("verify_ticket rejected: invalid ticket_id format: %r", ticket_id)
-            validation_result = {
-                "ticket_id": ticket_id,
-                "decision": "REWORK",
-                "passed": False,
-                "reason": "verification_error: invalid_ticket_id_format",
-                "failed_gates": [],
-                "total_gates": 0,
-                "rework_count": rework_count,
-                "evolve_prompt": False,
-                "timestamp": time.time(),
-            }
-            try:
-                self._log_decision(validation_result)
-            except OSError:
-                pass
-            try:
-                self._transition_ticket(ticket_id, "REWORK", [], store)
-            except Exception:
-                logger.exception("failed to transition ticket %s to REWORK after validation failure", ticket_id)
-            return validation_result
-        for cf in changed_files:
-            if not re.match(r'^[A-Za-z0-9_./-]+$', cf):
-                logger.error("verify_ticket rejected: invalid changed_file path: %r", cf)
+        try:
+            # Input validation: prevent path traversal in ticket_id and changed_files
+            # Security-relevant validation failures return FAIL (fail-closed) rather than REWORK
+            if not isinstance(ticket_id, str) or not re.match(r'^[A-Za-z0-9_-]+$', ticket_id):
+                logger.error("verify_ticket rejected: invalid ticket_id format: %r", ticket_id)
                 validation_result = {
                     "ticket_id": ticket_id,
-                    "decision": "REWORK",
+                    "decision": "FAIL",
                     "passed": False,
-                    "reason": "verification_error: invalid_changed_file_path",
+                    "reason": "verification_error: invalid_ticket_id_format",
                     "failed_gates": [],
                     "total_gates": 0,
                     "rework_count": rework_count,
@@ -135,11 +157,169 @@ class Gatekeeper:
                 except OSError:
                     pass
                 try:
-                    self._transition_ticket(ticket_id, "REWORK", [], store)
+                    self._transition_ticket(ticket_id, "FAIL", [], store)
                 except Exception:
-                    logger.exception("failed to transition ticket %s to REWORK after validation failure", ticket_id)
+                    logger.exception("failed to transition ticket %s to FAIL after validation failure", ticket_id)
                 return validation_result
-        try:
+            for cf in changed_files:
+                if not isinstance(cf, str):
+                    logger.error("verify_ticket rejected: invalid changed_file path (not string): %r", cf)
+                    validation_result = {
+                        "ticket_id": ticket_id,
+                        "decision": "FAIL",
+                        "passed": False,
+                        "reason": "verification_error: invalid_changed_file_path",
+                        "failed_gates": [],
+                        "total_gates": 0,
+                        "rework_count": rework_count,
+                        "evolve_prompt": False,
+                        "timestamp": time.time(),
+                    }
+                    try:
+                        self._log_decision(validation_result)
+                    except OSError:
+                        pass
+                    try:
+                        self._transition_ticket(ticket_id, "FAIL", [], store)
+                    except Exception:
+                        logger.exception("failed to transition ticket %s to FAIL after validation failure", ticket_id)
+                    return validation_result
+                # Pre-validate path format to prevent obvious traversal
+                if not re.match(r'^[A-Za-z0-9_./-]+$', cf) or '..' in cf:
+                    logger.error("verify_ticket rejected: changed_file path format invalid: %r", cf)
+                    validation_result = {
+                        "ticket_id": ticket_id,
+                        "decision": "FAIL",
+                        "passed": False,
+                        "reason": "verification_error: invalid_changed_file_path",
+                        "failed_gates": [],
+                        "total_gates": 0,
+                        "rework_count": rework_count,
+                        "evolve_prompt": False,
+                        "timestamp": time.time(),
+                    }
+                    try:
+                        self._log_decision(validation_result)
+                    except OSError:
+                        pass
+                    try:
+                        self._transition_ticket(ticket_id, "FAIL", [], store)
+                    except Exception:
+                        logger.exception("failed to transition ticket %s to FAIL after validation failure", ticket_id)
+                    return validation_result
+
+                # Reject absolute paths explicitly (defense-in-depth)
+                if os.path.isabs(cf):
+                    logger.error("verify_ticket rejected: changed_file path is absolute: %r", cf)
+                    validation_result = {
+                        "ticket_id": ticket_id,
+                        "decision": "FAIL",
+                        "passed": False,
+                        "reason": "verification_error: invalid_changed_file_path",
+                        "failed_gates": [],
+                        "total_gates": 0,
+                        "rework_count": rework_count,
+                        "evolve_prompt": False,
+                        "timestamp": time.time(),
+                    }
+                    try:
+                        self._log_decision(validation_result)
+                    except OSError:
+                        pass
+                    try:
+                        self._transition_ticket(ticket_id, "FAIL", [], store)
+                    except Exception:
+                        logger.exception("failed to transition ticket %s to FAIL after validation failure", ticket_id)
+                    return validation_result
+
+                # Symlink-component walk: reject if any component from workspace down to cf is a symlink.
+                # This prevents TOCTOU attacks where an attacker creates a symlink between validation and use.
+                # We use lstat (via Path.is_symlink) which does NOT follow symlinks.
+                candidate_path = self._workspace / cf
+                # Walk from workspace down through each parent component to candidate
+                # Build the list of components to check: workspace itself is trusted, so check children
+                parts_to_check: list[Path] = []
+                current = candidate_path
+                while current != self._workspace:
+                    parts_to_check.append(current)
+                    current = current.parent
+                # Check each component (from deepest to shallowest, but order doesn't matter for rejection)
+                for part in parts_to_check:
+                    try:
+                        if part.is_symlink():
+                            logger.error("verify_ticket rejected: changed_file path contains symlink component: %r (symlink: %s)", cf, part)
+                            validation_result = {
+                                "ticket_id": ticket_id,
+                                "decision": "FAIL",
+                                "passed": False,
+                                "reason": "verification_error: invalid_changed_file_path",
+                                "failed_gates": [],
+                                "total_gates": 0,
+                                "rework_count": rework_count,
+                                "evolve_prompt": False,
+                                "timestamp": time.time(),
+                            }
+                            try:
+                                self._log_decision(validation_result)
+                            except OSError:
+                                pass
+                            try:
+                                self._transition_ticket(ticket_id, "FAIL", [], store)
+                            except Exception:
+                                logger.exception("failed to transition ticket %s to FAIL after validation failure", ticket_id)
+                            return validation_result
+                    except OSError:
+                        # ENOENT or other OS errors: treat as non-symlink and continue.
+                        # A nonexistent intermediate path is OK (new file being created).
+                        continue
+
+                # Validate path does not escape workspace
+                try:
+                    resolved_path = (self._workspace / cf).resolve()
+                    if not resolved_path.is_relative_to(self._workspace.resolve()):
+                        logger.error("verify_ticket rejected: changed_file path escapes workspace: %r", cf)
+                        validation_result = {
+                            "ticket_id": ticket_id,
+                            "decision": "FAIL",
+                            "passed": False,
+                            "reason": "verification_error: invalid_changed_file_path",
+                            "failed_gates": [],
+                            "total_gates": 0,
+                            "rework_count": rework_count,
+                            "evolve_prompt": False,
+                            "timestamp": time.time(),
+                        }
+                        try:
+                            self._log_decision(validation_result)
+                        except OSError:
+                            pass
+                        try:
+                            self._transition_ticket(ticket_id, "FAIL", [], store)
+                        except Exception:
+                            logger.exception("failed to transition ticket %s to FAIL after validation failure", ticket_id)
+                        return validation_result
+                except Exception:
+                    logger.error("verify_ticket rejected: invalid changed_file path format: %r", cf)
+                    validation_result = {
+                        "ticket_id": ticket_id,
+                        "decision": "FAIL",
+                        "passed": False,
+                        "reason": "verification_error: invalid_changed_file_path",
+                        "failed_gates": [],
+                        "total_gates": 0,
+                        "rework_count": rework_count,
+                        "evolve_prompt": False,
+                        "timestamp": time.time(),
+                    }
+                    try:
+                        self._log_decision(validation_result)
+                    except OSError:
+                        pass
+                    try:
+                        self._transition_ticket(ticket_id, "FAIL", [], store)
+                    except Exception:
+                        logger.exception("failed to transition ticket %s to FAIL after validation failure", ticket_id)
+                    return validation_result
             from codebot.quality_gate import (
                 load_policy,
                 run_quality_gates_with_cache,
@@ -237,40 +417,82 @@ class Gatekeeper:
                 )
             except OSError:
                 pass
+            # For COMPLETE, verify artifact provenance BEFORE transitioning
+            # to avoid leaving ticket in COMPLETE without commit/PR.
+            # Commits are skipped when there are no files to commit — the
+            # deterministic gates already passed, so there is nothing to
+            # provenance-check. Running git subprocesses here blocks the
+            # orchestrator tick and causes the 10-tick freeze.
+            if decision == "COMPLETE":
+                ticket_for_commit = None
+                try:
+                    resolved = store if store is not None else None
+                    if resolved is None:
+                        from codebot.ticket_dispatcher import get_ticket_store
+                        resolved = get_ticket_store()
+                    ticket_for_commit = resolved.get(ticket_id) if resolved else None
+                except Exception:
+                    pass
+                files_to_commit = list(getattr(ticket_for_commit, "affected_modules", None) or []) if ticket_for_commit else list(changed_files or [])
+                if not files_to_commit:
+                    logger.info("ticket %s: no files to commit, skipping artifact provenance", ticket_id)
+                else:
+                    commit_ok = self._commit_completed_ticket(ticket_id)
+                    if not commit_ok:
+                        logger.error("ticket %s: artifact provenance failed before COMPLETE transition", ticket_id)
+                        commit_failure_result = {
+                            "ticket_id": ticket_id,
+                            "decision": "REWORK",
+                            "passed": False,
+                            "reason": "artifact_provenance_failed",
+                            "failed_gates": failed_gates,
+                            "total_gates": len(evaluations),
+                            "rework_count": rework_count,
+                            "evolve_prompt": rework_count >= MAX_REWORK_ATTEMPTS,
+                            "timestamp": time.time(),
+                        }
+                        self._log_decision(commit_failure_result)
+                        try:
+                            self._transition_ticket(ticket_id, "REWORK", failed_gates, store)
+                        except Exception:
+                            logger.exception("failed to transition ticket %s to REWORK after commit failure", ticket_id)
+                        return commit_failure_result
+
             self._log_decision(result)
             transition_ok = self._transition_ticket(ticket_id, decision, failed_gates, store)
             if not transition_ok:
                 logger.error("ticket %s: state transition failed for decision %s", ticket_id, decision)
-                result["decision"] = "REWORK"
-                result["passed"] = False
-                result["reason"] = f"state_transition_failed: {result['reason']}"
+                # Construct a fresh result dict for atomicity instead of mutating existing one
+                transition_failure_result = {
+                    "ticket_id": ticket_id,
+                    "decision": "REWORK",
+                    "passed": False,
+                    "reason": f"state_transition_failed: {reason}",
+                    "failed_gates": failed_gates,
+                    "total_gates": len(evaluations),
+                    "rework_count": rework_count,
+                    "evolve_prompt": rework_count >= MAX_REWORK_ATTEMPTS,
+                    "timestamp": time.time(),
+                }
+                self._log_decision(transition_failure_result)
                 # Attempt to transition to REWORK instead
                 try:
                     self._transition_ticket(ticket_id, "REWORK", failed_gates, store)
                 except Exception:
                     logger.exception("failed to fallback-transition ticket %s to REWORK", ticket_id)
-                return result
-
-            # If COMPLETE, also verify commit succeeded (artifact provenance)
-            if decision == "COMPLETE":
-                commit_ok = self._commit_completed_ticket(ticket_id)
-                if not commit_ok:
-                    logger.error("ticket %s: artifact provenance failed after COMPLETE transition", ticket_id)
-                    result["decision"] = "REWORK"
-                    result["passed"] = False
-                    result["reason"] = "artifact_provenance_failed"
-                    # Transition back to REWORK since commit failed
-                    try:
-                        self._transition_ticket(ticket_id, "REWORK", failed_gates, store)
-                    except Exception:
-                        logger.exception("failed to rollback ticket %s to REWORK after commit failure", ticket_id)
-                    return result
+                return transition_failure_result
 
             return result
         except Exception as e:
-            logger.error("verify_ticket failed for %s: %s", ticket_id, e, exc_info=True)
-            decision = "REWORK"
-            reason_msg = f"verification_error: {str(e)}"
+            # Log full exception internally at DEBUG level only; never leak to gate_results.jsonl
+            logger.debug("verify_ticket internal error for %s: %s", ticket_id, e, exc_info=True)
+            logger.error("verify_ticket failed for %s: verification_error", ticket_id)
+            decision = "FAIL"
+            # SECURITY: Sanitize exception to prevent secret leakage.
+            # Never include str(e) or repr(e), which may contain file paths,
+            # tokens, or internal state. Full details are logged at DEBUG
+            # level above for diagnostics.
+            reason_msg = "verification_error"
             result = {
                 "ticket_id": ticket_id,
                 "decision": decision,
@@ -287,6 +509,8 @@ class Gatekeeper:
             except OSError:
                 pass
             # Transition to REWORK so the ticket is not orphaned when verification crashes.
+            # Note: decision remains "FAIL" in the result dict per acceptance criteria,
+            # but ticket state must be REWORK since FAIL is not a valid TicketState.
             try:
                 self._transition_ticket(ticket_id, "REWORK", [], store)
             except Exception:
@@ -315,14 +539,14 @@ class Gatekeeper:
             return None
 
         from codebot.coverage_runner import run_coverage
-        from codebot.quality_gate import GateEvaluation, GateResult
+        from codebot.quality_gate import GateEvaluation, GateStatus
 
         started_at = time.monotonic()
         report = run_coverage(self._workspace, test_dirs=[test_dirs])
         duration_ms = (time.monotonic() - started_at) * 1000
         if report.error:
             return GateEvaluation(
-                "coverage", GateResult.ERROR, "python3 -m pytest --cov", "", duration_ms,
+                "coverage", GateStatus.ERROR, "python3 -m pytest --cov", "", duration_ms,
                 False, True, report.error,
             )
 
@@ -338,11 +562,11 @@ class Gatekeeper:
                 for path in incomplete
             )
             return GateEvaluation(
-                "coverage", GateResult.FAIL, "python3 -m pytest --cov", output, duration_ms,
+                "coverage", GateStatus.FAIL, "python3 -m pytest --cov", output, duration_ms,
                 False, True, "affected modules require 100% coverage",
             )
         return GateEvaluation(
-            "coverage", GateResult.PASS, "python3 -m pytest --cov", "", duration_ms, True,
+            "coverage", GateStatus.PASS, "python3 -m pytest --cov", "", duration_ms, True,
         )
 
     def _write_verification_packet(
@@ -370,7 +594,6 @@ class Gatekeeper:
         """Transition ticket state. Returns True on success, False on failure."""
         try:
             from codebot.ticket_engine import TicketState
-            from codebot.ticket_dispatcher import get_ticket_store
 
             store = store if store is not None else get_ticket_store()
             if store is None:
@@ -396,6 +619,11 @@ class Gatekeeper:
             elif decision in ("REWORK", "FAIL"):
                 if ticket.state == TicketState.REVIEW:
                     reviewer_feedback = self._collect_reviewer_feedback(ticket_id, failed_gates)
+                    rework_count = getattr(ticket, "rework_count", 0)
+                    if rework_count >= MAX_REWORK_ATTEMPTS:
+                        store.transition(ticket_id, TicketState.BLOCKED, reviewer_feedback)
+                        logger.warning("ticket %s exceeded max rework attempts (%d) — transitioned to BLOCKED", ticket_id, MAX_REWORK_ATTEMPTS)
+                        return True
                     store.transition(ticket_id, TicketState.REWORK, reviewer_feedback)
                     logger.info("ticket %s transitioned to REWORK with %d feedback items", ticket_id, len(reviewer_feedback))
                     return True
@@ -407,18 +635,13 @@ class Gatekeeper:
                     return False
             return False
         except Exception as e:
-            logger.error("failed to transition ticket %s: %s", ticket_id, e, exc_info=True)
+            logger.debug("transition failed for %s: %s", ticket_id, e, exc_info=True)
+            logger.error("failed to transition ticket %s: transition_error", ticket_id)
             return False
 
     def _commit_completed_ticket(self, ticket_id: str) -> bool:
         """Commit the ticket's files on cb/<ticket>, open PR, record SHA+URL. Returns True on success."""
         try:
-            from codebot.ticket_dispatcher import get_ticket_store
-            from codebot.completion_commit import (
-                commit_ticket_files, open_pull_request, auto_merge_pull_request,
-                push_current_branch, sync_ticket_issue,
-            )
-
             store = get_ticket_store()
             if store is None:
                 logger.warning("TicketStore unavailable for ticket %s commit", ticket_id)
@@ -430,22 +653,42 @@ class Gatekeeper:
             if not files:
                 return True  # No files to commit
             title = getattr(ticket, "title", "")
+
+            # Use module-level aliases for testability (patchable via codebot.gatekeeper.*)
+            if commit_ticket_files is None:
+                logger.error("ticket %s: commit_ticket_files not available", ticket_id)
+                return False
             ok, sha = commit_ticket_files(
                 self._workspace, ticket_id, title, files, branch=True,
             )
             if ok and sha:
                 pr_url = getattr(ticket, "pr_url", "")
                 if not pr_url and _push_enabled_for_prs():
-                    pok, pr_url = open_pull_request(
-                        self._workspace, ticket_id, title, sha,
-                    )
-                    if pok and pr_url:
-                        auto_merge_pull_request(pr_url)
+                    if open_pull_request is not None:
+                        pok, pr_url = open_pull_request(
+                            self._workspace, ticket_id, title, sha,
+                        )
+                        if pok and pr_url and auto_merge_pull_request is not None:
+                            auto_merge_pull_request(pr_url)
+                        else:
+                            pr_url = ""
                     else:
                         pr_url = ""
+                # Push and sync BEFORE recording commit to ensure artifact provenance.
+                # If push/sync fails, we don't record the commit, keeping state consistent.
+                if push_current_branch is None or sync_ticket_issue is None:
+                    logger.error("ticket %s: push_current_branch or sync_ticket_issue not available", ticket_id)
+                    return False
+                push_ok, push_msg = push_current_branch(self._workspace)
+                sync_ok, sync_msg = sync_ticket_issue(ticket_id, title, sha, "COMPLETE")
+                if not push_ok or not sync_ok:
+                    logger.error(
+                        "ticket %s: push/sync failed (push=%s/%s, sync=%s/%s); skipping record_commit",
+                        ticket_id, push_ok, push_msg, sync_ok, sync_msg,
+                    )
+                    return False
+                # Only record commit after all external operations succeed
                 store.record_commit(ticket_id, sha, pr_url)
-                push_current_branch(self._workspace)
-                sync_ticket_issue(ticket_id, title, sha, "COMPLETE")
 
                 # Auto-create documentation ticket if needed
                 self._create_documentation_ticket_if_needed(ticket_id, store)
@@ -455,7 +698,8 @@ class Gatekeeper:
                 return False
 
         except Exception as e:
-            logger.error("ticket %s: completion commit failed with exception: %s", ticket_id, e, exc_info=True)
+            logger.debug("completion commit failed for %s: %s", ticket_id, e, exc_info=True)
+            logger.error("ticket %s: completion commit failed: verification_error", ticket_id)
             return False
 
     def _create_documentation_ticket_if_needed(self, ticket_id: str, store: Any) -> None:
@@ -499,25 +743,61 @@ class Gatekeeper:
         return feedback
 
     def _log_decision(self, result: dict[str, Any]) -> None:
-        line = json.dumps(result) + "\n"
         import fcntl
         import os
 
-        fd = os.open(
-            str(self._log_path),
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-            0o644,
-        )
+        line = json.dumps(result) + "\n"
+        data = line.encode("utf-8")
+        lock_path = self._log_path.with_suffix(self._log_path.suffix + ".lock")
+        tmp_path = self._log_path.with_suffix(f"{self._log_path.suffix}.{os.getpid()}.tmp")
+
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            os.write(fd, line.encode("utf-8"))
-            os.fsync(fd)
-        finally:
+            # Acquire exclusive lock via a dedicated lock file
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except Exception:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+                # Read existing content to preserve history
+                existing_data = b""
+                if self._log_path.exists():
+                    try:
+                        existing_data = self._log_path.read_bytes()
+                    except OSError:
+                        pass
+
+                # Prepare full payload
+                payload = existing_data + data
+
+                # Write to tmp file atomically
+                tmp_fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                try:
+                    offset = 0
+                    total = len(payload)
+                    while offset < total:
+                        written = os.write(tmp_fd, payload[offset:])
+                        if written == 0:
+                            raise OSError("write returned 0 bytes")
+                        offset += written
+                    os.fsync(tmp_fd)
+                finally:
+                    os.close(tmp_fd)
+
+                # Atomic rename
+                os.replace(str(tmp_path), str(self._log_path))
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                os.close(lock_fd)
+        except OSError:
+            logger.warning("Failed to log decision to %s", self._log_path)
+            # Clean up tmp file if it exists
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
                 pass
-            os.close(fd)
 
     def get_history(self, ticket_id: str) -> list[dict[str, Any]]:
         if not self._log_path.exists():

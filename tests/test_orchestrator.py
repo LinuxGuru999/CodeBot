@@ -77,6 +77,54 @@ def _make_bot(config: BotConfig | None = None, **kwargs) -> BotState:
 # is_draining
 # ---------------------------------------------------------------------------
 
+class TestSetProjectAdapterInjection:
+    """Verify set_project_adapter returns PathConfig without mutating globals."""
+
+    def test_returns_pathconfig_object(self, tmp_path):
+        """set_project_adapter must return a PathConfig instance."""
+        from codebot.state_manager import PathConfig
+
+        adapter = MagicMock()
+        # Mock the paths() method to return a dict with expected keys
+        adapter.paths.return_value = {
+            'repository_root': str(tmp_path / "bots"),
+            'state_dir': str(tmp_path / "state"),
+            'logs_dir': str(tmp_path / "logs"),
+        }
+
+        result = orch.set_project_adapter(adapter)
+        assert isinstance(result, PathConfig)
+        assert result.state_dir == tmp_path / "state"
+
+    def test_no_global_mutation_side_effect(self, tmp_path):
+        """Calling set_project_adapter should not inject 'BOTS_DIR' into module globals.
+
+        Paths should be resolved via get_paths() or __getattr__, not stored
+        as explicit module-level variables that can be mutated directly.
+        """
+        adapter = MagicMock()
+        adapter.paths.return_value = {
+            'repository_root': str(tmp_path / "custom_bots"),
+            'state_dir': str(tmp_path / "custom_state"),
+            'logs_dir': str(tmp_path / "logs"),
+        }
+
+        # Ensure BOTS_DIR is not already a real attribute (only __getattr__ proxy)
+        assert "BOTS_DIR" not in orch.__dict__, "BOTS_DIR should not exist as explicit global"
+
+        orch.set_project_adapter(adapter)
+
+        # After calling, BOTS_DIR should STILL not be an explicit global variable.
+        # It should only be accessible via __getattr__ delegation to get_paths().
+        assert "BOTS_DIR" not in orch.__dict__, (
+            "set_project_adapter must not mutate module globals; "
+            "use get_paths() or __getattr__ instead"
+        )
+
+        # Verify the path is still resolvable via the public API
+        assert orch.BOTS_DIR == tmp_path / "custom_bots"
+
+
 class TestIsDraining:
     def test_no_drain_file(self, tmp_path):
         """is_draining returns False when .drain does not exist."""
@@ -120,16 +168,37 @@ class TestHeartbeatPath:
 
 
 class TestReadHeartbeat:
+    def _make_test_config(self, tmp_path):
+        """Helper to create a PathConfig for testing."""
+        from codebot.state_manager import PathConfig
+        cfg = PathConfig(
+            bots_dir=tmp_path / "bots",
+            state_dir=tmp_path,
+            logs_dir=tmp_path / "logs",
+            backup_dir=tmp_path / "backup",
+            alignment_events_dir=tmp_path / "alignment_events",
+            drain_file=tmp_path / ".drain",
+            update_lock=tmp_path / ".update_lock",
+            restart_file=tmp_path / ".restart",
+        )
+        cfg.bots_dir.mkdir(exist_ok=True)
+        cfg.logs_dir.mkdir(exist_ok=True)
+        cfg.backup_dir.mkdir(exist_ok=True)
+        cfg.alignment_events_dir.mkdir(exist_ok=True)
+        return cfg
+
     def test_missing_file_returns_zero(self, tmp_path):
         """read_heartbeat returns 0.0 when file does not exist."""
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             assert read_heartbeat("nonexistent") == 0.0
 
     def test_valid_float(self, tmp_path):
         """read_heartbeat parses a valid float timestamp."""
         hb = tmp_path / "test-bot.heartbeat"
         hb.write_text("1789000000.123")
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             val = read_heartbeat("test-bot")
             assert val == pytest.approx(1789000000.123, abs=0.01)
 
@@ -137,21 +206,24 @@ class TestReadHeartbeat:
         """read_heartbeat returns 0.0 for non-numeric, non-ISO content."""
         hb = tmp_path / "test-bot.heartbeat"
         hb.write_text("not-a-timestamp")
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             assert read_heartbeat("test-bot") == 0.0
 
     def test_empty_file_returns_zero(self, tmp_path):
         """read_heartbeat returns 0.0 for empty file."""
         hb = tmp_path / "test-bot.heartbeat"
         hb.write_text("")
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             assert read_heartbeat("test-bot") == 0.0
 
     def test_whitespace_around_float(self, tmp_path):
         """read_heartbeat handles whitespace around the float."""
         hb = tmp_path / "test-bot.heartbeat"
         hb.write_text("  1789000000.5  \n")
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             val = read_heartbeat("test-bot")
             assert val == pytest.approx(1789000000.5, abs=0.01)
 
@@ -370,15 +442,36 @@ class TestSlotMath:
 # ---------------------------------------------------------------------------
 
 class TestCheckpoint:
+    def _make_test_config(self, tmp_path):
+        """Helper to create a PathConfig for testing."""
+        from codebot.state_manager import PathConfig
+        cfg = PathConfig(
+            bots_dir=tmp_path / "bots",
+            state_dir=tmp_path,
+            logs_dir=tmp_path / "logs",
+            backup_dir=tmp_path / "backup",
+            alignment_events_dir=tmp_path / "alignment_events",
+            drain_file=tmp_path / ".drain",
+            update_lock=tmp_path / ".update_lock",
+            restart_file=tmp_path / ".restart",
+        )
+        cfg.bots_dir.mkdir(exist_ok=True)
+        cfg.logs_dir.mkdir(exist_ok=True)
+        cfg.backup_dir.mkdir(exist_ok=True)
+        cfg.alignment_events_dir.mkdir(exist_ok=True)
+        return cfg
+
     def test_checkpoint_path_convention(self, tmp_path):
         """checkpoint_path follows state/{name}.checkpoint.json."""
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             p = checkpoint_path("my-bot")
             assert p == tmp_path / "my-bot.checkpoint.json"
 
     def test_read_checkpoint_missing(self, tmp_path):
         """read_checkpoint returns None for missing file."""
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             assert read_checkpoint("no-such-bot") is None
 
     def test_read_checkpoint_valid_json(self, tmp_path):
@@ -386,7 +479,8 @@ class TestCheckpoint:
         cp = tmp_path / "test-bot.checkpoint.json"
         data = {"bot": "test-bot", "reason": "test"}
         cp.write_text(json.dumps(data))
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             result = read_checkpoint("test-bot")
             assert result == data
 
@@ -394,7 +488,8 @@ class TestCheckpoint:
         """read_checkpoint returns None (or backup) for corrupt JSON."""
         cp = tmp_path / "test-bot.checkpoint.json"
         cp.write_text("{{{not json")
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             result = read_checkpoint("test-bot")
             assert result is None
 
@@ -409,7 +504,8 @@ class TestCheckpoint:
         bak = tmp_path / "test-bot.checkpoint.bak"
         bak_data = {"bot": "test-bot", "reason": "backup"}
         bak.write_text(json.dumps(bak_data))
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             result = read_checkpoint("test-bot")
             # When primary doesn't exist but .bak does, read_checkpoint restores from .bak
             assert result == bak_data
@@ -418,7 +514,8 @@ class TestCheckpoint:
         """read_checkpoint returns None for non-dict JSON (e.g., list)."""
         cp = tmp_path / "test-bot.checkpoint.json"
         cp.write_text("[1, 2, 3]")
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             result = read_checkpoint("test-bot")
             assert result is None
 
@@ -588,16 +685,37 @@ class TestWriteJsonAtomic:
 # ---------------------------------------------------------------------------
 
 class TestReadStateFile:
+    def _make_test_config(self, tmp_path):
+        """Helper to create a PathConfig for testing."""
+        from codebot.state_manager import PathConfig
+        cfg = PathConfig(
+            bots_dir=tmp_path / "bots",
+            state_dir=tmp_path,
+            logs_dir=tmp_path / "logs",
+            backup_dir=tmp_path / "backup",
+            alignment_events_dir=tmp_path / "alignment_events",
+            drain_file=tmp_path / ".drain",
+            update_lock=tmp_path / ".update_lock",
+            restart_file=tmp_path / ".restart",
+        )
+        cfg.bots_dir.mkdir(exist_ok=True)
+        cfg.logs_dir.mkdir(exist_ok=True)
+        cfg.backup_dir.mkdir(exist_ok=True)
+        cfg.alignment_events_dir.mkdir(exist_ok=True)
+        return cfg
+
     def test_missing_returns_empty(self, tmp_path):
         """_read_state_file returns empty dict for missing file."""
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             assert _read_state_file("no-such-bot") == {}
 
     def test_valid_json(self, tmp_path):
         """_read_state_file reads valid JSON."""
         sf = tmp_path / "test-bot.state.json"
         sf.write_text(json.dumps({"status": "running"}))
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             result = _read_state_file("test-bot")
             assert result == {"status": "running"}
 
@@ -605,7 +723,8 @@ class TestReadStateFile:
         """_read_state_file returns empty dict for corrupt JSON."""
         sf = tmp_path / "test-bot.state.json"
         sf.write_text("{bad json")
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        cfg = self._make_test_config(tmp_path)
+        with patch.object(orch, "get_paths", return_value=cfg):
             assert _read_state_file("test-bot") == {}
 
 
@@ -616,23 +735,23 @@ class TestReadStateFile:
 class TestTicketClassRouting:
     """Verify the TICKET_CLASS_TO_IMPLEMENTER and TICKET_CLASS_TO_REVIEWER mappings."""
 
-    def test_bug_routes_to_general_implementer(self):
-        assert orch.TICKET_CLASS_TO_IMPLEMENTER["bug"] == "general_implementer"
+    def test_bug_routes_to_implementer(self):
+        assert orch.TICKET_CLASS_TO_IMPLEMENTER["bug"] == "implementer"
 
-    def test_feature_routes_to_general_implementer(self):
-        assert orch.TICKET_CLASS_TO_IMPLEMENTER["feature"] == "general_implementer"
+    def test_feature_routes_to_implementer(self):
+        assert orch.TICKET_CLASS_TO_IMPLEMENTER["feature"] == "implementer"
 
-    def test_security_routes_to_backend_implementer(self):
-        assert orch.TICKET_CLASS_TO_IMPLEMENTER["security"] == "backend_implementer"
+    def test_security_routes_to_implementer(self):
+        assert orch.TICKET_CLASS_TO_IMPLEMENTER["security"] == "implementer"
 
-    def test_test_routes_to_test_implementer(self):
-        assert orch.TICKET_CLASS_TO_IMPLEMENTER["test"] == "test_implementer"
+    def test_test_routes_to_implementer(self):
+        assert orch.TICKET_CLASS_TO_IMPLEMENTER["test"] == "implementer"
 
-    def test_security_ticket_routes_to_security_reviewer(self):
-        assert orch.TICKET_CLASS_TO_REVIEWER["security"] == "security_reviewer"
+    def test_security_ticket_routes_to_reviewer(self):
+        assert orch.TICKET_CLASS_TO_REVIEWER["security"] == "reviewer"
 
-    def test_bug_ticket_routes_to_correctness_reviewer(self):
-        assert orch.TICKET_CLASS_TO_REVIEWER["bug"] == "correctness_reviewer"
+    def test_bug_ticket_routes_to_reviewer(self):
+        assert orch.TICKET_CLASS_TO_REVIEWER["bug"] == "reviewer"
 
     def test_all_implementer_classes_covered(self):
         """Every ticket class should have an implementer mapping."""
@@ -1010,6 +1129,44 @@ class TestPathInjectionWithoutGlobalMutation:
             assert result.state_dir == expected_config.state_dir
             assert result.bots_dir == expected_config.bots_dir
 
+    def test_set_project_adapter_no_module_level_mutation(self, tmp_path):
+        """Verify set_project_adapter does not mutate orchestrator module globals.
+        
+        Regression test for CB-629135-E26F: ensures no 'global BOTS_DIR' etc.
+        are created in the orchestrator namespace when adapter is set.
+        """
+        from codebot.state_manager import PathConfig
+        
+        mock_adapter = MagicMock()
+        expected_config = PathConfig(
+            bots_dir=tmp_path / "bots",
+            state_dir=tmp_path / "state",
+            logs_dir=tmp_path / "logs",
+            backup_dir=tmp_path / "backup",
+            alignment_events_dir=tmp_path / "alignment_events",
+            drain_file=tmp_path / ".drain",
+            update_lock=tmp_path / ".update_lock",
+            restart_file=tmp_path / ".restart",
+        )
+        
+        # Snapshot module dict before call
+        pre_keys = set(orch.__dict__.keys())
+        
+        with patch.object(orch, '_sm_set_project_adapter', return_value=expected_config):
+            orch.set_project_adapter(mock_adapter)
+        
+        # Verify no new path-related keys were added to module __dict__
+        post_keys = set(orch.__dict__.keys())
+        new_keys = post_keys - pre_keys
+        path_attrs = {"BOTS_DIR", "STATE_DIR", "LOGS_DIR", "BACKUP_DIR", 
+                      "ALIGNMENT_EVENTS_DIR", "DRAIN_FILE", "UPDATE_LOCK", "RESTART_FILE"}
+        mutated_globals = new_keys & path_attrs
+        assert not mutated_globals, f"set_project_adapter mutated module globals: {mutated_globals}"
+        
+        # Also verify these aren't silently stored under different names
+        for attr in path_attrs:
+            assert attr not in orch.__dict__, f"{attr} exists as module attribute (should use __getattr__)"
+
     def test_orchestrator_functions_use_dynamic_paths_not_globals(self, tmp_path):
         """Orchestrator helper functions use get_paths() dynamically, not cached globals."""
         from codebot.state_manager import PathConfig
@@ -1102,12 +1259,31 @@ class TestPathInjectionWithoutGlobalMutation:
         # (verifies no broken global cache was left behind)
 
     def test_read_heartbeat_uses_patched_state_dir(self, tmp_path):
-        """read_heartbeat respects patched STATE_DIR without global mutation."""
+        """read_heartbeat respects patched get_paths() without global mutation."""
+        from codebot.state_manager import PathConfig
+        
         # Create heartbeat file in isolated temp dir
         hb_file = tmp_path / "isolated-bot.heartbeat"
         hb_file.write_text("1789000000.5")
+        
+        # Create a test PathConfig pointing to tmp_path
+        test_config = PathConfig(
+            bots_dir=tmp_path / "bots",
+            state_dir=tmp_path,
+            logs_dir=tmp_path / "logs",
+            backup_dir=tmp_path / "backup",
+            alignment_events_dir=tmp_path / "alignment_events",
+            drain_file=tmp_path / ".drain",
+            update_lock=tmp_path / ".update_lock",
+            restart_file=tmp_path / ".restart",
+        )
+        test_config.bots_dir.mkdir(exist_ok=True)
+        test_config.logs_dir.mkdir(exist_ok=True)
+        test_config.backup_dir.mkdir(exist_ok=True)
+        test_config.alignment_events_dir.mkdir(exist_ok=True)
 
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        # Patch get_paths to return our test config
+        with patch.object(orch, "get_paths", return_value=test_config):
             result = orch.read_heartbeat("isolated-bot")
             assert result == pytest.approx(1789000000.5, abs=0.01)
 
@@ -1115,15 +1291,32 @@ class TestPathInjectionWithoutGlobalMutation:
         # should still return 0.0 (not affected by previous test)
 
     def test_checkpoint_functions_isolated_via_patch(self, tmp_path):
-        """checkpoint_path and read_checkpoint work with patched STATE_DIR."""
+        """checkpoint_path and read_checkpoint work with patched get_paths()."""
+        from codebot.state_manager import PathConfig
         import json
 
         # Setup checkpoint file
         cp_file = tmp_path / "test-bot.checkpoint.json"
         test_data = {"bot": "test-bot", "status": "running", "iteration": 5}
         cp_file.write_text(json.dumps(test_data))
+        
+        # Create a test PathConfig pointing to tmp_path
+        test_config = PathConfig(
+            bots_dir=tmp_path / "bots",
+            state_dir=tmp_path,
+            logs_dir=tmp_path / "logs",
+            backup_dir=tmp_path / "backup",
+            alignment_events_dir=tmp_path / "alignment_events",
+            drain_file=tmp_path / ".drain",
+            update_lock=tmp_path / ".update_lock",
+            restart_file=tmp_path / ".restart",
+        )
+        test_config.bots_dir.mkdir(exist_ok=True)
+        test_config.logs_dir.mkdir(exist_ok=True)
+        test_config.backup_dir.mkdir(exist_ok=True)
+        test_config.alignment_events_dir.mkdir(exist_ok=True)
 
-        with patch.object(orch, "STATE_DIR", tmp_path):
+        with patch.object(orch, "get_paths", return_value=test_config):
             # Test checkpoint_path
             path = orch.checkpoint_path("test-bot")
             assert path == cp_file
@@ -1157,7 +1350,7 @@ class TestErrorExitIntegration:
         claims_dir = state_dir / "claims"
         claims_dir.mkdir()
 
-        # Create ticket in IMPLEMENTING
+        # Create ticket in IMPLEMENT (valid chain: DISCOVERED -> TRIAGED -> GOAL -> DECOMP -> PLANNING -> IMPLEMENT)
         store_path = state_dir / "tickets.json"
         store = TicketStore(store_path)
         t = create_ticket(
@@ -1172,11 +1365,11 @@ class TestErrorExitIntegration:
             risk=RiskLevel.LOW,
         )
         store.add(t)
-        store.transition(t.id, TicketState.VALIDATING)
         store.transition(t.id, TicketState.TRIAGED)
-        store.transition(t.id, TicketState.READY)
-        store.transition(t.id, TicketState.IMPLEMENTATION_READY)
-        store.transition(t.id, TicketState.IMPLEMENTING)
+        store.transition(t.id, TicketState.GOAL)
+        store.transition(t.id, TicketState.DECOMP)
+        store.transition(t.id, TicketState.PLANNING)
+        store.transition(t.id, TicketState.IMPLEMENT)
         store.flush()
         store.close()
 
@@ -1225,16 +1418,13 @@ class TestErrorExitIntegration:
                 orch.check_all_bots(bots)
         finally:
             td.STATE_DIR = original_td_state_dir
-            orch.check_all_bots(bots)
 
         # Verify ticket transitioned out of IMPLEMENTING (error recovery worked)
-        # Dispatchers may immediately route READY tickets, so accept READY or routed states
+        # On error exit from IMPLEMENT, transition_ticket_on_error returns to REWORK
         store2 = TicketStore(store_path)
         updated = store2.get(t.id)
-        assert updated.state != TicketState.IMPLEMENTING, \
-            f"Ticket should have left IMPLEMENTING after error, but stayed there"
-        assert updated.state in (TicketState.READY, TicketState.DECOMPOSE, TicketState.PLANNING, TicketState.IMPLEMENTATION_READY), \
-            f"Expected READY or routed state after error recovery, got {updated.state}"
+        assert updated.state == TicketState.REWORK, \
+            f"Expected REWORK after error recovery, got {updated.state}"
         store2.close()
 
         # Verify scratchpad was finished with error info
@@ -1357,3 +1547,62 @@ class TestRestartBotDelegation:
         with patch.object(pm, "restart_bot") as mock_restart:
             orch.restart_bot(bot, reason="test_reason", bots=bots)
             assert mock_restart.called
+
+
+class TestPromptGatewayInjection:
+    """Verify orchestrator uses injected gateway interface, not direct imports."""
+
+    def test_no_direct_prompt_gateway_imports(self):
+        """orchestrator.py must not import build_message or note_spawn directly from prompt_gateway."""
+        import inspect
+        source = inspect.getsource(orch)
+        # Must not have direct imports of concrete functions from prompt_gateway
+        assert "from codebot.prompt_gateway import" not in source, (
+            "orchestrator.py should not directly import from codebot.prompt_gateway; "
+            "use get_prompt_gateway() from process_manager instead"
+        )
+        # Must not reference prompt_gateway.build_message or prompt_gateway.note_spawn
+        assert "prompt_gateway.build_message" not in source
+        assert "prompt_gateway.note_spawn" not in source
+
+    def test_gateway_accessors_available(self):
+        """Orchestrator exposes gateway accessor functions from process_manager."""
+        assert hasattr(orch, "get_prompt_gateway")
+        assert hasattr(orch, "set_prompt_gateway")
+        assert hasattr(orch, "clear_prompt_gateway")
+        assert callable(orch.get_prompt_gateway)
+        assert callable(orch.set_prompt_gateway)
+        assert callable(orch.clear_prompt_gateway)
+
+
+class TestRoleRegistryDelegation:
+    """Orchestrator must query role_registry instead of owning role sets."""
+
+    def test_registered_role_names_queries_registry(self):
+        from codebot.role_registry import ROLE_REGISTRY
+        assert orch.registered_role_names() == frozenset(ROLE_REGISTRY)
+
+    def test_role_names_for_category(self):
+        from codebot.role_registry import IMPLEMENTER_ROLE_NAMES, RoleCategory
+        assert orch.role_names_for_category(RoleCategory.IMPLEMENTATION) == IMPLEMENTER_ROLE_NAMES
+
+    def test_getattr_delegates_role_names(self):
+        from codebot.role_registry import IMPLEMENTER_ROLE_NAMES
+        assert orch.IMPLEMENTER_ROLE_NAMES == IMPLEMENTER_ROLE_NAMES
+
+    def test_getattr_delegates_ticket_class_maps(self):
+        from codebot.ticket_dispatcher import TICKET_CLASS_TO_IMPLEMENTER, TICKET_CLASS_TO_REVIEWER
+        assert orch.TICKET_CLASS_TO_IMPLEMENTER == TICKET_CLASS_TO_IMPLEMENTER
+        assert orch.TICKET_CLASS_TO_REVIEWER == TICKET_CLASS_TO_REVIEWER
+
+    def test_getattr_delegates_alignment_functions(self):
+        from codebot.alignment_service import run_alignment_pipeline
+        assert orch.run_alignment_pipeline is run_alignment_pipeline
+
+    def test_getattr_delegates_dispatch_functions(self):
+        from codebot.dispatch_service import transition_ticket_on_success
+        assert orch.transition_ticket_on_success is transition_ticket_on_success
+
+    def test_unknown_attribute_raises(self):
+        with pytest.raises(AttributeError):
+            orch.NOT_A_REAL_ORCH_ATTR_XYZ

@@ -12,10 +12,8 @@ Provides stdlib-only internet research capabilities: web_search queries DuckDuck
 - `handle_endtag()`: Function
 
 ## Invariants
-- stdlib-only baseline (urllib.request, urllib.parse, html.parser, re); optionally uses
-  beautifulsoup4 + lxml for robust HTML parsing when installed, otherwise falls back
-  to regex-based extraction -- no required third-party runtime dependencies
-  (see docs/adr/005-web-tools-html-parsing-strategy.md)
+- stdlib-only (urllib.request, urllib.parse, html.parser, re, html.unescape)
+- No third-party runtime dependencies (beautifulsoup4, lxml removed per CB-4080995-C643)
 - All I/O bounded: search response capped at 500KB, fetch at 1MB
 - Timeouts enforced: 15s for search, 30s for fetch
 - Never follows redirects to private IPs (SSRF guard)

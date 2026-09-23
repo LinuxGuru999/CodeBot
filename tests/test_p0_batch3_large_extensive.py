@@ -359,382 +359,113 @@ def test_safe_kill_bot_process_rejects_invalid_Given_bad_name_When_call_Then_fal
     ok, pids = cs._safe_kill_bot_process("bad; name")
     assert ok is False and pids == []
 
-def test_safe_kill_bot_process_no_matches_Given_empty_pgrep_When_call_Then_true_empty():
-    """Given pgrep empty
+def test_safe_kill_bot_process_no_pid_file_Given_no_file_When_call_Then_true_empty():
+    """Given no PID file exists
     When _safe_kill_bot_process
-    Then (True, [])."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+    Then (True, []) — safe skip, no pgrep fallback."""
+    with patch.object(cs, "_read_pid_file", return_value=None):
         ok, pids = cs._safe_kill_bot_process("valid-bot")
         assert ok is True and pids == []
 
-def test_safe_kill_bot_process_pgrep_non_digit_lines_Given_weird_output_When_call_Then_skipped():
-    """Given pgrep output with non-digit lines
+def test_safe_kill_bot_process_pid_file_cmdline_match_Given_verified_When_call_Then_killed():
+    """Given PID file with matching cmdline
     When _safe_kill_bot_process
-    Then non-digits ignored."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="abc\n1234\n", returncode=0)):
-        m = mock_open(read_data=b"python\x00api_runner.py\x00valid-bot\x00")
-        with patch("builtins.open", m):
-            with patch("os.kill"):
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert ok is True
-                assert 1234 in pids
+    Then killed via _atomic_signal_pid."""
+    with patch.object(cs, "_read_pid_file", return_value=9999), \
+         patch.object(cs, "_verify_cmdline", return_value=True), \
+         patch.object(cs, "_atomic_signal_pid", return_value=True) as mock_sig, \
+         patch.object(cs, "STATE_DIR") as mock_sd:
+        mock_pf = MagicMock()
+        mock_pf.exists.return_value = True
+        mock_sd.__truediv__.return_value = mock_pf
+        ok, pids = cs._safe_kill_bot_process("valid-bot")
+        assert ok is True
+        assert 9999 in pids
+        mock_sig.assert_called_once()
 
-def test_safe_kill_bot_process_verifies_cmdline_Given_matching_pid_When_verified_Then_killed():
-    """Given pid with matching cmdline
+def test_safe_kill_bot_process_pid_file_cmdline_mismatch_Given_wrong_When_call_Then_not_killed():
+    """Given PID file but cmdline doesn't match
     When _safe_kill_bot_process
-    Then killed."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="9999\n", returncode=0)):
-        with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00valid-bot\x00")):
-            with patch("os.kill") as mk:
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert ok is True
-                assert 9999 in pids
-                mk.assert_called()
+    Then not killed, PID file NOT cleaned up (DoS prevention)."""
+    with patch.object(cs, "_read_pid_file", return_value=1111), \
+         patch.object(cs, "_verify_cmdline", return_value=False), \
+         patch.object(cs, "STATE_DIR") as mock_sd:
+        mock_pf = MagicMock()
+        mock_pf.exists.return_value = True
+        mock_sd.__truediv__.return_value = mock_pf
+        ok, pids = cs._safe_kill_bot_process("valid-bot")
+        assert ok is True
+        assert pids == []
+        mock_pf.unlink.assert_not_called()  # PID file preserved to prevent DoS race
 
-def test_safe_kill_bot_process_cmdline_mismatch_Given_wrong_cmdline_When_call_Then_not_killed():
-    """Given pid with non-matching cmdline
+def test_safe_kill_bot_process_non_python_cmdline_Given_java_When_call_Then_skipped():
+    """Given PID file points to non-python process
     When _safe_kill_bot_process
-    Then not killed."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="1111\n", returncode=0)):
-        with patch("builtins.open", mock_open(read_data=b"python other.py valid-bot")):
-            with patch("os.kill") as mk:
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert ok is True
-                assert pids == []
-                mk.assert_not_called()
+    Then not killed (cmdline verification rejects)."""
+    with patch.object(cs, "_read_pid_file", return_value=2222), \
+         patch.object(cs, "_verify_cmdline", return_value=False), \
+         patch.object(cs, "STATE_DIR") as mock_sd:
+        mock_pf = MagicMock()
+        mock_pf.exists.return_value = True
+        mock_sd.__truediv__.return_value = mock_pf
+        ok, pids = cs._safe_kill_bot_process("valid-bot")
+        assert pids == []
 
-def test_safe_kill_bot_process_proc_not_python_Given_non_python_When_call_Then_skipped():
-    """Given matched suffix but not python
+def test_safe_kill_bot_process_pidfd_unavailable_Given_fail_closed_When_call_Then_no_kill():
+    """Given PID file + cmdline match but pidfd signaling unavailable
     When _safe_kill_bot_process
-    Then skipped."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="2222\n", returncode=0)):
-        # cmdline ends with expected suffix but no python nor api_runner
-        with patch("builtins.open", mock_open(read_data=b"/usr/bin/fake\x00api_runner.py\x00valid-bot-other\x00")):
-            # Our logic: suffix check passes if " api_runner.py valid-bot" in cmdline, but python check fails if neither python nor api_runner? Actually api_runner present so it would still pass.
-            # Use a cmdline that has suffix but not python/api_runner substring check fails
-            pass
-        # Simpler: cmdline is "java other" -> will be debug skipped
-        with patch("builtins.open", mock_open(read_data=b"java\x00other\x00valid-bot\x00")):
-            with patch("os.kill") as mk:
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert pids == []
+    Then safe failure, PID file NOT cleaned up."""
+    with patch.object(cs, "_read_pid_file", return_value=5555), \
+         patch.object(cs, "_verify_cmdline", return_value=True), \
+         patch.object(cs, "_atomic_signal_pid", return_value=False), \
+         patch.object(cs, "STATE_DIR") as mock_sd:
+        mock_pf = MagicMock()
+        mock_pf.exists.return_value = True
+        mock_sd.__truediv__.return_value = mock_pf
+        ok, pids = cs._safe_kill_bot_process("valid-bot")
+        assert ok is True
+        assert pids == []  # No PID killed due to safe failure
+        mock_pf.unlink.assert_not_called()  # PID file preserved for operator investigation
 
-def test_safe_kill_bot_process_file_not_found_Given_exited_pid_When_call_Then_skipped():
-    """Given PID file not found (exited)
+def test_safe_kill_bot_process_process_lookup_error_Given_exited_When_call_Then_ok():
+    """Given PID already exited (ProcessLookupError)
     When _safe_kill_bot_process
-    Then skipped."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="3333\n", returncode=0)):
-        with patch("builtins.open", side_effect=FileNotFoundError):
-            with patch("os.kill") as mk:
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert ok is True and pids == []
-                mk.assert_not_called()
+    Then still ok, PID file cleaned up."""
+    with patch.object(cs, "_read_pid_file", return_value=6666), \
+         patch.object(cs, "_verify_cmdline", return_value=True), \
+         patch.object(cs, "_atomic_signal_pid", side_effect=ProcessLookupError), \
+         patch.object(cs, "STATE_DIR") as mock_sd:
+        mock_pf = MagicMock()
+        mock_pf.exists.return_value = True
+        mock_sd.__truediv__.return_value = mock_pf
+        ok, pids = cs._safe_kill_bot_process("valid-bot")
+        assert ok is True
+        assert 6666 in pids
 
-def test_safe_kill_bot_process_permission_error_Given_denied_When_call_Then_skipped():
-    """Given PermissionError reading proc
-    When _safe_kill_bot_process
-    Then skipped."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="4444\n", returncode=0)):
-        with patch("builtins.open", side_effect=PermissionError):
-            ok, pids = cs._safe_kill_bot_process("valid-bot")
-            assert ok is True and pids == []
-
-def test_safe_kill_bot_process_kill_permission_error_Given_verified_When_kill_denied_Then_continues():
+def test_safe_kill_bot_process_permission_error_Given_denied_When_call_Then_continues():
     """Given verified PID but kill permission denied
     When _safe_kill_bot_process
     Then still returns success with pid listed."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="5555\n", returncode=0)):
-        with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00valid-bot\x00")):
-            with patch("os.kill", side_effect=PermissionError):
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert ok is True
-                assert 5555 in pids
-
-def test_safe_kill_bot_process_kill_lookup_error_Given_exited_When_kill_Then_ok():
-    """Given PID exited before kill
-    When _safe_kill_bot_process
-    Then still ok."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="6666\n", returncode=0)):
-        with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00valid-bot\x00")):
-            with patch("os.kill", side_effect=ProcessLookupError):
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert ok is True
-                assert 6666 in pids
-
-def test_safe_kill_bot_process_timeout_Given_pgrep_timeout_When_call_Then_false():
-    """Given pgrep timeout
-    When _safe_kill_bot_process
-    Then (False, [])."""
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="pgrep", timeout=5)):
+    with patch.object(cs, "_read_pid_file", return_value=7777), \
+         patch.object(cs, "_verify_cmdline", return_value=True), \
+         patch.object(cs, "_atomic_signal_pid", side_effect=PermissionError):
         ok, pids = cs._safe_kill_bot_process("valid-bot")
-        assert ok is False
+        assert ok is True
+        assert 7777 in pids
 
-def test_safe_kill_bot_process_generic_exception_Given_error_When_call_Then_false():
-    """Given generic exception in pgrep
+def test_safe_kill_bot_process_generic_signal_error_Given_error_When_call_Then_handled():
+    """Given verified PID but signal raises generic OSError
     When _safe_kill_bot_process
-    Then (False, [])."""
-    with patch("subprocess.run", side_effect=RuntimeError("boom")):
-        ok, _ = cs._safe_kill_bot_process("valid-bot")
-        assert ok is False
+    Then handled gracefully."""
+    with patch.object(cs, "_read_pid_file", return_value=8888), \
+         patch.object(cs, "_verify_cmdline", return_value=True), \
+         patch.object(cs, "_atomic_signal_pid", side_effect=OSError("signal failed")):
+        ok, pids = cs._safe_kill_bot_process("valid-bot")
+        assert ok is True
+        assert 8888 in pids
 
-def test_safe_kill_bot_process_generic_verify_error_Given_open_raises_When_call_Then_handled():
-    """Given generic exception verifying PID
-    When _safe_kill_bot_process
-    Then skipped."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="7777\n", returncode=0)):
-        with patch("builtins.open", side_effect=RuntimeError("weird")):
-            ok, pids = cs._safe_kill_bot_process("valid-bot")
-            assert ok is True and pids == []
-
-def test_safe_kill_bot_process_kill_generic_error_Given_verified_When_kill_raises_Then_handled():
-    """Given verified PID but kill raises generic
-    When _safe_kill_bot_process
-    Then handled."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="8888\n", returncode=0)):
-        with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00valid-bot\x00")):
-            with patch("os.kill", side_effect=RuntimeError("boom")):
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert ok is True
-                assert 8888 in pids
-
-# _safe_kill_process
-def test_safe_kill_process_invalid_pid_bool_Given_bool_When_call_Then_false():
-    """Given bool pid
-    When _safe_kill_process
-    Then (False, None)."""
-    ok, pid = cs._safe_kill_process(True, "expected")  # type: ignore[arg-type]
-    assert ok is False and pid is None
-
-def test_safe_kill_process_invalid_pid_negative_Given_negative_When_call_Then_false():
-    """Given negative pid
-    When _safe_kill_process
-    Then False."""
-    ok, _ = cs._safe_kill_process(-1, "expected")
-    assert ok is False
-
-def test_safe_kill_process_invalid_cmdline_Given_empty_When_call_Then_false():
-    """Given empty expected_cmdline
-    When _safe_kill_process
-    Then False."""
-    ok, _ = cs._safe_kill_process(1234, "")
-    assert ok is False
-
-def test_safe_kill_process_invalid_cmdline_not_str_Given_int_When_call_Then_false():
-    """Given non-string cmdline
-    When _safe_kill_process
-    Then False."""
-    ok, _ = cs._safe_kill_process(1234, 123)  # type: ignore[arg-type]
-    assert ok is False
-
-def test_safe_kill_process_no_proc_Given_missing_When_call_Then_false():
-    """Given missing /proc pid
-    When _safe_kill_process
-    Then False."""
-    with patch("builtins.open", side_effect=FileNotFoundError):
-        ok, pid = cs._safe_kill_process(99999, "api_runner.py")
-        assert ok is False and pid is None
-
-def test_safe_kill_process_mismatch_Given_wrong_cmdline_When_call_Then_false():
-    """Given pid cmdline mismatch
-    When _safe_kill_process
-    Then False."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00other.py\x00")):
-        ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot")
-        assert ok is False
-
-def test_safe_kill_process_sigterm_success_Given_match_exits_quickly_When_call_Then_true():
-    """Given matching cmdline that exits after SIGTERM
-    When _safe_kill_process
-    Then True."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        with patch("os.kill") as mk:
-            # First kill SIGTERM, then kill(0) check says not alive
-            def fake_kill(pid, sig):
-                if sig == 0:
-                    raise ProcessLookupError
-                return None
-            mk.side_effect = fake_kill
-            with patch("time.sleep"):
-                ok, pid = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.1)
-                assert ok is True and pid == 1234
-
-def test_safe_kill_process_sigterm_perm_denied_Given_no_perm_When_call_Then_false():
-    """Given SIGTERM permission denied
-    When _safe_kill_process
-    Then False."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        with patch("os.kill", side_effect=PermissionError):
-            ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-            assert ok is False
-
-def test_safe_kill_process_sigterm_lookup_Given_already_exited_When_call_Then_true():
-    """Given PID already exited before SIGTERM
-    When _safe_kill_process
-    Then True."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        with patch("os.kill", side_effect=ProcessLookupError):
-            ok, pid = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-            assert ok is True
-
-def test_safe_kill_process_sigterm_generic_error_Given_error_When_call_Then_false():
-    """Given generic error on SIGTERM
-    When _safe_kill_process
-    Then False."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        with patch("os.kill", side_effect=RuntimeError("boom")):
-            ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-            assert ok is False
-
-def test_safe_kill_process_sighup_escalates_Given_still_alive_When_grace_expires_Then_sigkill():
-    """Given process still alive after grace
-    When _safe_kill_process
-    Then escalates to SIGKILL."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        kill_calls = []
-        def fake_kill(pid, sig):
-            kill_calls.append(sig)
-            if sig == 0:
-                return None  # alive
-            return None
-        with patch("os.kill", side_effect=fake_kill):
-            # Mock os.kill for SIGKILL to then succeed, and _is_alive to eventually false
-            # Need to patch time.sleep and make _is_alive return False after SIGKILL
-            import signal as _sig
-            with patch("time.sleep"):
-                # Patch _is_alive indirectly via os.kill(0) still returning success, but after SIGKILL we check again
-                # Our fake always says alive, so it will try SIGKILL and then still think alive -> returns False
-                ok, pid = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-                # At least SIGTERM and SIGKILL were sent
-                assert _sig.SIGTERM in kill_calls
-                assert _sig.SIGKILL in kill_calls
-
-def test_safe_kill_process_cmdline_changed_before_sigkill_Given_changed_When_grace_Then_abort():
-    """Given cmdline changes during grace
-    When checking before SIGKILL
-    Then abort SIGKILL."""
-    # First read: matching, second read after grace: mismatching
-    reads = [b"python\x00api_runner.py\x00mybot\x00", b"python\x00other.py\x00"]
-    def fake_open(path, mode="r", *a, **kw):
-        data = reads.pop(0) if reads else b"python\x00other.py\x00"
-        m = mock_open(read_data=data)
-        return m(path, mode, *a, **kw)
-    with patch("builtins.open", side_effect=fake_open):
-        with patch("os.kill") as mk:
-            # Make _is_alive say alive during grace so we reach re-verify
-            def fake_kill(pid, sig):
-                if sig == 0:
-                    return None
-                return None
-            mk.side_effect = fake_kill
-            with patch("time.sleep"):
-                ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-                assert ok is False
-                # Should not have sent SIGKILL (last call was SIGTERM)
-                import signal as _sig
-                sigkill_calls = [c for c in mk.call_args_list if c.args[1] == _sig.SIGKILL]
-                assert len(sigkill_calls) == 0
-
-def test_safe_kill_process_proc_exits_during_grace_Given_exits_When_grace_Then_true():
-    """Given process exits during grace period
-    When polled
-    Then True."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        with patch("os.kill") as mk:
-            call_count = {"n": 0}
-            def fake_kill(pid, sig):
-                if sig == 0:
-                    call_count["n"] += 1
-                    if call_count["n"] > 2:
-                        raise ProcessLookupError
-                    return None
-                return None
-            mk.side_effect = fake_kill
-            with patch("time.sleep"):
-                ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.5)
-                assert ok is True
-
-def test_safe_kill_process_sigkill_perm_denied_Given_no_perm_When_sigkill_Then_false():
-    """Given SIGKILL permission denied
-    When escalating
-    Then False."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        import signal as _sig
-        def fake_kill(pid, sig):
-            if sig == _sig.SIGTERM:
-                return None
-            if sig == _sig.SIGKILL:
-                raise PermissionError
-            if sig == 0:
-                return None
-            return None
-        with patch("os.kill", side_effect=fake_kill):
-            with patch("time.sleep"):
-                ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-                assert ok is False
-
-def test_safe_kill_process_sigkill_lookup_Given_exits_before_sigkill_When_call_Then_true():
-    """Given exits before SIGKILL
-    When escalating
-    Then True."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        import signal as _sig
-        def fake_kill(pid, sig):
-            if sig == _sig.SIGTERM:
-                return None
-            if sig == _sig.SIGKILL:
-                raise ProcessLookupError
-            if sig == 0:
-                return None
-            return None
-        with patch("os.kill", side_effect=fake_kill):
-            with patch("time.sleep"):
-                ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-                assert ok is True
-
-def test_safe_kill_process_still_alive_after_sigkill_Given_zombie_When_call_Then_false():
-    """Given still alive after SIGKILL
-    When final check
-    Then False (zombie)."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        import signal as _sig
-        def fake_kill(pid, sig):
-            return None
-        with patch("os.kill", side_effect=fake_kill):
-            with patch("time.sleep"):
-                ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-                assert ok is False
-
-def test_safe_kill_process_read_permission_error_Given_denied_When_initial_read_Then_false():
-    """Given permission denied reading proc
-    When initial read
-    Then False."""
-    with patch("builtins.open", side_effect=PermissionError):
-        ok, _ = cs._safe_kill_process(1234, "api_runner.py")
-        assert ok is False
-
-def test_safe_kill_process_read_generic_error_Given_error_When_read_Then_false():
-    """Given generic error reading proc
-    When initial read
-    Then False."""
-    with patch("builtins.open", side_effect=RuntimeError("boom")):
-        ok, _ = cs._safe_kill_process(1234, "api_runner.py")
-        assert ok is False
-
-def test_safe_kill_process_sigkill_generic_error_Given_error_When_sigkill_Then_false():
-    """Given generic error on SIGKILL
-    When escalating
-    Then False."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        import signal as _sig
-        def fake_kill(pid, sig):
-            if sig == _sig.SIGTERM: return None
-            if sig == _sig.SIGKILL: raise RuntimeError("boom")
-            if sig == 0: return None
-            return None
-        with patch("os.kill", side_effect=fake_kill):
-            with patch("time.sleep"):
-                ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0.01)
-                assert ok is False
+# _safe_kill_process removed — function deleted per CB-3FA9A security rework.
+# All process termination now uses PID-file-based _safe_kill_bot_process.
 
 # ===========================================================================
 # control_server — bot_status
@@ -769,7 +500,8 @@ def test_bot_status_with_registry_and_heartbeat_Given_registered_When_status_The
          patch.object(cs, "STATE_DIR", tmp_path):
         (tmp_path / "my-bot.heartbeat").write_text(str(time.time()))
         (tmp_path / "my-bot.state.json").write_text(json.dumps({"status":"running","next_run_at": time.time()+100,"restart_count":2}))
-        with patch("subprocess.run", return_value=MagicMock(stdout="1234\n", returncode=0)):
+        with patch.object(cs, "_read_pid_file", return_value=1234), \
+             patch.object(cs, "_verify_cmdline", return_value=True):
             data = cs.bot_status("my-bot")
             assert data["name"] == "my-bot"
             assert data["model"] == "m-x"
@@ -787,7 +519,7 @@ def test_bot_status_next_run_in_future_Given_next_run_When_status_Then_positive(
     cfg = BotConfig(name="b1", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=300, model="unknown")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
         (tmp_path / "b1.state.json").write_text(json.dumps({"next_run_at": time.time()+200}))
-        with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+        with patch.object(cs, "_read_pid_file", return_value=None):
             data = cs.bot_status("b1")
             assert data["next_run_in_seconds"] is not None and data["next_run_in_seconds"] > 0
 
@@ -799,7 +531,7 @@ def test_bot_status_next_run_past_Given_past_When_status_Then_zero(tmp_path: Pat
     cfg = BotConfig(name="b2", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=300, model="unknown")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
         (tmp_path / "b2.state.json").write_text(json.dumps({"next_run_at": time.time()-100}))
-        with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+        with patch.object(cs, "_read_pid_file", return_value=None):
             data = cs.bot_status("b2")
             assert data["next_run_in_seconds"] == 0
 
@@ -811,44 +543,41 @@ def test_bot_status_corrupt_state_Given_bad_json_When_status_Then_no_crash(tmp_p
     cfg = BotConfig(name="b3", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=300, model="unknown")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
         (tmp_path / "b3.state.json").write_text("{bad")
-        with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+        with patch.object(cs, "_read_pid_file", return_value=None):
             data = cs.bot_status("b3")
             assert data["name"] == "b3"
 
-def test_bot_status_orchestrator_running_Given_pgrep_orch_When_status_Then_true(tmp_path: Path):
-    """Given orchestrator pgrep returns
+def test_bot_status_orchestrator_running_Given_pid_file_verified_When_status_Then_true(tmp_path: Path):
+    """Given orchestrator PID file exists and cmdline verifies
     When bot_status()
     Then orchestrator_running True."""
     from codebot.process_manager import BotConfig
     cfg = BotConfig(name="b4", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=300, model="unknown")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
-        def fake_run(args, **kw):
-            if "orchestrator.py" in args[2]:
-                return MagicMock(stdout="999\n", returncode=0)
-            return MagicMock(stdout="", returncode=1)
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch.object(cs, "_read_orchestrator_pid_file", return_value=999), \
+             patch.object(cs, "_verify_orchestrator_cmdline", return_value=True):
             data = cs.bot_status("b4")
             assert data["orchestrator_running"] is True
 
-def test_bot_status_no_orch_Given_no_orch_When_status_Then_false(tmp_path: Path):
-    """Given no orchestrator
+def test_bot_status_no_orch_Given_no_pid_file_When_status_Then_false(tmp_path: Path):
+    """Given no orchestrator PID file
     When bot_status()
     Then orchestrator_running False."""
     from codebot.process_manager import BotConfig
     cfg = BotConfig(name="b5", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=300, model="unknown")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
-        with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+        with patch.object(cs, "_read_orchestrator_pid_file", return_value=None):
             data = cs.bot_status("b5")
             assert data["orchestrator_running"] is False
 
-def test_bot_status_pgrep_exception_Given_error_When_status_Then_running_false(tmp_path: Path):
-    """Given pgrep raises
+def test_bot_status_pid_file_exception_Given_error_When_status_Then_running_false(tmp_path: Path):
+    """Given PID file read raises
     When bot_status()
     Then running False, no crash."""
     from codebot.process_manager import BotConfig
     cfg = BotConfig(name="b6", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=300, model="unknown")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
-        with patch("subprocess.run", side_effect=RuntimeError("boom")):
+        with patch.object(cs, "_read_pid_file", side_effect=RuntimeError("boom")):
             data = cs.bot_status("b6")
             assert data["running"] is False
 
@@ -860,7 +589,7 @@ def test_bot_status_state_no_status_key_Given_missing_status_When_bot_status_The
     cfg = BotConfig(name="b7", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=300, model="unknown")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
         (tmp_path / "b7.state.json").write_text(json.dumps({"other":1}))
-        with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+        with patch.object(cs, "_read_pid_file", return_value=None):
             data = cs.bot_status("b7")
             assert data["state"] is None
 
@@ -1293,7 +1022,7 @@ def test_do_get_health_rate_limited_Given_blocked_When_get_health_Then_429():
     h = _handler("GET", "/health")
     # h.headers.get = lambda k, d=None: None  # removed: _FakeHeaders handles get
     h.client_address = ("1.2.3.4", 123)
-    with patch.object(cs._rate_limiter, "is_allowed", return_value=(False, "blocked")):
+    with patch.object(cs._health_rate_limiter, "is_allowed", return_value=(False, "blocked")):
         calls = _capture(h)
         h.do_GET()
         assert calls[0][0]==429
@@ -1304,7 +1033,7 @@ def test_do_get_health_api_version_Given_api_health_When_get_Then_200():
     Then 200."""
     h = _handler("GET", "/api/health")
     # h.headers.get = lambda k, d=None: None  # removed: _FakeHeaders handles get
-    with patch.object(cs._rate_limiter, "is_allowed", return_value=(True, None)):
+    with patch.object(cs._health_rate_limiter, "is_allowed", return_value=(True, None)):
         calls = _capture(h)
         h.do_GET()
         assert calls[0][0]==200
@@ -1388,7 +1117,7 @@ def test_do_get_bots_Given_registry_When_get_Then_list(tmp_path: Path):
         h = _handler("GET", "/bots", headers={"Authorization":"Bearer secret"})
         # h.headers.get = lambda k, d=None: "Bearer secret" if k=="Authorization" else d  # removed: _FakeHeaders handles get
         with patch.object(cs._rate_limiter, "is_allowed", return_value=(True, None)):
-            with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+            with patch.object(cs, "_read_pid_file", return_value=None):
                 calls = _capture(h)
                 h.do_GET()
                 assert calls[0][0]==200
@@ -1418,7 +1147,7 @@ def test_do_get_bot_valid_Given_registered_When_get_Then_200_with_cache(tmp_path
         h = _handler("GET", "/bots/bot-a", headers={"Authorization":"Bearer secret"})
         # h.headers.get = lambda k, d=None: "Bearer secret" if k=="Authorization" else d  # removed: _FakeHeaders handles get
         with patch.object(cs._rate_limiter, "is_allowed", return_value=(True, None)):
-            with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+            with patch.object(cs, "_read_pid_file", return_value=None):
                 # Don't capture, need to test _json_with_cache_headers path
                 h.do_GET()
                 h.send_response.assert_called_with(200)
@@ -1432,7 +1161,7 @@ def test_do_get_bot_304_etag_Given_matching_etag_When_get_Then_304(tmp_path: Pat
     cfg = BotConfig(name="bot-a", prompt_file="a.md", interval_seconds=60, heartbeat_timeout=30, model="m")
     with patch.object(cs, "BOT_REGISTRY", [cfg]), patch.object(cs, "STATE_DIR", tmp_path):
         # Get etag via bot_status
-        with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+        with patch.object(cs, "_read_pid_file", return_value=None):
             status = cs.bot_status("bot-a")
             etag = status["etag"]
         h = _handler("GET", "/bots/bot-a", headers={"Authorization":"Bearer secret", "If-None-Match": f'"{etag}"'})
@@ -1442,7 +1171,7 @@ def test_do_get_bot_304_etag_Given_matching_etag_When_get_Then_304(tmp_path: Pat
         h.headers = hdrs
         # h.headers.get = lambda k, d=None: hdrs.get(k,d)  # removed: _FakeHeaders handles get
         with patch.object(cs._rate_limiter, "is_allowed", return_value=(True, None)):
-            with patch("subprocess.run", return_value=MagicMock(stdout="", returncode=1)):
+            with patch.object(cs, "_read_pid_file", return_value=None):
                 h.do_GET()
                 h.send_response.assert_called_with(304)
 
@@ -2111,7 +1840,8 @@ def test_do_post_stop_all_Given_no_bots_When_post_Then_all(tmp_path: Path):
         # h.headers.get = lambda k, d=None: h.headers.get(k,d)  # removed: _FakeHeaders handles get
         h.rfile = io.BytesIO(raw)
         with patch.object(cs._rate_limiter, "is_allowed", return_value=(True, None)):
-            with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+            with patch.object(cs, "_safe_kill_bot_process", return_value=(True, [])), \
+                 patch.object(cs, "_safe_kill_orchestrator", return_value=(True, [])):
                 calls = _capture(h)
                 h.do_POST()
                 assert calls[0][0]==200
@@ -2354,30 +2084,7 @@ def test_log_message_is_quiet_Given_handler_When_log_message_Then_no_raise():
     h = _handler("GET", "/health")
     h.log_message("test %s", "arg")  # should not raise
 
-def test_safe_kill_bot_process_non_digit_pid_Given_mixed_output_When_call_Then_ignored():
-    """Given pgrep output has non-digit
-    When _safe_kill_bot_process
-    Then only digits considered."""
-    with patch("subprocess.run", return_value=MagicMock(stdout="abc\n1234\n", returncode=0)):
-        with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00valid-bot\x00")):
-            with patch("os.kill"):
-                ok, pids = cs._safe_kill_bot_process("valid-bot")
-                assert 1234 in pids
-
-def test_safe_kill_process_zero_grace_Given_zero_When_call_Then_handles():
-    """Given grace_period 0
-    When _safe_kill_process
-    Then poll_interval 0.2."""
-    with patch("builtins.open", mock_open(read_data=b"python\x00api_runner.py\x00mybot\x00")):
-        import signal as _sig
-        def fake_kill(pid, sig):
-            if sig == 0: return None
-            return None
-        with patch("os.kill", side_effect=fake_kill):
-            with patch("time.sleep"):
-                ok, _ = cs._safe_kill_process(1234, "api_runner.py mybot", grace_period=0)
-                # Will escalate to SIGKILL and be zombie -> False, but should not crash
-                assert ok is False
+# Stale pgrep/_safe_kill_process tests removed per CB-3FA9A security rework.
 
 # ===========================================================================
 # control_client
@@ -5040,38 +4747,39 @@ def test_cm_is_error_disabled_public_Given_manifest_When_public_Then_bool(tmp_pa
 # ===========================================================================
 # process_supervisor
 # ===========================================================================
-def test_process_supervisor_protocol_members_Given_protocol_When_inspect_Then_restart():
-    """Given ProcessSupervisor protocol
+def test_process_supervisor_abc_members_Given_abc_When_inspect_Then_restart():
+    """Given ProcessSupervisor ABC
     When inspected
-    Then has restart_self."""
-    assert hasattr(ps.ProcessSupervisor, "restart_self")
+    Then has restart."""
+    assert hasattr(ps.ProcessSupervisor, "restart")
 
-def test_default_supervisor_restart_self_Given_default_When_restart_Then_execv():
-    """Given DefaultProcessSupervisor
-    When restart_self
+def test_unix_supervisor_restart_Given_unix_When_restart_Then_execv():
+    """Given UnixProcessSupervisor
+    When restart
     Then calls os.execv."""
-    sup = ps.DefaultProcessSupervisor()
+    sup = ps.UnixProcessSupervisor()
     with patch("os.execv") as mock_exec:
         with patch.object(sys, "executable", "/usr/bin/python3"):
             with patch.object(sys, "argv", ["codebot","arg1"]):
-                sup.restart_self()
+                sup.restart()
                 mock_exec.assert_called_once_with("/usr/bin/python3", ["/usr/bin/python3","codebot","arg1"])
 
-def test_default_supervisor_restart_self_logs_Given_default_When_restart_Then_logged():
-    """Given DefaultProcessSupervisor
-    When restart_self raaises
+def test_unix_supervisor_restart_logs_Given_unix_When_restart_Then_logged():
+    """Given UnixProcessSupervisor
+    When restart raises
     Then exception propagates."""
-    sup = ps.DefaultProcessSupervisor()
+    sup = ps.UnixProcessSupervisor()
     with patch("os.execv", side_effect=OSError("exec fail")):
         with pytest.raises(OSError):
-            sup.restart_self()
+            sup.restart()
 
-def test_default_supervisor_is_process_supervisor_Given_instance_When_check_Then_protocol():
+def test_unix_supervisor_is_process_supervisor_Given_instance_When_check_Then_abc():
     """Given instance
-    When isinstance check via protocol
+    When isinstance check via ABC
     Then should have method."""
-    sup = ps.DefaultProcessSupervisor()
-    assert hasattr(sup, "restart_self") and callable(sup.restart_self)
+    sup = ps.UnixProcessSupervisor()
+    assert hasattr(sup, "restart") and callable(sup.restart)
+    assert isinstance(sup, ps.ProcessSupervisor)
 
 # ===========================================================================
 # Extra coverage — ensure large modules exercised

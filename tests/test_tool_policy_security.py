@@ -6,6 +6,7 @@ correctly blocks identified escape vectors:
 2. Workspace root None rejection for absolute paths
 3. Glob/tilde/brace expansion edge cases
 4. TOCTOU symlink swap simulation
+5. python -m module allowlist enforcement
 
 These tests are regression guards for security fixes and ensure that
 vulnerabilities do not re-emerge silently.
@@ -485,6 +486,18 @@ class TestCoverageEdgeCases:
     def test_find_exec_in_pipe_blocked(self, ws):
         """find -exec in pipeline must be blocked."""
         assert validate_command("ls | find . -exec cat {} \\;", workspace_root=ws) is None
+
+    def test_python_m_allowlist_blocked(self, ws):
+        """python -m http.server must be blocked (not in allowlist)."""
+        assert validate_command("python3 -m http.server", workspace_root=ws) is None
+        assert validate_command("python -m venv /tmp/evil", workspace_root=ws) is None
+
+    def test_python_m_allowlist_allowed(self, ws):
+        """python -m pytest must be allowed (in allowlist)."""
+        result = validate_command("python3 -m pytest tests/", workspace_root=ws)
+        assert result is not None
+        result2 = validate_command("python -m json.tool file.json", workspace_root=ws)
+        assert result2 is not None
 
     def test_resolve_symlink_oserror_mocked(self, ws):
         """resolve_workspace_path handles OSError during is_symlink check."""

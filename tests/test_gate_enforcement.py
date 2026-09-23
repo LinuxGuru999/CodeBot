@@ -22,7 +22,7 @@ from codebot.ticket_engine import (
     create_ticket,
     TicketStore,
 )
-from codebot.quality_gate import record_gate_results, GateResult, GateEvaluation
+from codebot.quality_gate import record_gate_results, GateStatus, GateEvaluation
 
 
 def _advance_to_verifying(store: TicketStore, ticket_id: str) -> None:
@@ -40,7 +40,7 @@ def _record_gate_pass(state_dir: Path, ticket_id: str, store: TicketStore | None
     evaluations = [
         GateEvaluation(
             gate_name="build",
-            result=GateResult.PASS,
+            result=GateStatus.PASS,
             command="echo ok",
             output="ok",
             duration_ms=0.1,
@@ -49,7 +49,7 @@ def _record_gate_pass(state_dir: Path, ticket_id: str, store: TicketStore | None
         ),
         GateEvaluation(
             gate_name="unit_tests",
-            result=GateResult.PASS,
+            result=GateStatus.PASS,
             command="pytest -q",
             output="ok",
             duration_ms=0.5,
@@ -67,7 +67,7 @@ def _record_gate_fail(state_dir: Path, ticket_id: str, store: TicketStore | None
     evaluations = [
         GateEvaluation(
             gate_name="build",
-            result=GateResult.FAIL,
+            result=GateStatus.FAIL,
             command="echo fail",
             output="build failed",
             duration_ms=0.1,

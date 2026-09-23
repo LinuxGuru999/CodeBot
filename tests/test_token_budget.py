@@ -16,7 +16,6 @@ import codebot.token_budget as tb
 from codebot.file_lock import flock, LOCK_EX
 from codebot.token_budget import (
     CAP,
-    _FLUSH_AFTER_WRITES,
     _new_ledger,
     _read,
     _valid_ledger,
@@ -28,13 +27,6 @@ from codebot.token_budget import (
     record_usage,
     record_usage_locked,
 )
-
-
-@pytest.fixture(autouse=True)
-def reset_pending_writes():
-    tb._pending_writes = 0
-    yield
-    tb._pending_writes = 0
 
 
 class TestNewLedger:

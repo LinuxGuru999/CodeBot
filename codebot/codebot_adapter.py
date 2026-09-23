@@ -130,7 +130,7 @@ class CodeBotAdapter(ProjectAdapter):
             }
         registry = []
         interval_map = {
-            "discovery": 1800,
+            "discovery": 60,
             "planning": 3600,
             "implementation": 300,
             "review": 600,

@@ -65,20 +65,20 @@ class PipelineState:
     """
     # Queue counts by stage
     discovered_count: int = 0
-    validating_count: int = 0
     triaged_count: int = 0
-    ready_count: int = 0
-    decompose_count: int = 0
+    goal_count: int = 0
+    decomp_count: int = 0
     planning_count: int = 0
-    implementing_count: int = 0
-    reviewing_count: int = 0
-    verifying_count: int = 0
+    implement_count: int = 0
+    review_count: int = 0
     rework_count: int = 0
     blocked_count: int = 0
     complete_count: int = 0
     rejected_count: int = 0
     duplicate_count: int = 0
     deferred_count: int = 0
+    later_count: int = 0
+    never_count: int = 0
 
     # Discovery candidates awaiting validation (§12)
     candidate_count: int = 0
@@ -135,7 +135,7 @@ class PipelineState:
     @property
     def actionable_backlog(self) -> int:
         """Tickets that can be worked on right now (ready + rework)."""
-        return self.ready_count + self.rework_count
+        return self.ready_count + self.implementation_ready_count + self.rework_count
 
     @property
     def downstream_demand(self) -> int:
@@ -143,21 +143,7 @@ class PipelineState:
 
     @property
     def total_pipeline_work(self) -> int:
-        """All non-terminal tickets in the system."""
-        return (
-            self.discovered_count
-            + self.validating_count
-            + self.triaged_count
-            + self.ready_count
-            + self.decompose_count
-            + self.planning_count
-            + self.implementing_count
-            + self.reviewing_count
-            + self.verifying_count
-            + self.rework_count
-            + self.blocked_count
-            + self.candidate_count
-        )
+        return self.discovered_count + self.validating_count + self.triaged_count + self.ready_count + self.decompose_count + self.planning_count + self.implementation_ready_count + self.implementing_count + self.reviewing_count + self.verifying_count + self.rework_count + self.blocked_count + self.candidate_count
 
     def active_by_role(self) -> dict[str, int]:
         """Count active workers grouped by role."""
@@ -221,6 +207,8 @@ class PipelineState:
                 "ready": self.ready_count,
                 "decompose": self.decompose_count,
                 "planning": self.planning_count,
+                "implementation": self.implementing_count + self.implementation_ready_count,
+                "implementation_ready": self.implementation_ready_count,
                 "implementing": self.implementing_count,
                 "reviewing": self.reviewing_count,
                 "verifying": self.verifying_count,
@@ -315,20 +303,20 @@ def inspect_pipeline(
 
     return PipelineState(
         discovered_count=state_counts.get("DISCOVERED", 0),
-        validating_count=state_counts.get("VALIDATING", 0),
         triaged_count=state_counts.get("TRIAGED", 0),
-        ready_count=state_counts.get("READY", 0),
-        decompose_count=state_counts.get("DECOMPOSE", 0),
+        goal_count=state_counts.get("GOAL", 0),
+        decomp_count=state_counts.get("DECOMP", 0),
         planning_count=state_counts.get("PLANNING", 0),
-        implementing_count=state_counts.get("IMPLEMENTING", 0),
-        reviewing_count=state_counts.get("REVIEWING", 0),
-        verifying_count=state_counts.get("VERIFYING", 0),
+        implement_count=state_counts.get("IMPLEMENT", 0),
+        review_count=state_counts.get("REVIEW", 0),
         rework_count=state_counts.get("REWORK", 0),
         blocked_count=state_counts.get("BLOCKED", 0),
         complete_count=state_counts.get("COMPLETE", 0),
         rejected_count=state_counts.get("REJECTED", 0),
         duplicate_count=state_counts.get("DUPLICATE", 0),
         deferred_count=state_counts.get("DEFERRED", 0),
+        later_count=state_counts.get("LATER", 0),
+        never_count=state_counts.get("NEVER", 0),
         candidate_count=candidate_count,
         active_workers=tuple(active_workers or []),
         stuck_workers=tuple(stuck_worker_ids or []),
@@ -400,22 +388,22 @@ class PipelineInspector:
 
         return PipelineState(
             discovered_count=counts.get("DISCOVERED", 0),
-            validating_count=counts.get("VALIDATING", 0),
             triaged_count=counts.get("TRIAGED", 0),
-            ready_count=counts.get("READY", 0),
-            decompose_count=counts.get("DECOMPOSE", 0),
+            goal_count=counts.get("GOAL", 0),
+            decomp_count=counts.get("DECOMP", 0),
             planning_count=counts.get("PLANNING", 0),
-            implementing_count=counts.get("IMPLEMENTING", 0),
-            reviewing_count=counts.get("REVIEWING", 0),
-            verifying_count=counts.get("VERIFYING", 0),
+            implement_count=counts.get("IMPLEMENT", 0),
+            review_count=counts.get("REVIEW", 0),
             rework_count=counts.get("REWORK", 0),
             blocked_count=counts.get("BLOCKED", 0),
             complete_count=counts.get("COMPLETE", 0),
             rejected_count=counts.get("REJECTED", 0),
             duplicate_count=counts.get("DUPLICATE", 0),
             deferred_count=counts.get("DEFERRED", 0),
-            candidate_count=counts.get("CANDIDATES", 0),
-            active_workers=tuple(workers),
+            later_count=counts.get("LATER", 0),
+            never_count=counts.get("NEVER", 0),
+        candidate_count=counts.get("CANDIDATES", 0),
+        active_workers=tuple(workers),
             stuck_workers=tuple(stuck),
             failed_workers=tuple(failed),
             total_slots=self._max_slots,

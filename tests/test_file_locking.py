@@ -1102,6 +1102,112 @@ class TestAtomicityContention:
             assert store2.get(tid) is not None
         store2.close()
 
+    def test_save_concurrent_mutation_survives(self, tmp_path):
+        """Concurrent mutation during _save survives crash/reload (TOCTOU fix)."""
+        path = tmp_path / "tickets.json"
+        store = TicketStore(path, start_background_workers=False)
+
+        # Create initial ticket
+        t1 = _create_ticket("concurrent-mutation-test")
+        store.add(t1)
+        store.flush()
+        assert store.count() == 1
+
+        # Barrier to synchronize threads
+        start_barrier = threading.Barrier(2)
+        mutation_done = threading.Event()
+        save_started = threading.Event()
+
+        mutated_value = {"version": 2}
+
+        def mutator():
+            start_barrier.wait()
+            # Wait until _save has started (signaled by saver)
+            save_started.wait(timeout=5)
+            # Mutate the ticket while _save is supposedly writing
+            ticket = store.get(t1.id)
+            if ticket:
+                updated = Ticket(**{**asdict(ticket), "title": f"{ticket.title}-mutated", "updated_at": time.time()})
+                store._tickets[t1.id] = updated
+                store._dirty_ids.add(t1.id)
+                # Synchronous WAL append under lock (simulating add/transition behavior)
+                try:
+                    store._append_wal_locked({t1.id})
+                except Exception:
+                    pass
+            mutation_done.set()
+
+        def saver_with_barrier():
+            start_barrier.wait()
+            # Signal that save is starting
+            save_started.set()
+            # Force a save (which will use the two-set mechanism)
+            store._force_compaction_on_next_save = False
+            store.flush()
+
+        t_mut = threading.Thread(target=mutator)
+        t_save = threading.Thread(target=saver_with_barrier)
+
+        t_mut.start()
+        t_save.start()
+
+        t_mut.join(timeout=10)
+        t_save.join(timeout=10)
+
+        assert mutation_done.is_set(), "Mutation thread did not complete"
+
+        store.close()
+
+        # Reload and verify the mutated version survived
+        store2 = TicketStore(path)
+        reloaded = store2.get(t1.id)
+        assert reloaded is not None
+        assert "mutated" in reloaded.title, f"Mutation lost: title={reloaded.title}"
+        store2.close()
+
+    def test_save_no_dirty_tracking_corruption_under_load(self, tmp_path):
+        """No dirty tracking corruption under load (_dirty_ids/_pending_flush disjoint)."""
+        path = tmp_path / "tickets.json"
+        store = TicketStore(path)
+
+        num_threads = 10
+        tickets_per_thread = 5
+        all_ids = []
+        id_lock = threading.Lock()
+        errors = []
+
+        def worker(thread_id):
+            local_ids = []
+            try:
+                for i in range(tickets_per_thread):
+                    t = _create_ticket(f"load-test-{thread_id}-{i}")
+                    store.add(t)
+                    local_ids.append(t.id)
+                with id_lock:
+                    all_ids.extend(local_ids)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(tid,)) for tid in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, f"Concurrent adds raised: {errors}"
+
+        # Flush all
+        store.flush()
+
+        # Verify no corruption: all IDs should be present
+        store.close()
+
+        store2 = TicketStore(path)
+        assert store2.count() == num_threads * tickets_per_thread
+        for tid in all_ids:
+            assert store2.get(tid) is not None, f"Ticket {tid} lost under load"
+        store2.close()
+
     def test_lock_released_on_store_close(self, tmp_path):
         """After TicketStore.close(), the lock file is released and reusable."""
         path = tmp_path / "tickets.json"

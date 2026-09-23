@@ -1,7 +1,8 @@
-"""Tests for codebot/process_supervisor.py.
+"""Tests for codebot/process_supervisor.py
 
 Covers:
-- DefaultProcessSupervisor.restart_self calls os.execv with correct arguments
+- UnixProcessSupervisor.restart calls os.execv with correct arguments
+- ProcessSupervisor ABC enforces restart() abstract method
 - Mock ProcessSupervisor can be injected without triggering actual process replacement
 """
 
@@ -10,51 +11,75 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from codebot.process_supervisor import DefaultProcessSupervisor, ProcessSupervisor
+from codebot.process_supervisor import (
+    ProcessSupervisor,
+    UnixProcessSupervisor,
+    DefaultProcessSupervisor,
+)
 
 
-class TestDefaultProcessSupervisor:
-    def test_restart_self_calls_execv_with_correct_args(self):
-        """DefaultProcessSupervisor.restart_self calls os.execv with sys.executable and sys.argv."""
-        supervisor = DefaultProcessSupervisor()
+class TestUnixProcessSupervisor:
+    def test_restart_calls_execv_with_correct_args(self):
+        """UnixProcessSupervisor.restart calls os.execv with sys.executable and sys.argv."""
+        supervisor = UnixProcessSupervisor()
         with patch("codebot.process_supervisor.os.execv") as mock_execv:
-            supervisor.restart_self()
+            supervisor.restart()
             mock_execv.assert_called_once_with(sys.executable, [sys.executable] + sys.argv)
 
-    def test_restart_self_logs_before_execv(self, caplog):
-        """DefaultProcessSupervisor.restart_self logs the command before calling execv."""
+    def test_restart_logs_before_execv(self, caplog):
+        """UnixProcessSupervisor.restart logs the command before calling execv."""
         import logging
         caplog.set_level(logging.INFO)
-        supervisor = DefaultProcessSupervisor()
+        supervisor = UnixProcessSupervisor()
         with patch("codebot.process_supervisor.os.execv"):
-            supervisor.restart_self()
+            supervisor.restart()
         assert any("Executing self-restart" in record.message for record in caplog.records)
+
+
+class TestProcessSupervisorABC:
+    def test_cannot_instantiate_abc_directly(self):
+        """ProcessSupervisor is an ABC; direct instantiation raises TypeError."""
+        with pytest.raises(TypeError):
+            ProcessSupervisor()  # type: ignore[abstract]
+
+    def test_restart_is_abstract(self):
+        """ProcessSupervisor defines restart() as an abstract method."""
+        assert hasattr(ProcessSupervisor, "restart")
+        # The method should be abstract
+        assert getattr(ProcessSupervisor.restart, "__isabstractmethod__", False)
+
+    def test_unix_supervisor_is_subclass(self):
+        """UnixProcessSupervisor is a concrete subclass of ProcessSupervisor."""
+        assert issubclass(UnixProcessSupervisor, ProcessSupervisor)
+
+    def test_default_alias_is_unix_supervisor(self):
+        """DefaultProcessSupervisor is an alias for UnixProcessSupervisor."""
+        assert DefaultProcessSupervisor is UnixProcessSupervisor
 
 
 class TestMockProcessSupervisor:
     def test_mock_supervisor_does_not_call_execv(self):
         """A mock ProcessSupervisor can be used without triggering os.execv."""
         mock_supervisor = MagicMock(spec=ProcessSupervisor)
-        mock_supervisor.restart_self.return_value = None
+        mock_supervisor.restart.return_value = None
 
         # Verify the mock doesn't call execv
         with patch("codebot.process_supervisor.os.execv") as mock_execv:
-            mock_supervisor.restart_self()
+            mock_supervisor.restart()
             mock_execv.assert_not_called()
 
-        # Verify restart_self was called on the mock
-        mock_supervisor.restart_self.assert_called_once()
+        # Verify restart was called on the mock
+        mock_supervisor.restart.assert_called_once()
 
     def test_mock_supervisor_injected_into_state_manager(self):
         """Mock ProcessSupervisor can be injected into state_manager.check_self_restart."""
         from pathlib import Path
         import tempfile
-        import json
 
         from codebot.state_manager import check_self_restart
 
         mock_supervisor = MagicMock(spec=ProcessSupervisor)
-        mock_supervisor.restart_self.return_value = None
+        mock_supervisor.restart.return_value = None
 
         # Create a temporary restart file to trigger the restart path
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -82,8 +107,8 @@ class TestMockProcessSupervisor:
                     # execv should NOT have been called
                     mock_execv.assert_not_called()
 
-                    # Our mock's restart_self should have been called
-                    mock_supervisor.restart_self.assert_called_once()
+                    # Our mock's restart should have been called
+                    mock_supervisor.restart.assert_called_once()
 
     def test_mock_supervisor_injected_into_orchestrator_services(self):
         """Mock ProcessSupervisor can be injected into orchestrator_services.check_self_restart."""
@@ -93,7 +118,7 @@ class TestMockProcessSupervisor:
         from codebot.orchestrator_services import check_self_restart
 
         mock_supervisor = MagicMock(spec=ProcessSupervisor)
-        mock_supervisor.restart_self.return_value = None
+        mock_supervisor.restart.return_value = None
 
         # Create a temporary restart file to trigger the restart path
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -120,16 +145,7 @@ class TestMockProcessSupervisor:
                     # execv should NOT have been called
                     mock_execv.assert_not_called()
 
-                    # Our mock's restart_self should have been called
-                    mock_supervisor.restart_self.assert_called_once()
+                    # Our mock's restart should have been called
+                    mock_supervisor.restart.assert_called_once()
             finally:
                 os_mod._paths_restart_file = original_restart_file
-
-
-class TestProcessSupervisorProtocol:
-    def test_default_supervisor_implements_protocol(self):
-        """DefaultProcessSupervisor satisfies the ProcessSupervisor Protocol."""
-        supervisor = DefaultProcessSupervisor()
-        # hasattr check for structural subtyping
-        assert hasattr(supervisor, "restart_self")
-        assert callable(supervisor.restart_self)

@@ -804,30 +804,87 @@ class TestRestartBotValidation(unittest.TestCase):
                 self.assertTrue(body["ok"])
 
     @patch("codebot.control_server.BOT_REGISTRY", [type("B", (), {"name": "test-bot"})()])
-    def test_restart_uses_safe_kill_with_escaped_pattern(self):
-        """Verify that _safe_kill_bot_process uses re.escape for pgrep pattern.
+    def test_restart_uses_pid_file_based_kill(self):
+        """Verify that _safe_kill_bot_process uses PID file + cmdline verification.
         
-        Updated for CB-1017888-B58B: The secure implementation uses pgrep + /proc
-        verification instead of direct pkill. This test verifies re.escape is applied
-        in the pgrep pattern within _safe_kill_bot_process.
+        Updated for CB-3FA9A: The secure implementation uses PID files +
+        _verify_cmdline instead of pgrep/pkill. This test verifies the
+        PID-file-based path is used.
         """
-        from codebot.control_server import ControlHandler, _safe_kill_bot_process
-        import re
+        from codebot.control_server import _safe_kill_bot_process
 
-        # Verify _safe_kill_bot_process applies re.escape internally
-        with patch("codebot.control_server.subprocess.run") as mock_run:
-            # Mock pgrep returning no processes (clean exit)
-            mock_run.return_value = MagicMock(stdout="", returncode=1)
+        with patch("codebot.control_server._read_pid_file", return_value=1234) as mock_rpf, \
+             patch("codebot.control_server._verify_cmdline", return_value=True) as mock_vc, \
+             patch("codebot.control_server._atomic_signal_pid", return_value=True) as mock_sig, \
+             patch("codebot.control_server.STATE_DIR") as mock_sd:
+            mock_pf = MagicMock()
+            mock_pf.exists.return_value = True
+            mock_sd.__truediv__.return_value = mock_pf
             _safe_kill_bot_process("test-bot", timeout=3)
             
-            # Verify pgrep was called with escaped pattern
-            mock_run.assert_called()
-            args = mock_run.call_args[0][0]
-            self.assertEqual(args[0], "pgrep")
-            self.assertEqual(args[1], "-f")
-            # Pattern must contain escaped bot name
-            pattern = args[2]
-            self.assertIn(re.escape("test-bot"), pattern)
+            # Verify PID file was read and cmdline verified
+            mock_rpf.assert_called_once_with("test-bot")
+            mock_vc.assert_called_once_with(1234, "test-bot")
+            mock_sig.assert_called_once()
+
+    def test_stop_unknown_bot_returns_404(self):
+        """POST /bots/stop with unknown bot name returns 404.
+        
+        Ticket: CB-990023-1087 — Missing input validation on /bots/stop allows
+        arbitrary process killing via pkill regex. Unknown bots must return 404
+        to align with other bot endpoints (restart/pause/resume).
+        """
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "valid-bot"
+
+        handler = self._make_handler("POST", "/bots/stop", body={"bots": ["nonexistent"], "force": True})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["nonexistent"], "force": True}, None, None)
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]), \
+             patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 404, f"Expected 404 for unknown bot, got {status_code}")
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+
+    def test_stop_regex_injection_returns_400(self):
+        """POST /bots/stop with regex pattern like \".*\" returns 400.
+        
+        Ticket: CB-990023-1087 — Missing input validation on /bots/stop allows
+        arbitrary process killing via pkill regex. Regex patterns must be rejected
+        by validate_bot_name() which only allows [a-zA-Z0-9_-]+.
+        """
+        from codebot.control_server import ControlHandler
+
+        mock_bot = MagicMock()
+        mock_bot.name = "valid-bot"
+
+        handler = self._make_handler("POST", "/bots/stop", body={"bots": [".*"], "force": True})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": [".*"], "force": True}, None, None)
+
+        with patch("codebot.control_server.BOT_REGISTRY", [mock_bot]), \
+             patch("codebot.control_server.subprocess.run") as mock_run:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        # ".*" fails validate_bot_name() because it contains '.' and '*'
+        # which are not in [a-zA-Z0-9_-]+
+        self.assertEqual(status_code, 400, f"Expected 400 for regex pattern, got {status_code}")
+        self.assertIn("invalid bot name", body.get("error", "").lower())
 
 
 if __name__ == "__main__":
