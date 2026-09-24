@@ -473,6 +473,8 @@ class BucketDispatcher:
             state_val = state.value if hasattr(state, "value") else str(state) if state else ""
         except Exception:
             state_val = ""
+        if state_val == "REQUESTED":
+            return "user_agent"
         if state_val == "TRIAGED":
             return "goal_aligner"
         if state_val == "GOAL":
@@ -554,6 +556,18 @@ class Scheduler:
                 store = get_ticket_store()
             except Exception:  # pragma: no cover
                 return 0
+        try:
+            from codebot.request_ingestion import ingest_requests
+            from codebot.state_manager import get_paths
+            ingest_requests(store, get_paths().state_dir)
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            from codebot.finding_ingestion import ingest_findings
+            from codebot.state_manager import get_paths
+            ingest_findings(store, get_paths().state_dir)
+        except Exception:  # pragma: no cover
+            pass
         return self._dispatcher.tick(store)
 
     def _reconcile(self) -> None:  # pragma: no cover - exercised via finalize_agent and explicit tests

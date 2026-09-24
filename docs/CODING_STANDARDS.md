@@ -3,6 +3,7 @@
 > **Authority:** This document is normative. All code that touches scheduling, claims, slots, queues, tickets, or lifecycle MUST conform. Violations are invariant violations, not style nits.
 >
 > **Source of truth for dispatch:** §2–§8 define the 7 invariants. Grep-enforceable where noted.
+> **Source of truth for context:** §22 defines the CONTEXT IS THE CONTROL PLANE invariant. CodeBot is a context compiler. See ADR-008.
 > **Constitution anchor:** Constitution §4 — single-owner authority, bounded contexts, atomic ownership, one-way reconstructable mapping.
 > **ADR:** `docs/adr/007-authoritative-dispatch.md` (Status: Accepted).
 
@@ -460,6 +461,34 @@ Tag `pre-authoritative-dispatch` is the rollback point before any dispatch chang
 
 - `ticket_status.py` CLI offline helper — single documented exemption for direct `TicketStore(tickets_file)`, or folded behind `get_ticket_store` (Phase 1 Todo 1 decides; leans to fold).
 - `tests/*` — `TicketStore(tmp_path)` via fixture, allowed; arch test enforces no production direct construction outside factory.
+
+---
+
+## 20. Invariant 8 — ONE INGRESS CONTRACT
+
+> Raw external intent may enter TicketStore only through the dedicated REQUESTED ingress state. It must never enter DISCOVERED, GOAL, DECOMP, PLANNING, IMPLEMENT, REVIEW, or other work states until an ingress role (user_agent) has normalized it into canonical DiscoveryFindings. APIs, CLIs, webhooks, and external integrations write request envelopes to state/requests/ only; platform-owned request_ingestion creates REQUESTED tickets. Finding ingestion creates DISCOVERED tickets from validated Findings.
+
+**Measurable:** `grep -R "store.add\|store.transition" codebot/control_server.py codebot/api_runner.py --include="*.py" | grep -v finding_ingestion | grep -v request_ingestion | grep -v test` yields zero hits for external-facing modules creating tickets directly.
+
+---
+
+## 21. Invariant 9 — IDEMPOTENT INGESTION
+
+> Reprocessing the same Finding or Request identifier must never create a second ticket. Exact matches (finding_id, fingerprint) suppress deterministically. Fuzzy matches (Jaccard similarity ≥ 0.8) enrich context only via EvidenceItem(kind='related_ticket_candidate') — they produce related_ticket_candidates, never suppress work. Failed/malformed inputs are quarantined to rejected/ directories, not left in the inbox for infinite reprocessing.
+
+**Measurable:** `grep -R "def ingest_findings\|def ingest_requests" codebot/ --include="*.py"` shows both functions check idempotency before calling store.add(). Architecture test: double-ingest produces exactly one ticket.
+
+---
+
+## 22. Invariant 10 — CONTEXT IS THE CONTROL PLANE
+
+> The swarm is controlled through durable authoritative context produced by the lifecycle. Critical intent, constraints, decisions, acceptance criteria, and discovered facts must not exist only in prompts, chat history, agent memory, or scratchpads.
+>
+> **Scope:** Within this implementation, this invariant is enforced at the REQUESTED ingress boundary. Lifecycle-wide context gate enforcement for GOAL/TRIAGE/DECOMP/PLANNING/IMPLEMENT/REVIEW/COMPLETE transitions is a separate roadmap item. The pattern established here extends to all stages in future work. Every lifecycle stage must leave the project with equal or better authoritative context than it received.
+
+The lifecycle is a context compiler: each stage produces durable context consumed by the next. Agents consume context; lifecycle stages produce and validate context. State transitions without the required context are invalid.
+
+**Measurable:** After terminating all running agent processes, a fresh swarm spawned against the same repository MUST be able to resume work without loss of requirements, constraints, decisions, acceptance criteria, or discovered facts.
 
 ---
 
