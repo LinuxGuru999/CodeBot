@@ -2050,10 +2050,23 @@ class TicketStore:
         self._queue_save()
         return ticket
 
-    def list_by_state(self, state: TicketState) -> list[Ticket]:
+    def list_by_state(self, state: TicketState, include_workers: bool = True) -> list[Ticket]:
         with self._lock:
             ticket_ids = self._state_index.get(state, set())
-            return [self._tickets[tid] for tid in ticket_ids if tid in self._tickets]
+            tickets = [self._tickets[tid] for tid in ticket_ids if tid in self._tickets]
+            if not include_workers:
+                tickets = [t for t in tickets if not getattr(t, "assigned_agent", "")]
+            return tickets
+
+    def list_tickets(self, include_workers: bool = True) -> list[Ticket]:
+        with self._lock:
+            tickets = list(self._tickets.values())
+            if not include_workers:
+                tickets = [t for t in tickets if not getattr(t, "assigned_agent", "")]
+            return tickets
+
+    def list_all(self, include_workers: bool = True) -> list[Ticket]:
+        return self.list_tickets(include_workers=include_workers)
 
     def count(self) -> int:
         with self._lock:
@@ -2140,70 +2153,134 @@ class TicketStore:
         return sorted(matches.values(), key=lambda t: t.updated_at, reverse=True)
 
 
+class ReadOnlyTicketView:
+    def __init__(self, store: TicketStore):
+        object.__setattr__(self, "_store", store)
+
+    def get(self, ticket_id: str):
+        return self._store.get(ticket_id)
+
+    def get_by_id(self, ticket_id: str):
+        return self._store.get_by_id(ticket_id)
+
+    def list_by_state(self, state, include_workers: bool = False):
+        return self._store.list_by_state(state, include_workers=include_workers)
+
+    def list_tickets(self, include_workers: bool = False):
+        return self._store.list_tickets(include_workers=include_workers)
+
+    def list_all(self, include_workers: bool = False):
+        return self._store.list_all(include_workers=include_workers)
+
+    def summary(self):
+        return self._store.summary()
+
+    def count(self):
+        return self._store.count()
+
+    def find_similar(self, *a, **kw):
+        return self._store.find_similar(*a, **kw)
+
+    def discovery_history(self, *a, **kw):
+        return self._store.discovery_history(*a, **kw)
+
+
 # ---------------------------------------------------------------------------
 # QueueManager — Adapter interface for queue depth and ticket class queries
 # ---------------------------------------------------------------------------
 
 class QueueManager:
-    """Adapter providing queue metrics without exposing TicketStore internals.
-
-    Purpose
-    -------
-    Decouples orchestrator from direct TicketStore dependency. Provides
-    queue depth, ticket classes, and state summary via an adapter interface.
-    The orchestrator injects a QueueManager instead of importing TicketStore
-    functions directly.
-
-    Why
-    ---
-    CB-5190476-CBC6 requires that queue depth be provided via adapter,
-    not through direct TicketStore imports in orchestrator.py.
-
-    Invariants
-    ----------
-    - Wraps TicketStore internally; callers don't know about storage format
-    - Provides actionable_queue_depth() for worker scaling decisions
-    - Provides ticket_classes() for model-tier routing
-    - Provides summary() for pipeline state checks
-    - get_store() available for backward-compat with dispatch functions
-    """
-
-    def __init__(self, store: TicketStore | None = None):
-        """Initialize with optional TicketStore instance.
-
-        If store is None, will lazily load from disk on first access.
-        """
-        self._store: TicketStore | None = store
-        self._store_path: Path | None = None
+    def __init__(self, store: TicketStore | None = None, *, state_dir: Path | None = None):
         if store is not None:
-            # Infer store path from the TicketStore instance
+            self._store: TicketStore | None = store
             try:
-                self._store_path = getattr(store, '_path', None)
+                self._state_dir = Path(getattr(store, "_path", None)).parent if getattr(store, "_path", None) else state_dir
             except Exception:
-                pass
+                self._state_dir = state_dir
+            self._store_path: Path | None = getattr(store, "_path", None)
+        else:
+            self._store = None
+            self._state_dir = state_dir
+            self._store_path = (state_dir / "tickets.json") if state_dir is not None else None
+            if self._store_path is None:
+                try:
+                    from codebot.state_manager import get_paths
+                    self._state_dir = get_paths().state_dir
+                    self._store_path = self._state_dir / "tickets.json"
+                except Exception:
+                    self._store_path = None
 
     def _ensure_store(self) -> TicketStore | None:
-        """Lazy-load TicketStore if not already loaded."""
         if self._store is not None:
             return self._store
-        if self._store_path is None:
-            # Default to standard location
+        if self._state_dir is not None:
             try:
-                from codebot.state_manager import get_paths
-                self._store_path = get_paths().state_dir / "tickets.json"
+                from codebot.ticket_dispatcher import get_ticket_store
+                s = get_ticket_store(self._state_dir)
+                if s is not None:
+                    self._store = s
+                    self._store_path = getattr(s, "_path", None)
+                    return s
             except Exception:
-                return None
-        try:
-            self._store = TicketStore(self._store_path)
-            return self._store
-        except Exception:
-            return None
+                pass
+        if self._store_path is not None:
+            try:
+                from codebot.ticket_dispatcher import get_ticket_store
+                parent = self._store_path.parent
+                s = get_ticket_store(parent)
+                if s is not None:
+                    self._store = s
+                    self._state_dir = parent
+                    return s
+            except Exception:
+                pass
+        return None
 
     def clear_cache(self) -> None:
-        """Clear the internal TicketStore cache for fresh read on next tick."""
-        if self._store is not None:
-            # Force reload by clearing reference; next access will re-read
-            self._store = None
+        sdir = getattr(self, "_state_dir", None)
+        if sdir is not None:
+            try:
+                from codebot.ticket_dispatcher import _canonical_state_dir, _ticket_store_cache, _ticket_store_cache_lock, _ticket_store_fingerprints
+            except Exception:
+                self._store = None
+                return
+            try:
+                canonical = _canonical_state_dir(sdir)
+            except Exception:
+                canonical = None
+            if canonical is not None:
+                with _ticket_store_cache_lock:
+                    cached = _ticket_store_cache.get(canonical)
+                    if cached is not None:
+                        try:
+                            store_path = canonical / "tickets.json"
+                            if not store_path.exists():
+                                _ticket_store_cache.pop(canonical, None)
+                                _ticket_store_fingerprints.pop(canonical, None)
+                                try:
+                                    cached.close()
+                                except Exception:
+                                    pass
+                            else:
+                                st = store_path.stat()
+                                fp = (float(st.st_mtime), int(st.st_size))
+                                cur = _ticket_store_fingerprints.get(canonical)
+                                if cur is not None and cur != fp:
+                                    _ticket_store_cache.pop(canonical, None)
+                                    _ticket_store_fingerprints.pop(canonical, None)
+                                    try:
+                                        cached.close()
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+        else:
+            try:
+                from codebot.ticket_dispatcher import clear_ticket_store_cache
+                clear_ticket_store_cache()
+            except Exception:
+                pass
+        self._store = None
 
     def actionable_queue_depth(self) -> int:
         store = self._ensure_store()
@@ -2229,9 +2306,9 @@ class QueueManager:
                 tickets = [store._tickets[tid] for tid in impl_ids if tid in store._tickets]
             classes = []
             for t in tickets:
-                tc = getattr(t, 'ticket_class', None)
+                tc = getattr(t, "ticket_class", None)
                 if tc is not None:
-                    classes.append(tc.value if hasattr(tc, 'value') else str(tc))
+                    classes.append(tc.value if hasattr(tc, "value") else str(tc))
                 else:
                     classes.append("feature")
             return classes
@@ -2239,10 +2316,6 @@ class QueueManager:
             return []
 
     def summary(self) -> dict[str, int]:
-        """Return count of tickets per state.
-
-        O(1) via cached _state_counts. Returns empty dict if unavailable.
-        """
         store = self._ensure_store()
         if store is None:
             return {}
@@ -2252,26 +2325,16 @@ class QueueManager:
             return {}
 
     def get_store(self) -> TicketStore | None:
-        """Return underlying TicketStore for backward-compat with dispatchers.
-
-        Dispatch functions that need full TicketStore access can call this.
-        New code should prefer actionable_queue_depth(), ticket_classes(), summary().
-        """
         return self._ensure_store()
+
+    def as_readonly(self) -> ReadOnlyTicketView | None:
+        s = self._ensure_store()
+        if s is None:
+            return None
+        return ReadOnlyTicketView(s)
 
     @classmethod
     def from_state_dir(cls, state_dir: Path) -> "QueueManager":
-        """Create QueueManager from state directory path.
-
-        Returns a QueueManager with no underlying store if tickets.json
-        is missing or unreadable. Callers should check get_store() for None.
-
-        TicketStore is loaded lazily on first access to avoid O(n) parse
-        during tick initialization when queue depth may not be needed.
-        """
-        store_path = state_dir / "tickets.json"
-        qm = cls(None)
-        # Preserve the requested path so _ensure_store loads an empty store
-        # instead of falling back to the default global location.
-        qm._store_path = store_path
+        qm = cls(None, state_dir=Path(state_dir))
+        qm._store_path = Path(state_dir) / "tickets.json"
         return qm
