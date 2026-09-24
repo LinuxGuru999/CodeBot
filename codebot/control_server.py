@@ -1494,6 +1494,24 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._html(200, ticket_explorer_page())
             return
 
+        m_req = re.match(r"^/api/request/([^/]+)$", path)
+        if m_req:
+            request_id = m_req.group(1)
+            try:
+                from codebot.state_manager import get_paths
+                state_dir = get_paths().state_dir
+                for subdir in ("requests", "requests/processed", "requests/rejected"):
+                    candidate = state_dir / subdir / f"{request_id}.json"
+                    if candidate.exists():
+                        data = json.loads(candidate.read_text(encoding="utf-8"))
+                        self._json(200, data)
+                        return
+                self._json(404, {"error": "request not found"})
+            except Exception as e:
+                logger.warning("GET /api/request/%s failed: %s", request_id, e)
+                self._json(500, {"error": "internal error"})
+            return
+
         if path in ("/dashboard/snapshot", "/api/dashboard/snapshot") and self._is_loopback_client():
             from codebot.dashboard import live_snapshot
             self._json(200, dict(live_snapshot(BOTS_DIR.parent)))
@@ -1723,6 +1741,96 @@ class ControlHandler(BaseHTTPRequestHandler):
         # Ensure body is always a dict (robust against edge cases)
         if body is None:
             body = {}
+
+        # POST /api/request — create a UserRequest envelope
+        if path == "/api/request":
+            message = body.get("message", "").strip() if isinstance(body.get("message"), str) else ""
+            if not message:
+                self._json(400, {"error": "message is required"})
+                return
+            context_text = body.get("context", "")
+            conversation_id = body.get("conversation_id", "")
+            try:
+                from codebot.user_request import UserRequest, DedupCandidate
+                request_id = UserRequest.generate_id()
+                candidates: tuple[DedupCandidate, ...] = ()
+                try:
+                    from codebot.ticket_dispatcher import get_ticket_store
+                    store = get_ticket_store()
+                    if store is not None:
+                        similar = store.find_similar(problem_statement=message, limit=3)
+                        candidates = tuple(
+                            DedupCandidate(
+                                ticket_id=t.id,
+                                title=t.title,
+                                state=t.state.value if hasattr(t.state, "value") else str(t.state),
+                                similarity=float(sim),
+                            )
+                            for t, sim in similar
+                        )
+                except Exception:
+                    pass
+                req = UserRequest(
+                    request_id=request_id,
+                    source="user",
+                    message=message,
+                    context=context_text if isinstance(context_text, str) else "",
+                    conversation_id=conversation_id if isinstance(conversation_id, str) else "",
+                    dedup_candidates=candidates,
+                )
+                from codebot.state_manager import get_paths
+                state_dir = get_paths().state_dir
+                UserRequest.ensure_directories(state_dir)
+                dest = state_dir / "requests" / f"{request_id}.json"
+                tmp = dest.with_suffix(".tmp")
+                tmp.write_text(req.to_json(), encoding="utf-8")
+                tmp.replace(dest)
+                self._json(200, {
+                    "status": "accepted",
+                    "request_id": request_id,
+                    "dedup_candidates": [c.to_dict() for c in candidates],
+                })
+            except Exception as e:
+                logger.warning("POST /api/request failed: %s", e)
+                self._json(500, {"error": "internal error"})
+            return
+
+        # GET handled in do_GET; POST /api/request/<id>/reply — context-only update
+        m_reply = re.match(r"^/api/request/([^/]+)/reply$", path)
+        if m_reply:
+            request_id = m_reply.group(1)
+            response_text = body.get("response", "").strip() if isinstance(body.get("response"), str) else ""
+            if not response_text:
+                self._json(400, {"error": "response is required"})
+                return
+            try:
+                from codebot.user_request import UserRequest, UserRequestStatus
+                from codebot.state_manager import get_paths
+                state_dir = get_paths().state_dir
+                processed_dir = state_dir / "requests" / "processed"
+                req_path = processed_dir / f"{request_id}.json"
+                if not req_path.exists():
+                    req_path = state_dir / "requests" / f"{request_id}.json"
+                if not req_path.exists():
+                    self._json(404, {"error": "request not found"})
+                    return
+                data = json.loads(req_path.read_text(encoding="utf-8"))
+                req = UserRequest.from_dict(data)
+                if req.status != UserRequestStatus.AWAITING_INPUT:
+                    self._json(400, {"error": f"request is {req.status.value}, not awaiting_input"})
+                    return
+                updated = req.with_response(response_text).update_status(UserRequestStatus.PENDING)
+                dest = processed_dir / f"{request_id}.json"
+                tmp = dest.with_suffix(".tmp")
+                tmp.write_text(updated.to_json(), encoding="utf-8")
+                tmp.replace(dest)
+                self._json(200, {"status": "replied", "request_id": request_id})
+            except ValueError as e:
+                self._json(400, {"error": str(e)})
+            except Exception as e:
+                logger.warning("POST /api/request/%s/reply failed: %s", request_id, e)
+                self._json(500, {"error": "internal error"})
+            return
 
         # Destructive endpoint validation: require explicit confirmation or dry-run
         DESTRUCTIVE_PATHS = {
