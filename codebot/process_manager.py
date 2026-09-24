@@ -1243,6 +1243,23 @@ def _load_ticket_context(ticket_id: str) -> str:
                 if fb.get('recommendation'):
                     lines.append(f"  Fix: {_truncate_field(fb['recommendation'], 2048)}")
             lines.append("=== END REVIEWER FEEDBACK ===")
+        origin_type = getattr(t, "origin_type", "") or ""
+        origin_id = getattr(t, "origin_id", "") or ""
+        if origin_type == "user_request" and origin_id:
+            try:
+                from codebot.state_manager import get_paths
+                state_dir = get_paths().state_dir
+                for subdir in ("requests/processed", "requests"):
+                    req_path = state_dir / subdir / f"{origin_id}.json"
+                    if req_path.exists():
+                        req_text = req_path.read_text(encoding="utf-8")
+                        lines.append("")
+                        lines.append("=== USER REQUEST CONTEXT ===")
+                        lines.append(_truncate_field(req_text, 4096))
+                        lines.append("=== END USER REQUEST CONTEXT ===")
+                        break
+            except Exception:
+                pass
         lines.append("--- END TICKET CONTEXT ---")
         return _truncate_field("\n".join(lines), 8192)
     except Exception:
