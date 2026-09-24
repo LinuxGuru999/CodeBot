@@ -29,6 +29,9 @@ Every role prompt MUST contain these sections in order:
 
 Optional sections by category: Output Format, Detection Patterns, Complexity Tiers, Decomposition Rules, Strategic Priorities, Verdict Format, Claim Protocol. Never omit required sections.
 
+
+> **Authoritative dispatch (ADR-007):** Every role prompt that writes, edits, or reviews code MUST reference `docs/CODING_STANDARDS.md §2–§8` by symbol (one stable line per prompt, e.g. `See docs/CODING_STANDARDS.md §2–§8 for ownership/slot/claim/queue/reconciler invariants — violations = REWORK`). See `docs/CODING_STANDARDS.md` and `docs/adr/007-authoritative-dispatch.md`. The 15 relevant roles are: implementer, reviewer, security_reviewer, architecture_reviewer, performance_reviewer, concurrency_reviewer, data_integrity_reviewer, test_reviewer, documentation_reviewer, planner, decomposer, architecture_auditor, performance_auditor, security_auditor, bug_hunter.
+
 Reference implementations:
 - **Discovery (cheap models)**: `codebot/roles/bug_hunter.md`
 - **Implementation (TDD)**: `codebot/roles/general_implementer.md`
