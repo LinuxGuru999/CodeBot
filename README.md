@@ -218,27 +218,25 @@ CodeBot provides a user-facing interface for:
 
 ### Ticket Lifecycle
 
-All work flows through normalized structured tickets:
+All work flows through normalized structured tickets (schema v3, 19 states with aliases):
 
 ```
-DISCOVERED → VALIDATING → TRIAGED → READY → PLANNING → IMPLEMENTING → REVIEWING → VERIFYING → COMPLETE
+DISCOVERED → TRIAGED → GOAL (NOW/LATER/NEVER) → DECOMP → PLANNING → IMPLEMENT → REVIEW → COMPLETE
 ```
 
-With side states for exceptions:
+Terminal states: `REJECTED · DUPLICATE · NOT_ACTIONABLE · RESOLVED · SUPERSEDED · CANCELLED · NEVER` (no exits). Universal exits from any non-COMPLETE: `RESOLVED · SUPERSEDED · CANCELLED`. Aliases: `DECOMPOSE=DECOMP`, `IMPLEMENTING=IMPLEMENT`, `REVIEWING=REVIEW`. Blocked REWORK/deferred loops are per `TRANSITIONS` in `ticket_engine.py`.
 
-```
-BLOCKED · REWORK · REJECTED · DUPLICATE · DEFERRED · HUMAN_REQUIRED
-```
+Discovery is **outside** the scheduler: a 5-slot daemon round-robins 9 auditors at 60s each with `batch_grep` + dirty-file (CHANGED_FILES) priority, via `discovery_daemon.py`. The scheduler (`scheduler_v2`, 90 slots) covers GOAL/DECOMP/PLANNING/REWORK/IMPLEMENT/REVIEW buckets.
 
 ### Role-Based Agents
 
-29 registered roles across 5 categories:
+24 registered roles (5 implemented: discovery 9 + planning 3 + implementation 1 + review 6 + control 5) plus prompt-only legacy. Reference: `docs/ROLES.md` auth.
 
-- **Discovery**: Bug hunters, security auditors, architecture auditors, performance auditors
-- **Planning**: Decomposers, implementation planners, dependency planners
-- **Implementation**: General, backend, frontend, test, migration, documentation implementers
-- **Review**: Correctness, security, architecture, test, performance, simplicity reviewers
-- **Control**: Scheduler, quality gate, conflict resolver, budget controller
+- **Discovery** (5-slot daemon, 60s per role, outside scheduler): `bug_hunter`, `security_auditor`, `architecture_auditor`, `performance_auditor`, `test_gap_auditor` (cheap), `documentation_auditor` (cheap), `dependency_auditor` (cheap), `ux_auditor`, `feature_hunter` (index-driven)
+- **Planning** (scheduler_v2 GOAL/DECOMP/PLANNING): `goal_aligner`, `decomposer`, `planner`
+- **Implementation** (scheduler IMPLEMENT/REWORK): `implementer` (unified)
+- **Review** (scheduler REVIEW): `reviewer` (default broad), `security_reviewer`, `architecture_reviewer`, `performance_reviewer`, `concurrency_reviewer`, `data_integrity_reviewer`
+- **Control**: `scheduler` (legacy), `ticket_triager`, `git_sync`, `github_mirror`, `budget_controller`
 
 ### Quality Gates
 

@@ -264,8 +264,8 @@ Tickets should eventually contain structured fields including:
 
 ---
 
-<!-- DELIVERABLE: id=2.E status=IN_PROGRESS tier=T1 modules=role_registry.py,findings_log.py,discovery_manager.py -->
-## E. Automatic Ticket Discovery
+<!-- DELIVERABLE: id=2.E status=IN_PROGRESS tier=T1 modules=role_registry.py,discovery_daemon.py,discovery_finding.py,evidence_validator.py -->
+## E. Automatic Ticket Discovery — discovery daemon (5 slots, 60s each, outside scheduler)
 
 CodeBot must continuously discover actionable work from:
 
@@ -292,14 +292,15 @@ Discovery must be separated from authorization.
 
 Finding a possible improvement must never automatically authorize implementation.
 
+Discovery is a 5-slot daemon outside the scheduler (discovery_daemon.py, round-robin 9 roles at 60s each, dirty-first CHANGED_FILES via git diff HEAD + porcelain). Each role's interval is in codebot_adapter (discovery 60s). Cheap tier (test_gap/documentation/dependency) pinned to xiaomi-mimo-2.5.
+
 **Exit Criteria:**
 
-- [x] Cooldown system prevents duplicate discovery runs
-- [x] Yield tracking counts findings per discovery pass
-- [x] Diversity allocation rotates across discovery roles
-- [x] Saturation detection identifies diminishing returns
-- [ ] All 8 discovery roles produce findings
-- [ ] Findings persist across restarts via findings_log
+- [x] 60s per-role cooldown (next_run_at + _last_run + heartbeat mtime) prevents duplicate discovery runs — discovery_daemon.Delivery<60>5
+- [x] 5-slot concurrent discovery (outside scheduler) — discovery_daemon.DISCOVERY_MAX_CONCURRENT=5
+- [x] Dirty-first via _changed_files_block + lean 22-line prompts with batch_grep
+- [x] All 9 discovery roles produce findings (see prior COMPLETE 610-discovery evidence)
+- [ ] Saturation detection identifies diminishing returns (legacy discovery_manager archived)
 
 ---
 

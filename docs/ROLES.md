@@ -1,133 +1,98 @@
 # CodeBot Roles Reference
 
-Last updated: 2026-09-20
+Last updated: 2026-09-23
 
-CodeBot defines **29 registered roles** across 5 categories in `role_registry.py`, with **40 prompt files** in `codebot/roles/*.md`. Each role specifies identity, incentives, tool constraints, operational protocols, and safety rules. Roles are loaded from `codebot/roles/*.md` and assembled with project context from the `ProjectAdapter` at runtime.
+CodeBot defines **24 registered roles** in `role_registry.py` (plus `implementer` is unified, legacy prompts remain). Current prompt files are 35 in `codebot/roles/*.md` (24 registered, 1 unified implementation, plus planning/control prompt-only leftovers).
 
-Some prompt files exist for roles not yet formally registered in `role_registry.py`. These are documented below with a note. They can be loaded by name but lack the full `AgentRole` definition (model profile, tool policy, adversarial mappings).
+All prompts follow `docs/ROLE_PROMPT_STANDARDS.md`. Discovery scanners are lean 22–26 line prompts since Sep 2026. `feature_hunter` remains 201 lines (index-driven).
 
-All prompts follow the hardened authoring standard in `docs/ROLE_PROMPT_STANDARDS.md`. Reference implementations per category: `bug_hunter.md` (discovery), `general_implementer.md` (implementation), `correctness_reviewer.md` (review), `scheduler.md` (control), `feature_decomposer.md` (planning).
+Legacy bot names are mapped via `roles/__init__.py` and `role_registry`.
 
-Legacy Monitor bot names are mapped to CodeBot roles via `LEGACY_ROLE_MAP` in `role_prompt.py`.
+## Discovery Roles (9) — outside scheduler, discovery daemon 5 slots / 60s interval
 
-## Discovery Roles (9)
+Discovery agents scan continuously via `discovery_daemon.py` (round-robin, 60s per role, 5 concurrent). All are READ-ONLY — they never modify source files. They only call `batch_grep` → `read` hits → `create_ticket`. Each mission is injected with a `CHANGED_FILES` block (git diff HEAD + porcelain, 30 files, 60s cache) and is instructed to scan dirty files first.
 
-Discovery agents scan source code for issues. All are READ-ONLY — they never modify source files.
+| Role | Incentive | Model tier | Adversarial To |
+|------|-----------|------------|----------------|
+| `bug_hunter` | Maximize true positives, penalized for false reports | STANDARD | Implementers |
+| `security_auditor` | Find exploitable vulnerabilities | PREMIUM/thinking | implementer |
+| `architecture_auditor` | Find coupling violations and technical debt | PREMIUM/thinking | implementer |
+| `performance_auditor` | Find scalability regressions | STANDARD | implementer |
+| `test_gap_auditor` | Maximize coverage gap detection accuracy | **CHEAP** xiaomi-mimo-2.5 | — |
+| `documentation_auditor` | Find claims that are no longer true | **CHEAP** xiaomi-mimo-2.5 | implementer |
+| `dependency_auditor` | Find supply chain risks | **CHEAP** xiaomi-mimo-2.5 | — |
+| `ux_auditor` | Find usability and accessibility issues | STANDARD | — |
+| `feature_hunter` | Convert roadmap deliverables into tickets (index-driven) | CHEAP | — |
 
-| Role | Legacy Bot | Incentive | Adversarial To |
-|------|-----------|-----------|----------------|
-| `bug_hunter` | `issues` | Maximize true positives, penalized for false reports | Implementers |
-| `security_auditor` | `security_auditor` | Find exploitable vulnerabilities | backend/frontend/general_implementer |
-| `architecture_auditor` | `features` | Find coupling violations and technical debt | backend_implementer, simplicity_reviewer |
-| `performance_auditor` | — | Find scalability regressions | backend/general_implementer |
-| `test_gap_auditor` | `test_coverage` | Maximize coverage gap detection accuracy | — |
-| `documentation_auditor` | — | Find claims that are no longer true | documentation_implementer |
-| `dependency_auditor` | `dependency` | Find supply chain risks | — |
-| `ux_auditor` | `ui_improve` | Find usability and accessibility issues | — |
-| `feature_hunter` | — | Convert roadmap deliverables into tickets | — |
+Cheap tier is pinned in `discovery_daemon._ensure_bot` + `_launch`, not via `model_manager.next_model_for_role`.
 
-## Planning Roles (2 registered + 3 prompt-only)
+## Planning Roles (3)
 
-Planning agents analyze, decompose, and order work items. They produce tickets and plans but never modify source code.
+Planning agents analyze, decompose, and align work. They produce tickets and plans but never modify source code.
 
-### Registered in `role_registry.py` (2)
+| Role | Incentive | Tier |
+|------|-----------|------|
+| `decomposer` | Break tickets into atomic, implementable pieces | background |
+| `planner` | Produce complete actionable plans preventing rework | background |
+| `goal_aligner` | Classify tickets NOW/LATER/NEVER via goal alignment | background |
 
-| Role | Legacy Bot | Incentive |
-|------|-----------|-----------|
-| `decomposer` | `feature_decomposer` | Break tickets into atomic, implementable pieces |
-| `implementation_planner` | — | Produce complete actionable plans preventing rework |
+`scheduler_v2` buckets: `GOAL → goal_aligner`, `DECOMP → decomposer`, `PLANNING → planner`.
 
-### Prompt files only (not in registry) (3)
+## Implementation Roles (1 unified)
 
-These have `.md` prompt files but are not yet registered as `AgentRole` entries:
+| Role | Incentive | Tool Access | Git Write |
+|------|-----------|-------------|-----------|
+| `implementer` | Make the requested change work correctly and completely | read/write/edit/grep/glob/bash + batch_read/batch_grep | Yes |
 
-| Role | Legacy Bot | Incentive |
-|------|-----------|-----------|
-| `dependency_planner` | — | Ensure tickets execute in correct order |
-| `architecture_planner` | — | Ensure changes align with architectural vision |
-| `goal_steering` | `goal_steering` | Direct effort toward strategic priorities |
+All ticket classes (bug/feature/security/performance/architecture/test/documentation/dependency/infrastructure) route to `implementer` via `TICKET_CLASS_TO_IMPLEMENTER`. Former 6-role split (`general_implementer` etc.) is retired to `legacy` and not scheduled.
 
-## Implementation Roles (6)
+### Operational Protocols (all agents)
 
-Implementation agents write code, tests, and documentation. They follow TDD (red-green-refactor) and the operational protocols (claim, heartbeat, checkpoint, noop cap). Commits happen at COMPLETE stage via completion_commit, not by agents.
+1. **Scheduler agents**: claim `claims/{ticket}.{role}.claim.json` via `DispatchGate`, 90-slot pool.
+2. **Discovery agents**: no claim, `CHANGED_FILES` block, 5-slot daemon pool, 60s per role.
+3. **Heartbeat**: bare Unix timestamp to `{STATE_DIR}/{agent}.heartbeat` every 60s.
+4. **Checkpoint**: `state/{ticket}.scratchpad.json` via `scratchpad.py` (claim protocol).
+5. **Noop cap**: 20 empty scans → exit cleanly. Zero tickets = success for discovery.
 
-| Role | Legacy Worker | Tool Access | Git Write |
-|------|--------------|-------------|-----------|
-| `general_implementer` | worker-1,2,3,11,12 | read/write/edit/grep/glob/bash | Yes |
-| `backend_implementer` | worker-4,5,6 | read/write/edit/grep/glob/bash | Yes |
-| `frontend_implementer` | worker-7 | read/write/edit/grep/glob/bash | Yes |
-| `test_implementer` | worker-8 | read/write/edit/grep/glob/bash | Yes |
-| `migration_implementer` | worker-9 | read/write/edit/grep/glob/bash | Yes |
-| `documentation_implementer` | worker-10 | read/write/edit/grep/glob/bash | Yes |
-
-### Operational Protocols (all implementers)
-
-1. **Claim**: Write `{STATE_DIR}/claims/{ticket_id}.{agent_name}.json` before starting work. Delete on completion or failure.
-2. **Heartbeat**: Write bare Unix timestamp to `{STATE_DIR}/{agent_name}.heartbeat` after every atomic task and at least every 60s.
-3. **Checkpoint**: Write JSON to `{STATE_DIR}/{agent_name}.checkpoint.json` after every atomic task. Format per ROLE_PROMPT_STANDARDS.md §7.5.
-4. **Release claim**: Delete the claim file when done. Do NOT commit or push —
-   `completion_commit` commits the ticket's own files with `[CB-xxx]` at
-   COMPLETE (scoped, fail-open, SHA recorded on the ticket).
-5. **Noop cap**: Track consecutive empty scans. Exit cleanly at ≥ 20.
-
-Where `{STATE_DIR}` = `{PROJECT_ROOT}/.codebot/state`.
-
-## Review Roles (8)
+## Review Roles (6 + ux_reviewer if enabled)
 
 Review agents evaluate implementations. All are READ-ONLY. Their incentives intentionally conflict with implementers.
 
 | Role | Incentive | Adversarial To |
 |------|-----------|----------------|
-| `correctness_reviewer` | Find behavior tests missed | general/backend/migration_implementer |
-| `security_reviewer` | Find a way to exploit the change | general/backend/frontend/migration_implementer |
-| `architecture_reviewer` | Find coupling/boundary violations | general/backend_implementer |
-| `test_reviewer` | Find behavior tests failed to cover | test_implementer |
-| `performance_reviewer` | Find scalability regressions | general/backend_implementer |
-| `simplicity_reviewer` | Find unnecessary complexity | general/backend/architecture_auditor |
-| `documentation_reviewer` | Find claims no longer true | documentation_implementer |
-| `ux_reviewer` | Find usability issues, accessibility violations, visual regressions | frontend/general_implementer |
+| `reviewer` | Default broad reviewer: correctness, acceptance, scope. Escalates to specialists | implementer |
+| `security_reviewer` | Specialist: security question escalated from reviewer | implementer |
+| `architecture_reviewer` | Specialist: architecture question | implementer |
+| `performance_reviewer` | Specialist: performance question | implementer |
+| `concurrency_reviewer` | Specialist: races, lock ordering, TOCTOU | implementer |
+| `data_integrity_reviewer` | Specialist: migrations, schema, destructive writes | implementer |
+
+Plus `ux_reviewer` (evaluates browser/a11y, only if `scheduler_v2` REVIEW routes to it). Specialists only answer the escalated question.
 
 ### Verdicts
 
-- **APPROVE** → transition to VERIFYING
-- **REWORK** → document findings, transition to REWORK
-- **ESCALATE/BLOCK** → transition to REWORK
+- **APPROVE** → COMPLETE (via gatekeeper)
+- **REWORK** → REWORK with findings
+- **Escalation** → reviewer escalates security/architecture/perf/concurrency/data to specialist, then re-evaluates
 
-## Control Roles (4 registered + 7 prompt-only)
+## Control Roles (5)
 
-Control agents manage infrastructure, scheduling, economics, and learning.
+| Role | Purpose | Tier |
+|------|---------|------|
+| `scheduler` | Agent scheduling, concurrency limits (legacy, mostly superseded by scheduler_v2 DispatchGate) | interactive CHEAP |
+| `ticket_triager` | Validates DISCOVERED → TRIAGED: completeness, dedup, fingerprint | interactive CHEAP |
+| `git_sync` | Batched push / vendor sync (commits from completion_commit) | background CHEAP |
+| `github_mirror` | Mirror issue files to GitHub Issues via `gh` CLI | background CHEAP |
+| `budget_controller` | Token spend tracking, budget enforcement (via token_budget) | interactive CHEAP |
 
-### Registered in `role_registry.py` (4)
-
-| Role | Legacy Bot | Purpose |
-|------|-----------|---------|
-| `scheduler` | (orchestrator) | Agent scheduling, concurrency limits, model selection |
-| `ticket_triager` | `bug_triage` | Validates incoming tickets: completeness, dedup, severity, routing |
-| `budget_controller` | `prompt_opt` | Token spend tracking, budget enforcement |
-| `conflict_resolver` | — | Merge conflict detection and resolution |
-
-### Prompt files only (not in registry) (7)
-
-These have `.md` prompt files but are not yet registered as `AgentRole` entries:
-
-| Role | Legacy Bot | Purpose |
-|------|-----------|---------|
-| `quality_gate` | `build` | Central gate evaluation, COMPLETE authority |
-| `github_mirror` | `github_bot` | Mirror issue files to GitHub Issues via `gh` CLI |
-| `git_sync` | (implicit gitsync) | Batched push / vendor sync (commits come from completion_commit) |
-| `release_manager` | `release` | Staged rollout with gate-driven progression |
-| `alignment_scorer` | `alignment` | Exit event processing, reward computation |
-| `prompt_optimizer` | `prompt_opt` | Epsilon-greedy RSI with 11 Q-arms |
-| `ticket_decomposer` | — | Break complex rework tickets into atomic sub-tickets |
+Also: `quality_gate` gate evaluation is not a role but a module; alignment lives in `api_runner`/`rl_engine`.
 
 ## Role Resolution
 
-When the orchestrator starts an agent named `issues`, the resolution chain is:
-
 ```
-"issues" → LEGACY_ROLE_MAP["issues"] → "bug_hunter"
-    → load_role_template("bug_hunter") → codebot/roles/bug_hunter.md
-    → assemble_prompt("bug_hunter", adapter=...) → final prompt
+"bug_hunter" → codebot/roles/bug_hunter.md (lean 26-line, CHANGED_FILES + batch_grep)
+     → discovery_daemon._ensure_bot(BotConfig interval=60s, tier=11)
+     → process_manager._prepare_prompt_with_context(extra_block=CHANGED_FILES)
 ```
 
-If no mapping exists, the bot name is used directly as the role name.
+Scheduler agents resolve via `scheduler_v2` BUCKET_ORDER → BUCKET_TO_ROLE_SETS → role.

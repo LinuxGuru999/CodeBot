@@ -50,21 +50,29 @@ CodeBot uses a role-based abstraction instead of hardcoded bot names. Roles defi
 
 ### Role Categories
 
-There are 31 predefined roles across 5 categories:
+There are 24 registered roles in `role_registry.py` (31 counting legacy/planning prompt-only) across 5 categories. Scheduler uses `scheduler_v2` buckets GOAL/DECOMP/PLANNING/REWORK/IMPLEMENT/REVIEW; discovery runs as a 5-slot daemon outside the scheduler (60s per role) and is not a scheduler bucket.
 
-| Category | Count | Purpose | Example Roles |
-|----------|-------|---------|---------------|
+| Category | Count (registered) | Purpose | Example Roles |
+|----------|-------------------|---------|---------------|
 | **Discovery** | 9 | Scan codebase for issues, vulnerabilities, debt | `bug_hunter`, `security_auditor`, `architecture_auditor` |
-| **Planning** | 2 | Decompose tickets, generate implementation plans | `feature_decomposer`, `implementation_planner` |
-| **Implementation** | 6 | Execute changes, write code, fix bugs | `general_implementer`, `backend_implementer`, `test_implementer` |
-| **Review** | 8 | Verify correctness, security, architecture | `correctness_reviewer`, `security_reviewer`, `architecture_reviewer` |
-| **Control** | 6 | Orchestrate workflow, manage state | `ticket_triager`, `dependency_planner`, `completion_commit` |
+| **Planning** | 3 | Decompose, plan, goal-align | `decomposer`, `planner`, `goal_aligner` |
+| **Implementation** | 1 | Execute changes, write code, fix bugs | `implementer` |
+| **Review** | 6 | Verify correctness, security, architecture, concurrency, data integrity | `reviewer`, `security_reviewer`, `concurrency_reviewer` |
+| **Control** | 5 | Orchestrate workflow, manage state, mirror | `ticket_triager`, `git_sync`, `github_mirror`, `scheduler`, `budget_controller` |
 
 ### Data Structures
 
 -   **`AgentRole`**: Immutable definition containing name, category, description, required model profile, tool policy, incentive, and adversarial mappings.
 -   **`ModelProfile`**: Specifies capability requirements (reasoning level, coding skill, context size, cost class, latency, security review flag).
 -   **`ToolPolicy`**: Fail-closed allowlist defining permitted tools (`read`, `write`, `bash`, etc.), permitted commands (`git`, `pytest`, etc.), filesystem scope, network access, git write access, and max file size.
+
+## Discovery vs Scheduler
+
+Discovery runs as a 5-slot daemon outside the scheduler. See `docs/scheduler.md` and `docs/discovery.md`.
+
+- Scheduler (`scheduler_v2`, 90 slots) handles GOAL, DECOMP, PLANNING, REWORK, IMPLEMENT, REVIEW bucket dispatches via `DispatchGate` claims.
+- Discovery daemon (`discovery_daemon.py`, 5 slots, 60s per role, 9 roles round-robin) only does `read`/`batch_grep`/`create_ticket` with a `CHANGED_FILES` dirty-first hint and never holds a claim.
+- Both are started by `orchestrator_runtime.run_main_loop` and share `process_manager` for subprocess launch. Scheduler exclusivity is enforced by skipping `DISCOVERY_ROLE_NAMES` in `apply_agent_availability` and `start_eligible_bots`.
 
 ### Interaction with API Runner
 
@@ -122,49 +130,42 @@ sequenceDiagram
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
-| `adaptive_scheduler.py` | ~700 | Core 30-slot adaptive concurrency scheduler control loop integrating all subsystems |
-| `conflict_detector.py` | ~300 | File/module overlap detection between concurrent tickets, worktree isolation tracking |
-| `discovery_manager.py` | ~435 | Discovery cooldown tracking, yield statistics per role, diversity allocation, saturation detection |
+| `scheduler_v2/lifecycle.py` | ~330 | AgentState (CREATED→DEAD), AgentRecord, Clock/ProcessSpawner protocols, per-model stale timeouts |
+| `scheduler_v2/dispatch_gate.py` | ~490 | DispatchGate (ConcurrencyController + claims + SpawnQueue 0.5s stagger) |
+| `scheduler_v2/dispatcher.py` | ~690 | BucketDispatcher (6 buckets: GOAL/DECOMP/PLANNING/REWORK/IMPLEMENT/REVIEW), ModelSelector, Scheduler |
+| `discovery_daemon.py` | ~385 | 5-slot discovery outside scheduler, round-robin 9 roles, 60s cooldown, dirty-file CHANGED_FILES, cheap tier |
+| `orchestrator.py` | ~490 | Thin coordinator, delegates to orchestrator_runtime/process_manager/health_check_loop |
+| `orchestrator_runtime.py` | ~240 | Bootstrap adapter, shutdown handlers, run_main_loop (spawns discovery daemon thread) |
+| `orchestrator_services.py` | ~670 | Bot registry loading from adapter, skip-discovery in apply_agent_availability |
+| `health_check_loop.py` | ~850 | Per-tick bot lifecycle, dispatcher invocation, eligible-bot startup (skips discovery) |
+| `process_manager.py` | ~1270 | Bot lifecycle start/stop/restart, `_prepare_prompt_with_context(extra_block)` for CHANGED_FILES |
+| `scheduler_config.py` | ~453 | Frozen dataclass configs for scheduler + Backlog/Workforce/Cost/Hysteresis |
 | `pipeline_state.py` | ~350 | Frozen dataclass snapshot of the entire engineering pipeline for scheduler decisions |
-| `prompt_optimizer.py` | ~180 | Consumes RL alignment triggers to evolve agent prompts automatically |
-| `queue_pressure.py` | ~470 | Calculates queue pressure ratios and detects bottlenecks for adaptive scheduling |
-| `scheduler_config.py` | ~376 | Centralized configuration for the adaptive scheduler with YAML/JSON loading |
-| `scheduler_metrics.py` | ~290 | Throughput metrics collector: utilization, cycle time, discovery yield, cost per ticket |
-| `work_scorer.py` | ~392 | Utility scoring engine: priority + bottleneck relief + dependency unlock + aging - penalties |
-| `orchestrator.py` | ~2900 | Process lifecycle: start, stop, health monitoring, heartbeat checking, drain management |
-| `config_reloader.py` | ~160 | Hot-reloading for prompts, source code, and bot registry config; triggers graceful respawns |
-| `api_runner.py` | ~1450 | LLM execution loop: prompt assembly, tool dispatch, claim protocol (no commit — commit happens at COMPLETE) |
-| `ticket_engine.py` | ~390 | Normalized ticket schema v2, 14-state machine, SHA-256 dedup, persistent CRUD |
-| `dependency_graph.py` | ~160 | DAG construction, cycle detection, topological sort, ready-ticket resolution |
-| `risk_classifier.py` | ~100 | Deterministic risk scoring (0-100), constitution-aware autonomy decisions |
+| `ticket_engine.py` | ~2300 | Schema v3 (19 states incl. GOAL/LATER/NEVER/RESOLVED), WAL + compaction, fingerprint dedup |
+| `role_registry.py` | ~475 | 24 role definitions (9 discovery + 1 impl + 6 review + 5 control + 3 planning) |
+| `roles/*.md` | 22–26 | 8 scanner prompts lean (batch_grep + CHANGED_FILES), feature_hunter index-driven |
+| `discovery_finding.py` | ~560 | Structured finding schema with evidence separation, fingerprinting, validation |
+| `evidence_validator.py` | ~520 | Pre-ticket verification (file/symbol, generated/vendor hallucination) |
+| `dispatch_service.py` | ~810 | Pipeline state, agent availability (skips discovery), ticket transitions, model rotation |
+| `api_runner.py` | ~3300 | LLM execution loop, tool dispatch, bounded I/O, 50 iterations/120s timeout |
+| `prompt_gateway.py` | ~210 | Prompt compression, shared contract injection |
+| `config_reloader.py` | ~160 | Hot-reloading for prompts, source code, and bot registry config |
+| `dependency_graph.py` | ~160 | DAG, cycle detection, topological sort, ready-ticket resolution |
+| `risk_classifier.py` | ~100 | Deterministic risk scoring (0-100), constitution-aware autonomy |
 | `implementation_planner.py` | ~170 | Risk-scaled plan generation (summary/standard/full depth) |
 | `quality_gate.py` | ~250 | YAML-driven gate engine, subprocess evaluation, conditional triggers |
 | `gatekeeper.py` | ~120 | Central completion authority, max 3 rework cap, REWORK escalation |
-| `role_registry.py` | ~460 | 29 role definitions with model profiles, tool policies, adversarial mappings |
-| `role_prompt.py` | ~210 | Role template loading, project context injection, legacy name mapping |
-| `prompt_gateway.py` | ~190 | Prompt compression, shared contract injection, spawn gating |
-| `rl_engine.py` | ~880 | Epsilon-greedy bandit optimization, Q-value updates, reward shaping |
-| `metrics_collector.py` | ~620 | Per-agent telemetry: execution, alignment, progress, liveness, quality, tokens |
-| `token_budget.py` | ~140 | Fleet-wide token ledger, UTC-day accounting, budget enforcement |
-| `cost_tracker.py` | ~200 | Per-ticket cost attribution, phase tracking, fleet summaries |
-| `credentials.py` | ~120 | SSH/GitHub/API credential resolution from env vars or secret files |
 | `control_server.py` | ~660 | HTTP control plane: agent status, logs, restart, drain, remote management |
-| `control_client.py` | ~90 | Stdlib HTTP client for control server |
-| `codebot_bootstrap.py` | ~150 | Adapter discovery, injection into core modules, project validation |
-| `project_adapter.py` | ~130 | Abstract base class defining the 13-method adapter interface |
-| `monitor_adapter.py` | ~180 | Concrete Monitor Platform adapter implementation |
-| `migrate_queue.py` | ~230 | One-time QUEUE.md → TicketStore migration script |
-| `codebot_adapter.py` | ~220 | Self-hosting adapter: CodeBot manages its own repo via 29-role registry |
-| `model_router.py` | ~300 | Multi-provider model routing with automatic fallback and capability matching |
-| `pricing_table.py` | ~170 | Model pricing table for monetary cost calculation (tokens to USD conversion) |
+| `codebot_adapter.py` | ~300 | Self-hosting adapter: intervals discovery 60s, planning 3600s, implementation 300s |
+| `model_manager.py` | ~260 | Model profiles (lockup risk, heartbeat_multiplier, restart_cooldown), rotation |
 | `alignment_service.py` | ~250 | Decoupled alignment pipeline for reward scoring and prompt evolution |
-| `integration_queue.py` | ~220 | Integration queue with dependency-aware merge ordering |
-| `stale_branch_detector.py` | ~240 | Stale branch detection and cleanup mechanism |
 | `adaptive_rate_limiter.py` | ~200 | Adaptive rate limiting based on API provider feedback |
-| `alignment_events.py` | ~150 | Alignment event bus for reward scoring and prompt evolution triggers |
-| `bot_metrics.py` | ~180 | Per-bot performance metrics collection, aggregation, and reporting |
-| `checkpoint_manager.py` | ~200 | Agent checkpoint save/restore for crash recovery and session continuity |
+| `checkpoint_manager.py` | ~200 | Agent checkpoint save/restore for crash recovery |
 | `file_lock.py` | ~120 | Cross-process file locking primitives for safe concurrent state access |
+| `state_manager.py` | ~200 | PathConfig, drain/lock/restart flags, adapter injection |
+| `scheduler_v2/__init__.py`, `workforce_*` | ~100 | Bucket/workforce helpers |
+
+Archived/removed: `adaptive_scheduler.py`, `discovery_manager.py` (classic), `migrate_queue.py`, `integration_queue.py`, `metrics_collector.py`, `quality_metrics.py`, `batch_scheduler.py`, `lifecycle_scheduler.py`.
 
 ### Capability Modules (CAP Pipeline)
 
@@ -210,75 +211,77 @@ sequenceDiagram
 ## Data Flow
 
 ```
-Discovery Agent (bug_hunter, security_auditor, etc.)
+Discovery daemon (5-slot, outside scheduler, 60s each)
+├── bug_hunter / security_auditor / ... / feature_hunter (read-only)
+│   └── batch_grep dirty files (CHANGED_FILES hint) → read hits → self-challenge
+└── ticket_engine.create_ticket() → DISCOVERED (fingerprint/evidence dedup)
     │
     ▼
-ticket_engine.create_ticket() → DISCOVERED state
+ticket_triager + goal_aligner validate → TRIAGED → GOAL (NOW/LATER/NEVER)
     │
     ▼
-ticket_triager validates → TRIAGED state
+decomposer builds DAG (.decomp.json) → DECOMP → PLANNING
     │
     ▼
-dependency_planner builds DAG → READY state (when deps satisfied)
+planner generates plan (.plan.json) → IMPLEMENT
     │
     ▼
-implementation_planner generates plan → PLANNING state
-    │
-    ▼
-scheduler picks ticket, assigns role + model → IMPLEMENTING state
+scheduler_v2 BucketDispatcher picks bucket, assigns role + model → REVIEW swarm after impl
     │
     ▼
 api_runner executes via LLM with tools
-    ├── Claims ticket (state/claims/{id}.{agent}.json)
+    ├── Claims ticket (claims/{ticket}.{role}.claim.json via DispatchGate)
     ├── Writes failing test (TDD red)
     ├── Implements change (TDD green)
     ├── Runs pytest (verify)
     ├── Releases claim
-    └── Transitions → REVIEWING state (no commit here)
+    └── Transitions → REVIEW (no commit here)
     │
     ▼
-Reviewers (correctness, security, architecture, etc.)
-    ├── APPROVE → VERIFYING state
-    └── REWORK → IMPLEMENTING state (increment rework_count)
+Reviewers (reviewer + security/architecture/performance/concurrency/data_integrity)
+    ├── APPROVE → COMPLETE
+    └── REWORK → REWORK (increment rework_count, back to IMPLEMENT or PLANNING)
     │
     ▼
-gatekeeper runs quality gates
-    ├── ALL PASS → COMPLETE state
-    ├── ANY FAIL → REWORK (if rework_count < 3)
-    └── rework_count >= 3 → REWORK state
+quality_gate + gatekeeper runs gates (YAML policy)
+    ├── ALL PASS → COMPLETE
+    └── ANY FAIL → REWORK (if rework_count < 3)
     │
     ▼
 completion_commit commits the ticket's own files with [CB-xxx] message,
 records SHA on the ticket (fail-open; no push — push stays batched)
     │
     ▼
-alignment_scorer processes exit event → reward signal
-    │
-    ▼
-rl_engine updates Q-values → prompt_optimizer refines prompts
+alignment_scorer → rl_engine updates Q-values → prompt_optimizer refines prompts
 ```
 
 ## State Machine
 
-Tickets flow through 14 states:
+Schema v3 (19 states incl. aliases). `TicketState` aliases: `DECOMPOSE=DECOMP`, `IMPLEMENTING=IMPLEMENT`, `REVIEWING=REVIEW`.
 
 ```
-DISCOVERED → VALIDATING → TRIAGED → READY → PLANNING → IMPLEMENTING → REVIEWING → VERIFYING → COMPLETE
-    ↓            ↓           ↓         ↓         ↓           ↓             ↓            ↓
- REJECTED    DUPLICATE   DEFERRED   DEFERRED   BLOCKED     REWORK       REWORK       REWORK
-                                            HUMAN_REQ   HUMAN_REQ    HUMAN_REQ
+DISCOVERED → TRIAGED → GOAL → DECOMP → PLANNING → IMPLEMENT → REVIEW → COMPLETE
+    ↓           ↓         ↓        ↓         ↓           ↓          ↓
+ REJECTED   DUPLICATE  LATER    BLOCKED   BLOCKED   REWORK/RESOLVED REWORK/RESOLVED/BLOCKED
+ NOT_ACTIONABLE        NEVER   RESOLVED  RESOLVED  CANCELLED     CANCELLED
+ RESOLVED   RESOLVED CANCELLED CANCELLED CANCELLED
+ SUPERSEDED SUPERSEDED        SUPERSEDED
+ CANCELLED  CANCELLED
+        REWORK ←─────┐  (REWORK → [IMPLEMENT|PLANNING|DECOMP|DEFERRED|RESOLVED|SUPERSEDED|CANCELLED])
+        DEFERRED     │  (BLOCKED → [DECOMP|PLANNING|DEFERRED])
+        LATER ─→ GOAL┘  (LATER → [GOAL|RESOLVED|SUPERSEDED|CANCELLED])
 ```
 
-Valid transitions are enforced by `TRANSITIONS` dict in `ticket_engine.py`. Invalid transitions raise `ValueError`.
+Goal alignment: `TRIAGED → GOAL (NOW→DECOMP / LATER / NEVER via goal_aligner)`. Terminals: `COMPLETE`, `REJECTED`, `DUPLICATE`, `NOT_ACTIONABLE`, `RESOLVED`, `SUPERSEDED`, `CANCELLED`, `NEVER` (no exits). All non-COMPLETE can go to `RESOLVED|SUPERSEDED|CANCELLED` universal exits. Valid transitions are enforced by `TRANSITIONS` dict in `ticket_engine.py`; invalid raises `ValueError`.
 
 ## Concurrency Model
 
-- **Single process orchestrator** manages all agent lifecycles
-- **File-based claims** (`state/claims/{ticket}.{agent}.json`) prevent double-work via atomic file creation (`open('x')` mode)
-- **Claim TTL**: 2-hour expiry; stale claims can be stolen by other workers
-- **Heartbeat monitoring**: each agent writes timestamp to `state/{name}.heartbeat` after every atomic task; orchestrator kills agents exceeding `effective_timeout`
-- **TicketStore locking**: `threading.Lock()` protects `self._tickets` mutations; serialization happens under lock, disk I/O outside lock
-- **Drain flag**: `state/.drain` file prevents new agent spawns for graceful shutdown
+- **Orchestrator**: single process + 2 thread pools: scheduler_v2 (90 slots via DispatchGate + ClaimRecord + SpawnQueue 0.5s stagger) and discovery daemon (5 slots, round-robin, 60s cooldown via BotState.next_run_at + _last_run, 2s stagger, yarn-style dirty-first via CHANGED_FILES)
+- **Claims**: scheduler tickets use `claims/{ticket}.{role}.claim.json` with `flock` on `.claim.lock` (atomic tmp+replace). Discovery is claim-free — only `create_ticket`.
+- **Heartbeat monitoring**: each agent writes timestamp to `.codebot/state/{name}.heartbeat` after every atomic task; orchestrator kills agents exceeding `effective_timeout` (model-aware: xiaomi 1.5x → thinking 2.8x)
+- **TicketStore**: `threading.RLock` + WAL + periodic compaction (`TicketStore.flush()`); debounce 0.5s batch; `BACKUP_EVERY_N_COMPACT=5`, max file size 50MB guard; `weakref` atexit registry for clean close across daemon + workers
+- **Drain flag**: `.codebot/state/.drain` file — `dispatch_service` + daemon `tick()` both check `state_manager.is_draining()` before launch; graceful shutdown via `run_main_loop` SIGINT/SIGTERM joining daemon
+- **Adapter wiring**: `codebot_adapter.bot_registry` intervals drive daemon cooldown; stale dynamic workers pruned by `orchestrator_runtime.prune_stale_dynamic_bot_state`
 
 ## Security Properties
 

@@ -1,10 +1,10 @@
 # CodeBot Discovery System Architecture
 
-Last updated: 2026-09-20
+Last updated: 2026-09-23
 
 ## Overview
 
-Discovery is the most important upstream stage of CodeBot. Its responsibility is to continuously determine what valuable engineering work exists in a repository, prove that the work is real, avoid rediscovering existing work, and create high-quality tickets that downstream stages can act upon.
+Discovery is the upstream stage of CodeBot. It continuously determines what valuable engineering work exists, proves it is real, avoids rediscovering existing work, and creates high-quality tickets that downstream stages can act upon.
 
 Discovery answers:
 
@@ -24,7 +24,24 @@ useful findings
 compute + tokens + noise
 ```
 
-The system prefers **fewer high-confidence, actionable findings over large volumes of speculative work.** A discovery agent that correctly finds nothing worth doing may have performed excellent work.
+Fewer high-confidence, actionable findings over speculative volume. A discovery agent that correctly finds nothing worth doing performed excellent work.
+
+## Runtime: Discovery Daemon (outside scheduler)
+
+Since Sep 2026 discovery runs **outside** `scheduler_v2` in its own daemon so it does not compete for the 90 scheduler slots.
+
+- **File**: `codebot/discovery_daemon.py`
+- **Roles**: 9 (`bug_hunter`, `security_auditor`, `architecture_auditor`, `performance_auditor`, `test_gap_auditor`, `documentation_auditor`, `dependency_auditor`, `ux_auditor`, `feature_hunter`)
+- **Concurrency**: `DISCOVERY_MAX_CONCURRENT = 5` own pool; scheduler uses 90, daemon uses 5 → total 95.
+- **Cooldown**: `DISCOVERY_INTERVAL_SECONDS = 60` per role. `next_run_at` (set by `process_manager` after launch) plus in-memory `_last_run` plus heartbeat-file mtime.
+- **Tick**: `DISCOVERY_TICK_SECONDS = 10`, own 2s stagger (`DISCOVERY_STAGGER_SECONDS`).
+- **Scheduling**: Round-robin from `_next_index`, skip any role that is alive or on cooldown, `_ensure_bot()` creates `BotConfig` lazily.
+- **Dirty-first**: Each spawn injects a `CHANGED_FILES` block from `git diff --name-only HEAD` (fallback `git status --porcelain`, 60s cache, 30-file cap) via `process_manager._prepare_prompt_with_context(extra_block=)`. Prompts are instructed to scan dirty files first.
+- **Cheap tier pinned**: `test_gap_auditor`, `documentation_auditor`, `dependency_auditor` pinned to `xiaomi-mimo-2.5` in both `_ensure_bot()` and `_launch()`, not rotated.
+- **Excluded from scheduler**: `dispatch_service.apply_agent_availability` and `orchestrator_services.apply_agent_availability` skip `DISCOVERY_ROLE_NAMES`; `health_check_loop.start_eligible_bots` also skips them. `scheduler_v2` has no DISCOVERY bucket by design (DISCOVERED → TRIAGED is platform code).
+- **Lifecycle**: `orchestrator_runtime.run_main_loop` starts the daemon thread on `pid_path.parent` and joins on shutdown. Respects `is_draining()` and `orchestrator_runtime._shutdown_requested`.
+
+Intervals are also in `codebot_adapter.bot_registry()`: discovery 60s, planning 3600s, implementation 300s, review 600s, control 900s. The 60s value survives restarts via heartbeat file.
 
 ## Architecture Components
 
@@ -83,25 +100,11 @@ New TicketStore methods:
 
 The `add()` method now enforces fingerprint dedup: if a ticket with the same fingerprint exists in a non-terminal state, creation is rejected.
 
-### 4. Discovery Manager (`codebot/discovery_manager.py`)
+### 4. Process Manager Wiring
 
-Enhanced with:
-
-**Burst Detection (§52)**: `detect_burst()` flags when ticket creation rate in a 5-minute window exceeds both an absolute threshold (15 tickets) AND is 5× the baseline rate. When detected, `compute_allocation()` returns zero discovery slots.
-
-**Coverage Tracking (§28)**: `get_coverage_summary()` returns which scopes have been scanned, by which role, at what revision, and when. Also identifies roles that have never scanned.
-
-**Change-Triggered Discovery (§30)**: `roles_for_change(change_kind)` maps completed-change types to relevant discovery roles:
-- `"security"` → `security_auditor`
-- `"concurrency"` → `bug_hunter`
-- `"dependency"` → `dependency_auditor`, `security_auditor`
-- `"ui"` → `ux_auditor`, `test_gap_auditor`
-
-**Backpressure (§31)**: `compute_allocation()` accepts `downstream_backlog` parameter. When backlog exceeds the high watermark (100), discovery slots are reduced to 25%. When above target (50), reduced to 50%.
-
-**Extended RoleYieldStats**: Tracks `no_actionable_runs`, `completed_downstream`, `hallucinated_references`, `stale_findings_prevented`, and `hallucination_rate`. These feed role quality metrics for marginal value assessment.
-
-**CHEAP_DISCOVERY_ROLES**: `test_gap_auditor`, `documentation_auditor`, `dependency_auditor` use cheaper models (lower reasoning requirements, metadata-driven checks).
+- `process_manager._prepare_prompt_with_context(bot, extra_block="")` — appends `extra_block` after implementation packet. Discovery daemon passes the CHANGED_FILES block here.
+- `_init_and_prepare_bot(bot, resume_checkpoint, extra_block="")` — threads `extra_block` through.
+- Scheduler's `apply_agent_availability` and `health_check_loop.start_eligible_bots` both skip discovery roles.
 
 ### 5. Findings Log (`codebot/findings_log.py`)
 
@@ -121,36 +124,44 @@ The tool schema is updated to document `priority` (distinct from severity), `con
 
 ### 7. Role Prompts (`codebot/roles/*.md`)
 
-All 8 discovery role prompts updated:
+8 scanner roles are **lean 22-26 line prompts** (was ~165 lines). Each follows:
 
-| Role | Codename | Focus |
-|------|----------|-------|
-| `bug_hunter` | Tracker | Logic errors, race conditions, leaks |
-| `security_auditor` | Sentinel | Injection, auth, crypto, exposure |
-| `architecture_auditor` | Architect | Coupling, circular deps, god classes |
-| `performance_auditor` | Profiler | O(n²), hot paths, memory, N+1 |
-| `test_gap_auditor` | Coverage | Behavioral gaps, untested transitions |
-| `documentation_auditor` | Scribe | Wrong/stale docs, API drift |
-| `dependency_auditor` | Supply | CVEs, licenses, platform compat |
-| `ux_auditor` | Eye | Accessibility, usability, workflow friction |
+| Prompt | Codename | Focus | Model tier |
+|--------|----------|-------|------------|
+| `bug_hunter` | Tracker | Logic errors, race conditions, leaks | standard |
+| `security_auditor` | Sentinel | Injection, auth, crypto, exposure | premium/thinking |
+| `architecture_auditor` | Architect | Coupling, circular deps, god classes | premium/thinking |
+| `performance_auditor` | Profiler | O(n²), hot paths, memory, N+1 | standard |
+| `test_gap_auditor` | Coverage | Behavioral gaps, untested transitions | **cheap** xiaomi-mimo-2.5 |
+| `documentation_auditor` | Scribe | Wrong/stale docs, API drift | **cheap** xiaomi-mimo-2.5 |
+| `dependency_auditor` | Supply | CVEs, licenses, platform compat | **cheap** xiaomi-mimo-2.5 |
+| `ux_auditor` | Eye | Accessibility, usability, workflow friction | standard |
 
-Key changes to all prompts:
-- **Removed** "minimum 5 tickets" anti-pattern
-- **Added** self-challenge: "What evidence would prove this finding wrong?"
-- **Added** NO_ACTIONABLE_FINDINGS as a valid successful outcome
-- **Added** evidence requirements (observation/interpretation/impact)
-- **Added** severity vs priority distinction
-- **Added** confidence and atomicity fields to create_ticket format
-- **Added** stopping rule (exit when marginal value is low)
-- **Added** generated/vendor file exclusion
+`feature_hunter` (Scout, 201 lines) is unchanged — index-driven, not a scanner.
+
+Lean prompt pattern (all 8 scanners):
+1. `read checkpoint` + `grep tickets.json` ONCE for dedup
+2. **Dirty-first**: read `CHANGED_FILES` block, `batch_grep` 5 patterns on dirty files → `read` hits only; fallback `batch_grep` on `codebot/**/*.py`
+3. Self-challenge before every ticket, `create_ticket` JSON, checkpoint+heartbeat
+
+Tools allowed: `read`, `write`, `grep`, `glob`, `bash`, `create_ticket`, `batch_grep`, `batch_read`. Cheap-tier roles are told "be terse" (xiaomi-mimo-2.5 has weaker instruction-following).
+
+Key invariants in lean prompts:
+- JSON args only, no YAML
+- `source` always equals own role name
+- `evidence` file:line never empty, fabricate path = violation → exit cleanly
+- Write scope strictly checkpoint + heartbeat under `.codebot/state/`
 
 ## Discovery Lifecycle
 
 ```
-Discovery Agent scans code
+Discovery daemon tick every 10s (round-robin)
     │
+    ▼ round-robin _next_index, skip alive/on-cooldown, up to 5 slots
+Discovery agent launched via process_manager._launch_bot_subprocess
+    │  (prompt + CHANGED_FILES block + contract)
     ▼
-Candidate finding identified
+Agent scans: batch_grep 5 patterns on dirty files → read hits
     │
     ▼
 Self-Challenge: "What would prove me wrong?"
@@ -174,14 +185,12 @@ Historical awareness
     └── Previously DUPLICATE? → Follow canonical ticket
     │
     ▼
-Ticket created with structured fields
+Ticket created with structured fields (DISCOVERED)
     │
     ▼
-DiscoveryManager records completion
-    ├── Cooldown updated
-    ├── Yield stats updated
-    ├── Burst detection checked
-    └── Coverage summary updated
+Cooldown applied (60s next_run_at + _last_run + heartbeat mtime)
+    ├── yield recorded via metrics
+    └── agent exits cleanly, daemon rotates to next role
 ```
 
 ## Key Design Decisions
@@ -204,21 +213,13 @@ HIGH confidence requires at least one concrete evidence kind (failing_test, runt
 - **COMPOUND**: Needs decomposition, e.g., "Agent lifecycle management is unreliable across restart, crash recovery, stale claims"
 - **UNKNOWN**: Insufficient information to assess
 
-### Backpressure Integration (§31)
+### Dirty-First Injection
 
-Discovery allocation responds to downstream pipeline pressure:
+Dirty files are injected as a text block (git diff HEAD + porcelain status, 30 files, 60s cache) via `extra_block`. This is a hint, not a hard gate — prompts are instructed to scan dirty first but fall back to full scan if none.
 
-```
-downstream_backlog >= high_watermark (100) → 75% reduction
-downstream_backlog >= target (50)          → 50% reduction
-burst detected                             → 100% reduction (zero slots)
-```
+### Cheap Tier Pinning
 
-### Burst Detection (§52)
-
-Prevents discovery storms by detecting when ticket creation rate in a 5-minute window exceeds both:
-1. Absolute threshold: 15 tickets
-2. Relative threshold: 5× the baseline rate
+Cheap discovery roles (`test_gap`, `documentation`, `dependency`) are pinned at the daemon layer to `xiaomi-mimo-2.5` so `model_manager.next_model_for_role()` rotation does not elevate them.
 
 ## Testing
 
@@ -228,17 +229,16 @@ Test coverage for the discovery system:
 |-----------|----------|
 | `tests/test_discovery_finding.py` | Finding schema, validation, serialization, fingerprinting, agent output repair |
 | `tests/test_evidence_validator.py` | File existence, symbol verification, generated/vendor detection, hallucination rejection |
-| `tests/test_discovery_enhanced.py` | Burst detection, coverage tracking, NO_ACTIONABLE_FINDINGS, semantic dedup, backpressure, change-triggered discovery, persistence |
+| `tests/test_discovery_enhanced.py` | Coverage tracking, NO_ACTIONABLE_FINDINGS, semantic dedup |
 | `tests/test_ticket_engine.py` | New fields, fingerprint dedup, find_similar, discovery_history |
-| `tests/test_discovery_manager.py` | CHEAP_DISCOVERY_ROLES, yield stats, allocation, cooldown |
+| `tests/test_discovery_daemon.py` | 5-slot daemon, round-robin, cooldown, dirty-file injection, cheap tier (when present) |
 
 ## Module Index
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
+| `discovery_daemon.py` | ~385 | 5-slot daemon outside scheduler, round-robin, dirty-file injection, cheap-tier pin |
 | `discovery_finding.py` | ~557 | Structured finding schema with evidence separation, fingerprinting, validation |
 | `evidence_validator.py` | ~515 | Pre-ticket evidence verification: file existence, symbol lookup, hallucination detection |
-| `discovery_manager.py` | ~734 | Cooldown, yield stats, burst detection, coverage, backpressure, change-triggered discovery |
-| `findings_log.py` | ~179 | Extended findings JSONL with confidence, revision, atomicity, relationships |
-| `ticket_engine.py` | ~1451 | Extended Ticket schema, semantic dedup indexes, find_similar, discovery_history |
-| `api_runner.py` | ~2621 | Evidence validation in create_ticket tool, new finding fields |
+| `process_manager.py` | +extra_block wiring | CHANGED_FILES injection for discovery |
+
