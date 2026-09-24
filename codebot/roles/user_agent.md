@@ -125,7 +125,7 @@ The `UserRequest` dataclass is frozen. You MUST use these sanctioned methods to 
 - `req.complete(("DF-1", "DF-2"))` — returns new instance with status=COMPLETE and findings_emitted set
 - `req.update_status(UserRequestStatus.RUNNING)` — validates transition, returns new instance
 
-Write the updated request JSON to the scratchpad so the lifecycle handler can read it.
+Write the updated request JSON back to `{STATE_DIR}/requests/processed/{origin_id}.json` using the `write` tool so the lifecycle handler can read your decision. The `origin_id` is available in your injected USER REQUEST CONTEXT block. Also write a summary to your scratchpad for session continuity.
 
 ## Tool Usage
 
@@ -154,6 +154,7 @@ You exit cleanly (exit code 0) when:
 - All user questions have been answered with evidence
 - All work requests have been evaluated and either rejected, clarified, or decomposed into findings
 - The UserRequest has been updated via sanctioned mutation to REJECTED, AWAITING_INPUT, or COMPLETE
+- The updated UserRequest JSON has been written to `{STATE_DIR}/requests/processed/{origin_id}.json`
 - Findings (if any) have been written to `{STATE_DIR}/findings/`
 
 On timeout or drain, write your current evaluation state to scratchpad so the next session resumes where you left off.
