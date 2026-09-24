@@ -280,6 +280,110 @@ cmd_status() {
     fi
 }
 
+cmd_request() {
+    local message="${1:?Usage: $0 request <message> [--context <text>] [--conversation-id <id>]}"
+    shift
+    local context="" conversation_id=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --context) context="$2"; shift 2 ;;
+            --conversation-id) conversation_id="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; exit 1 ;;
+        esac
+    done
+    python3 -c "
+import json, urllib.request, os, sys
+url = 'http://127.0.0.1:${WEB_PORT}/api/request'
+body = json.dumps({'message': sys.argv[1], 'context': sys.argv[2], 'conversation_id': sys.argv[3]}).encode()
+headers = {'Content-Type': 'application/json'}
+token = os.environ.get('CONTROL_TOKEN', '')
+if token:
+    headers['Authorization'] = f'Bearer {token}'
+req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+try:
+    resp = urllib.request.urlopen(req)
+    print(resp.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.read().decode(), file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+    sys.exit(1)
+" "$message" "$context" "$conversation_id"
+}
+
+cmd_request_status() {
+    local request_id="${1:?Usage: $0 request-status <request_id> [--human]}"
+    local human="${2:-}"
+    python3 -c "
+import json, urllib.request, os, sys
+url = f'http://127.0.0.1:${WEB_PORT}/api/request/{sys.argv[1]}'
+headers = {}
+token = os.environ.get('CONTROL_TOKEN', '')
+if token:
+    headers['Authorization'] = f'Bearer {token}'
+req = urllib.request.Request(url, headers=headers)
+try:
+    resp = urllib.request.urlopen(req)
+    data = json.loads(resp.read().decode())
+    if sys.argv[2] == '--human':
+        print(f\"Request:  {data.get('request_id', 'N/A')}\")
+        print(f\"Status:   {data.get('status', 'N/A')}\")
+        print(f\"Message:  {data.get('message', 'N/A')}\")
+        print(f\"Created:  {data.get('created_at', 'N/A')}\")
+        print(f\"Updated:  {data.get('updated_at', 'N/A')}\")
+        q = data.get('clarification_questions', ())
+        if q:
+            print(f\"Questions: {', '.join(q)}\")
+        r = data.get('response', '')
+        if r:
+            print(f\"Response: {r}\")
+        rr = data.get('rejection_reason', '')
+        if rr:
+            print(f\"Rejected: {rr}\")
+        fe = data.get('findings_emitted', ())
+        if fe:
+            print(f\"Findings: {', '.join(fe)}\")
+        dc = data.get('dedup_candidates', ())
+        if dc:
+            print('Related tickets:')
+            for c in dc:
+                print(f\"  {c.get('ticket_id','')} ({c.get('state','')}) sim={c.get('similarity',0):.2f} - {c.get('title','')}\")
+    else:
+        print(json.dumps(data, indent=2))
+except urllib.error.HTTPError as e:
+    print(e.read().decode(), file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+    sys.exit(1)
+" "$request_id" "$human"
+}
+
+cmd_request_reply() {
+    local request_id="${1:?Usage: $0 request-reply <request_id> <response>}"
+    local response="${2:?Usage: $0 request-reply <request_id> <response>}"
+    python3 -c "
+import json, urllib.request, os, sys
+url = f'http://127.0.0.1:${WEB_PORT}/api/request/{sys.argv[1]}/reply'
+body = json.dumps({'response': sys.argv[2]}).encode()
+headers = {'Content-Type': 'application/json'}
+token = os.environ.get('CONTROL_TOKEN', '')
+if token:
+    headers['Authorization'] = f'Bearer {token}'
+req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+try:
+    resp = urllib.request.urlopen(req)
+    print(resp.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.read().decode(), file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+    sys.exit(1)
+" "$request_id" "$response"
+}
+
 case "${1:-help}" in
     start)   cmd_start ;;
     stop)    cmd_stop ;;
@@ -290,8 +394,11 @@ case "${1:-help}" in
     web-stop) cmd_web_stop ;;
     web-status) cmd_web_status ;;
     web-restart) cmd_web_stop; sleep 1; cmd_web_start ;;
+    request) shift; cmd_request "$@" ;;
+    request-status) shift; cmd_request_status "$@" ;;
+    request-reply) shift; cmd_request_reply "$@" ;;
     *)
-        echo "Usage: $0 {start|stop|restart|clear|status|web-start|web-stop|web-restart|web-status}"
+        echo "Usage: $0 {start|stop|restart|clear|status|web-start|web-stop|web-restart|web-status|request|request-status|request-reply}"
         exit 1
         ;;
 esac
