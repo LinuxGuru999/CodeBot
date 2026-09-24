@@ -12,6 +12,8 @@ Last updated: 2026-09-24 — Phase 0.
 
 ## 1. Authority Model (overview)
 
+> CodeBot is a context compiler. Context is the source; code is the artifact. The lifecycle transforms natural-language intent through parse, semantic analysis, decomposition, planning, code generation, and verification into durable project knowledge. Every invariant below serves this pipeline. See `docs/adr/008-context-is-source.md` (Status: Accepted).
+
 ```
                      Orchestrator Process — owns exactly ONE Scheduler
                                    │
@@ -458,3 +460,15 @@ Tag `pre-authoritative-dispatch` is the rollback point before any dispatch chang
 
 - `ticket_status.py` CLI offline helper — single documented exemption for direct `TicketStore(tickets_file)`, or folded behind `get_ticket_store` (Phase 1 Todo 1 decides; leans to fold).
 - `tests/*` — `TicketStore(tmp_path)` via fixture, allowed; arch test enforces no production direct construction outside factory.
+
+---
+
+## 23. Durability Test Principle
+
+> If killing every agent destroys important knowledge, that knowledge was stored in the wrong place.
+
+All critical project knowledge MUST exist in durable artifacts (tickets, Findings, ADRs, design docs, constitution, coding standards, co-located module docs) before any agent session terminates. Agent memory, scratchpads, and conversation history are transient working state, not authoritative storage.
+
+**Measurable:** After terminating all running agent processes, a fresh swarm spawned against the same repository MUST be able to resume work without loss of requirements, constraints, decisions, acceptance criteria, or discovered facts. No TODO/FIXME referencing lost context or undocumented decisions in the codebase.
+
+**Enforcement:** Any ticket reaching COMPLETE that left critical context only in agent memory (not written to a durable artifact) is a standards violation. Reviewers MUST verify that decisions, rationale, and constraints from prior lifecycle stages are persisted in durable context (lifecycle_context on tickets, ADRs, design docs, constitution amendments) before approving.
