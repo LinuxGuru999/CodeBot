@@ -353,6 +353,33 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                             logger.info(f"Ticket {assigned_tid} -> REVIEW (final implementer {bot.config.name} completed)")
                         else:
                             logger.info(f"Ticket {assigned_tid} implementation approval {len(updated.implementation_approvals)}/{len(IMPLEMENTATION_ROLE_ORDER)} by {bot.config.name}")
+                elif base_role == "user_agent":
+                    origin_id = getattr(t, "origin_id", "") or ""
+                    req_data = None
+                    if origin_id:
+                        for subdir in ("requests/processed", "requests"):
+                            candidate = STATE_DIR / subdir / f"{origin_id}.json"
+                            if candidate.exists():
+                                try:
+                                    req_data = json.loads(candidate.read_text(encoding="utf-8"))
+                                    break
+                                except (json.JSONDecodeError, OSError):
+                                    pass
+                    req_status = req_data.get("status", "") if req_data else ""
+                    try:
+                        if req_status == "complete":
+                            ts.transition(assigned_tid, TicketState.COMPLETE, actor=bot.config.name)
+                            logger.info(f"Ticket {assigned_tid} -> COMPLETE (user_agent {bot.config.name} evaluated)")
+                        elif req_status == "rejected":
+                            ts.transition(assigned_tid, TicketState.REJECTED, actor=bot.config.name)
+                            logger.info(f"Ticket {assigned_tid} -> REJECTED (user_agent {bot.config.name} rejected)")
+                        elif req_status == "awaiting_input":
+                            ts.transition(assigned_tid, TicketState.DEFERRED, actor=bot.config.name)
+                            logger.info(f"Ticket {assigned_tid} -> DEFERRED (user_agent {bot.config.name} awaiting input)")
+                        else:
+                            logger.warning(f"user_agent {bot.config.name} exited but request status '{req_status}' has no mapped transition for {assigned_tid}")
+                    except ValueError as ve:
+                        logger.warning(f"user_agent transition failed for {assigned_tid}: {ve}")
                 else:
                     if t.state == TicketState.DECOMP:
                         ts.transition(assigned_tid, TicketState.PLANNING, actor=bot.config.name)
