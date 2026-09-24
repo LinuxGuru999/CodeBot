@@ -1,5 +1,9 @@
 # Project Constitution
 
+> **Context is the source. Code is the artifact.**
+>
+> Software development should begin with an authoritative model of intent, constraints, architecture, and reality — not with source code. CodeBot is a context compiler. It transforms natural-language human intent through structured context (requirements, constraints, architecture, decisions, invariants, evidence, dependencies, acceptance criteria, current-state) into verified software. Agents are temporary workers; context is persistent. The repository's accumulated knowledge is the primary source material from which code is compiled. Every document in this project exists to serve that compilation pipeline.
+
 Human-controlled architectural and engineering invariants for CodeBot-managed projects.
 Agents may propose constitution changes but must never silently weaken requirements to satisfy a task.
 

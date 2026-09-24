@@ -1,3 +1,41 @@
+## Core Thesis
+
+> **Context is the source. Code is the artifact.**
+
+Software development should begin with an authoritative model of intent, constraints, architecture, and reality — not with source code. The lifecycle is effectively a compiler pipeline:
+
+```
+Natural-language intent
+        ↓
+        Parse (user_agent evaluates, challenges ambiguity)
+        ↓
+Requirements / constraints (DESIRED-STATE context)
+        ↓
+Semantic analysis (discovery compares desired vs current reality)
+        ↓
+Architecture / conflict detection (ADR validation, contradiction findings)
+        ↓
+Intermediate representation (decomposition into atomic work boundaries)
+        ↓
+Findings / decomposition (DISCOVERED tickets, dependency graphs)
+        ↓
+Optimization / planning (implementation contracts, invariants, acceptance criteria)
+        ↓
+Implementation plan (PLANNING → IMPLEMENT transition)
+        ↓
+Code generation (implementer produces verified code)
+        ↓
+Source code (src/ is one output of the knowledge system)
+        ↓
+Verification (review validates CODE ↔ TESTS ↔ REQUIREMENTS ↔ ARCHITECTURE ↔ DOCS)
+        ↓
+Context reconciliation (CURRENT-STATE updated, durable knowledge improved)
+```
+
+> **If killing every agent destroys important knowledge, that knowledge was stored in the wrong place.**
+
+---
+
 # ENTRYPOINT — How to Enter the CodeBot Codebase
 
 Start here. This file orients new engineers (human or agent) to the system in under five minutes.
