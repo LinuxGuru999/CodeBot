@@ -70,6 +70,7 @@ TICKET_CLASS_TO_ROLES: dict[str, str] = TICKET_CLASS_TO_IMPLEMENTER
 # the GOAL bucket, route to goal_aligner role. DISCOVERED is intentionally
 # absent — triage runs as platform code, not through BucketDispatcher.
 BUCKET_ORDER: list[tuple[str, list[str]]] = [
+    ("USER", ["REQUESTED"]),
     ("GOAL", ["TRIAGED"]),
     ("DECOMP", ["DECOMP"]),
     ("PLANNING", ["PLANNING"]),
@@ -79,6 +80,7 @@ BUCKET_ORDER: list[tuple[str, list[str]]] = [
 ]
 
 BUCKET_TO_ROLE_SETS: dict[str, frozenset[str]] = {
+    "USER": frozenset({"user_agent"}),
     "GOAL": frozenset({"goal_aligner"}),
     "DECOMP": DECOMPOSER_ROLE_NAMES,
     "PLANNING": PLANNING_ROLE_NAMES,
