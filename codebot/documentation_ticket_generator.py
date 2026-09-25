@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +163,17 @@ def create_documentation_ticket(
         store.add(doc_ticket)
         store.transition(doc_ticket.id, TicketState.TRIAGED)
         store.transition(doc_ticket.id, TicketState.GOAL)
+        current = store.get(doc_ticket.id)
+        assert current is not None
+        updated = replace(
+            current,
+            goal_disposition="NOW",
+            goal_reason="auto-generated documentation ticket",
+        )
+        assert updated.state == current.state, "same-state update must not change state"
+        store._tickets[doc_ticket.id] = updated
+        store._dirty_ids.add(doc_ticket.id)
+        doc_ticket = updated
         store.transition(doc_ticket.id, TicketState.DECOMP)
 
         logger.info(
