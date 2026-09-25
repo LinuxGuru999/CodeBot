@@ -214,17 +214,22 @@ class TestBlocklistedCommand:
             assert result is None, f"Should block python -c: {cmd}"
 
     def test_python_m_and_script_allowed(self):
-        """python3 -m and python script.py still work."""
-        # Allowlisted modules
+        """python3 -m works only for strictly curated safe modules."""
+        # Allowlisted modules (strictly curated for safety)
         cmds = [
             "python3 -m pytest",
-            "python3 -m json.tool file.json",
+            "python3 -m py.test",
+            "python3 -m unittest",
+            "python3 -m coverage",
+            "python3 -m codebot.check_drain",
+            "python3 -m codebot.ticket_status",
+            "python3 -m codebot.health_check",
         ]
         for cmd in cmds:
             result = allowlisted_command(cmd)
             assert result is not None, f"Blocked valid python: {cmd}"
         
-        # Dangerous modules must be blocked (security: sandbox escape/exfiltration)
+        # Dangerous/removed modules must be blocked (security: sandbox escape/exfiltration/file read)
         blocked_cmds = [
             "python3 -m http.server",
             "python -m http.server 8080",
@@ -233,6 +238,13 @@ class TestBlocklistedCommand:
             "python3 -m timeit",
             "python3 -m profile",
             "python3 -m trace",
+            # Removed from allowlist per security ticket: potential for abuse
+            "python3 -m json.tool file.json",
+            "python3 -m py_compile foo.py",
+            "python3 -m compileall src/",
+            "python3 -m doctest module.py",
+            "python3 -m importlib.metadata",
+            "python3 -m codebot.migrate_queue",
         ]
         for cmd in blocked_cmds:
             result = allowlisted_command(cmd)

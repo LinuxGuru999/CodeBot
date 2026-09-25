@@ -85,14 +85,11 @@ class TestInitTick:
         mock_adapter = MagicMock()
         mock_adapter.queue_depth.return_value = 5
         mock_qm = MagicMock()
-        with patch("codebot.ticket_dispatcher.clear_ticket_store_cache") as mock_clear_td, \
-             patch("codebot.ticket_engine.QueueManager") as mock_qm_cls, \
+        with patch("codebot.ticket_engine.QueueManager") as mock_qm_cls, \
              patch("codebot.orchestrator.get_paths", return_value=paths), \
              patch("codebot.orchestrator.get_adapter_instance", return_value=mock_adapter):
             mock_qm_cls.from_state_dir.return_value = mock_qm
-            # When
             hcl.init_tick()
-            mock_clear_td.assert_called_once()
             mock_qm.clear_cache.assert_called_once()
             mock_adapter.queue_depth.assert_called_once()
 
@@ -101,12 +98,10 @@ class TestInitTick:
         mock_adapter = MagicMock()
         mock_adapter.queue_depth.side_effect = RuntimeError("boom")
         mock_qm = MagicMock()
-        with patch("codebot.ticket_dispatcher.clear_ticket_store_cache"), \
-             patch("codebot.ticket_engine.QueueManager") as mock_qm_cls, \
+        with patch("codebot.ticket_engine.QueueManager") as mock_qm_cls, \
              patch("codebot.orchestrator.get_paths", return_value=paths), \
              patch("codebot.orchestrator.get_adapter_instance", return_value=mock_adapter):
             mock_qm_cls.from_state_dir.return_value = mock_qm
-            # When — should not raise
             hcl.init_tick()
 
     def test_Given_clear_cache_import_fails_When_init_tick_Then_still_completes(self, tmp_path: Path) -> None:

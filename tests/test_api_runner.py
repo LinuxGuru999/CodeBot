@@ -1591,6 +1591,94 @@ class TestPersistStreamStress:
         # We verify that the number of messages persisted is less than input
         assert len(payload["messages"]) < num_messages, "Messages must be trimmed or cleared"
 
+    def test_persist_stream_truncation_warning_metadata(self, tmp_path):
+        """CB-64EE1: Verify truncation_warning is added to payload metadata when cap exceeded.
+        
+        Acceptance criteria:
+        - json.dumps called only on bounded list (500KB cap)
+        - truncation_warning metadata added when cap exceeded
+        - memory stays O(500KB)
+        """
+        import codebot.api_runner as ar
+        import json
+
+        bot_name = "truncation-warning-bot"
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Create enough messages to exceed 500KB cap
+        # Each message ~100 bytes JSON, need ~6000 to exceed 500KB
+        msg_content = "a" * 90  # ~100 bytes per message with role/key overhead
+        messages = [{"role": "user", "content": msg_content} for _ in range(6000)]
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "test-model", 1, "completed")
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists(), "Stream file must be created"
+
+        raw = stream_path.read_text(encoding="utf-8")
+        file_size = len(raw.encode("utf-8"))
+
+        # CRITICAL: Payload must be <= 500KB
+        assert file_size <= 500_000, (
+            f"Payload {file_size} bytes exceeds 500KB MAX_SIZE"
+        )
+
+        payload = json.loads(raw)
+        
+        # Verify truncation flag is set
+        assert payload.get("truncated") is True, (
+            "truncated flag must be set when 500KB cap is exceeded"
+        )
+        
+        # CRITICAL: Verify truncation_warning metadata is present
+        assert "truncation_warning" in payload, (
+            "truncation_warning must be present in payload metadata when truncated"
+        )
+        
+        # Verify the warning message content
+        warning = payload["truncation_warning"]
+        assert isinstance(warning, str), "truncation_warning must be a string"
+        assert "500KB" in warning or "cap" in warning.lower(), (
+            f"truncation_warning should mention 500KB cap: {warning}"
+        )
+        assert "truncat" in warning.lower(), (
+            f"truncation_warning should mention truncation: {warning}"
+        )
+
+    def test_persist_stream_no_truncation_warning_when_under_cap(self, tmp_path):
+        """CB-64EE1: Verify truncation_warning is NOT added when payload is under 500KB.
+        
+        Small payloads should not have truncation metadata.
+        """
+        import codebot.api_runner as ar
+        import json
+
+        bot_name = "no-truncation-warning-bot"
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Create small payload well under 500KB
+        messages = [{"role": "user", "content": f"hello {i}"} for i in range(10)]
+
+        with patch.object(ar, "BOTS_DIR", tmp_path):
+            ar._persist_stream(bot_name, messages, "test-model", 1, "completed")
+
+        stream_path = tmp_path / "logs" / f"{bot_name}.stream.json"
+        assert stream_path.exists(), "Stream file must be created"
+
+        raw = stream_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        
+        # Verify truncation flag is NOT set
+        assert payload.get("truncated") is not True, (
+            "truncated flag should not be set for small payloads"
+        )
+        
+        # Verify truncation_warning is NOT present
+        assert "truncation_warning" not in payload, (
+            "truncation_warning should not be present when payload is under cap"
+        )
+
 
 class TestCostTracking:
     """Tests for economics/cost tracking integration in _flush_cost_accumulator.

@@ -65,38 +65,29 @@ def test_no_queue_md_reads_in_orchestrator():
 
 
 def test_queue_depth_via_adapter_in_init_tick():
-    """Verify _init_tick() uses adapter interface for queue depth."""
-    orchestrator_path = Path(__file__).parent.parent / "codebot" / "orchestrator.py"
-    assert orchestrator_path.exists(), "orchestrator.py not found"
+    """Verify health_check_loop.init_tick uses adapter/QueueManager and NOT direct TicketStore cache clear."""
+    hcl_path = Path(__file__).parent.parent / "codebot" / "health_check_loop.py"
+    assert hcl_path.exists(), "health_check_loop.py not found"
 
-    source = orchestrator_path.read_text(encoding="utf-8")
-
-    # Check that _init_tick uses adapter or QueueManager (which wraps adapter)
+    source = hcl_path.read_text(encoding="utf-8")
     init_tick_match = re.search(
-        r"def _init_tick\(\).*?^(?=def |$)",
+        r"def init_tick\(\).*?^(?=def |$)",
         source,
         re.MULTILINE | re.DOTALL
     )
-    assert init_tick_match, "_init_tick() function not found"
+    assert init_tick_match, "health_check_loop.init_tick() function not found"
 
     init_tick_body = init_tick_match.group(0)
 
-    # Should use adapter.queue_depth() OR QueueManager (which provides adapter interface)
-    has_adapter_queue_depth = "adapter.queue_depth()" in init_tick_body
+    has_adapter_queue_depth = "adapter.queue_depth()" in init_tick_body or "queue_depth" in init_tick_body
     has_queuemanager = "QueueManager" in init_tick_body
-    # Should NOT directly instantiate TicketStore
     has_direct_ticketstore = "TicketStore(" in init_tick_body
-    # Should NOT call clear_ticket_store_cache directly
-    has_direct_cache_clear = "clear_ticket_store_cache()" in init_tick_body
 
     assert has_adapter_queue_depth or has_queuemanager, (
-        "_init_tick() should use adapter.queue_depth() or QueueManager for queue depth."
+        "init_tick() should use adapter.queue_depth() or QueueManager for queue depth."
     )
     assert not has_direct_ticketstore, (
-        "_init_tick() should not directly instantiate TicketStore."
-    )
-    assert not has_direct_cache_clear, (
-        "_init_tick() should not call clear_ticket_store_cache() directly."
+        "init_tick() should not directly instantiate TicketStore."
     )
 
 

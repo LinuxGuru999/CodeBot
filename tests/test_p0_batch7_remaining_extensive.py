@@ -199,7 +199,7 @@ def test_auto_revert_commit_is_bot_authored_Given_author_strings_When_check_Then
         assert ar._commit_is_bot_authored(tmp_path, "sha") is False
     with patch("codebot.auto_revert._run", return_value=(0, "Bot <bot@example.com>")):
         assert ar._commit_is_bot_authored(tmp_path, "sha") is True
-    with patch("codebot.auto_revert._run", return_value=(0, "Sisyphus <a@b>")):
+    with patch("codebot.auto_revert._run", return_value=(0, "CodeBot <a@b>")):
         assert ar._commit_is_bot_authored(tmp_path, "sha") is True
     with patch("codebot.auto_revert._run", return_value=(0, "LinuxGuru999 <x>")):
         assert ar._commit_is_bot_authored(tmp_path, "sha") is True

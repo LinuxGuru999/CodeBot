@@ -83,6 +83,18 @@ def test_pinned_http_connection_invalid_ip_literal_fails():
         conn.connect()
 
 
+def test_verify_ssl_context_config():
+    """Verify _SECURE_SSL_CONTEXT enforces certificate validation (AC: test_verify_ssl_context_config).
+
+    Acceptance criteria require:
+    - verify_mode is CERT_REQUIRED
+    - check_hostname is True
+    This prevents silent regressions that could disable TLS certificate validation.
+    """
+    assert _SECURE_SSL_CONTEXT.verify_mode == ssl.CERT_REQUIRED
+    assert _SECURE_SSL_CONTEXT.check_hostname is True
+
+
 def test_secure_ssl_context_enforces_cert_validation():
     """Verify that the module-level SSL context requires certificate validation."""
     assert _SECURE_SSL_CONTEXT.verify_mode == ssl.CERT_REQUIRED
@@ -1138,3 +1150,308 @@ def test_no_x_pinned_ip_header_leakage_on_redirect():
     # Other headers should be preserved (urllib normalizes header keys to title-case)
     assert new_req.headers.get('User-agent') == 'TestAgent' or new_req.headers.get('User-Agent') == 'TestAgent'
     assert new_req.headers.get('Accept') == 'text/html'
+
+
+# =============================================================================
+# SSL Certificate Validation Integration Tests (CB-796C8)
+# End-to-end tests using a local HTTPS server to verify web_fetch behavior
+# with self-signed (rejected) and valid (accepted) certificates.
+# =============================================================================
+
+
+def _generate_self_signed_cert():
+    """Generate a self-signed certificate and private key for testing.
+    
+    Returns:
+        Tuple of (cert_pem_bytes, key_pem_bytes) or raises ImportError
+        if cryptography is not available.
+    """
+    import ipaddress
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import datetime
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+            ]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return cert_pem, key_pem
+
+
+class _SSLHTTPServer:
+    """HTTPServer subclass that wraps each accepted connection with SSL.
+
+    The listening socket remains plain TCP so that select()-based polling
+    in serve_forever() works correctly. SSL wrapping happens per-connection
+    inside get_request(), which is the standard pattern for Python HTTPS servers.
+    """
+
+    def __init__(self, server_address, handler_class, ssl_context):
+        import http.server
+        self._ssl_context = ssl_context
+        self._http_server = http.server.HTTPServer(server_address, handler_class)
+        # Override get_request to wrap accepted connections with SSL
+        original_get_request = self._http_server.get_request
+        ssl_ctx = self._ssl_context
+
+        def ssl_get_request():
+            newsocket, fromaddr = original_get_request()
+            connstream = ssl_ctx.wrap_socket(newsocket, server_side=True)
+            return connstream, fromaddr
+
+        self._http_server.get_request = ssl_get_request
+
+    @property
+    def socket(self):
+        return self._http_server.socket
+
+    @property
+    def server_address(self):
+        return self._http_server.server_address
+
+    def serve_forever(self, poll_interval=0.5):
+        self._http_server.serve_forever(poll_interval=poll_interval)
+
+    def shutdown(self):
+        self._http_server.shutdown()
+
+    def server_close(self):
+        self._http_server.server_close()
+
+    def handle_request(self):
+        self._http_server.handle_request()
+
+
+class _LocalHTTPSServer:
+    """Minimal HTTPS server for integration tests.
+
+    Serves a fixed response on a random port using a provided SSL context.
+    Runs in a daemon thread; shuts down when the test completes.
+    """
+
+    def __init__(self, ssl_context, response_body=b"Hello from secure server"):
+        import http.server
+        import threading
+
+        self.response_body = response_body
+        self._ssl_context = ssl_context
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(handler_self):
+                handler_self.send_response(200)
+                handler_self.send_header("Content-Type", "text/plain")
+                handler_self.send_header("Content-Length", str(len(outer.response_body)))
+                handler_self.end_headers()
+                handler_self.wfile.write(outer.response_body)
+
+            def log_message(handler_self, *args, **kwargs):
+                pass  # Suppress server logs during tests
+
+        self._server = _SSLHTTPServer(("127.0.0.1", 0), Handler, ssl_context)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self):
+        try:
+            self._server.serve_forever(poll_interval=0.1)
+        except Exception:
+            pass
+
+    def start(self):
+        self._thread.start()
+        # Wait for server to actually be accepting connections
+        import time
+        for _ in range(50):  # 5 seconds max wait
+            try:
+                probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                probe.settimeout(0.1)
+                probe.connect(("127.0.0.1", self.port))
+                probe.close()
+                return  # Server is ready
+            except (socket.error, OSError):
+                time.sleep(0.1)
+        raise RuntimeError("HTTPS server failed to start within timeout")
+
+    def stop(self):
+        try:
+            self._server.shutdown()
+        except Exception:
+            pass
+        try:
+            self._server.server_close()
+        except Exception:
+            pass
+        self._thread.join(timeout=3.0)
+
+
+def test_reject_self_signed_cert():
+    """Integration: web_fetch returns error for server with self-signed certificate.
+    
+    Spins up a local HTTPS server with a self-signed certificate and verifies
+    that web_fetch fails closed with an SSL verification error rather than
+    silently accepting the untrusted certificate. This proves the end-to-end
+    TLS security posture of web_fetch.
+    """
+    from codebot.web_tools import web_fetch
+
+    try:
+        cert_pem, key_pem = _generate_self_signed_cert()
+    except ImportError:
+        pytest.skip("cryptography library not available for self-signed cert generation")
+
+    import tempfile
+    import os
+
+    cert_fd, cert_path = tempfile.mkstemp(suffix=".pem")
+    key_fd, key_path = tempfile.mkstemp(suffix=".pem")
+    try:
+        os.write(cert_fd, cert_pem)
+        os.close(cert_fd)
+        os.write(key_fd, key_pem)
+        os.close(key_fd)
+
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(cert_path, key_path)
+
+        server = _LocalHTTPSServer(server_ctx, response_body=b"Should not be seen")
+        server.start()
+
+        try:
+            # Use 127.0.0.1 to avoid DNS resolution issues in test
+            url = f"https://127.0.0.1:{server.port}/"
+
+            # Patch SSRF guards to allow connection to local test server
+            with patch("codebot.web_tools.is_blocked_url", return_value=False):
+                with patch(
+                    "codebot.web_tools._resolve_and_validate_host",
+                    return_value=("127.0.0.1", server.port, socket.AF_INET),
+                ):
+                    result = web_fetch(url, max_bytes=1024)
+
+            # MUST return error - never silently accept the self-signed cert
+            assert result["success"] is False, (
+                f"web_fetch must reject self-signed cert, but got success=True: {result}"
+            )
+            assert result["output"] == "", (
+                f"web_fetch must return empty output on SSL failure, got: {result['output']!r}"
+            )
+            # Error should mention network/SSL issue
+            err = (result.get("error") or "").lower()
+            assert any(
+                kw in err
+                for kw in ("ssl", "certificate", "network", "urlerror", "sslf", "verification")
+            ), f"web_fetch error should mention SSL/network issue, got: {err!r}"
+        finally:
+            server.stop()
+    finally:
+        for p in (cert_path, key_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
+def test_accept_valid_cert():
+    """Integration: web_fetch succeeds for server with a valid (trusted) certificate.
+    
+    Spins up a local HTTPS server and configures the client SSL context to
+    trust the server's self-signed certificate (simulating a CA-issued cert).
+    This proves the happy path: when certificate validation passes, web_fetch
+    returns the response content successfully.
+    """
+    import os
+    import tempfile
+    from codebot.web_tools import web_fetch
+
+    try:
+        cert_pem, key_pem = _generate_self_signed_cert()
+    except ImportError:
+        pytest.skip("cryptography library not available for cert generation")
+
+    cert_fd, cert_path = tempfile.mkstemp(suffix=".pem")
+    key_fd, key_path = tempfile.mkstemp(suffix=".pem")
+    try:
+        os.write(cert_fd, cert_pem)
+        os.close(cert_fd)
+        os.write(key_fd, key_pem)
+        os.close(key_fd)
+
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(cert_path, key_path)
+
+        response_body = b"Valid cert response content"
+        server = _LocalHTTPSServer(server_ctx, response_body=response_body)
+        server.start()
+
+        try:
+            # Use 127.0.0.1 to avoid DNS resolution issues
+            url = f"https://127.0.0.1:{server.port}/"
+
+            # Create a trusted context that accepts our self-signed cert
+            trusted_ctx = ssl.create_default_context()
+            trusted_ctx.check_hostname = False  # Avoid hostname mismatch for 127.0.0.1 vs localhost
+            trusted_ctx.verify_mode = ssl.CERT_REQUIRED
+            trusted_ctx.load_verify_locations(cert_path)
+
+            # Verify server is reachable at all (debugging)
+            import time
+            time.sleep(0.5)  # Give server a moment to settle after ready event
+            
+            # Patch _SECURE_SSL_CONTEXT to use the trusted context
+            with patch("codebot.web_tools._SECURE_SSL_CONTEXT", trusted_ctx):
+                # Bypass SSRF guards for local test server
+                with patch("codebot.web_tools.is_blocked_url", return_value=False):
+                    with patch(
+                        "codebot.web_tools._resolve_and_validate_host",
+                        return_value=("127.0.0.1", server.port, socket.AF_INET),
+                    ):
+                        result = web_fetch(url, max_bytes=4096)
+
+            # web_fetch must succeed with valid cert
+            assert result["success"] is True, (
+                f"web_fetch must succeed for valid cert, got: {result}"
+            )
+            assert result["error"] is None, (
+                f"web_fetch should have no error, got: {result['error']!r}"
+            )
+            # Response body should be present in output
+            assert "Valid cert response content" in result["output"], (
+                f"Response content missing from output: {result['output']!r}"
+            )
+        finally:
+            server.stop()
+    finally:
+        for p in (cert_path, key_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass

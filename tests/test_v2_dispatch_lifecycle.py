@@ -83,16 +83,9 @@ class TestSlotReleaseOnExit:
         assert dispatched == 1
         assert sched.gate.count_active() == 1
 
-        ready = sched.gate.dequeue_ready()
-        assert len(ready) == 1
-        agent_id = ready[0].agent_id
-
-        record = AgentRecord(
-            agent_id=agent_id, ticket_id="T-1", role="implementer",
-            model="test-model", pid=999, state=AgentState.STARTING,
-            created_at=clock.now(),
-        )
-        sched.register_agent(record)
+        active_agents = list(sched.gate._active.keys())
+        assert len(active_agents) == 1
+        agent_id = active_agents[0]
 
         sched.finalize_agent(agent_id, outcome="exit-code-0")
         assert sched.gate.count_active() == 0
@@ -112,11 +105,12 @@ class TestFailedSpawnCancelsDispatch:
         assert dispatched == 1
         assert sched.gate.count_active() == 1
 
-        ready = sched.gate.dequeue_ready()
-        assert len(ready) == 1
-        req = ready[0]
+        active_agents = list(sched.gate._active.keys())
+        assert len(active_agents) == 1
+        agent_id = active_agents[0]
+        ticket_id = sched.gate._active[agent_id][1].ticket_id
 
-        sched.gate.cancel_dispatch(req.agent_id, req.ticket_id)
+        sched.gate.cancel_dispatch(agent_id, ticket_id)
         assert sched.gate.count_active() == 0
 
         store2 = _FakeStore([_FakeTicket("T-2")])
@@ -184,16 +178,7 @@ class TestSustainedCyclesNoLeak:
             assert dispatched <= 2
 
             clock.advance(1.0)
-            ready = sched.gate.dequeue_ready()
-            agent_ids = []
-            for req in ready:
-                record = AgentRecord(
-                    agent_id=req.agent_id, ticket_id=req.ticket_id,
-                    role=req.role, model=req.model or "m", pid=cycle * 100,
-                    state=AgentState.STARTING, created_at=clock.now(),
-                )
-                sched.register_agent(record)
-                agent_ids.append(req.agent_id)
+            agent_ids = list(sched.gate._active.keys())
 
             for aid in agent_ids:
                 sched.finalize_agent(aid, outcome="cycle-complete")

@@ -685,6 +685,90 @@ class TestCommandInjectionPrevention(unittest.TestCase):
         self.assertEqual(status_code, 400, f"Expected 400 for unknown bot, got {status_code}")
         self.assertIn("unknown bot", body.get("error", "").lower())
 
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_rejects_malformed_newline_injection(self):
+        """Start endpoint must reject bot names containing newlines."""
+        from codebot.control_server import ControlHandler
+
+        # Newline is invalid per validate_bot_name
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["test\nrm -rf /"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["test\nrm -rf /"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_rejects_path_traversal(self):
+        """Start endpoint must reject bot names containing path traversal sequences."""
+        from codebot.control_server import ControlHandler
+
+        # Path traversal is invalid per validate_bot_name
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["../etc/passwd"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["../etc/passwd"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_rejects_help_flag(self):
+        """Start endpoint must reject '--help' as it's not in registry and could be arg injection."""
+        from codebot.control_server import ControlHandler
+
+        # --help is valid format but not in registry -> 400 unknown bot
+        handler = self._make_handler("POST", "/bots/start", body={"bots": ["--help"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": ["--help"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [MagicMock(name="valid-bot")])
+    def test_start_rejects_regex_dot_star(self):
+        """Start endpoint must reject '.*' which is invalid format."""
+        from codebot.control_server import ControlHandler
+
+        # .* is invalid per validate_bot_name
+        handler = self._make_handler("POST", "/bots/start", body={"bots": [".*"]})
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        handler._read_json_body = lambda: ({"bots": [".*"]}, None, None)
+
+        with patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 400)
+        self.assertIn("invalid bot name", body.get("error", "").lower())
+
 
 class TestRestartBotValidation(unittest.TestCase):
     """Verify that restart endpoint validates bot names against BOT_REGISTRY.
@@ -710,7 +794,7 @@ class TestRestartBotValidation(unittest.TestCase):
 
     @patch("codebot.control_server.BOT_REGISTRY", [])
     def test_restart_rejects_unknown_bot(self):
-        """Restart endpoint must return 404 for bot names not in BOT_REGISTRY."""
+        """Restart endpoint must return 404 for bot names not in BOT_REGISTRY (with force=True)."""
         from codebot.control_server import ControlHandler
 
         handler = self._make_handler("POST", "/bots/nonexistent_bot/restart")
@@ -718,6 +802,29 @@ class TestRestartBotValidation(unittest.TestCase):
         handler._json = lambda code, data, r=responses: r.append((code, data))
         handler._auth = lambda: True
         handler._read_json_body = lambda: ({"force": True}, None, None)
+
+        with patch("codebot.control_server.subprocess.run") as mock_run, \
+             patch("codebot.control_server.subprocess.Popen") as mock_popen:
+            ControlHandler.do_POST(handler)
+            mock_run.assert_not_called()
+            mock_popen.assert_not_called()
+
+        self.assertTrue(len(responses) > 0)
+        status_code, body = responses[0]
+        self.assertEqual(status_code, 404)
+        self.assertIn("unknown bot", body.get("error", "").lower())
+
+    @patch("codebot.control_server.BOT_REGISTRY", [])
+    def test_restart_rejects_unknown_bot_without_force(self):
+        """Restart endpoint must return 404 for bot names not in BOT_REGISTRY (without force flag)."""
+        from codebot.control_server import ControlHandler
+
+        handler = self._make_handler("POST", "/bots/nonexistent_bot/restart")
+        responses = []
+        handler._json = lambda code, data, r=responses: r.append((code, data))
+        handler._auth = lambda: True
+        # No force flag in body
+        handler._read_json_body = lambda: (None, None, None)
 
         with patch("codebot.control_server.subprocess.run") as mock_run, \
              patch("codebot.control_server.subprocess.Popen") as mock_popen:
@@ -827,12 +934,12 @@ class TestRestartBotValidation(unittest.TestCase):
             mock_vc.assert_called_once_with(1234, "test-bot")
             mock_sig.assert_called_once()
 
-    def test_stop_unknown_bot_returns_404(self):
-        """POST /bots/stop with unknown bot name returns 404.
+    def test_stop_unknown_bot_returns_400(self):
+        """POST /bots/stop with unknown bot name returns 400.
         
-        Ticket: CB-990023-1087 — Missing input validation on /bots/stop allows
-        arbitrary process killing via pkill regex. Unknown bots must return 404
-        to align with other bot endpoints (restart/pause/resume).
+        Ticket: CB-990023-1087 / CB-949FF — Missing input validation on /bots/stop allows
+        arbitrary process killing via pkill regex. Unknown bots must return 400
+        (not 404) to prevent enumeration and argument injection, aligning with /bots/start.
         """
         from codebot.control_server import ControlHandler
 
@@ -852,7 +959,7 @@ class TestRestartBotValidation(unittest.TestCase):
 
         self.assertTrue(len(responses) > 0)
         status_code, body = responses[0]
-        self.assertEqual(status_code, 404, f"Expected 404 for unknown bot, got {status_code}")
+        self.assertEqual(status_code, 400, f"Expected 400 for unknown bot, got {status_code}")
         self.assertIn("unknown bot", body.get("error", "").lower())
 
 
@@ -885,6 +992,90 @@ class TestRestartBotValidation(unittest.TestCase):
         # which are not in [a-zA-Z0-9_-]+
         self.assertEqual(status_code, 400, f"Expected 400 for regex pattern, got {status_code}")
         self.assertIn("invalid bot name", body.get("error", "").lower())
+
+
+class TestRestartEndpointPytestMock:
+    """Tests using pytest-mock to verify restart endpoint returns 404 for unknown bots.
+
+    Ticket: CB-99E2D — Tests verify restart endpoint returns 404 for unknown bot
+    without calling Popen. Uses pytest-mock per acceptance criteria.
+    """
+
+    def _send_post(self, mocker, path: str, body: dict | None = None):
+        """Helper to simulate POST request via mocked handler."""
+        from codebot.control_server import ControlHandler
+        import json as _json
+
+        handler = mocker.MagicMock(spec=ControlHandler)
+        handler.path = path
+        handler.command = "POST"
+        handler.headers = {"Authorization": "Bearer test-token"}
+
+        responses = []
+
+        def capture_json(code, data, extra_headers=None):
+            responses.append((code, data))
+
+        handler._json = capture_json
+        handler._auth = lambda: True
+
+        if body is not None:
+            handler._read_json_body = lambda: (body, None, None)
+        else:
+            handler._read_json_body = lambda: (None, None, None)
+
+        return handler, responses
+
+    def test_restart_unknown_bot_returns_404_no_popen_with_force(self, mocker):
+        """POST /bots/unknown_bot/restart with force=true returns 404 and does NOT call Popen."""
+        # Patch BOT_REGISTRY to be empty so 'unknown_bot' is not found
+        mocker.patch("codebot.control_server.BOT_REGISTRY", [])
+        # Patch subprocess.Popen to track calls
+        mock_popen = mocker.patch("codebot.control_server.subprocess.Popen")
+
+        handler, responses = self._send_post(
+            mocker,
+            "/bots/unknown_bot/restart",
+            body={"force": True},
+        )
+
+        from codebot.control_server import ControlHandler
+        ControlHandler.do_POST(handler)
+
+        assert len(responses) > 0, "Handler must produce a response"
+        status_code, body = responses[0]
+        assert status_code == 404, f"Expected 404 for unknown bot, got {status_code}"
+        assert "unknown bot" in body.get("error", "").lower()
+        # Critical assertion: Popen must NOT have been called
+        assert mock_popen.call_count == 0, (
+            f"subprocess.Popen must not be called for unknown bot, "
+            f"but was called {mock_popen.call_count} times"
+        )
+
+    def test_restart_unknown_bot_returns_404_no_popen_without_force(self, mocker):
+        """POST /bots/unknown_bot/restart without force flag returns 404 and does NOT call Popen."""
+        mocker.patch("codebot.control_server.BOT_REGISTRY", [])
+        mock_popen = mocker.patch("codebot.control_server.subprocess.Popen")
+
+        handler, responses = self._send_post(
+            mocker,
+            "/bots/unknown_bot/restart",
+            body={},  # No force flag
+        )
+
+        from codebot.control_server import ControlHandler
+        ControlHandler.do_POST(handler)
+
+        assert len(responses) > 0, "Handler must produce a response"
+        status_code, body = responses[0]
+        # Without force, should still reject unknown bot with 404 before requiring force
+        assert status_code == 404, f"Expected 404 for unknown bot, got {status_code}"
+        assert "unknown bot" in body.get("error", "").lower()
+        # Popen must NOT have been called
+        assert mock_popen.call_count == 0, (
+            f"subprocess.Popen must not be called for unknown bot, "
+            f"but was called {mock_popen.call_count} times"
+        )
 
 
 if __name__ == "__main__":

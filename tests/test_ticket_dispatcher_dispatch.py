@@ -24,8 +24,8 @@ from codebot.ticket_dispatcher import (
     IMPLEMENTER_ROLE_NAMES,
     REVIEWER_ROLE_NAMES,
     REVIEWER_TYPES,
-    IMPLEMENTATION_ROLE_ORDER,
 )
+from codebot.role_registry import IMPLEMENTATION_ROLE_ORDER
 from codebot.process_manager import BotConfig, BotState
 
 

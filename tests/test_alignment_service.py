@@ -33,7 +33,7 @@ class TestEnsureRlAdapter:
         rl_engine._adapter_instance = None
         
         try:
-            with patch('codebot.state_manager.get_paths', return_value=mock_paths):
+            with patch('codebot.alignment_service.get_paths', return_value=mock_paths):
                 alignment_service._ensure_rl_adapter()
                 
                 # Verify rl_engine now has an adapter
@@ -581,4 +581,145 @@ class TestAlignmentPipelineStateUsage:
                 
                 # Should still process the event
                 assert result is True
-"}}]}
+
+    def test_run_alignment_pipeline_guard_triggers_on_missing_adapter_non_canonical_path(self, tmp_path, caplog):
+        """Verify run_alignment_pipeline aborts when adapter is None and state_dir is non-canonical."""
+        import json
+        import logging
+        from codebot import rl_engine
+        
+        # Create state directory structure
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+        
+        # Create a test event file
+        event_data = {
+            "bot": "test_bot",
+            "exit_reason": "clean",
+            "processed": False,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths to return non-canonical state_dir
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir  # This is NOT the canonical path
+        mock_paths.alignment_events_dir = events_dir
+        
+        # Mock get_adapter_instance to return None
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.state_manager.get_adapter_instance', return_value=None), \
+             caplog.at_level(logging.CRITICAL):
+            result = alignment_service.run_alignment_pipeline("test_bot")
+            
+            # Should return False (guard triggered)
+            assert result is False
+            
+            # Should log CRITICAL message
+            assert any(
+                record.levelno == logging.CRITICAL and 
+                "Alignment pipeline aborted" in record.message
+                for record in caplog.records
+            )
+            
+            # Verify event was NOT processed (zero events mutated)
+            updated_data = json.loads(event_file.read_text())
+            assert updated_data["processed"] is False
+            # Ensure no other exit.json files were created or modified
+            all_exit_files = list(events_dir.glob("*.exit.json"))
+            assert len(all_exit_files) == 1
+            assert all_exit_files[0] == event_file
+
+    def test_run_alignment_pipeline_guard_passes_with_canonical_path(self, tmp_path):
+        """Verify run_alignment_pipeline proceeds when state_dir matches canonical path."""
+        import json
+        from codebot import rl_engine
+        
+        # Use the actual canonical path
+        canonical_state_dir = (Path(alignment_service.__file__).parent.parent / ".codebot" / "state")
+        canonical_state_dir.mkdir(parents=True, exist_ok=True)
+        events_dir = canonical_state_dir / "alignment_events"
+        events_dir.mkdir(exist_ok=True)
+        
+        # Create a test event file
+        event_data = {
+            "bot": "test_bot",
+            "exit_reason": "clean",
+            "processed": False,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+        
+        # Clear rl_engine adapter
+        rl_engine._adapter_instance = None
+        
+        # Mock get_paths to return canonical state_dir
+        mock_paths = MagicMock()
+        mock_paths.state_dir = canonical_state_dir
+        mock_paths.alignment_events_dir = events_dir
+        
+        try:
+            # Mock get_adapter_instance to return None (but path is canonical)
+            with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+                 patch('codebot.state_manager.get_adapter_instance', return_value=None), \
+                 patch('codebot.rl_engine.score_event', return_value={'score': 80}):
+                result = alignment_service.run_alignment_pipeline("test_bot")
+                
+                # Should proceed (guard passes because path is canonical)
+                assert result is True
+                
+                # Verify event was processed
+                updated_data = json.loads(event_file.read_text())
+                assert updated_data["processed"] is True
+        finally:
+            # Cleanup
+            if event_file.exists():
+                event_file.unlink()
+
+    def test_run_alignment_pipeline_guard_passes_with_adapter_set(self, tmp_path):
+        """Verify run_alignment_pipeline proceeds normally when adapter is set (happy path)."""
+        import json
+        from codebot import rl_engine
+
+        # Create state directory structure (non-canonical path)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "alignment_events"
+        events_dir.mkdir()
+
+        # Create a test event file
+        event_data = {
+            "bot": "test_bot",
+            "exit_reason": "clean",
+            "processed": False,
+        }
+        event_file = events_dir / "test_bot.exit.json"
+        event_file.write_text(json.dumps(event_data))
+
+        # Mock get_paths to return non-canonical state_dir
+        mock_paths = MagicMock()
+        mock_paths.state_dir = state_dir
+        mock_paths.alignment_events_dir = events_dir
+
+        # Mock adapter as present (guard should pass regardless of path)
+        mock_adapter = MagicMock()
+
+        with patch('codebot.state_manager.get_paths', return_value=mock_paths), \
+             patch('codebot.state_manager.get_adapter_instance', return_value=mock_adapter), \
+             patch('codebot.rl_engine.score_event', return_value={'score': 80}):
+            result = alignment_service.run_alignment_pipeline("test_bot")
+
+            # Should proceed and process event (adapter is set)
+            assert result is True
+
+            # Verify event was processed normally
+            updated_data = json.loads(event_file.read_text())
+            assert updated_data["processed"] is True
+            assert "processed_at" in updated_data
+            assert "reward" in updated_data
+            assert "pattern" in updated_data

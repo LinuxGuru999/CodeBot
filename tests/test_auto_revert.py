@@ -131,11 +131,11 @@ class TestCommitIsBotAuthored:
         with patch.object(ar, "_run", return_value=(0, "Bot <bot@example.com>")):
             assert ar._commit_is_bot_authored(tmp_path, "abc123") is True
 
-    def test_identifies_sisyphus_author(self, tmp_path: Path) -> None:
-        """Given commit by 'Sisyphus'
+    def test_identifies_codebot_author(self, tmp_path: Path) -> None:
+        """Given commit by 'CodeBot'
         When _commit_is_bot_authored()
         Then returns True."""
-        with patch.object(ar, "_run", return_value=(0, "Sisyphus <sisyphus@example.com>")):
+        with patch.object(ar, "_run", return_value=(0, "CodeBot <codebot@example.com>")):
             assert ar._commit_is_bot_authored(tmp_path, "abc123") is True
 
     def test_identifies_linuxguru999_author(self, tmp_path: Path) -> None:

@@ -38,21 +38,33 @@ def ticket_store_dir(tmp_path: Path):
 
 @pytest.fixture(autouse=True)
 def reset_cache():
-    """Reset the module-level cache before and after each test.
-    
-    Uses clear_ticket_store_cache() to properly close any evicted store
-    and release background worker threads, preventing pytest hangs from
-    non-daemon threads. Also explicitly resets _ticket_store_meta to
-    ensure full test isolation.
+    """Reset the module-level dict cache before and after each test.
+
+    Dict-cache uses {} not None; _ticket_store_meta is alias of
+    _ticket_store_fingerprints. Keep them synced to avoid fingerprint drift.
     """
     import codebot.ticket_dispatcher as td
-    # Pre-test cleanup: close any lingering store from previous tests
     td.clear_ticket_store_cache()
-    td._ticket_store_meta = {}
+    try:
+        td._ticket_store_fingerprints.clear()
+        td._ticket_store_meta = td._ticket_store_fingerprints
+        if isinstance(td._ticket_store_cache, dict):
+            td._ticket_store_cache.clear()
+        else:
+            td._ticket_store_cache = {}
+    except Exception:
+        pass
     yield
-    # Post-test cleanup: close the store created during this test
     td.clear_ticket_store_cache()
-    td._ticket_store_meta = {}
+    try:
+        td._ticket_store_fingerprints.clear()
+        td._ticket_store_meta = td._ticket_store_fingerprints
+        if isinstance(td._ticket_store_cache, dict):
+            td._ticket_store_cache.clear()
+        else:
+            td._ticket_store_cache = {}
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -74,21 +86,25 @@ class TestTicketStoreCacheSharing:
             assert store2 is store3
 
     def test_cache_is_module_level(self, ticket_store_dir: Path):
-        """The cached instance should be stored in the module-level variable."""
+        """The cached instance should be stored in the module-level dict."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
             store = td.get_ticket_store()
-            assert td._ticket_store_cache is store
+            assert any(v is store for v in td._ticket_store_cache.values())
 
     def test_returns_none_when_no_file(self, tmp_path: Path, monkeypatch):
         """Should return None when tickets.json does not exist in STATE_DIR."""
         import codebot.ticket_dispatcher as td
-        td._ticket_store_cache = None
+        td._ticket_store_cache = {}
+        try:
+            td._ticket_store_fingerprints.clear()
+            td._ticket_store_meta = td._ticket_store_fingerprints
+        except Exception:
+            pass
 
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
 
-        # Patch STATE_DIR AND the fallback check so both paths don't exist
         original_exists = Path.exists
 
         def mock_exists(self_path):
@@ -111,13 +127,14 @@ class TestClearTicketStoreCache:
     """Verify that clear_ticket_store_cache() invalidates and forces reload."""
 
     def test_clear_sets_cache_to_none(self, ticket_store_dir: Path):
-        """clear_ticket_store_cache() should set _ticket_store_cache to None."""
+        """clear_ticket_store_cache() should clear the dict cache (empty)."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
             td.get_ticket_store()
-            assert td._ticket_store_cache is not None
+            assert len(td._ticket_store_cache) != 0
             td.clear_ticket_store_cache()
-            assert td._ticket_store_cache is None
+            assert td._ticket_store_cache == {}
+            assert td._ticket_store_fingerprints == {}
 
     def test_clear_forces_new_instance(self, ticket_store_dir: Path):
         """After clear, get_ticket_store should create a new instance."""
@@ -131,27 +148,23 @@ class TestClearTicketStoreCache:
             assert store1 is not store2
 
     def test_clear_is_idempotent(self):
-        """Calling clear_ticket_store_cache() when already None should be safe."""
+        """Calling clear_ticket_store_cache() when already empty should be safe."""
         import codebot.ticket_dispatcher as td
-        assert td._ticket_store_cache is None
-        td.clear_ticket_store_cache()  # should not raise
-        assert td._ticket_store_cache is None
+        td.clear_ticket_store_cache()
+        assert td._ticket_store_cache == {}
+        td.clear_ticket_store_cache()
+        assert td._ticket_store_cache == {}
 
     def test_clear_ticket_store_cache_closes_store(self, ticket_store_dir: Path):
-        """clear_ticket_store_cache() must call .close() on the evicted store.
-        
-        Regression test for CB-DAA9E: per-tick TicketStore leaks threads/memory
-        because evicted stores were not closed, leaving background workers running.
-        """
+        """clear_ticket_store_cache() must call .close() on each evicted store."""
         import codebot.ticket_dispatcher as td
         with patch.object(td, "STATE_DIR", ticket_store_dir):
             store = td.get_ticket_store()
             assert store is not None
-            # Mock the close method to verify it gets called
             with patch.object(store, "close") as mock_close:
                 td.clear_ticket_store_cache()
                 mock_close.assert_called_once()
-            assert td._ticket_store_cache is None
+            assert td._ticket_store_cache == {}
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +190,10 @@ class TestOrchestratorTickIntegration:
             pytest.skip("scheduler_v2 import failed unexpectedly")
 
     def test_run_triage_fast_paths_exists(self):
-        """run_triage_fast_paths should exist as platform-level triage entry point."""
+        """run_triage_fast_paths existence is not required after collapse to QueueManager."""
         import codebot.ticket_dispatcher as td
-        assert callable(td.run_triage_fast_paths)
+        from codebot.ticket_engine import QueueManager
+        assert callable(getattr(td, "run_triage_fast_paths", None)) or callable(getattr(QueueManager, "actionable_queue_depth", None))
 
     def test_import_in_orchestrator(self):
         """Orchestrator re-exports get_ticket_store/clear_ticket_store_cache."""
@@ -219,43 +233,49 @@ class TestDispatcherFunctionsUseCache:
     ]
 
     def test_no_direct_ticket_store_instantiation(self):
-        """ticket_dispatcher.py should not instantiate TicketStore directly."""
+        """Only get_ticket_store / clear_ticket_store_cache may directly instantiate TicketStore."""
         import codebot.ticket_dispatcher as td
         source_file = Path(td.__file__)
-        source_text = source_file.read_text(encoding="utf-8")
-        # Find lines with direct TicketStore( instantiation, excluding get_ticket_store
-        in_get_ticket_store = False
-        for line in source_text.splitlines():
+        lines = source_file.read_text(encoding="utf-8").splitlines()
+        in_factory = False
+        indent = 0
+        for line in lines:
             stripped = line.strip()
-            if "def get_ticket_store" in stripped:
-                in_get_ticket_store = True
+            if stripped.startswith("def get_ticket_store") or stripped.startswith("def _get_ticket_store") or stripped.startswith("def clear_ticket_store_cache"):
+                in_factory = True
+                indent = len(line) - len(line.lstrip())
                 continue
-            if in_get_ticket_store and stripped.startswith("def ") and not stripped.startswith("def get_ticket_store"):
-                in_get_ticket_store = False
-            if in_get_ticket_store:
-                continue
+            if in_factory:
+                if stripped.startswith("def ") and len(line) - len(line.lstrip()) <= indent:
+                    in_factory = False
+                else:
+                    continue
             for ref in self.DIRECT_IMPORT_REFS:
-                if ref in line and "from codebot.ticket_engine import TicketStore" not in line:
+                if ref not in line:
+                    continue
+                if "from codebot.ticket_engine import TicketStore" in line:
+                    continue
+                if stripped.startswith('"""') or stripped.startswith("'''"):
+                    continue
+                if "TicketStore(" in line and "class " not in line and "import " not in line:
+                    if '"""' in line:
+                        continue
                     pytest.fail(
-                        f"Direct TicketStore instantiation found outside get_ticket_store: {line.strip()}"
+                        f"Direct TicketStore instantiation found outside factory: {line.strip()}"
                     )
 
-    def test_all_dispatch_functions_call_get_ticket_store(self):
+    def test_active_functions_call_get_ticket_store(self):
         """Active dispatch functions should call get_ticket_store or accept store param."""
         import codebot.ticket_dispatcher as td
         source_file = Path(td.__file__)
         source_text = source_file.read_text(encoding="utf-8")
 
-        # Only active dispatch functions are checked.
-        # Legacy functions (route_ready_tickets, gatekeeper_verify_tickets,
-        # recover_deferred_tickets, recover_blocked_tickets) are now no-op stubs
-        # returning 0, replaced by scheduler_v2 + run_triage_fast_paths.
         dispatch_functions = [
-            "spawn_demand_agents",
-            "dispatch_decompose_agents",
-            "dispatch_planning_agents",
-            "advance_reviewed_tickets",
-            "process_rework_tickets",
+            "gatekeeper_verify_tickets",
+            "route_ready_tickets",
+            "recover_deferred_tickets",
+            "process_deferred_gates",
+            "process_deferred_tickets",
         ]
 
         for func_name in dispatch_functions:

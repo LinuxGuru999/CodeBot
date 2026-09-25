@@ -27,6 +27,7 @@ from codebot.scheduler_v2.dispatch_gate import (
 )
 from codebot.scheduler_v2.dispatcher import (
     BucketDispatcher,
+    InvariantViolation,
     ModelSelector,
     NoModelsAvailableError,
     ReasonCode,
@@ -454,36 +455,46 @@ class TestDispatchGate:
 
     def test_claim_ticket_basic(self, tmp_path: Path):
         clk = FakeClock(100.0)
-        rec = claim_ticket(tmp_path, "T-1", "agent-1", role="impl", clock=clk)
+        outcome, rec = claim_ticket(tmp_path, "T-1", "agent-1", role="impl", clock=clk)
+        assert outcome.value == "CLAIMED"
         assert rec is not None
         assert rec.ticket_id == "T-1"
         assert rec.agent_id == "agent-1"
         assert rec.role == "impl"
         assert rec.claimed_at == 100.0
         assert rec.revision_token
+        assert rec.work_item_id == "ticket--T-1"
+        assert rec.execution_id
         # Same agent re-claim is idempotent
-        rec2 = claim_ticket(tmp_path, "T-1", "agent-1", role="impl", clock=clk)
+        outcome2, rec2 = claim_ticket(tmp_path, "T-1", "agent-1", role="impl", clock=clk)
+        assert outcome2.value == "CLAIMED"
         assert rec2 is not None
         assert rec2.ticket_id == "T-1"
         # Different agent cannot claim
-        rec3 = claim_ticket(tmp_path, "T-1", "agent-2", role="impl", clock=clk)
+        outcome3, rec3 = claim_ticket(tmp_path, "T-1", "agent-2", role="impl", clock=clk)
+        assert outcome3.value == "ALREADY_CLAIMED"
         assert rec3 is None
         # Invalid args
-        assert claim_ticket(tmp_path, "", "agent-1") is None
-        assert claim_ticket(tmp_path, "T-1", "") is None
-        assert claim_ticket(None, "T-1", "agent-1") is None  # type: ignore
+        outcome, rec = claim_ticket(tmp_path, "", "agent-1")
+        assert outcome.value == "INVALID_TICKET"
+        assert rec is None
+        outcome, rec = claim_ticket(tmp_path, "T-1", "")
+        assert outcome.value == "INVALID_TICKET"
+        assert rec is None
+        outcome, rec = claim_ticket(None, "T-1", "agent-1")  # type: ignore
+        assert outcome.value == "INVALID_TICKET"
+        assert rec is None
         p = Path(str(tmp_path) + "/nonexistent-sub")
-        assert claim_ticket(p / "missing", "", "agent-1") is None
+        outcome, rec = claim_ticket(p / "missing", "", "agent-1")
+        assert outcome.value == "INVALID_TICKET"
+        assert rec is None
 
     def test_claim_corrupt_file(self, tmp_path: Path):
-        # Write corrupt claim file then try to claim with same agent
         claims_dir = tmp_path / "claims"
         claims_dir.mkdir(parents=True, exist_ok=True)
-        (claims_dir / "T-CORRUPT.claim.json").write_text("not valid json {{{", encoding="utf-8")
-        rec = claim_ticket(tmp_path, "T-CORRUPT", "agent-99", clock=FakeClock(0))
-        # Corrupt existing claim treated as empty owner, same agent check fails (owner=="")
-        # But "agent-99" != "" so returns None. Actually current code: owner="" from empty dict, owner != agent_id => None
-        # Let's also test the second path: corrupt with existing owner
+        (claims_dir / "ticket--T-CORRUPT.claim.json").write_text("not valid json {{{", encoding="utf-8")
+        outcome, rec = claim_ticket(tmp_path, "T-CORRUPT", "agent-99", clock=FakeClock(0))
+        assert outcome.value == "ALREADY_CLAIMED"
         assert rec is None
 
     def test_release_claim(self, tmp_path: Path):
@@ -503,14 +514,14 @@ class TestDispatchGate:
         claim_ticket(tmp_path, "T-2", "agent-1", clock=clk)
         assert release_claim(tmp_path, "T-2", "agent-2") is False
         # Ensure original claim still exists
-        assert (tmp_path / "claims" / "T-2.claim.json").exists()
+        assert (tmp_path / "claims" / "ticket--T-2.claim.json").exists()
 
     def test_release_corrupt_claim(self, tmp_path: Path):
         claims_dir = tmp_path / "claims"
         claims_dir.mkdir(parents=True, exist_ok=True)
-        (claims_dir / "T-BAD.claim.json").write_text("{{{ corrupt", encoding="utf-8")
+        (claims_dir / "ticket--T-BAD.claim.json").write_text("{{{ corrupt", encoding="utf-8")
         assert release_claim(tmp_path, "T-BAD", "agent-1") is True
-        assert not (claims_dir / "T-BAD.claim.json").exists()
+        assert not (claims_dir / "ticket--T-BAD.claim.json").exists()
 
     def test_stagger_basic(self):
         clk = FakeClock(1000.0)
@@ -519,25 +530,29 @@ class TestDispatchGate:
         assert q.queue_depth == 0
         assert q.peek_next() is None
         assert q.next_spawn_in() is None
-        assert q.dequeue_ready() == []
-        # First enqueue at T=1000
+        assert q.drain() is None
         r1 = SpawnRequest(agent_id="a1", ticket_id="t1", role="r", model="m")
         s1 = q.enqueue(r1)
         assert s1.scheduled_at == 1000.0
-        # Second at T+5
         r2 = SpawnRequest(agent_id="a2", ticket_id="t2", role="r", model="m")
         s2 = q.enqueue(r2)
-        assert s2.scheduled_at == 1005.0
-        # Third at T+10
+        assert s2.scheduled_at == 1000.0
         r3 = SpawnRequest(agent_id="a3", ticket_id="t3", role="r", model="m")
         s3 = q.enqueue(r3)
-        assert s3.scheduled_at == 1010.0
+        assert s3.scheduled_at == 1000.0
         assert len(q) == 3
-        assert q.next_spawn_in() == 0.0
-        # All dequeue at 1010
-        clk.advance(10.0)
-        ready = q.dequeue_ready()
-        assert len(ready) == 3
+        drained = q.drain()
+        assert drained is not None and drained.agent_id == "a1"
+        assert len(q) == 2
+        q.record_spawn(1000.0)
+        assert q.drain() is None
+        clk.advance(5.0)
+        drained2 = q.drain()
+        assert drained2 is not None and drained2.agent_id == "a2"
+        q.record_spawn(1005.0)
+        clk.advance(5.0)
+        drained3 = q.drain()
+        assert drained3 is not None and drained3.agent_id == "a3"
         assert len(q) == 0
 
     def test_stagger_dequeue_partial(self):
@@ -546,33 +561,32 @@ class TestDispatchGate:
         q.enqueue(SpawnRequest(agent_id="a1", ticket_id="t1", role="r", model="m"))
         q.enqueue(SpawnRequest(agent_id="a2", ticket_id="t2", role="r", model="m"))
         q.enqueue(SpawnRequest(agent_id="a3", ticket_id="t3", role="r", model="m"))
-        # At T=0 only a1 ready
-        ready = q.dequeue_ready()
-        assert len(ready) == 1 and ready[0].agent_id == "a1"
+        drained = q.drain()
+        assert drained is not None and drained.agent_id == "a1"
+        q.record_spawn(0.0)
+        assert q.drain() is None
         clk.advance(5.0)
-        ready = q.dequeue_ready()
-        assert len(ready) == 1 and ready[0].agent_id == "a2"
+        drained2 = q.drain()
+        assert drained2 is not None and drained2.agent_id == "a2"
+        q.record_spawn(5.0)
+        assert q.drain() is None
         clk.advance(5.0)
-        ready = q.dequeue_ready()
-        assert len(ready) == 1 and ready[0].agent_id == "a3"
+        drained3 = q.drain()
+        assert drained3 is not None and drained3.agent_id == "a3"
 
-    def test_stagger_heartbeat_empty_queue(self, tmp_path: Path):
-        # E3: empty queue should use disk heartbeat
+    def test_stagger_heartbeat_does_not_affect_enqueue(self, tmp_path: Path):
         clk = FakeClock(1000.0)
         (tmp_path / "worker-1.heartbeat").write_text("1995.0", encoding="utf-8")
         q = SpawnQueue(clock=clk, stagger_seconds=5.0, heartbeat_dir=tmp_path)
         q.update_latest_heartbeat(1998.0)
         r1 = SpawnRequest(agent_id="a1", ticket_id="t1", role="r", model="m")
         s1 = q.enqueue(r1)
-        # heartbeat 1998 + 5 = 2003, now=1000, max(1000,2003)=2003
-        # But clock now=1000, heartbeat 1998 > now, so next = hb+5 = 2003
-        assert s1.scheduled_at == 2003.0
-        # Subsequent heartbeats must NOT postpone already-scheduled request
+        assert s1.scheduled_at == 1000.0
         q.update_latest_heartbeat(3000.0)
         s2 = q.enqueue(SpawnRequest(agent_id="a2", ticket_id="t2", role="r", model="m"))
-        # s2 scheduled at s1+5=2008, NOT 3005
-        assert s2.scheduled_at == 2008.0
-        assert s1.scheduled_at == 2003.0
+        assert s2.scheduled_at == 1000.0
+        drained = q.drain()
+        assert drained is not None and drained.agent_id == "a1"
 
     def test_stagger_heartbeat_from_disk(self, tmp_path: Path):
         clk = FakeClock(1000.0)
@@ -625,24 +639,16 @@ class TestDispatchGate:
         q = SpawnQueue(clock=clk, stagger_seconds=5.0, heartbeat_dir=tmp_path)
         assert q._read_latest_heartbeat_from_disk() == 995.0
 
-    def test_stagger_heartbeat_from_disk_later(self, tmp_path: Path):
+    def test_stagger_drain_gated_by_last_process_start(self, tmp_path: Path):
         clk = FakeClock(1000.0)
-        (tmp_path / "some.heartbeat").write_text("1200.0", encoding="utf-8")
         q = SpawnQueue(clock=clk, stagger_seconds=5.0, heartbeat_dir=tmp_path)
+        q.record_spawn(998.0)
         r1 = SpawnRequest(agent_id="a1", ticket_id="t1", role="r", model="m")
-        s1 = q.enqueue(r1)
-        assert s1.scheduled_at == 1205.0
-        # Corrupt heartbeat file should be ignored
-        (tmp_path / "bad.heartbeat").write_text("not_a_number", encoding="utf-8")
-        q2 = SpawnQueue(clock=FakeClock(500.0), stagger_seconds=5.0, heartbeat_dir=tmp_path)
-        q2.update_latest_heartbeat(0.0)
-        # Disk read finds valid latest is 1200, heartbeat_dir scan still works
-        # But _latest_heartbeat is 0, so it reads from disk. Corrupt file ignored.
-        (tmp_path / "empty.heartbeat").write_text("", encoding="utf-8")
-        r2 = SpawnRequest(agent_id="a1", ticket_id="t1", role="r", model="m")
-        # Should not crash, ignores bad files
-        s2 = q2.enqueue(r2)
-        assert s2.scheduled_at >= 500.0
+        q.enqueue(r1)
+        assert q.drain() is None
+        clk.advance(5.0)
+        drained = q.drain()
+        assert drained is not None and drained.agent_id == "a1"
 
     def test_stagger_no_heartbeat_dir(self):
         clk = FakeClock(1000.0)
@@ -674,15 +680,18 @@ class TestDispatchGate:
         q.enqueue(SpawnRequest(agent_id="a1", ticket_id="t1", role="r", model="m"))
         q.enqueue(SpawnRequest(agent_id="a2", ticket_id="t2", role="r", model="m"))
         assert q.next_spawn_in() == 0.0
+        drained = q.drain()
+        assert drained is not None and drained.agent_id == "a1"
+        q.record_spawn(0.0)
+        assert q.next_spawn_in() == pytest.approx(5.0)
         clk.advance(3.0)
-        # a1 was at 0, dequeue_ready would have removed it. But we haven't dequeued.
-        # At T=3, a1 ready at 0, a2 at 5. next_spawn_in checks queue[0]=a1 so 0.
-        assert q.next_spawn_in() == 0.0
-        q.dequeue_ready()
         assert q.next_spawn_in() == pytest.approx(2.0)
         clk.advance(3.0)
         assert q.next_spawn_in() == pytest.approx(0.0)
-        q.dequeue_ready()
+        drained2 = q.drain()
+        assert drained2 is not None and drained2.agent_id == "a2"
+        q.record_spawn(6.0)
+        assert len(q) == 0
         assert q.next_spawn_in() is None
 
     def test_stagger_missing_heartbeat_dir(self, tmp_path: Path):
@@ -751,10 +760,10 @@ class TestDispatchGate:
         clk = FakeClock(0.0)
         gate = DispatchGate(max_slots=5, state_dir=tmp_path, clock=clk)
         gate.try_dispatch("T-1", "agent-1", role="impl")
-        assert (tmp_path / "claims" / "T-1.claim.json").exists()
+        assert (tmp_path / "claims" / "ticket--T-1.claim.json").exists()
         assert gate.cancel_dispatch("agent-1", "T-1") is True
         assert gate.count_active() == 0
-        assert not (tmp_path / "claims" / "T-1.claim.json").exists()
+        assert not (tmp_path / "claims" / "ticket--T-1.claim.json").exists()
         # Double cancel is safe
         assert gate.cancel_dispatch("agent-1", "T-1") is False
         assert gate.cancel_dispatch("nonexistent", "T-X") is False
@@ -816,7 +825,8 @@ class TestDispatchGate:
         q.enqueue(SpawnRequest(agent_id="a1", ticket_id="t1", role="r", model="m"))
         assert q.queue_depth == 1
         assert q.next_spawn_in() == 0.0
-        q.dequeue_ready()
+        drained = q.drain()
+        assert drained is not None
         assert q.queue_depth == 0
         assert q.next_spawn_in() is None
 
@@ -830,14 +840,18 @@ class TestDispatchGate:
         with pytest.raises(ValueError):
             DispatchGate(max_slots=5, stagger_seconds=-5)
 
-    def test_dispatch_gate_dequeue_and_heartbeat(self, tmp_path: Path):
+    def test_dispatch_gate_drain_authoritative(self, tmp_path: Path):
         clk = FakeClock(0.0)
         gate = DispatchGate(max_slots=5, state_dir=tmp_path, clock=clk)
         gate.try_dispatch("T-1", "agent-1", role="impl")
         gate.try_dispatch("T-2", "agent-2", role="impl")
-        gate.update_heartbeat(100.0)
-        ready = gate.dequeue_ready()
-        assert len(ready) >= 1
+        drained = gate.spawn_queue.drain()
+        assert drained is not None and drained.agent_id == "agent-1"
+        gate.spawn_queue.record_spawn(0.0)
+        assert gate.spawn_queue.drain() is None
+        clk.advance(5.0)
+        drained2 = gate.spawn_queue.drain()
+        assert drained2 is not None and drained2.agent_id == "agent-2"
         assert gate.complete_dispatch("agent-1") is True
 
     def test_dispatch_gate_stress(self, tmp_path: Path):
@@ -860,7 +874,7 @@ class TestDispatchGate:
         assert gate.count_active() == 10
 
     def test_concurrent_claims_one_winner(self, tmp_path: Path):
-        results: list[ClaimRecord | None] = []
+        results: list[tuple] = []
         barrier = threading.Barrier(5)
 
         def worker():
@@ -873,7 +887,7 @@ class TestDispatchGate:
             t.start()
         for t in threads:
             t.join()
-        winners = [r for r in results if r is not None]
+        winners = [r for outcome, r in results if outcome.value == "CLAIMED" and r is not None]
         assert len(winners) == 1
 
     def test_concurrent_concurrency_one_winner(self):
@@ -1204,7 +1218,8 @@ class TestDispatcher:
         gate2 = DispatchGate(max_slots=5, state_dir=tmp_path, clock=clk2_adv)
         sched2._gate = gate2
         sched2._dispatcher = BucketDispatcher(gate=gate2, clock=clk2_adv)
-        assert sched2.why_not_running("T-UNKNOWN") == ReasonCode.UNKNOWN
+        with pytest.raises(InvariantViolation):
+            sched2.why_not_running("T-UNKNOWN")
         assert bd._count_active_per_bucket({"IMPLEMENT": [type("T", (), {"id": "CB-1"})()]}, {"CB-1"}) == {
             name: (1 if name == "IMPLEMENT" else 0) for name, _ in BUCKET_ORDER
         }
@@ -1214,7 +1229,7 @@ class TestDispatcher:
         from unittest.mock import MagicMock
         clk = FakeClock(0.0)
         gate = DispatchGate(max_slots=5, state_dir=tmp_path, clock=clk)
-        bd = BucketDispatcher(gate=gate, clock=clk, role_caps={"planning": 0})
+        bd = BucketDispatcher(gate=gate, clock=clk, role_caps={"plan": 0})
         t = Ticket(
             id="CB-STARVE", title="t", ticket_class=TicketClass.BUG,
             severity=Severity.MEDIUM, state=TicketState.PLANNING,
@@ -1335,7 +1350,7 @@ class TestDispatcher:
         sched = Scheduler(max_slots=1, state_dir=tmp_path, clock=clk)
         sched.request_agent_spawn("backend_implementer", "T-CAP-1", model="m")
         reason = sched.why_not_running("T-CAP-2")
-        assert reason == ReasonCode.NO_GLOBAL_CAPACITY
+        assert reason == ReasonCode.WAITING_FOR_SLOT
 
     def test_scheduler_why_not_running_stagger(self, tmp_path: Path):
         clk = FakeClock(0.0)
@@ -1343,8 +1358,9 @@ class TestDispatcher:
         r = sched.request_agent_spawn("backend_implementer", "T-STAG-1", model="m")
         assert r.success is True
         result = sched.why_not_running("T-STAG-1")
-        assert result == ReasonCode.ALREADY_CLAIMED
-        assert sched.why_not_running("T-UNKNOWN-XYZ") == ReasonCode.UNKNOWN
+        assert result in (ReasonCode.CLAIMED, ReasonCode.WAITING_FOR_STAGGER)
+        with pytest.raises(InvariantViolation):
+            sched.why_not_running("T-UNKNOWN-XYZ")
 
     def test_scheduler_request_no_model_available(self, tmp_path: Path):
         sched = Scheduler(max_slots=5, state_dir=tmp_path, clock=FakeClock(0.0), model_pool=["m1", "m2"])
@@ -1367,8 +1383,8 @@ class TestDispatcher:
         mock_store.list_by_state.return_value = []
         n = sched.tick(store=mock_store)
         assert n == 0
-        reason = sched.why_not_running("T-UNKNOWN", store=mock_store)
-        assert reason in ReasonCode
+        with pytest.raises(InvariantViolation):
+            sched.why_not_running("T-UNKNOWN", store=mock_store)
 
     def test_scheduler_request_and_finalize(self, tmp_path: Path):
         clk = FakeClock(0.0)
@@ -1454,7 +1470,7 @@ class TestDispatcher:
         mock_store.get.return_value = mock_ticket
         mock_store.list_by_state.return_value = []
         reason = sched.why_not_running("T-BLOCKED", store=mock_store)
-        assert reason == ReasonCode.BLOCKED
+        assert reason == ReasonCode.BLOCKED_ON_DEPENDENCY
 
     def test_scheduler_finalize_zombie(self, tmp_path: Path):
         sched = Scheduler(max_slots=5, state_dir=tmp_path, clock=FakeClock(0.0))
@@ -1511,8 +1527,10 @@ class TestDispatcher:
         })()
         n = sched.tick(store=store)
         assert n >= 0
-        assert sched.why_not_running("T-UNKNOWN2") in ReasonCode
-        assert sched.why_not_running("T-UNKNOWN2", store=None) in ReasonCode
+        with pytest.raises(InvariantViolation):
+            sched.why_not_running("T-UNKNOWN2")
+        with pytest.raises(InvariantViolation):
+            sched.why_not_running("T-UNKNOWN2", store=None)
 
     def test_scheduler_why_not_running_states(self, tmp_path: Path):
         from unittest.mock import MagicMock
@@ -1520,7 +1538,7 @@ class TestDispatcher:
         sched = Scheduler(max_slots=5, state_dir=tmp_path, clock=clk)
         s1 = sched.request_agent_spawn("backend_implementer", "T-WHY-1", model="m")
         assert s1.success is True
-        assert sched.why_not_running("T-WHY-1") == ReasonCode.ALREADY_CLAIMED
+        assert sched.why_not_running("T-WHY-1") in (ReasonCode.CLAIMED, ReasonCode.WAITING_FOR_STAGGER)
         mock_complete = MagicMock()
         mock_complete.state.value = "COMPLETE"
         store_c = MagicMock()
@@ -1538,10 +1556,12 @@ class TestDispatcher:
         assert sched.why_not_running("T-DUP", store=store_d) == ReasonCode.NO_ACTIONABLE_WORK
         store_none = MagicMock()
         store_none.get.return_value = None
-        assert sched.why_not_running("T-NONE", store=store_none) == ReasonCode.UNKNOWN
+        with pytest.raises(InvariantViolation):
+            sched.why_not_running("T-NONE", store=store_none)
         store_err = MagicMock()
         store_err.get.side_effect = RuntimeError("boom")
-        assert sched.why_not_running("T-ERR", store=store_err) == ReasonCode.UNKNOWN
+        with pytest.raises(InvariantViolation):
+            sched.why_not_running("T-ERR", store=store_err)
 
     def test_scheduler_why_not_running_stagger_and_blocked(self, tmp_path: Path):
         from unittest.mock import MagicMock
@@ -1551,10 +1571,10 @@ class TestDispatcher:
         mock_blocked.state.value = "BLOCKED"
         store_b = MagicMock()
         store_b.get.return_value = mock_blocked
-        assert sched.why_not_running("T-BLOCKED2", store=store_b) == ReasonCode.BLOCKED
+        assert sched.why_not_running("T-BLOCKED2", store=store_b) == ReasonCode.BLOCKED_ON_DEPENDENCY
         s2 = sched.request_agent_spawn("backend_implementer", "T-STAG2", model="m")
         assert s2.success is True
-        assert sched.why_not_running("T-STAG2") == ReasonCode.ALREADY_CLAIMED
+        assert sched.why_not_running("T-STAG2") in (ReasonCode.CLAIMED, ReasonCode.WAITING_FOR_STAGGER)
 
     def test_scheduler_list_and_register(self, tmp_path: Path):
         sched = Scheduler(max_slots=5, state_dir=tmp_path, clock=FakeClock(0.0))

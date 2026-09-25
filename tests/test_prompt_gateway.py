@@ -240,30 +240,18 @@ class TestSpawnAllowed:
         assert allowed is True
         assert "slot available" in reason
 
-    def test_denies_when_at_capacity(self):
-        """Deny spawn if running >= MAX_CONCURRENT."""
-        prompt_gateway._last_spawn_ts = 0.0
-        
-        # Mock enough bots to hit cap
-        max_conc = int(prompt_gateway.MAX_CONCURRENT)
+    def test_allows_when_no_rate_limit(self):
+        """spawn_allowed delegates capacity to ConcurrencyController; only checks rate limiter."""
         bots = {}
-        for i in range(max_conc):
-            mock_proc = MagicMock()
-            mock_proc.poll.return_value = None
-            bots[f"bot{i}"] = MagicMock(process=mock_proc)
-        
         allowed, reason = prompt_gateway.spawn_allowed(bots)
-        assert allowed is False
-        assert "cap" in reason.lower()
+        assert allowed is True
+        assert "slot available" in reason
 
-    def test_denies_when_gap_too_small(self):
-        """Deny spawn if time since last spawn < MIN_SPAWN_GAP."""
-        prompt_gateway._last_spawn_ts = time.time()  # Just now
-        bots = {}  # 0 running
-        
+    def test_allows_with_bots_when_no_rate_limit(self):
+        """Capacity gating moved to DispatchGate; spawn_allowed no longer checks bot count."""
+        bots = {f"bot{i}": MagicMock(process=MagicMock(poll=MagicMock(return_value=None))) for i in range(100)}
         allowed, reason = prompt_gateway.spawn_allowed(bots)
-        assert allowed is False
-        assert "gap" in reason.lower()
+        assert allowed is True
 
 
 class TestNoteSpawn:

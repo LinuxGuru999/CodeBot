@@ -3103,7 +3103,7 @@ def test_default_gateway_props_Given_default_When_max_concurrent_Then_value():
     When max_concurrent/min_spawn_gap
     Then returns."""
     gw = pm.DefaultPromptGateway()
-    with patch("codebot.prompt_gateway.MAX_CONCURRENT", 26):
+    with patch("codebot.scheduler_config.MAX_CONCURRENT_AGENTS", 26):
         with patch("codebot.prompt_gateway.MIN_SPAWN_GAP", 25):
             assert gw.max_concurrent == 26
             assert gw.min_spawn_gap == 25
