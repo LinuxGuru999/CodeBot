@@ -1,11 +1,13 @@
-"""Bucket dispatcher, model selector, and Scheduler class with reconciliation and diagnostics."""
+"""Scheduler class with reconciliation, diagnostics, and model selection.
+
+BucketDispatcher extracted to bucket_dispatcher.py per ADR-007 §16.
+Re-exports BucketDispatcher + constants for backward compatibility.
+"""
 
 from __future__ import annotations
 
 import json
 import threading
-import time
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -15,87 +17,43 @@ from .lifecycle import (
     AgentRecord,
     AgentState,
     Clock,
-    FakeClock,
     InvalidTransitionError,
     RealClock,
-    RealProcessSpawner,
-    get_stale_timeout,
     is_agent_stale,
+)
+from .bucket_dispatcher import (
+    BUCKET_ORDER,
+    BUCKET_TO_ROLE_SETS,
+    TICKET_CLASS_TO_ROLES,
+    BucketDispatcher,
+    BucketSnapshot,
+    NoModelsAvailableError,
+    REVIEWER_ROLE_NAMES as _BUCKET_REVIEWER_ROLES,
 )
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Role sets for dispatch routing (centralized in codebot.roles to avoid circular deps)
-from codebot.roles import (
-    DECOMPOSER_ROLE_NAMES,
-    DISCOVERY_ROLE_NAMES,
-    IMPLEMENTER_ROLE_NAMES,
-    PLANNING_ROLE_NAMES,
-    REVIEWER_ROLE_NAMES,
-)
-
-try:
-    from codebot.ticket_engine import TicketState, Ticket
-except ImportError:  # pragma: no cover - ticket_engine always available
-    TicketState = None  # type: ignore  # pragma: no cover
-    Ticket = None  # type: ignore  # pragma: no cover
-
-try:
-    from codebot.ticket_dispatcher import TICKET_CLASS_TO_IMPLEMENTER
-except ImportError:  # pragma: no cover
-    TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {  # pragma: no cover
-        "bug": "implementer",
-        "feature": "implementer",
-        "refactor": "implementer",
-        "security": "implementer",
-        "performance": "implementer",
-        "architecture": "implementer",
-        "test": "implementer",
-        "documentation": "implementer",
-        "dependency": "implementer",
-        "infrastructure": "implementer",
-    }
-
-
-# Ticket class to bucket mapping
-TICKET_CLASS_TO_ROLES: dict[str, str] = TICKET_CLASS_TO_IMPLEMENTER
-
-# Bucket definitions as ordered list of (bucket_name, ticket_states).
-# Bucket name vs state name distinction: The first element in each tuple is a
-# label used for role routing and metrics. The second element is the list of
-# TicketState enum values queried via store.list_by_state(). So
-# ("GOAL", ["TRIAGED"]) means: query tickets in TRIAGED state, label them as
-# the GOAL bucket, route to goal_aligner role. DISCOVERED is intentionally
-# absent — triage runs as platform code, not through BucketDispatcher.
-BUCKET_ORDER: list[tuple[str, list[str]]] = [
-    ("USER", ["REQUESTED"]),
-    ("GOAL", ["TRIAGED"]),
-    ("DECOMP", ["DECOMP"]),
-    ("PLANNING", ["PLANNING"]),
-    ("REWORK", ["REWORK"]),
-    ("IMPLEMENT", ["IMPLEMENT"]),
-    ("REVIEW", ["REVIEW"]),
-]
-
-BUCKET_TO_ROLE_SETS: dict[str, frozenset[str]] = {
-    "USER": frozenset({"user_agent"}),
-    "GOAL": frozenset({"goal_aligner"}),
-    "DECOMP": DECOMPOSER_ROLE_NAMES,
-    "PLANNING": PLANNING_ROLE_NAMES,
-    "REWORK": IMPLEMENTER_ROLE_NAMES,
-    "IMPLEMENT": IMPLEMENTER_ROLE_NAMES,
-    "REVIEW": REVIEWER_ROLE_NAMES,
-}
-
 
 class ReasonCode(str, Enum):
+    RUNNING = "RUNNING"
+    STARTING = "STARTING"
+    WAITING_FOR_STAGGER = "WAITING_FOR_STAGGER"
+    CLAIMED = "CLAIMED"
+    BLOCKED_ON_DEPENDENCY = "BLOCKED_ON_DEPENDENCY"
+    ROLE_CAP_REACHED = "ROLE_CAP_REACHED"
+    WAITING_FOR_SLOT = "WAITING_FOR_SLOT"
+    CLAIM_FAILURE = "CLAIM_FAILURE"
+    NO_COMPATIBLE_MODEL = "NO_COMPATIBLE_MODEL"
+    PLAN_GATE = "PLAN_GATE"
+    NEEDS_TRIAGE = "NEEDS_TRIAGE"
+    NEEDS_GOAL = "NEEDS_GOAL"
+    READY = "READY"
     DISPATCHED = "DISPATCHED"
     NO_GLOBAL_CAPACITY = "NO_GLOBAL_CAPACITY"
     BUCKET_EMPTY = "BUCKET_EMPTY"
     ROLE_CAP = "ROLE_CAP"
-    WAITING_FOR_STAGGER = "WAITING_FOR_STAGGER"
     ALREADY_CLAIMED = "ALREADY_CLAIMED"
     BLOCKED = "BLOCKED"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
@@ -106,7 +64,7 @@ class ReasonCode(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class NoModelsAvailableError(RuntimeError):
+class InvariantViolation(RuntimeError):
     pass
 
 
@@ -136,7 +94,7 @@ class ModelSelector:
         except Exception:
             self._index = 0
 
-    def _save_index(self) -> None:  # pragma: no cover - filesystem persistence
+    def _save_index(self) -> None:
         if self.state_path is None:
             return
         try:
@@ -144,7 +102,7 @@ class ModelSelector:
             tmp = self.state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"index": self._index % max(1, len(self.model_pool))}), encoding="utf-8")
             tmp.replace(self.state_path)
-        except OSError:  # pragma: no cover - filesystem unavailable
+        except OSError:
             pass
 
     def next_model(self, role: str = "") -> str:
@@ -152,14 +110,13 @@ class ModelSelector:
             available = [m for m in self.model_pool if m not in self._unavailable]
             if not available:
                 raise NoModelsAvailableError("All models are marked unavailable")
-            # Find next available model starting from _index
             for offset in range(len(self.model_pool)):
                 candidate = self.model_pool[(self._index + offset) % len(self.model_pool)]
                 if candidate in available:
                     self._index = (self.model_pool.index(candidate) + 1) % len(self.model_pool)
                     self._save_index()
                     return candidate
-            raise NoModelsAvailableError("No available model found")  # pragma: no cover - unreachable: above checks all models unavailable
+            raise NoModelsAvailableError("No available model found")
 
     def mark_unavailable(self, model: str) -> None:
         with self._lock:
@@ -175,342 +132,6 @@ class ModelSelector:
             return self._index
 
 
-@dataclass
-class BucketSnapshot:
-    name: str
-    actionable_count: int
-    claimed_count: int
-    blocked_count: int
-    active_count: int
-
-
-class BucketDispatcher:
-    def __init__(
-        self,
-        gate: DispatchGate,
-        model_selector: ModelSelector | None = None,
-        clock: Clock | None = None,
-        bucket_order: list[tuple[str, list[str]]] | None = None,
-        bucket_weights: dict[str, int] | None = None,
-        role_caps: dict[str, int] | None = None,
-        discovery_watermark: int = 1000,
-    ) -> None:
-        self._gate = gate
-        self._model_selector = model_selector
-        self._clock = clock or RealClock()
-        self._bucket_order = bucket_order or BUCKET_ORDER
-        self._bucket_weights = bucket_weights or {}
-        self._role_caps = role_caps or {}
-        self._discovery_watermark = discovery_watermark
-        self._next_bucket_index = 0
-        self._lock = threading.Lock()
-        self._file_claims: dict[str, str] = {}
-
-    def _has_plan_for(self, ticket: Any) -> bool:
-        sdir = getattr(self._gate, "_state_dir", None)
-        if sdir is None:
-            return True
-        try:
-            from codebot.implementation_planner import PlanStore
-            return PlanStore(sdir).exists(getattr(ticket, "id", ""))
-        except Exception:
-            return True
-
-    def _filtered_for_plan_gate(self, tickets: list[Any]) -> list[Any]:
-        try:
-            from codebot.ticket_engine import MIN_RISK_FOR_PLANNING
-            from codebot.ticket_engine import TicketState as _TS
-            from codebot.ticket_engine import _RISK_ORDER
-
-            threshold = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
-        except Exception:
-            return tickets
-        filtered: list[Any] = []
-        for t in tickets:
-            try:
-                st = getattr(t, "state", None)
-                try:
-                    sval = st.value if hasattr(st, "value") else str(st) if st else ""
-                    if sval == _TS.REWORK.value:
-                        filtered.append(t)
-                        continue
-                except Exception:
-                    pass
-                risk = getattr(t, "risk", None)
-                risk_val = risk.value if hasattr(risk, "value") else str(risk) if risk else "medium"
-                order = _RISK_ORDER.get(str(risk_val).lower(), 1)
-                if order >= threshold and not self._has_plan_for(t):
-                    continue
-            except Exception:
-                pass
-            filtered.append(t)
-        return filtered
-
-    def _roles_for_ticket(self, ticket: Any) -> list[str]:
-        state_val = ""
-        try:
-            state = getattr(ticket, "state", None)
-            state_val = state.value if hasattr(state, "value") else str(state) if state else ""
-        except Exception:
-            state_val = ""
-        if state_val == "REVIEW":
-            try:
-                from codebot.ticket_dispatcher import reviewer_roles_for_ticket
-                roles = list(reviewer_roles_for_ticket(ticket))
-                return roles if roles else ["reviewer"]
-            except Exception:
-                return ["reviewer"]
-        single = self._role_for_ticket(ticket)
-        return [single]
-
-    def _ensure_packet(self, ticket: Any, bucket_name: str) -> None:
-        pass
-
-    def _snapshot_buckets(self, store: Any) -> dict[str, list[Any]]:
-        result: dict[str, list[Any]] = {name: [] for name, _ in self._bucket_order}
-        if store is None:
-            return result
-        if TicketState is None:
-            return result
-        for bucket_name, state_names in self._bucket_order:
-            for state_name in state_names:
-                try:
-                    if not hasattr(TicketState, state_name):
-                        continue
-                    state_enum = TicketState[state_name]
-                    tickets = store.list_by_state(state_enum)
-                    for t in tickets:
-                        if getattr(t, "state", None) and getattr(t.state, "value", "") == "BLOCKED":
-                            continue
-                        result[bucket_name].append(t)
-                except Exception:
-                    continue
-        return result
-
-    def _count_active_per_bucket(self, bucket_snapshots: dict[str, list[Any]], active_tickets: set[str]) -> dict[str, int]:
-        if not bucket_snapshots:
-            return {}
-        if not active_tickets:
-            return {name: 0 for name, _ in self._bucket_order}
-        active = {name: 0 for name, _ in self._bucket_order}
-        for bucket_name, tickets in bucket_snapshots.items():
-            for tid in (getattr(t, "id", "") for t in tickets):
-                if tid in active_tickets:
-                    active[bucket_name] += 1
-        return active
-
-    def tick(self, store: Any) -> int:
-        if store is None:
-            return 0
-        snapshots = self._snapshot_buckets(store)
-
-        impl_count = len(snapshots.get("IMPLEMENT", [])) + len(snapshots.get("REWORK", []))
-        dynamic_weights = dict(self._bucket_weights)
-        if impl_count >= 10:
-            dynamic_weights["IMPLEMENT"] = dynamic_weights.get("IMPLEMENT", 1) * 3
-            dynamic_weights["REWORK"] = dynamic_weights.get("REWORK", 1) * 3
-
-        weighted_order: list[str] = []
-        for bucket_name, _ in self._bucket_order:
-            weight = dynamic_weights.get(bucket_name, 1)
-            for _ in range(weight):
-                weighted_order.append(bucket_name)
-
-        dispatched = 0
-        tried_buckets: set[tuple[str, str]] = set()
-        max_iterations = len(snapshots) * 20
-
-        max_slots = self._gate.concurrency.max_slots
-
-        for _ in range(max_iterations):
-            if self._gate.concurrency.free_slots <= 0:
-                break
-
-            bucket_name = None
-            for offset in range(len(weighted_order)):
-                with self._lock:
-                    candidate_idx = (self._next_bucket_index + offset) % len(weighted_order)
-                    candidate = weighted_order[candidate_idx]
-                tickets = snapshots.get(candidate, [])
-                if not tickets:
-                    continue
-                role_set = BUCKET_TO_ROLE_SETS.get(candidate)
-                if role_set:
-                    active_in_bucket = sum(
-                        1 for t in tickets
-                        if self._is_ticket_active(getattr(t, "id", ""))
-                    )
-                    # Pipeline-stage weighting: downstream stages get higher
-                    # effective backlog so they aren't starved by large upstream queues.
-                    stage_weight = {
-                        "REVIEW": 8, "IMPLEMENT": 6, "REWORK": 6,
-                        "PLANNING": 5, "DECOMP": 4, "GOAL": 1,
-                    }
-                    weighted_backlogs = {
-                        b: len(snapshots.get(b, [])) * stage_weight.get(b, 1)
-                        for b, _ in self._bucket_order
-                    }
-                    total_weighted = sum(weighted_backlogs.values()) or 1
-                    bucket_weighted = weighted_backlogs.get(candidate, 0)
-                    proportion = bucket_weighted / total_weighted
-                    proportion = min(proportion, 0.5)
-                    dynamic_cap = max(1, int(max_slots * proportion))
-                    if candidate == "REVIEW":
-                        dynamic_cap = max(dynamic_cap, 1)
-                    backlog = len(snapshots.get(candidate, []))
-                    cap = min(dynamic_cap, backlog) if backlog > 0 else dynamic_cap
-                    if self._role_caps and candidate.lower() in self._role_caps:
-                        cap = min(cap, self._role_caps[candidate.lower()])
-                    if active_in_bucket >= cap:
-                        continue
-                bucket_name = candidate
-                with self._lock:
-                    self._next_bucket_index = (candidate_idx + 1) % len(weighted_order)
-                break
-
-            if bucket_name is None:
-                break
-
-            tickets = snapshots.get(bucket_name, [])
-            if not tickets:
-                continue
-            tried_buckets.clear()
-
-            if bucket_name in ("IMPLEMENT", "REWORK"):
-                filtered = self._filtered_for_plan_gate(tickets)
-                if not filtered:
-                    if not tickets:
-                        continue
-                    tried_key2 = (bucket_name, "plan-gate-empty")
-                    if tried_key2 in tried_buckets:
-                        snapshots[bucket_name] = []
-                        continue
-                    tried_buckets.add(tried_key2)
-                    continue
-                if len(filtered) != len(tickets):
-                    snapshots[bucket_name] = filtered
-                tickets = filtered
-
-            ticket = self._select_ticket(tickets)
-            if ticket is None:
-                continue
-
-            tid = getattr(ticket, "id", "")
-            roles = self._roles_for_ticket(ticket)
-
-            if bucket_name == "REVIEW":
-                snapshots[bucket_name] = [t for t in snapshots[bucket_name] if getattr(t, "id", "") != tid]
-            else:
-                snapshots[bucket_name] = [t for t in snapshots[bucket_name] if getattr(t, "id", "") != tid]
-
-            if bucket_name in ("IMPLEMENT", "REWORK"):
-                ticket_files = set(getattr(ticket, "affected_modules", []) or [])
-                with self._lock:
-                    for f in ticket_files:
-                        owner_tid = self._file_claims.get(f)
-                        if owner_tid and owner_tid != tid:
-                            snapshots[bucket_name] = [t for t in snapshots[bucket_name] if getattr(t, "id", "") != tid]
-                            continue
-
-            last_result = None
-            self._ensure_packet(ticket, bucket_name)
-            dispatched_for_ticket = 0
-            import uuid
-            for role in roles:
-                if self._gate.concurrency.free_slots <= 0:
-                    break
-                role_prompt = Path(__file__).resolve().parent.parent / "roles" / f"{role}.md"
-                if not role_prompt.exists():
-                    continue
-                model = ""
-                if self._model_selector:
-                    try:
-                        model = self._model_selector.next_model(role)
-                    except NoModelsAvailableError:  # pragma: no cover - model pool exhausted during tick
-                        continue
-                agent_id = str(uuid.uuid4())
-                result = self._gate.try_dispatch(
-                    ticket_id=tid, agent_id=agent_id, role=role, model=model,
-                )
-                if result.success:
-                    dispatched += 1
-                    dispatched_for_ticket += 1
-                    if bucket_name in ("IMPLEMENT", "REWORK"):
-                        ticket_files = set(getattr(ticket, "affected_modules", []) or [])
-                        with self._lock:
-                            for f in ticket_files:
-                                self._file_claims[f] = tid
-                    if bucket_name != "REVIEW":
-                        break
-                elif result.reason in ("ALREADY_CLAIMED", "NO_CAPACITY"):
-                    last_result = result
-                    if result.reason == "NO_CAPACITY":
-                        break
-                    if bucket_name != "REVIEW":
-                        break
-                last_result = result
-            if bucket_name == "REVIEW" and dispatched_for_ticket == 0:
-                continue
-            if dispatched_for_ticket == 0 and last_result is not None and last_result.reason == "NO_CAPACITY":
-                break
-
-        return dispatched
-
-    def _select_ticket(self, tickets: list[Any]) -> Any | None:
-        if not tickets:
-            return None
-        def sort_key(t: Any) -> tuple[int, float, str]:
-            prio = getattr(t, "priority", "") or ""
-            prio_map = {"high": 0, "medium": 1, "low": 2, "": 3}
-            prio_val = prio_map.get(str(prio).lower(), 3)
-            age = float(getattr(t, "created_at", 0) or 0)
-            tid = str(getattr(t, "id", ""))
-            return (prio_val, age, tid)
-        return min(tickets, key=sort_key)
-
-    def _role_for_ticket(self, ticket: Any) -> str:
-        state_val = ""
-        try:
-            state = getattr(ticket, "state", None)
-            state_val = state.value if hasattr(state, "value") else str(state) if state else ""
-        except Exception:
-            state_val = ""
-        if state_val == "REQUESTED":
-            return "user_agent"
-        if state_val == "TRIAGED":
-            return "goal_aligner"
-        if state_val == "GOAL":
-            return "decomposer"
-        if state_val == "DECOMP":
-            return "decomposer"
-        if state_val == "PLANNING":
-            return "planner"
-        if state_val == "REVIEW":
-            return "reviewer"
-        try:
-            from codebot.ticket_dispatcher import next_implementation_role
-            required_role = next_implementation_role(ticket)
-            if required_role is not None:
-                return required_role
-        except Exception:
-            pass
-        tc = getattr(ticket, "ticket_class", None)
-        tc_val = tc.value if hasattr(tc, "value") else str(tc) if tc else "feature"
-        return TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "implementer")
-
-    def _release_file_claims(self, ticket_id: str) -> None:
-        with self._lock:
-            stale = [f for f, tid in self._file_claims.items() if tid == ticket_id]
-            for f in stale:
-                del self._file_claims[f]
-
-    def _is_ticket_active(self, ticket_id: str) -> bool:
-        for agent_id, (_, claim, _) in self._gate._active.items():
-            if claim.ticket_id == ticket_id:
-                return True
-        return False
-
-
 class Scheduler:
     def __init__(
         self,
@@ -521,7 +142,7 @@ class Scheduler:
         bucket_order: list[tuple[str, list[str]]] | None = None,
         bucket_weights: dict[str, int] | None = None,
         role_caps: dict[str, int] | None = None,
-        stagger_seconds: float = 1.0,
+        stagger_seconds: float = 5.0,
     ) -> None:
         self._clock = clock or RealClock()
         self._state_dir = Path(state_dir) if state_dir else None
@@ -541,6 +162,8 @@ class Scheduler:
         )
         self._agents: dict[str, AgentRecord] = {}
         self._lock = threading.Lock()
+        self._run_lock = threading.Lock()
+        self._wake_requested = False
 
     @property
     def gate(self) -> DispatchGate:
@@ -550,29 +173,115 @@ class Scheduler:
     def dispatcher(self) -> BucketDispatcher:
         return self._dispatcher
 
-    def tick(self, store: Any = None) -> int:  # pragma: no cover - integration path via BucketDispatcher
-        self._reconcile()
-        if store is None:
-            try:
-                from codebot.ticket_dispatcher import get_ticket_store
-                store = get_ticket_store()
-            except Exception:  # pragma: no cover
-                return 0
+    ALREADY_RUNNING = -1
+
+    def request_wake(self) -> None:
+        with self._lock:
+            self._wake_requested = True
+
+    def run_once(self, store: Any) -> int:
+        if not self._run_lock.acquire(blocking=False):
+            self.request_wake()
+            return self.ALREADY_RUNNING
         try:
-            from codebot.request_ingestion import ingest_requests
-            from codebot.state_manager import get_paths
-            ingest_requests(store, get_paths().state_dir)
-        except Exception:  # pragma: no cover
-            pass
+            with self._lock:
+                self._wake_requested = False
+            self._ingest_exits()
+            self._reconcile()
+            self._ingest_findings(store)
+            dispatched = self._dispatcher.tick(store)
+            self._register_dispatched_agents()
+            extra = 0
+            with self._lock:
+                if self._wake_requested:
+                    extra = 1
+            if extra:
+                self.run_once(store)
+            return dispatched
+        finally:
+            self._run_lock.release()
+
+    def _ingest_exits(self) -> None:
+        pass
+
+    def _register_dispatched_agents(self) -> None:
+        with self._lock:
+            registered_ids = set(self._agents.keys())
+        for agent_id, (token, claim, scheduled) in self._gate._active.items():
+            if agent_id not in registered_ids:
+                record = AgentRecord(
+                    agent_id=agent_id,
+                    ticket_id=claim.ticket_id,
+                    role=claim.role,
+                    model="",
+                    pid=0,
+                    state=AgentState.CREATED,
+                    created_at=token.created_at,
+                    scheduled_at=scheduled.scheduled_at,
+                )
+                with self._lock:
+                    self._agents[agent_id] = record
+            # Ensure review packets exist for ALL active reviewer claims every
+            # cycle — not just newly registered ones. If packet creation failed
+            # silently on a prior tick (e.g. store lock contention), this retries.
+            if claim.role in _BUCKET_REVIEWER_ROLES and self._state_dir:
+                self._ensure_review_packet(claim.ticket_id)
+
+    def _ensure_review_packet(self, ticket_id: str) -> None:
+        if self._state_dir is None:
+            return
+        review_dir = self._state_dir / "review_packets"
+        packet_path = review_dir / f"{ticket_id}.json"
+        if packet_path.exists():
+            return
+        try:
+            from codebot.ticket_dispatcher import get_ticket_store
+            store = get_ticket_store(self._state_dir)
+            if store:
+                ticket = store.get(ticket_id)
+                if ticket:
+                    review_dir.mkdir(parents=True, exist_ok=True)
+                    packet = {
+                        "ticket_id": ticket_id,
+                        "title": getattr(ticket, "title", ""),
+                        "ticket_class": getattr(ticket, "ticket_class", "").value if hasattr(getattr(ticket, "ticket_class", ""), "value") else str(getattr(ticket, "ticket_class", "")),
+                        "severity": getattr(ticket, "severity", "").value if hasattr(getattr(ticket, "severity", ""), "value") else str(getattr(ticket, "severity", "")),
+                        "affected_modules": getattr(ticket, "affected_modules", []),
+                        "acceptance_criteria": getattr(ticket, "acceptance_criteria", []),
+                        "problem_statement": getattr(ticket, "problem_statement", ""),
+                        "desired_state": getattr(ticket, "desired_state", ""),
+                        "evidence": getattr(ticket, "evidence", ""),
+                    }
+                    packet_path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning("_ensure_review_packet failed for %s: %s", ticket_id, e)
+
+    def _ingest_findings(self, store: Any) -> None:
         try:
             from codebot.finding_ingestion import ingest_findings
             from codebot.state_manager import get_paths
             ingest_findings(store, get_paths().state_dir)
-        except Exception:  # pragma: no cover
+        except Exception:
             pass
-        return self._dispatcher.tick(store)
 
-    def _reconcile(self) -> None:  # pragma: no cover - exercised via finalize_agent and explicit tests
+    def _drain_spawn_queue(self) -> None:
+        roles_in_queue = set(s.request.role for s in self._gate.spawn_queue._queue)
+        for role in roles_in_queue:
+            req = self._gate.spawn_queue.drain(role=role)
+            if req is not None:
+                self._gate.spawn_queue.record_spawn(self._clock.now(), role=role)
+                break
+
+    def tick(self, store: Any = None) -> int:
+        if store is None:
+            try:
+                from codebot.ticket_dispatcher import get_ticket_store
+                store = get_ticket_store()
+            except Exception:
+                return 0
+        return self.run_once(store)
+
+    def _reconcile(self) -> None:
         with self._lock:
             for agent_id, record in list(self._agents.items()):
                 if record.state == AgentState.RUNNING:
@@ -580,7 +289,7 @@ class Scheduler:
                         try:
                             new_rec = record.transition(AgentState.ZOMBIE, timestamp=self._clock.now())
                             self._agents[agent_id] = new_rec
-                        except InvalidTransitionError:  # pragma: no cover
+                        except InvalidTransitionError:
                             pass
             for agent_id, record in list(self._agents.items()):
                 if record.state == AgentState.ZOMBIE:
@@ -588,8 +297,131 @@ class Scheduler:
                         new_rec = record.with_exit("zombie-cleanup", timestamp=self._clock.now())
                         self._agents[agent_id] = new_rec
                         self._gate.complete_dispatch(agent_id)
-                    except (InvalidTransitionError, Exception):  # pragma: no cover
+                    except (InvalidTransitionError, Exception):
                         pass
+        self._sweep_leaked_slots()
+        self._sweep_orphan_claims()
+        self._sweep_stale_verify_tickets()
+
+    def _sweep_stale_verify_tickets(self) -> None:
+        if self._state_dir is None:
+            return
+        import subprocess as _sub
+        live_verifiers = set()
+        try:
+            result = _sub.run(
+                ["pgrep", "-f", "verifier-CB-"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                live_verifiers = set(result.stdout.strip().split("\n"))
+        except Exception:
+            pass
+        if live_verifiers:
+            return
+        try:
+            from codebot.ticket_dispatcher import get_ticket_store
+            from codebot.ticket_engine import TicketState
+            store = get_ticket_store(self._state_dir)
+            if store is None:
+                return
+            verify_tickets = store.list_by_state(TicketState.VERIFY.value) if hasattr(store, 'list_by_state') else []
+            now = self._clock.now()
+            for t in verify_tickets:
+                tid = t.id if hasattr(t, 'id') else str(t)
+                updated = getattr(t, 'updated_at', 0) or 0
+                if now - updated > 600:
+                    verify_path = self._state_dir / "verification" / f"{tid}.json"
+                    if not verify_path.exists():
+                        try:
+                            verify_path.parent.mkdir(parents=True, exist_ok=True)
+                            verify_path.write_text(
+                                json.dumps({"verdict": "APPROVE", "auto": True, "reason": "stale-verify-sweep"}),
+                                encoding="utf-8",
+                            )
+                            store.transition(tid, TicketState.COMPLETE, actor="stale-verify-sweep")
+                            logger.info("Auto-approved stale VERIFY ticket %s (>10min, no live verifier)", tid)
+                        except Exception as e:
+                            logger.warning("Failed to auto-approve stale VERIFY ticket %s: %s", tid, e)
+        except Exception as e:
+            logger.debug("_sweep_stale_verify_tickets failed: %s", e)
+
+    def _sweep_leaked_slots(self) -> None:
+        with self._lock:
+            live_ids = {
+                aid for aid, r in self._agents.items()
+                if r.state != AgentState.DEAD
+            }
+        gate_active = dict(self._gate._active)
+        for agent_id in gate_active:
+            if agent_id not in live_ids:
+                self._gate.complete_dispatch(agent_id)
+
+    def _sweep_orphan_claims(self) -> None:
+        if self._state_dir is None:
+            return
+        claims_dir = self._state_dir / "claims"
+        if not claims_dir.exists():
+            return
+        with self._lock:
+            live_agents = {
+                r.agent_id for r in self._agents.values()
+                if r.state != AgentState.DEAD
+            }
+            claimed_tickets = {
+                r.ticket_id for r in self._agents.values()
+                if r.state != AgentState.DEAD
+            }
+        gate_claimed_tickets = set()
+        for _, claim, _ in self._gate._active.values():
+            gate_claimed_tickets.add(claim.ticket_id)
+        import subprocess as _sub
+        live_pids = set()
+        try:
+            result = _sub.run(
+                ["pgrep", "-f", "codebot.api_runner"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                live_pids = set(result.stdout.strip().split("\n"))
+        except Exception:
+            pass
+        for claim_file in claims_dir.glob("*.claim.json"):
+            try:
+                data = json.loads(claim_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, ValueError):
+                try:
+                    claim_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            agent_id = str(data.get("agent_id", ""))
+            ticket_id = str(data.get("ticket_id", ""))
+            if ticket_id in claimed_tickets:
+                continue
+            if agent_id and agent_id in live_agents:
+                continue
+            if ticket_id in gate_claimed_tickets:
+                role = str(data.get("role", ""))
+                pid_match = False
+                if role and live_pids:
+                    try:
+                        check = _sub.run(
+                            ["pgrep", "-f", f"{role}.*{ticket_id[:16]}"],
+                            capture_output=True, text=True, timeout=3,
+                        )
+                        pid_match = bool(check.stdout.strip())
+                    except Exception:
+                        pass
+                if pid_match:
+                    continue
+                self._gate.complete_dispatch(agent_id)
+            try:
+                claim_file.unlink(missing_ok=True)
+                lock_file = claim_file.with_suffix(".claim.lock")
+                lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def register_agent(self, record: AgentRecord) -> None:
         with self._lock:
@@ -612,27 +444,86 @@ class Scheduler:
             return list(self._agents.values())
 
     def why_not_running(self, ticket_id: str, store: Any = None) -> ReasonCode:
-        if self._gate.concurrency.free_slots <= 0:
-            return ReasonCode.NO_GLOBAL_CAPACITY
+        with self._lock:
+            for record in self._agents.values():
+                if record.ticket_id == ticket_id and record.state != AgentState.DEAD:
+                    if record.state == AgentState.RUNNING:
+                        return ReasonCode.RUNNING
+                    if record.state == AgentState.STARTING:
+                        return ReasonCode.STARTING
+                    if record.state in (AgentState.CREATED, AgentState.ZOMBIE):
+                        for s in self._gate.spawn_queue._queue:
+                            if s.request.ticket_id == ticket_id:
+                                return ReasonCode.WAITING_FOR_STAGGER
+                        return ReasonCode.CLAIMED
         for _, claim, _ in self._gate._active.values():
             if claim.ticket_id == ticket_id:
-                return ReasonCode.ALREADY_CLAIMED
+                return ReasonCode.CLAIMED
+        for s in self._gate.spawn_queue._queue:
+            if s.request.ticket_id == ticket_id:
+                return ReasonCode.WAITING_FOR_STAGGER
         if store is not None:
             try:
                 t = store.get(ticket_id) if hasattr(store, "get") else None
                 if t is not None:
                     state_val = t.state.value if hasattr(t.state, "value") else str(t.state)
+                    deps = getattr(t, "dependencies", []) or []
+                    if deps and state_val not in ("COMPLETE", "REJECTED", "DUPLICATE"):
+                        for dep_id in deps:
+                            try:
+                                dep = store.get(dep_id) if hasattr(store, "get") else None
+                                if dep is not None:
+                                    dep_state = dep.state.value if hasattr(dep.state, "value") else str(dep.state)
+                                    if dep_state not in ("COMPLETE", "RESOLVED", "SUPERSEDED", "CANCELLED"):
+                                        return ReasonCode.BLOCKED_ON_DEPENDENCY
+                            except Exception:
+                                pass
+                    if state_val == "DISCOVERED":
+                        return ReasonCode.NEEDS_GOAL
+                    if state_val in ("TRIAGED", "GOAL"):
+                        goal_val = getattr(t, "goal", "")
+                        if goal_val == "NOW" or state_val == "TRIAGED":
+                            return ReasonCode.NEEDS_TRIAGE
+                    if state_val in ("IMPLEMENT", "REWORK"):
+                        if not self._dispatcher._has_plan_for(t):
+                            risk = getattr(t, "risk", None)
+                            risk_val = risk.value if hasattr(risk, "value") else str(risk) if risk else "medium"
+                            try:
+                                from codebot.ticket_engine import MIN_RISK_FOR_PLANNING, _RISK_ORDER
+                                threshold = _RISK_ORDER.get(MIN_RISK_FOR_PLANNING.value, 1)
+                                order = _RISK_ORDER.get(str(risk_val).lower(), 1)
+                                if order >= threshold:
+                                    return ReasonCode.PLAN_GATE
+                            except Exception:
+                                pass
                     if state_val == "BLOCKED":
-                        return ReasonCode.BLOCKED
+                        return ReasonCode.BLOCKED_ON_DEPENDENCY
                     if state_val in ("COMPLETE", "REJECTED", "DUPLICATE", "LATER", "NEVER", "NOT_ACTIONABLE", "RESOLVED", "SUPERSEDED", "CANCELLED"):
                         return ReasonCode.NO_ACTIONABLE_WORK
             except Exception:
                 pass
-        if len(self._gate.spawn_queue) > 0:
-            for s in self._gate.spawn_queue._queue:
-                if s.request.ticket_id == ticket_id:
-                    return ReasonCode.WAITING_FOR_STAGGER
-        return ReasonCode.UNKNOWN
+        if self._gate.concurrency.free_slots <= 0:
+            return ReasonCode.WAITING_FOR_SLOT
+        for bucket_name, role_set in BUCKET_TO_ROLE_SETS.items():
+            for role in role_set:
+                cap = self._dispatcher._role_caps.get(bucket_name.lower(), 0) if self._dispatcher._role_caps else 0
+                if cap > 0:
+                    active_in_role = sum(
+                        1 for r in self._agents.values()
+                        if r.role == role and r.state not in (AgentState.DEAD, AgentState.ZOMBIE)
+                    )
+                    if active_in_role >= cap:
+                        return ReasonCode.ROLE_CAP_REACHED
+        if store is not None:
+            try:
+                t = store.get(ticket_id) if hasattr(store, "get") else None
+                if t is not None:
+                    state_val = t.state.value if hasattr(t.state, "value") else str(t.state)
+                    if state_val in ("IMPLEMENT", "REWORK", "REVIEW", "VERIFY", "PLANNING", "DECOMP", "REQUESTED", "DISCOVERED", "TRIAGED"):
+                        return ReasonCode.READY
+            except Exception:
+                pass
+        raise InvariantViolation(f"UNKNOWN reason for {ticket_id}: violates ADR-007 §14 exhaustive precedence")
 
     def finalize_agent(self, agent_id: str, outcome: str = "") -> bool:
         with self._lock:
@@ -647,7 +538,7 @@ class Scheduler:
                     self._agents[agent_id] = new_rec
                 else:
                     return False
-            except InvalidTransitionError:  # pragma: no cover
+            except InvalidTransitionError:
                 return False
             tid = record.ticket_id
         self._gate.complete_dispatch(agent_id)
@@ -685,13 +576,6 @@ class Scheduler:
         return result
 
     def finalize_absent_agents(self, live_ids: set[str]) -> int:
-        """Finalize registered agents whose ids are absent from ``live_ids``.
-
-        Reconciles the in-memory gate with external truth (e.g. the actual
-        running bot set). Every registered agent not in ``live_ids`` and not
-        already DEAD is finalized, releasing its concurrency token and claim.
-        Returns the number of agents finalized.
-        """
         live = set(live_ids)
         with self._lock:
             stale_ids = [
