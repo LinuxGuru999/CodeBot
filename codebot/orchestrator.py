@@ -16,6 +16,7 @@ should always use ``get_paths()`` or the adapter/config object.
 """
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import sys

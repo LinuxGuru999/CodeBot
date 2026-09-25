@@ -325,7 +325,7 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
     This prevents DNS rebinding by ensuring the TCP connection is made
     to the exact IP address validated earlier, bypassing any further DNS lookups.
     """
-    def __init__(self, host: str, port: int = 80, timeout: float = 15,
+    def __init__(self, host: str, port: int | None = None, timeout: float = 15,
                  source_address: tuple[str, int] | None = None,
                  pinned_ip: str | None = None):
         super().__init__(host, port, timeout, source_address)
@@ -354,7 +354,7 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """HTTPSConnection that connects to a pre-resolved IP address."""
-    def __init__(self, host: str, port: int = 443, timeout: float = 15,
+    def __init__(self, host: str, port: int | None = None, timeout: float = 15,
                  source_address: tuple[str, int] | None = None,
                  pinned_ip: str | None = None,
                  context: ssl.SSLContext | None = None):

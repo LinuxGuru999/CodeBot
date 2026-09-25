@@ -22,7 +22,7 @@ REVERT_LOG = Path("/home/kozuka/Work/CodeBot/.codebot/state/auto_revert_log.json
 FAIL_RE = re.compile(r"^FAIL\s+(.+)$", re.IGNORECASE)
 FILE_RE = re.compile(r"([\w./-]+\.[a-zA-Z0-9]+)")
 
-BOT_PATTERNS = ["bot", "sisyphus", "linuxguru999"]
+BOT_PATTERNS = ["bot", "codebot", "linuxguru999"]
 
 
 def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> tuple[int, str]:
@@ -78,7 +78,7 @@ def _last_bot_commit(repo: Path, file: str) -> str | None:
     """Get the last commit SHA for a file authored by a bot."""
     # This function is mocked in tests, but implementation would use git log
     # For now, we rely on the mock in tests. Real impl would be:
-    # code, out = _run(["git", "log", "-1", "--format=%H", "--author=bot|sisyphus|linuxguru999", "--", file], cwd=repo)
+    # code, out = _run(["git", "log", "-1", "--format=%H", "--author=bot|codebot|linuxguru999", "--", file], cwd=repo)
     # But since tests mock _run, we just need the signature.
     # The actual logic for _last_bot_commit is tested via mocking _run.
     # We'll implement a placeholder that relies on _run being mocked or implemented.
