@@ -45,6 +45,7 @@ from codebot.model_manager import model_profile, ModelProfile, MODEL_PROFILES
 from codebot.state_manager import get_paths
 from codebot.scheduler_config import MAX_CONCURRENT_AGENTS
 from codebot.dispatch_service import batch_read_bot_states
+from codebot.ticket_dispatcher import REVIEWER_ROLE_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -407,8 +408,7 @@ class DefaultPromptGateway:
 
     @property
     def max_concurrent(self) -> int:
-        import codebot.prompt_gateway as _pg
-        return _pg.MAX_CONCURRENT
+        return MAX_CONCURRENT_AGENTS
 
 
 _prompt_gateway_instance: Optional[PromptGatewayProtocol] = None
@@ -440,8 +440,6 @@ def clear_prompt_gateway() -> None:
 
 # Backward-compatible aliases delegating to gateway when available,
 # falling back to env vars. Kept for external callers (orchestrator, health_check).
-GATEWAY_MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", str(MAX_CONCURRENT_AGENTS)))
-
 # Process count cache with TTL to avoid repeated pgrep calls
 _PROCESS_COUNT_TTL: float = 5.0
 _cached_process_count: int | None = None
@@ -508,9 +506,9 @@ def _spawn_gate(bots: dict[str, BotState] | None = None, is_queued: bool = False
                 runner_mode: str = "api", bot_model: str = "", bot_name: str = "",
                 is_overture: bool = False, is_demand: bool = False) -> tuple[bool, str]:
     v2_active = _v2_active_count()
-    cap = GATEWAY_MAX_CONCURRENT
+    cap = MAX_CONCURRENT_AGENTS
     if is_demand or is_overture:
-        cap = GATEWAY_MAX_CONCURRENT + 2
+        cap = MAX_CONCURRENT_AGENTS + 2
     if v2_active >= cap:
         return False, f"cap {v2_active}/{cap} (v2)"
     return True, "slot available"
@@ -786,6 +784,35 @@ def _prepare_prompt_with_context(bot: BotState, extra_block: str = "") -> str:
     prompt_text = ""
     using_variant = False
 
+    def _load_ticket_context_safe(tid: str) -> str:
+        try:
+            from codebot.ticket_dispatcher import get_ticket_store
+            store = get_ticket_store()
+            if store:
+                t = store.get(tid)
+                if t:
+                    parts = []
+                    title = getattr(t, 'title', '')
+                    if title: parts.append(f'Title: {title}')
+                    tc = getattr(t, 'ticket_class', '')
+                    if tc: parts.append(f'Class: {tc.value if hasattr(tc, "value") else tc}')
+                    sev = getattr(t, 'severity', '')
+                    if sev: parts.append(f'Severity: {sev.value if hasattr(sev, "value") else sev}')
+                    ps = getattr(t, 'problem_statement', '')
+                    if ps: parts.append(f'Problem: {ps[:500]}')
+                    ds = getattr(t, 'desired_state', '')
+                    if ds: parts.append(f'Desired State: {ds[:500]}')
+                    ac = getattr(t, 'acceptance_criteria', [])
+                    if ac: parts.append(f'Acceptance Criteria: {"; ".join(ac[:5])}')
+                    am = getattr(t, 'affected_modules', [])
+                    if am: parts.append(f'Affected Modules: {", ".join(am[:10])}')
+                    ev = getattr(t, 'evidence', '')
+                    if ev: parts.append(f'Evidence: {ev[:500]}')
+                    return '\n'.join(parts)
+        except Exception:
+            pass
+        return ''
+
     # Step 1: Choose base prompt — tournament variant or canonical
     try:
         from codebot.rl_tournament import load_state, get_variant_prompt_path, assign_ticket_to_variant
@@ -813,7 +840,6 @@ def _prepare_prompt_with_context(bot: BotState, extra_block: str = "") -> str:
         prompt_path = _resolve_bots_dir() / bot.config.prompt_file
         try:
             with _prompt_read_lock(prompt_path):
-                # Use st_mtime_ns (integer nanoseconds) for consistency with config_reloader
                 mtime_ns = prompt_path.stat().st_mtime_ns
                 bot.prompt_mtime = mtime_ns
                 bot.last_prompt_mtime = mtime_ns
@@ -829,16 +855,61 @@ def _prepare_prompt_with_context(bot: BotState, extra_block: str = "") -> str:
             bot.last_prompt_mtime = 0
             return ""
 
+    state_dir = str(_resolve_state_dir())
+    project_root = str(_resolve_bots_dir())
+    bot_suffix = bot.config.name.split("-", 1)[1] if "-" in bot.config.name else bot.config.name
+    prompt_text = prompt_text.replace("{BOT_NAME}", bot.config.name)
+    prompt_text = prompt_text.replace("{BOT_SUFFIX}", bot_suffix)
+    prompt_text = prompt_text.replace("{TICKET_ID}", assigned_tid)
+    prompt_text = prompt_text.replace("{TICKET_ID}", assigned_tid)
+    prompt_text = prompt_text.replace("{STATE_DIR}", state_dir)
+    prompt_text = prompt_text.replace("{PROJECT_ROOT}", project_root)
+
     logger.info(f"start_bot '{bot.config.name}': assigned_tid='{assigned_tid}', prompt={len(prompt_text)} chars, variant={using_variant}")
 
     # Step 2: Add ticket context
     if assigned_tid:
-        ticket_ctx = _load_ticket_context(assigned_tid)
-        if ticket_ctx:
-            prompt_text = f"{prompt_text}\n\n{ticket_ctx}"
-            logger.info(f"Injected ticket context for {bot.config.name}: {assigned_tid} ({len(ticket_ctx)} chars)")
+        try:
+            ticket_ctx = _load_ticket_context_safe(assigned_tid)
+            if ticket_ctx:
+                prompt_text = f"{prompt_text}\n\n{ticket_ctx}"
+                logger.info(f"Injected ticket context for {bot.config.name}: {assigned_tid} ({len(ticket_ctx)} chars)")
+        except Exception:
+            logger.debug(f"Ticket context injection failed for {bot.config.name}: {assigned_tid}")
+
+    # Step 2b: For reviewer roles, inline the review packet directly into the prompt
+    if assigned_tid and base_role in REVIEWER_ROLE_NAMES:
+        review_packet_path = _resolve_state_dir() / "review_packets" / f"{assigned_tid}.json"
+        if review_packet_path.exists():
+            try:
+                packet_content = review_packet_path.read_text(encoding="utf-8")
+                prompt_text = f"{prompt_text}\n\n--- REVIEW PACKET ---\n{packet_content}\n--- END REVIEW PACKET ---"
+                logger.info(f"Injected review packet for {bot.config.name}: {assigned_tid}")
+            except OSError:
+                pass
         else:
-            logger.warning(f"No ticket context found for {bot.config.name}: {assigned_tid}")
+            try:
+                from codebot.ticket_dispatcher import get_ticket_store
+                store = get_ticket_store()
+                if store:
+                    ticket = store.get(assigned_tid)
+                    if ticket:
+                        import json as _json
+                        synthetic_packet = _json.dumps({
+                            "ticket_id": assigned_tid,
+                            "title": getattr(ticket, "title", ""),
+                            "ticket_class": getattr(ticket, "ticket_class", "").value if hasattr(getattr(ticket, "ticket_class", ""), "value") else str(getattr(ticket, "ticket_class", "")),
+                            "severity": getattr(ticket, "severity", "").value if hasattr(getattr(ticket, "severity", ""), "value") else str(getattr(ticket, "severity", "")),
+                            "affected_modules": getattr(ticket, "affected_modules", []),
+                            "acceptance_criteria": getattr(ticket, "acceptance_criteria", []),
+                            "problem_statement": getattr(ticket, "problem_statement", ""),
+                            "desired_state": getattr(ticket, "desired_state", ""),
+                            "evidence": getattr(ticket, "evidence", ""),
+                        }, indent=2)
+                        prompt_text = f"{prompt_text}\n\n--- REVIEW PACKET ---\n{synthetic_packet}\n--- END REVIEW PACKET ---"
+                        logger.info(f"Generated synthetic review packet for {bot.config.name}: {assigned_tid}")
+            except Exception as e:
+                logger.debug(f"Could not generate synthetic review packet: {e}")
 
     # Step 3: Add scratchpad handoff
     try:

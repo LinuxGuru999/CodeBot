@@ -36,6 +36,7 @@ from codebot.ticket_dispatcher import (
     IMPLEMENTER_ROLE_NAMES,
     DISCOVERY_ROLE_NAMES,
     REVIEWER_ROLE_NAMES,
+    is_implementer_role,
 )
 from codebot.role_registry import (
     CONTROL_ROLE_NAMES,
@@ -105,7 +106,7 @@ def is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
         return decomp > 0 or goal > 0
     if base_name in PLANNING_ROLE_NAMES:
         return planning > 0
-    if base_name in IMPLEMENTER_ROLE_NAMES:
+    if is_implementer_role(base_name):
         return implement > 0
     if base_name in REVIEWER_ROLE_NAMES or base_name == "ux_reviewer":
         return review > 0
@@ -153,7 +154,7 @@ def apply_agent_availability(bots: dict[str, Any], stop_fn: Any = None, update_s
             should_enable = decomp > 0 or goal > 0
         elif base_name in PLANNING_ROLE_NAMES:
             should_enable = planning > 0
-        elif base_name in IMPLEMENTER_ROLE_NAMES:
+        elif is_implementer_role(base_name):
             should_enable = implement > 0
         elif base_name in REVIEWER_ROLE_NAMES or base_name == "ux_reviewer":
             should_enable = review > 0
@@ -254,6 +255,13 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                 for cf in list(claims_dir.glob(f"{bot.config.name}*.json")) + list(claims_dir.glob("*.claim.json")) + list(claims_dir.glob(f"*.{bot.config.name}.claim.json")):
                     try:
                         data = json.loads(cf.read_text(encoding="utf-8"))
+                        
+                        # Validate schema before processing
+                        from codebot.ticket_dispatcher import _validate_claim_schema
+                        if not _validate_claim_schema(data, cf):
+                            logger.warning("Skipping malformed claim file %s", cf)
+                            continue
+                        
                         tid = data.get("ticket_id", data.get("ticket", "")) or cf.name.split(".")[0]
                         agent = str(data.get("agent_id", data.get("worker", data.get("bot", ""))))
                         role = str(data.get("role", ""))
@@ -269,6 +277,13 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                     for cf in claims_dir.glob(f"*.{bot.config.name}.json"):
                         try:
                             data = json.loads(cf.read_text(encoding="utf-8"))
+                            
+                            # Validate schema before processing
+                            from codebot.ticket_dispatcher import _validate_claim_schema
+                            if not _validate_claim_schema(data, cf):
+                                logger.warning("Skipping malformed claim file %s", cf)
+                                continue
+                            
                             tid = data.get("ticket_id", data.get("ticket", ""))
                             if tid:
                                 assigned_tid = tid
@@ -296,14 +311,52 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
             if t is not None:
                 if base_role in REVIEWER_ROLE_NAMES:
                     clear_reviewer_failures(assigned_tid)
-                    logger.info(f"Reviewer {bot.config.name} completed for ticket {assigned_tid} (verdict evaluation deferred to advance_reviewed_tickets)")
+                    logger.info(f"Reviewer {bot.config.name} completed for ticket {assigned_tid}")
+                    if t.state == TicketState.REVIEW:
+                        try:
+                            ts.transition(assigned_tid, TicketState.VERIFY, actor=bot.config.name)
+                            logger.info(f"Ticket {assigned_tid} -> VERIFY (reviewer {bot.config.name} approved)")
+                        except ValueError as ve:
+                            logger.warning(f"Review->Verify transition failed for {assigned_tid}: {ve}")
+                        except Exception as e:
+                            logger.warning(f"Review->Verify transition error for {assigned_tid}: {e}")
+                elif base_role == "verifier":
+                    verdict_path = STATE_DIR / "verification" / f"{assigned_tid}.json"
+                    verdict = "APPROVE"
+                    try:
+                        if verdict_path.exists():
+                            vdata = json.loads(verdict_path.read_text(encoding="utf-8"))
+                            verdict = str(vdata.get("verdict", vdata.get("decision", "APPROVE"))).upper()
+                    except (json.JSONDecodeError, OSError, ValueError):
+                        pass
+                    if t.state == TicketState.VERIFY:
+                        target = TicketState.COMPLETE if verdict == "APPROVE" else TicketState.REWORK
+                        try:
+                            ts.transition(assigned_tid, target, actor=bot.config.name)
+                            logger.info(f"Ticket {assigned_tid} -> {target.value} (verifier {bot.config.name} verdict={verdict})")
+                        except ValueError as ve:
+                            logger.warning(f"Verify transition failed for {assigned_tid}: {ve}")
+                        except Exception as e:
+                            logger.warning(f"Verify transition error for {assigned_tid}: {e}")
                 elif base_role == "ticket_triager":
-                    status_path = STATE_DIR / "ticket_triager.status.json"
+                    status_path = STATE_DIR / f"{bot.config.name}.status.json"
+                    progress_path = STATE_DIR / f"{bot.config.name}.progress.json"
+                    if not status_path.exists() and progress_path.exists():
+                        status_path = progress_path
+                    if not status_path.exists():
+                        status_path = STATE_DIR / "ticket_triager.status.json"
                     triage_decision = "TRIAGED"
                     try:
                         if status_path.exists():
                             raw = status_path.read_text(encoding="utf-8")
-                            data = json.loads(raw)
+                            try:
+                                data = json.loads(raw)
+                            except (json.JSONDecodeError, ValueError):
+                                import ast as _ast
+                                try:
+                                    data = _ast.literal_eval(raw.strip())
+                                except (ValueError, SyntaxError):
+                                    data = None
                             if isinstance(data, dict):
                                 for entry in data.get("triaged", []):
                                     if isinstance(entry, dict) and entry.get("ticket_id") == assigned_tid:
@@ -328,9 +381,6 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                             logger.info(f"Ticket {assigned_tid} -> {target.value} (triager {bot.config.name} completed)")
                         except ValueError as ve:
                             logger.warning(f"Triage transition failed for {assigned_tid}: {ve}")
-                    elif t.state == TicketState.TRIAGED:
-                        ts.transition(assigned_tid, TicketState.GOAL, actor=bot.config.name)
-                        logger.info(f"Ticket {assigned_tid} -> GOAL (triager {bot.config.name} confirmed)")
                 elif base_role in PLANNING_ROLE_NAMES:
                     if t.state == TicketState.PLANNING:
                         try:
@@ -340,8 +390,23 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                             logger.warning(f"Plan gate blocked PLANNING->IMPLEMENT for {assigned_tid}: {ve}")
                         except Exception as e:
                             logger.warning(f"PLANNING transition failed for {assigned_tid}: {e}")
-                elif base_role in IMPLEMENTER_ROLE_NAMES:
+                elif is_implementer_role(base_role):
                     if t.state == TicketState.IMPLEMENT:
+                        status_data = None
+                        for _sfx in (".progress.json", ".status.json"):
+                            _sp = STATE_DIR / f"{bot.config.name}{_sfx}"
+                            if _sp.exists():
+                                try:
+                                    status_data = json.loads(_sp.read_text(encoding="utf-8"))
+                                    break
+                                except (json.JSONDecodeError, OSError):
+                                    pass
+                        _iters = float(status_data.get("iteration", 0)) if isinstance(status_data, dict) else 0
+                        _files = len(status_data.get("files_touched", [])) if isinstance(status_data, dict) else 0
+                        if _iters < 2 and _files == 0:
+                            logger.info(f"Implementer {bot.config.name} exited with no work ({_iters} iters, {_files} files) for {assigned_tid} — skipping approval")
+                            bot._assigned_ticket_id = ''
+                            return
                         approvals = list(getattr(t, "implementation_approvals", []) or [])
                         if base_role not in approvals:
                             approvals.append(base_role)
@@ -349,6 +414,29 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                         if updated is None:
                             logger.warning(f"Ticket {assigned_tid} not found when recording {base_role} approval")
                         elif next_implementation_role(updated) is None:
+                            try:
+                                review_dir = STATE_DIR / "review_packets"
+                                review_dir.mkdir(parents=True, exist_ok=True)
+                                packet_path = review_dir / f"{assigned_tid}.json"
+                                if not packet_path.exists():
+                                    import json as _json
+                                    packet = {
+                                        "ticket_id": assigned_tid,
+                                        "title": getattr(t, "title", ""),
+                                        "ticket_class": getattr(t, "ticket_class", "").value if hasattr(getattr(t, "ticket_class", ""), "value") else str(getattr(t, "ticket_class", "")),
+                                        "severity": getattr(t, "severity", "").value if hasattr(getattr(t, "severity", ""), "value") else str(getattr(t, "severity", "")),
+                                        "affected_modules": getattr(t, "affected_modules", []),
+                                        "acceptance_criteria": getattr(t, "acceptance_criteria", []),
+                                        "problem_statement": getattr(t, "problem_statement", ""),
+                                        "desired_state": getattr(t, "desired_state", ""),
+                                        "evidence": getattr(t, "evidence", ""),
+                                        "implementer": bot.config.name,
+                                        "created_at": time.time(),
+                                    }
+                                    packet_path.write_text(_json.dumps(packet, indent=2), encoding="utf-8")
+                                    logger.info(f"Created review packet for {assigned_tid}")
+                            except Exception as e:
+                                logger.warning(f"Failed to create review packet for {assigned_tid}: {e}")
                             ts.transition(assigned_tid, TicketState.REVIEW, actor=bot.config.name)
                             logger.info(f"Ticket {assigned_tid} -> REVIEW (final implementer {bot.config.name} completed)")
                         else:
@@ -391,6 +479,13 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                     removed = False
                     try:
                         data = json.loads(cf.read_text(encoding="utf-8"))
+                        
+                        # Validate schema before processing
+                        from codebot.ticket_dispatcher import _validate_claim_schema
+                        if not _validate_claim_schema(data, cf):
+                            logger.warning("Skipping malformed claim file %s", cf)
+                            continue
+                        
                         claim_bot = data.get("bot", data.get("worker", data.get("agent", "")))
                         if claim_bot == bot.config.name:
                             cf.unlink(missing_ok=True)
@@ -399,12 +494,7 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
                         cf.unlink(missing_ok=True)
                         removed = True
                     if removed:
-                        try:
-                            from codebot.ticket_dispatcher import release_claim
-
-                            release_claim(claim_name)
-                        except (ImportError, ValueError, KeyError):
-                            pass
+                        pass
     except Exception as te:
         logger.warning(f"Ticket transition failed for {assigned_tid}: {te}")
     
@@ -414,7 +504,7 @@ def transition_ticket_on_success(bot: Any, bots: dict[str, Any], store: Any | No
 def record_workforce_completion(bot: Any, completed_at: float | None = None) -> None:
     """Record a clean engineering-worker duration for the next allocation tick."""
     base_role = bot.config.name.split("-", 1)[0]
-    if base_role in IMPLEMENTER_ROLE_NAMES:
+    if is_implementer_role(base_role):
         stage = "implementation"
     elif base_role in REVIEWER_ROLE_NAMES or base_role == "ux_reviewer":
         stage = "review"
@@ -551,7 +641,7 @@ def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int, s
             else:
                 logger.warning(f"Reviewer '{bot.config.name}' errored (exit {exit_code}) for {assigned_tid}; failure {failures.get('count')}/{REVIEWER_FAILURE_LIMIT}")
         elif current_state == TicketState.IMPLEMENT:
-            if exit_code == 3 and base_role in IMPLEMENTER_ROLE_NAMES:
+            if exit_code == 3 and is_implementer_role(base_role):
                 logger.info(f"Implementer '{bot.config.name}' hit 429 rate limit for {assigned_tid} — leaving in IMPLEMENT for transient retry")
             else:
                 ts.transition(assigned_tid, TicketState.REWORK, actor=bot.config.name)
@@ -582,15 +672,8 @@ def transition_ticket_on_error(bot: Any, bots: dict[str, Any], exit_code: int, s
     if claims_dir.exists():
         for cf in claims_dir.glob(f"{assigned_tid}.*.json"):
             try:
-                claim_name = cf.name
                 cf.unlink()
             except OSError:
-                claim_name = cf.name
-            try:
-                from codebot.ticket_dispatcher import release_claim
-
-                release_claim(claim_name)
-            except (ImportError, ValueError, KeyError):
                 pass
 
 
@@ -781,54 +864,5 @@ def dispatch_ready_tickets(
     update_state_fn: Any = None,
     store: Any = None,
 ) -> None:
-    """Sequence routing logic directly without delegating to external orchestrator-like modules.
-    
-    This function implements the core dispatch sequencing inline, adhering to the
-    thin-router/fat-service invariant (Constitution §4). It avoids indirect delegation
-    to scheduler_v2 or workforce_dispatch to prevent circular architectural dependencies.
-    
-    Routing sequence:
-    1. Process rework/stalled tickets first to free capacity
-    2. Advance reviewed tickets to transition out of REVIEW state
-    3. Spawn demand agents for IMPLEMENT and REVIEW stages
-    """
-    # Resolve store if not provided
-    if store is None:
-        try:
-            from codebot.ticket_dispatcher import get_ticket_store
-            store = get_ticket_store()
-        except Exception:
-            store = None
-    
-    if store is None:
-        logger.debug("No store available for dispatch; skipping.")
-        return
-    
-    # 1. Process rework/stalled tickets first
-    try:
-        from codebot.ticket_dispatcher import process_rework_tickets
-        process_rework_tickets(bots, store=store)
-    except Exception as e:
-        logger.warning(f"process_rework_tickets failed: {e}")
-    
-    # 2. Advance reviewed tickets (transition REVIEW -> COMPLETE/REWORK/etc)
-    try:
-        from codebot.ticket_dispatcher import advance_reviewed_tickets
-        advance_reviewed_tickets(bots, store=store)
-    except Exception as e:
-        logger.warning(f"advance_reviewed_tickets failed: {e}")
-    
-    # 3. Spawn demand agents for IMPLEMENT and REVIEW stages
-    try:
-        from codebot.ticket_dispatcher import spawn_demand_agents
-        from codebot.process_manager import GATEWAY_MAX_CONCURRENT
-        spawned = spawn_demand_agents(
-            bots=bots,
-            max_concurrent=GATEWAY_MAX_CONCURRENT,
-            start_bot_fn=start_bot_fn,
-            store=store,
-        )
-        if spawned:
-            logger.info(f"Dispatch spawned {spawned} agents")
-    except Exception as e:
-        logger.warning(f"spawn_demand_agents failed: {e}")
+    """No-op: legacy dispatch replaced by Scheduler.run_once() (ADR-007 Phase 2)."""
+    pass

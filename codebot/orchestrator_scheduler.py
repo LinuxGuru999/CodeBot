@@ -9,7 +9,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from codebot.process_manager import BotState, GATEWAY_MAX_CONCURRENT
+from codebot.process_manager import BotState
+from codebot.scheduler_config import MAX_CONCURRENT_AGENTS, ROLE_CAPS
 from codebot.state_manager import get_paths
 
 logger = logging.getLogger("orchestrator.scheduler")
@@ -30,10 +31,11 @@ def get_scheduler(state_dir: Path | None = None) -> Any | None:
         model_pool = ["qwen-3.5-plus"]
 
     _v2_scheduler = V2Scheduler(
-        max_slots=GATEWAY_MAX_CONCURRENT,
+        max_slots=MAX_CONCURRENT_AGENTS,
         state_dir=state_dir or get_paths().state_dir,
         model_pool=model_pool,
-        stagger_seconds=0.5,
+        stagger_seconds=5.0,
+        role_caps=ROLE_CAPS,
     )
     return _v2_scheduler
 

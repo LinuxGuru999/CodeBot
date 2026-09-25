@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from codebot.process_manager import (
@@ -44,6 +45,7 @@ from codebot.dispatch_service import (
     dispatch_ready_tickets as _fallback_dispatch_ready,
     IMPLEMENTER_ROLE_NAMES,
     REVIEWER_ROLE_NAMES,
+    is_implementer_role as _is_implementer_role,
     batch_read_bot_statuses as _fallback_batch_read_status,
     compute_rate_limit_backoff as _fallback_backoff,
     rotate_model_on_error as _fallback_rotate,
@@ -284,19 +286,34 @@ def handle_exited_bots(
                 logger.warning(f"update_bot_state failed for {name}: {e}")
         elif exit_code == 3:
             base_role = name.split("-")[0] if "-" in name else name
-            is_implementer = base_role in IMPLEMENTER_ROLE_NAMES
+            is_implementer = _is_implementer_role(base_role)
             if is_implementer:
-                try:
-                    backoff, should_disable = backoff_fn(bot)
-                except Exception:
-                    backoff, should_disable = _fallback_backoff(bot)
-                requeue_delay = max(backoff, 60.0)
-                bot.next_run_at = now + requeue_delay
-                try:
-                    ubs(bot, "waiting")
-                except Exception:
-                    pass
-                logger.info(f"Implementer '{name}' hit 429 rate limit — requeue in {requeue_delay:.0f}s, preserving scratchpad for resume")
+                bot.consecutive_errors += 1
+                assigned_tid = getattr(bot, "_assigned_ticket_id", "")
+                if bot.consecutive_errors >= 5 and assigned_tid:
+                    try:
+                        if ts is not None:
+                            trans_err(bot, bots, exit_code, store=ts)
+                        else:
+                            trans_err(bot, bots, exit_code)
+                    except TypeError:
+                        trans_err(bot, bots, exit_code, store=None)
+                    except Exception as e:
+                        logger.warning(f"transition_ticket_on_error failed for {name}: {e}")
+                    bot.consecutive_errors = 0
+                    logger.warning(f"Implementer '{name}' hit 429 rate limit 5x for {assigned_tid} — transitioning to REWORK")
+                else:
+                    try:
+                        backoff, should_disable = backoff_fn(bot)
+                    except Exception:
+                        backoff, should_disable = _fallback_backoff(bot)
+                    requeue_delay = max(backoff, 60.0)
+                    bot.next_run_at = now + requeue_delay
+                    try:
+                        ubs(bot, "waiting")
+                    except Exception:
+                        pass
+                    logger.info(f"Implementer '{name}' hit 429 rate limit ({bot.consecutive_errors}/5) — requeue in {requeue_delay:.0f}s")
             else:
                 try:
                     backoff, should_disable = backoff_fn(bot)
@@ -479,9 +496,9 @@ def consume_goal_decisions(store: Any, state_dir: Any) -> int:
     if decisions_dir.exists():
         decision_files.extend(decisions_dir.glob("*.json"))
 
-    shared_status = sdir / "goal_aligner.status.json"
-    if shared_status.exists() and shared_status.stat().st_size > 0:
-        decision_files.append(shared_status)
+    for status_file in sdir.glob("goal_aligner*.status.json"):
+        if status_file.stat().st_size > 0:
+            decision_files.append(status_file)
 
     for dfile in decision_files:
         try:
@@ -501,16 +518,32 @@ def consume_goal_decisions(store: Any, state_dir: Any) -> int:
                 entries = data
         except (_json.JSONDecodeError, ValueError):
             import ast as _ast
-            try:
-                data = _ast.literal_eval(raw.strip())
-                if isinstance(data, dict):
-                    if "decisions" in data and isinstance(data["decisions"], list):
-                        entries = data["decisions"]
-                    elif "ticket_id" in data or "decision" in data:
-                        entries = [data]
-                elif isinstance(data, list):
-                    entries = data
-            except (ValueError, SyntaxError):
+            cleaned = raw.strip()
+            data = None
+            while cleaned and cleaned[-1] in ("}", "]", "\n", "\r", " "):
+                try:
+                    data = _json.loads(cleaned)
+                    break
+                except (_json.JSONDecodeError, ValueError):
+                    pass
+                try:
+                    data = _ast.literal_eval(cleaned)
+                    break
+                except (ValueError, SyntaxError):
+                    if cleaned.endswith("}}"):
+                        cleaned = cleaned[:-1]
+                    elif cleaned.endswith("]]}"):
+                        cleaned = cleaned[:-1]
+                    else:
+                        break
+            if isinstance(data, dict):
+                if "decisions" in data and isinstance(data["decisions"], list):
+                    entries = data["decisions"]
+                elif "ticket_id" in data or "decision" in data:
+                    entries = [data]
+            elif isinstance(data, list):
+                entries = data
+            if not entries:
                 continue
 
         for entry in entries:
@@ -526,7 +559,7 @@ def consume_goal_decisions(store: Any, state_dir: Any) -> int:
                 continue
 
             current_state = getattr(ticket.state, "value", str(ticket.state))
-            if current_state not in ("TRIAGED", "GOAL"):
+            if current_state != "TRIAGED":
                 continue
 
             rl_goal_advice = ""
@@ -551,9 +584,6 @@ def consume_goal_decisions(store: Any, state_dir: Any) -> int:
                 pass
 
             try:
-                if current_state == "TRIAGED":
-                    store.transition(tid, TicketState.GOAL, actor="goal-aligner-consumer")
-
                 if decision == "NOW":
                     store.transition(tid, TicketState.DECOMP, actor="goal-aligner-consumer")
                 elif decision == "LATER":
@@ -627,12 +657,6 @@ def run_dispatchers(
     tick_store = store if store is not None else current_tick_store()
 
     try:
-        from codebot.ticket_dispatcher import _sweep_orphan_claims
-        _sweep_orphan_claims(bots)
-    except Exception as e:
-        logger.debug("sweep orphan claims failed: %s", e)
-
-    try:
         from codebot.ticket_dispatcher import run_triage_fast_paths
         from codebot.state_manager import get_paths
         state_dir = get_paths().state_dir
@@ -692,9 +716,13 @@ def run_dispatchers(
                 logger.info("scheduler_v2 dispatched %d agents", dispatched)
 
             drain_deadline = time.monotonic() + 5.0
+            drain_iterations = 0
             while time.monotonic() < drain_deadline:
                 ready_requests = scheduler.gate.dequeue_ready()
+                drain_iterations += 1
                 if not ready_requests:
+                    if drain_iterations == 1:
+                        logger.debug("drain: dequeue_ready returned empty on first call (queue_depth=%d)", len(scheduler.gate.spawn_queue))
                     break
                 from codebot.process_manager import BotConfig, BotState
                 from codebot.scheduler_v2.lifecycle import AgentRecord, AgentState
@@ -735,7 +763,67 @@ def run_dispatchers(
                         bots[bot_name] = existing
 
                     existing._assigned_ticket_id = tid
+                    if role in REVIEWER_ROLE_NAMES:
+                        _sdir = getattr(scheduler, "_state_dir", None)
+                        if _sdir is not None:
+                            _rpkt = Path(_sdir) / "review_packets" / f"{tid}.json"
+                            if not _rpkt.exists():
+                                try:
+                                    _rpkt.parent.mkdir(parents=True, exist_ok=True)
+                                    _rstore = get_ticket_store(_sdir)
+                                    _rticket = _rstore.get(tid) if _rstore else None
+                                    if _rticket is not None:
+                                        import json as _json2
+                                        _pkt = {
+                                            "ticket_id": tid,
+                                            "title": getattr(_rticket, "title", ""),
+                                            "ticket_class": getattr(_rticket, "ticket_class", "").value if hasattr(getattr(_rticket, "ticket_class", ""), "value") else str(getattr(_rticket, "ticket_class", "")),
+                                            "severity": getattr(_rticket, "severity", "").value if hasattr(getattr(_rticket, "severity", ""), "value") else str(getattr(_rticket, "severity", "")),
+                                            "affected_modules": getattr(_rticket, "affected_modules", []),
+                                            "acceptance_criteria": getattr(_rticket, "acceptance_criteria", []),
+                                            "problem_statement": getattr(_rticket, "problem_statement", ""),
+                                            "desired_state": getattr(_rticket, "desired_state", ""),
+                                            "evidence": getattr(_rticket, "evidence", ""),
+                                        }
+                                        _rpkt.write_text(_json2.dumps(_pkt, indent=2), encoding="utf-8")
+                                        logger.info("pre-spawn: created review packet for %s", tid)
+                                    else:
+                                        logger.warning("pre-spawn: ticket %s not found, skipping reviewer spawn", tid)
+                                        cancel_fn = getattr(scheduler.gate, "cancel_dispatch", None)
+                                        if callable(cancel_fn):
+                                            try:
+                                                cancel_fn(agent_id, tid)
+                                            except Exception:
+                                                pass
+                                        existing._assigned_ticket_id = ""
+                                        continue
+                                except Exception as _re:
+                                    logger.warning("pre-spawn: failed to create review packet for %s: %s, skipping", tid, _re)
+                                    cancel_fn = getattr(scheduler.gate, "cancel_dispatch", None)
+                                    if callable(cancel_fn):
+                                        try:
+                                            cancel_fn(agent_id, tid)
+                                        except Exception:
+                                            pass
+                                    existing._assigned_ticket_id = ""
+                                    continue
                     try:
+                        import json as _json
+                        sdir = getattr(scheduler, "_state_dir", None)
+                        sdir_str = str(sdir) if sdir else ".codebot/state"
+                        ckpt_path = Path(sdir_str) / f"{bot_name}.checkpoint.json"
+                        if not ckpt_path.exists():
+                            try:
+                                ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                                ckpt_path.write_text(_json.dumps({"processed_ids": [], "tickets_created": 0, "updated_at": 0}), encoding="utf-8")
+                            except OSError:
+                                pass
+                        scratch_path = Path(sdir_str) / f"{bot_name}.scratchpad.json"
+                        if not scratch_path.exists():
+                            try:
+                                scratch_path.write_text(_json.dumps({"ticket_id": tid, "agent_history": [], "completed_steps": [], "pending_steps": [], "last_updated": 0}), encoding="utf-8")
+                            except OSError:
+                                pass
                         started = start_bot_fn(existing, bots=bots, is_demand=True)
                         if started:
                             pid = 0
@@ -758,6 +846,24 @@ def run_dispatchers(
                                     pass
                             existing._agent_id = agent_id
                             logger.info("spawned %s for %s (model=%s)", bot_name, tid, model)
+                            proc_check = getattr(existing, "process", None)
+                            if proc_check is not None:
+                                time.sleep(0.5)
+                                if proc_check.poll() is not None:
+                                    exit_code = proc_check.returncode
+                                    logger.warning(
+                                        "agent %s died immediately for %s (exit=%s), cancelling",
+                                        bot_name, tid, exit_code,
+                                    )
+                                    cancel_fn = getattr(scheduler.gate, "cancel_dispatch", None)
+                                    if callable(cancel_fn):
+                                        try:
+                                            cancel_fn(agent_id, tid)
+                                        except Exception:
+                                            pass
+                                    existing._assigned_ticket_id = ""
+                                    existing._agent_id = ""
+                                    continue
                         else:
                             cancel_fn = getattr(scheduler.gate, "cancel_dispatch", None)
                             if callable(cancel_fn):
@@ -804,55 +910,4 @@ def start_eligible_bots(
     start_bot_fn: Any,
     store: Any = None,
 ) -> None:
-    tick_store = store if store is not None else current_tick_store()
-    gps = _orch("get_pipeline_state", _fallback_get_ps)
-    inb = _orch("is_needed_bot", _fallback_is_needed)
-    is_drain_fn = _orch("is_draining", _fallback_is_draining)
-    ubs = _orch("update_bot_state", _pm_update_bot_state)
-    try:
-        pipeline = gps(store=tick_store) if tick_store is not None else gps()
-    except TypeError:
-        try:
-            pipeline = gps()
-        except Exception:
-            pipeline = {}
-    except Exception:
-        pipeline = {}
-    for name, bot in bots.items():
-        try:
-            draining = is_drain_fn()
-        except Exception:
-            draining = _fallback_is_draining()
-        if not bot.config.enabled or draining or bot.process is not None:
-            continue
-        if bot.next_run_at and now < bot.next_run_at:
-            continue
-        base = name.split("-")[0] if "-" in name else name
-        if base in IMPLEMENTER_ROLE_NAMES or base in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
-            continue
-        try:
-            from codebot.roles import DISCOVERY_ROLE_NAMES as _DISC
-            if base in _DISC or name in _DISC:
-                continue
-        except Exception:
-            pass
-        needed = False
-        try:
-            needed = inb(name, pipeline)
-        except Exception:
-            needed = _fallback_is_needed(name, pipeline)
-        if needed:
-            has_ticket = bool(getattr(bot, "_assigned_ticket_id", ""))
-            try:
-                start_bot_fn(bot, bots=bots, is_demand=has_ticket)
-            except TypeError:
-                try:
-                    start_bot_fn(bot)
-                except Exception as e:
-                    logger.warning(f"start_bot_fn failed for {name}: {e}")
-        else:
-            bot.next_run_at = now + bot.config.interval_seconds
-            try:
-                ubs(bot, "waiting")
-            except Exception:
-                pass
+    pass

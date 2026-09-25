@@ -167,8 +167,9 @@ def load_scratchpad(state_dir: Path, ticket_id: str) -> ScratchpadState:
         if len(raw) > MAX_SCRATCHPAD_BYTES:
             return ScratchpadState(ticket_id=ticket_id, started_at=time.time(), updated_at=time.time())
         state = ScratchpadState.from_json(raw)
-        if state.version != SCRATCHPAD_VERSION:
+        if not state.ticket_id or state.ticket_id != ticket_id:
             state.ticket_id = ticket_id
+        if state.version != SCRATCHPAD_VERSION:
             state.version = SCRATCHPAD_VERSION
         return state
     except (json.JSONDecodeError, KeyError, OSError, TypeError):

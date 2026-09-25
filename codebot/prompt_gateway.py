@@ -30,11 +30,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from codebot.scheduler_config import MAX_CONCURRENT_AGENTS
-
 logger = logging.getLogger("prompt_gateway")
-
-MAX_CONCURRENT = int(os.getenv("CODEBOT_MAX_CONCURRENT", os.getenv("BOTNET_MAX_CONCURRENT", str(MAX_CONCURRENT_AGENTS))))
 
 try:
     from codebot.adaptive_rate_limiter import rate_limiter
@@ -145,7 +141,7 @@ def _common_contract(bot: str, heartbeat_file: str, ckpt_file: str, state_dir: s
 - Drain: if `bash` is in your allowed tools list, before startup and between atomic tasks run `bash` with `python3 -m codebot.check_drain` to check for drain. If exit code is 0, exit 0 cleanly; you will be respawned. If `bash` is NOT in your allowed tools, SKIP this step entirely — the orchestrator handles drain gating for you. Do NOT attempt bash calls if your role does not permit them.
 - Heartbeat: write float Unix time to {heartbeat_file} at startup, after every atomic task, and every 60s while waiting on subagents. Never exceed 120s gap or you are restarted. Use the `write` tool with just the timestamp string.
 - Checkpoint: platform-owned only. Do NOT write {ckpt_file} directly; report progress through scratchpad/status updates. The runner validates and persists checkpoints. If you must include state, keep it under 4KB JSON with keys bot, updated_at, reason. On startup prefer an injected CHECKPOINT HANDOFF block over the file.
-- Alignment: on startup and clean exit read {align_scores} and {align_trigger}. Score 80+ clears stale triggers; score <60 with fresh trigger means prompt evolution will improve this agent's prompt. You do NOT self-evolve.
+- Alignment: on startup and clean exit read {align_scores} and {align_trigger}. If either file does not exist, SKIP immediately and proceed to your mission — do NOT retry or treat as error. Score 80+ clears stale triggers; score <60 with fresh trigger means prompt evolution will improve this agent's prompt. You do NOT self-evolve.
 - Research: prefer web_search/webfetch/context7/gh code search over guessing; verify, then write.
 - Bound: you are a bounded delegated task, not a daemon. Do atomic work, heartbeat, checkpoint, exit 0 on drain or SESSION_TIMEOUT.
 - Context compaction: if your conversation grows long, earlier messages may be summarized automatically. Always write critical state to your scratchpad file so it survives compaction.
@@ -169,8 +165,8 @@ def build_message(
     """
     core, _ = compress_prompt(prompt_text)
     header = (
-        f"Sisyphus — delegated task: '{bot}' workflow (model {model}).\n"
-        f"Remain Sisyphus; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
+f"CodeBot — delegated task: '{bot}' workflow (model {model}).\n"
+            f"Remain CodeBot; do not adopt a new identity. Execute the specification below as a bounded delegated task, not an infinite daemon.\n"
         f"State dir: {state_dir}  Log dir: {logs_dir}  Prompt: {prompt_name}\n"
     )
     contract = _common_contract(bot, heartbeat_file, ckpt_file, state_dir)

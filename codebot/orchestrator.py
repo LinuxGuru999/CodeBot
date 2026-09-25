@@ -31,7 +31,6 @@ from codebot.process_manager import (
     model_profile, ModelProfile, MODEL_PROFILES,
     read_heartbeat, heartbeat_path, checkpoint_path, read_checkpoint,
     update_bot_state, log_mtime,
-    GATEWAY_MAX_CONCURRENT,
     batch_read_heartbeats,
     get_prompt_gateway, set_prompt_gateway, clear_prompt_gateway,
 )
@@ -53,8 +52,8 @@ from codebot.service_registry import get_run_alignment_pipeline_for_all, get_run
 from codebot import vcs_adapter
 
 from codebot.ticket_dispatcher import (
-    advance_reviewed_tickets, process_deferred_gates,
-    process_rework_tickets, process_deferred_tickets,
+    process_deferred_gates,
+    process_deferred_tickets,
 )
 from codebot import role_registry as _role_registry
 from codebot.state_manager import (
@@ -330,7 +329,6 @@ from codebot.health_check_loop import (
     handle_exited_bots as _hcl_handle_exited_bots,
     handle_stuck_bots as _hcl_handle_stuck_bots,
     run_dispatchers as _hcl_run_dispatchers,
-    start_eligible_bots as _hcl_start_eligible_bots,
     current_tick_store, flush_tick_store,
 )
 from codebot.dispatch_service import get_pipeline_state, log_bot_statuses, batch_read_bot_statuses
@@ -411,7 +409,6 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
     _hcl_run_dispatchers(bots, start_bot, stop_bot, update_bot_state, skip_route_tids=error_recovered_tids, store=tick_store)
 
     for fn, name in [
-        (advance_reviewed_tickets, "advance_reviewed_tickets"),
         (process_deferred_gates, "process_deferred_gates"),
         (process_deferred_tickets, "process_deferred_tickets"),
     ]:
@@ -422,7 +419,6 @@ def check_all_bots(bots: dict[str, BotState]) -> None:
         except Exception as e:
             logger.debug("%s failed: %s", name, e)
 
-    _hcl_start_eligible_bots(bots, now, start_bot, store=tick_store)
     flush_tick_store(tick_store)
 
 

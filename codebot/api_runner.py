@@ -413,7 +413,7 @@ def _write_bot_status(
             "updated_at": time.time(),
             "updated_at_human": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        status_path = state_dir / f"{bot_name}.status.json"
+        status_path = state_dir / f"{bot_name}.progress.json"
         tmp = Path(str(status_path) + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(status_path)
@@ -707,6 +707,11 @@ def _ticket_id_from_claim(state_dir: Path, bot_name: str) -> str:
     for claim_file in (state_dir / "claims").glob(f"*.{bot_name}.json"):
         try:
             claim = json.loads(claim_file.read_text(encoding="utf-8"))
+            
+            # Validate schema before processing
+            from codebot.ticket_dispatcher import _validate_claim_schema
+            if not _validate_claim_schema(claim, claim_file):
+                continue
         except (json.JSONDecodeError, OSError):
             continue
         ticket_id = claim.get("ticket_id", claim.get("ticket", ""))
@@ -1235,8 +1240,18 @@ def _create_ticket_tool(
     tc = class_map.get(ticket_class.lower(), TicketClass.FEATURE)
     sv = sev_map.get(severity.lower(), Severity.MEDIUM)
     rk = risk_map.get(risk.lower(), RiskLevel.MEDIUM)
-    ac_list = [c.strip() for c in acceptance_criteria.split(";") if c.strip()] if acceptance_criteria else [title]
-    modules = [m.strip() for m in affected_modules.split(",") if m.strip()] if affected_modules else []
+    if isinstance(acceptance_criteria, list):
+        ac_list = [str(c).strip() for c in acceptance_criteria if str(c).strip()] or [title]
+    elif isinstance(acceptance_criteria, str) and acceptance_criteria.strip():
+        ac_list = [c.strip() for c in acceptance_criteria.split(";") if c.strip()]
+    else:
+        ac_list = [title]
+    if isinstance(affected_modules, list):
+        modules = [str(m).strip() for m in affected_modules if str(m).strip()]
+    elif isinstance(affected_modules, str) and affected_modules.strip():
+        modules = [m.strip() for m in affected_modules.split(",") if m.strip()]
+    else:
+        modules = []
     raw_deps = kwargs.get("dependencies", "")
     if isinstance(raw_deps, list):
         deps = [str(d).strip() for d in raw_deps if str(d).strip()]
@@ -1249,6 +1264,15 @@ def _create_ticket_tool(
     if not desired_state:
         desired_state = f"Resolve: {title}"
 
+    initial_state_str = str(kwargs.get("initial_state", "") or "").strip().upper()
+    initial_state = None
+    if initial_state_str:
+        try:
+            from codebot.ticket_engine import TicketState as _TS
+            initial_state = _TS(initial_state_str)
+        except (ValueError, ImportError):
+            pass
+
     # New discovery fields (§2-3, §13-14, §43)
     confidence = str(kwargs.get("confidence", "") or "").strip().lower()
     priority = str(kwargs.get("priority", "") or "").strip().lower()
@@ -1257,6 +1281,15 @@ def _create_ticket_tool(
     finding_id = str(kwargs.get("finding_id", "") or "").strip()
     fingerprint = str(kwargs.get("fingerprint", "") or "").strip()
     repo_revision = str(kwargs.get("repo_revision", "") or "").strip()
+
+    initial_state_str = str(kwargs.get("initial_state", "") or "").strip().upper()
+    initial_state = None
+    if initial_state_str:
+        try:
+            from codebot.ticket_engine import TicketState as _TS
+            initial_state = _TS(initial_state_str)
+        except (ValueError, ImportError):
+            pass
 
     # Get current repo revision if not provided
     if not repo_revision and project_root.exists():
@@ -1286,6 +1319,7 @@ def _create_ticket_tool(
             discovery_category=discovery_category,
             finding_id=finding_id,
             fingerprint=fingerprint,
+            initial_state=initial_state,
         )
     except ValueError as ve:
         return {"success": False, "output": "", "error": str(ve)}
@@ -1306,13 +1340,17 @@ def _create_ticket_tool(
     }
     impl_type = impl_map.get(tc.value, "implementer")
     try:
-        store = TicketStore(store_path)
+        from codebot.ticket_dispatcher import get_ticket_store
+        state_dir = store_path.parent
+        if _adapter_instance is not None:
+            try:
+                state_dir = _adapter_instance.paths().state_dir  # type: ignore[union-attr]
+            except Exception:
+                pass
+        store = get_ticket_store(state_dir)
+        if store is None:
+            return {"success": False, "output": "", "error": "ticket store unavailable"}
         store.add(ticket)
-        # Flush synchronously so callers (tests, CLI) see the ticket immediately.
-        # TicketStore is debounced (0.5s) for throughput; without flush a freshly
-        # created store in the caller would miss the WAL compaction window and
-        # observe an empty file.  Flush is O(K) (K dirty tickets) so it stays
-        # O(1) for a single add and preserves durability.
         try:
             store.flush()
         except Exception:
@@ -1461,11 +1499,13 @@ def _write_checkpoint(ckpt_file, bot_name, reason):
 
 def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reason, usage=None):
     try:
-        MAX_SIZE = 500_000
+        # CB-64EE1: Enforce 500KB payload cap with truncation marker
+        MAX_SIZE = 500 * 1024  # 500KB hard cap
         # Safety margin: use 95% of MAX_SIZE during accumulation to account for
         # JSON structural overhead that per-entry tracking may underestimate.
         # This prevents adversarial expansion ratio manipulation (feedback #32/#36).
-        EFFECTIVE_MAX_SIZE = int(MAX_SIZE * 0.95)  # 475,000 bytes
+        EFFECTIVE_MAX_SIZE = int(MAX_SIZE * 0.95)
+        truncation_warning = None  # Track if/why truncation occurred
         MAX_MESSAGES = 10000
         bounded = []
         entry_sizes = []
@@ -1586,9 +1626,9 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
                         skipped_count += 1
                         continue
 
-            # Store serialized JSON string instead of dict to bound memory usage.
-            # This avoids keeping Python dict objects in the bounded list.
-            bounded.append(entry_json)
+            # Store the dict entry. We track size via entry_sizes for trimming.
+            # Storing dicts ensures correct final JSON serialization without double-escaping.
+            bounded.append(entry)
             entry_sizes.append(entry_size)
             cumulative_size += entry_size
 
@@ -1612,6 +1652,10 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
 
         if stream_truncated or truncated_count > 0:
             payload["truncated"] = True
+            # CB-64EE1: Add truncation warning to payload metadata for downstream consumers
+            if truncation_warning is None:
+                truncation_warning = "Payload exceeded 500KB cap during accumulation; stream truncated to fit bound"
+            payload["truncation_warning"] = truncation_warning
 
         body = json.dumps(payload, ensure_ascii=False)
         # Use byte length for accurate size bound since file is written as UTF-8.
@@ -1620,21 +1664,21 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
         final_size = len(body.encode("utf-8"))
         # Optimized tail-trim: use tracked entry_sizes to estimate how many
         # messages to remove, then verify with a single re-serialization.
-        # entry_sizes tracks JSON char length, but final_size is UTF-8 bytes.
-        # For Unicode-heavy content, bytes can be up to 4x chars, so we apply
-        # a conservative 4x multiplier to entry_sizes when estimating reduction.
-        # This prevents over-removal while still achieving O(1) serializations.
-        max_trim_iterations = min(len(bounded), 100)
-        trim_iterations = 0
-        while final_size > MAX_SIZE and bounded and trim_iterations < max_trim_iterations:
+        # entry_sizes tracks JSON byte length. For Unicode-heavy content, bytes
+        # can be up to 4x chars, so we apply a conservative 4x multiplier to
+        # entry_sizes when estimating reduction to avoid under-removal.
+        # Cap the number of while-loop passes to prevent CPU DoS.
+        max_trim_passes = 100
+        trim_passes = 0
+        while final_size > MAX_SIZE and bounded and trim_passes < max_trim_passes:
             # Estimate how many entries to remove based on tracked sizes.
-            # Apply 4x multiplier to account for worst-case UTF-8 expansion.
             overshoot = final_size - MAX_SIZE
             estimated_reduction = 0
             entries_to_remove = 0
             # Walk backwards through entry_sizes to find how many to pop
             for i in range(len(entry_sizes) - 1, -1, -1):
-                # Conservative estimate: each char could be up to 4 UTF-8 bytes
+                # Conservative estimate: each byte in entry_size could correspond
+                # to up to 4 bytes in final serialization due to JSON escaping/UTF-8
                 estimated_reduction += entry_sizes[i] * 4
                 entries_to_remove += 1
                 if estimated_reduction >= overshoot:
@@ -1648,14 +1692,14 @@ def _persist_stream(bot_name, messages, active_model, tool_iterations, exit_reas
                     bounded.pop()
                 if entry_sizes:
                     entry_sizes.pop()
-            trim_iterations += entries_to_remove
+            trim_passes += 1
             stream_truncated = True
             payload["messages"] = bounded
             payload["truncated"] = True
             body = json.dumps(payload, ensure_ascii=False)
             final_size = len(body.encode("utf-8"))
 
-        # Safety cap: if trim iterations exhausted and size still exceeds MAX_SIZE,
+        # Safety cap: if trim passes exhausted and size still exceeds MAX_SIZE,
         # clear bounded to guarantee compliance and prevent CPU DoS.
         if final_size > MAX_SIZE and bounded:
             bounded.clear()
@@ -1735,9 +1779,19 @@ def _call_api_stream(messages, model, api_key, schemas, timeout):
     tool_calls_map: dict[int, dict] = {}
     finish_reason = "stop"
     buffer = ""
+    deadline = time.monotonic() + timeout
     last_chunk_at = time.monotonic()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         while True:
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise urllib.error.URLError("stream deadline exceeded")
+            try:
+                sock = resp.fp._sock if hasattr(resp.fp, '_sock') else None
+                if sock is not None:
+                    sock.settimeout(min(remaining_time, float(_STREAM_CHUNK_IDLE_TIMEOUT)))
+            except Exception:
+                pass
             try:
                 piece = resp.read(4096)
             except Exception:
@@ -1797,7 +1851,7 @@ def _call_api(messages, model, api_key, timeout=None, bot_name=None):
     schemas = TOOL_SCHEMAS
     if bot_name:
         base = bot_name.split("-")[0] if "-" in bot_name else bot_name
-        no_bash_roles = frozenset({"decomposer", "planner",
+        no_bash_roles = frozenset({"decomposer", "planner", "verifier",
             "reviewer", "security_reviewer", "architecture_reviewer",
             "performance_reviewer", "concurrency_reviewer",
             "data_integrity_reviewer", "ux_reviewer"})
@@ -1899,10 +1953,15 @@ def _execute_tool(name, args, bot_name: str = ""):
                 from codebot.review_store import write_verdict
                 import json as _json
                 ticket_id, role = target
+                raw_content = args.get("content", "{}")
                 try:
-                    payload = _json.loads(args.get("content", "{}"))
+                    payload = _json.loads(raw_content)
                 except Exception:
-                    return {"success": False, "output": "", "error": "verdict content must be JSON"}
+                    import ast as _ast
+                    try:
+                        payload = _ast.literal_eval(raw_content)
+                    except (ValueError, SyntaxError):
+                        return {"success": False, "output": "", "error": "verdict content must be JSON or a Python dict literal"}
                 if not isinstance(payload, dict):
                     return {"success": False, "output": "", "error": "verdict content must be a JSON object"}
                 try:
@@ -2807,6 +2866,7 @@ def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_ite
     final_content = ""
     exit_reason = "unknown"
     continue_nudges = 0
+    _recent_tool_signatures: list[str] = []
     while True:
         if iterations >= max_iterations:
             exit_reason = "iteration_limit"
@@ -2867,6 +2927,16 @@ def run_agent_loop(bot_name, mission_prompt, model_responder, state_dir, max_ite
                     if not isinstance(args, dict):
                         args = {}
                 parsed_calls.append({"tc_id": tc_id, "name": name, "args": args})
+
+            for pc in parsed_calls:
+                sig = f"{pc['name']}:{json.dumps(pc['args'], sort_keys=True)[:200]}"
+                _recent_tool_signatures.append(sig)
+                if len(_recent_tool_signatures) > 6:
+                    _recent_tool_signatures.pop(0)
+                if _recent_tool_signatures.count(sig) >= 3:
+                    messages.append({"role": "user", "content": f"STOP repeating {pc['name']} with the same arguments. You have called it {_recent_tool_signatures.count(sig)} times identically. Move to the next step in your instructions NOW. If you have the data you need, write your output and exit."})
+                    _recent_tool_signatures.clear()
+                    break
 
             def _execute_parsed(parsed: dict) -> dict:
                 """Execute a single parsed tool call, return enriched dict."""
@@ -3018,7 +3088,7 @@ def run_bot(bot_name, model, mission_prompt, heartbeat_file, ckpt_file, fallback
 
     contract = _contract(heartbeat_file, ckpt_file)
     full_message = (
-        f"Sisyphus — delegated task: '{bot_name}' workflow (model {model}).\n"
+        f"CodeBot — delegated task: '{bot_name}' workflow (model {model}).\n"
         + contract
         + "\n--- Mission ---\n"
         + mission_prompt
@@ -3295,6 +3365,13 @@ if __name__ == "__main__":
     _fb_chain = sys.argv[8].split(",") if len(sys.argv) > 8 and sys.argv[8] else []
     try:
         _mission_prompt = Path(_mission_file).read_text(encoding="utf-8")
+        _state_dir = str(Path(_heartbeat_file).resolve().parent)
+        _project_root = str(WORK_ROOT)
+        _bot_suffix = _bot_name.split("-", 1)[1] if "-" in _bot_name else _bot_name
+        _mission_prompt = _mission_prompt.replace("{BOT_NAME}", _bot_name)
+        _mission_prompt = _mission_prompt.replace("{BOT_SUFFIX}", _bot_suffix)
+        _mission_prompt = _mission_prompt.replace("{STATE_DIR}", _state_dir)
+        _mission_prompt = _mission_prompt.replace("{PROJECT_ROOT}", _project_root)
     except Exception as exc:
         print(f"failed to read mission file {_mission_file}: {exc}", file=sys.stderr)
         sys.exit(2)

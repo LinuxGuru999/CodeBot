@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from codebot.ticket_dispatcher import is_implementer_role
 from codebot.process_manager import (
     BotConfig,
     BotState,
@@ -341,7 +342,7 @@ def is_needed_bot(name: str, pipeline: dict[str, int]) -> bool:
         return decomp > 0 or goal > 0
     if base_name in PLANNING_ROLE_NAMES:
         return planning > 0
-    if base_name in IMPLEMENTER_ROLE_NAMES:
+    if is_implementer_role(base_name):
         return implement > 0
     if base_name in REVIEWER_ROLE_NAMES or base_name == "ux_reviewer":
         return review > 0
@@ -378,7 +379,7 @@ def apply_agent_availability(bots: dict[str, BotState], store: Any | None = None
             should_enable = decomp > 0 or goal > 0
         elif base_name in PLANNING_ROLE_NAMES:
             should_enable = planning > 0
-        elif base_name in IMPLEMENTER_ROLE_NAMES:
+        elif is_implementer_role(base_name):
             should_enable = implement > 0
         elif base_name in REVIEWER_ROLE_NAMES or base_name == "ux_reviewer":
             should_enable = review > 0
