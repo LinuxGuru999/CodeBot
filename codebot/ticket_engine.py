@@ -1806,18 +1806,21 @@ class TicketStore:
                             )
             from codebot.context_contracts import (
                 check_transition_contract,
-                ContextContractViolation,
+                get_producer_role,
+                handle_gate_failure,
             )
             _ctx_ok, _ctx_missing, _ctx_inv = check_transition_contract(
                 ticket, ticket.state.value, new_state.value,
             )
             if not _ctx_ok:
-                raise ContextContractViolation(
+                handle_gate_failure(
                     ticket_id=ticket_id,
                     source_state=ticket.state.value,
                     dest_state=new_state.value,
                     missing_fields=_ctx_missing,
                     failed_invariants=_ctx_inv,
+                    state_dir=self._path.parent,
+                    producer_role=get_producer_role(ticket.state.value, new_state.value),
                 )
             old_state = ticket.state
             prev_updated_at = ticket.updated_at
@@ -1847,6 +1850,26 @@ class TicketStore:
             # safety without holding the lock during expensive compaction I/O.
             try:
                 self._append_wal_locked({ticket_id})
+                from codebot.context_contracts import (
+                    cleanup_gate_failure,
+                    ContextGateFailure,
+                )
+                _terminal_states = frozenset({
+                    "COMPLETE", "REJECTED", "RESOLVED",
+                    "SUPERSEDED", "CANCELLED",
+                })
+                if new_state.value in _terminal_states:
+                    ContextGateFailure.delete_all_for_ticket(
+                        state_dir=self._path.parent,
+                        ticket_id=ticket_id,
+                    )
+                else:
+                    cleanup_gate_failure(
+                        state_dir=self._path.parent,
+                        ticket_id=ticket_id,
+                        source_state=old_state.value,
+                        dest_state=new_state.value,
+                    )
             except Exception as exc:
                 logger.error("WAL append failed in transition(): %s", exc)
                 raise
@@ -1881,6 +1904,7 @@ class TicketStore:
 
         results: list[Ticket] = []
         pending_events: list[dict[str, Any]] = []
+        pending_gate_cleanups: list[tuple[str, str, str]] = []
         with self._lock:
             # Snapshot state for rollback on failure to guarantee atomicity.
             # We capture only the tickets that will be mutated so the cost is
@@ -1930,18 +1954,21 @@ class TicketStore:
 
                     from codebot.context_contracts import (
                         check_transition_contract,
-                        ContextContractViolation,
+                        get_producer_role,
+                        handle_gate_failure,
                     )
                     _ctx_ok, _ctx_missing, _ctx_inv = check_transition_contract(
                         ticket, ticket.state.value, new_state.value,
                     )
                     if not _ctx_ok:
-                        raise ContextContractViolation(
+                        handle_gate_failure(
                             ticket_id=ticket_id,
                             source_state=ticket.state.value,
                             dest_state=new_state.value,
                             missing_fields=_ctx_missing,
                             failed_invariants=_ctx_inv,
+                            state_dir=self._path.parent,
+                            producer_role=get_producer_role(ticket.state.value, new_state.value),
                         )
 
                     old_state = ticket.state
@@ -1966,6 +1993,9 @@ class TicketStore:
                         self._build_lifecycle_event(ticket_id, old_state, prev_updated_at, updated, actor)
                     )
                     results.append(updated)
+                    pending_gate_cleanups.append(
+                        (ticket_id, old_state.value, new_state.value)
+                    )
             except (ValueError, KeyError):
                 # Rollback all mutations applied so far in this batch
                 for tid, orig_ticket in original_tickets.items():
@@ -2004,6 +2034,27 @@ class TicketStore:
             batch_specific_ids = {t.id for t in results}
             try:
                 self._append_wal_locked(batch_specific_ids)
+                from codebot.context_contracts import (
+                    cleanup_gate_failure,
+                    ContextGateFailure,
+                )
+                _terminal_states = frozenset({
+                    "COMPLETE", "REJECTED", "RESOLVED",
+                    "SUPERSEDED", "CANCELLED",
+                })
+                for _tid, _src, _dst in pending_gate_cleanups:
+                    if _dst in _terminal_states:
+                        ContextGateFailure.delete_all_for_ticket(
+                            state_dir=self._path.parent,
+                            ticket_id=_tid,
+                        )
+                    else:
+                        cleanup_gate_failure(
+                            state_dir=self._path.parent,
+                            ticket_id=_tid,
+                            source_state=_src,
+                            dest_state=_dst,
+                        )
             except Exception as exc:
                 logger.error("WAL append failed in batch_transition(): %s", exc)
                 raise
