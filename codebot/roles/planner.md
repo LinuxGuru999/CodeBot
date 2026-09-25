@@ -46,7 +46,7 @@ Do not continue investigating because more context *could* be gathered. Sufficie
 
 1. Extract `ticket_id` from your ASSIGNED TICKET block (injected by orchestrator).
 2. `read` `{STATE_DIR}/{ticket_id}.scratchpad.json` — if missing, that is NORMAL. Continue.
-3. `read` `{STATE_DIR}/implementation_planner.checkpoint.json` — skip already-planned tickets. If missing use `{"processed_ids":[],"plans_created":0,"updated_at":0}`.
+3. `read` `{STATE_DIR}/{BOT_NAME}.checkpoint.json` — skip already-planned tickets. If file not found, use `{"processed_ids":[],"plans_created":0,"updated_at":0}` and continue. Do NOT retry.
 4. `glob` `{STATE_DIR}/plans/{ticket_id}*` — if plan exists, skip this ticket (already planned).
 
 Do NOT check drain. Do NOT read boilerplate (.drain, .update_lock, ROADMAP.md, alignment files).
@@ -210,7 +210,7 @@ Every field must contain real values derived from your investigation. Placeholde
 
 ## Session
 
-- Timeout: 1800s. Heartbeat: `{STATE_DIR}/implementation_planner.heartbeat` (bare float).
-- Checkpoint: `{STATE_DIR}/implementation_planner.checkpoint.json` — update `processed_ids` and `plans_created` after each plan.
+- Timeout: 1800s. Heartbeat: `{STATE_DIR}/{BOT_NAME}.heartbeat` (bare float).
+- Checkpoint: `{STATE_DIR}/{BOT_NAME}.checkpoint.json` — update `processed_ids` and `plans_created` after each plan.
 - Noop cap: 20 → exit.
 - Restart: read checkpoint, skip processed_ids.

@@ -14,7 +14,7 @@ STATE_DIR = {PROJECT_ROOT}/.codebot/state
 
 ## Startup
 1. `read` `{STATE_DIR}/tickets.json` → filter `state=="GOAL"`. ONCE.
-2. `read` `{STATE_DIR}/decomposer.checkpoint.json` → skip `processed_ids`. Default: `{"processed_ids":[],"tickets_created":0,"updated_at":0}`
+2. `read` `{STATE_DIR}/{BOT_NAME}.checkpoint.json` → skip `processed_ids`. If file not found, use default: `{"processed_ids":[],"tickets_created":0,"updated_at":0}` and continue. Do NOT retry.
 3. `grep` parent_id → skip if children exist (dedup).
 Forbidden: .drain, .update_lock, alignment files, ROADMAP.md, source outside affected_modules.
 
@@ -42,9 +42,9 @@ CRITICAL: After reading tickets and checkpoint, you MUST call `create_ticket` fo
 ## create_ticket
 ```
 Tool: create_ticket
-Arguments: {"title":"{outcome}","ticket_class":"feature","severity":"{sev}","source":"decomposer","evidence":"Parent:{pid}. Root cause:{cause}","problem_statement":"{problem}","desired_state":"{outcome}","acceptance_criteria":"{evidence1}; {evidence2}","affected_modules":"{files}","dependencies":"{PARENT_ID}","risk":"{risk}"}
+Arguments: {"title":"{outcome}","ticket_class":"feature","severity":"{sev}","source":"decomposer","evidence":"Parent:{pid}. Root cause:{cause}","problem_statement":"{problem}","desired_state":"{outcome}","acceptance_criteria":"{evidence1}; {evidence2}","affected_modules":"{files}","dependencies":"{PARENT_ID}","risk":"{risk}","initial_state":"PLANNING"}
 ```
-Rules: title<200chars outcome-based. source="decomposer". acceptance_criteria=verifiable evidence never vague. dependencies=comma-sep string with parent ID mandatory. severity/risk inherited from parent.
+Rules: title<200chars outcome-based. source="decomposer". ALWAYS include `"initial_state":"PLANNING"` so sub-tickets enter the pipeline at the PLANNING stage. acceptance_criteria=verifiable evidence never vague. dependencies=comma-sep string with parent ID mandatory. severity/risk inherited from parent.
 
 ## Artifact
 After each parent's sub-tickets, write `{STATE_DIR}/decompositions/{PARENT_ID}.decomp.json`:
@@ -52,10 +52,10 @@ After each parent's sub-tickets, write `{STATE_DIR}/decompositions/{PARENT_ID}.d
 Valid JSON, double quotes. dag_edges: child→[blocking children] or {}. Then checkpoint.
 
 ## Checkpoint
-Write `{STATE_DIR}/decomposer.checkpoint.json` after each parent: `{"processed_ids":["CB-X"],"tickets_created":N,"updated_at":T}`
+Write `{STATE_DIR}/{BOT_NAME}.checkpoint.json` after each parent: `{"processed_ids":["CB-X"],"tickets_created":N,"updated_at":T}`
 
 ## Limits
 - Max 4 parents per session, max 10 sub-tickets per parent, prefer 2-5.
 - Vertical slices > horizontal layers. Tests co-located with behavior.
-- Heartbeat: `{STATE_DIR}/decomposer.heartbeat` bare float. Timeout: 1800s. Noop cap: 20.
+- Heartbeat: `{STATE_DIR}/{BOT_NAME}.heartbeat` bare float. Timeout: 1800s. Noop cap: 20.
 - NEVER: modify source, circular deps, bash, single-quote JSON, empty dependencies, speculative tickets.

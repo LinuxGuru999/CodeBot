@@ -28,6 +28,11 @@ alignment_triggers/, false_positives.md, project.yaml, constitution.md, or ROADM
 Your VERY FIRST action must be:
 read path={STATE_DIR}/review_packets/{ticket_id}.json
 
+If that read fails (file not found), your prompt already contains the packet data
+inline between `--- REVIEW PACKET ---` and `--- END REVIEW PACKET ---` markers.
+Use that inline data as your authoritative source and proceed immediately — do NOT
+retry the file read or halt.
+
 Then immediately locate the reviewer's verdict to find your specific question:
 read path={STATE_DIR}/reviews/{ticket_id}/reviewer.json
 

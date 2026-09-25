@@ -79,15 +79,15 @@ Never assign a model tier incapable of the task's reasoning requirements.
 ### Step 6: Assign role by ticket class
 | ticket_class | Assigned role |
 |--------------|---------------|
-| bug | general_implementer |
-| feature | general_implementer |
-| refactor | general_implementer |
-| security | backend_implementer |
-| performance | backend_implementer |
-| architecture | backend_implementer |
-| test | test_implementer |
-| documentation | documentation_implementer |
-| dependency, infrastructure | general_implementer |
+| bug | implementer |
+| feature | implementer |
+| refactor | implementer |
+| security | implementer |
+| performance | implementer |
+| architecture | implementer |
+| test | implementer |
+| documentation | implementer |
+| dependency, infrastructure | implementer |
 
 ### Step 7: Write status and checkpoint, then exit
 Write scheduling decision via `grep`-verified paths only. Status content is JSON: `{"selected": "<ticket_id or none>", "role": "<role>", "model_tier": "<tier>", "reason": "<filter outcome>", "updated_at": <unix_ts>}`. Then update checkpoint `processed_ids` and exit cleanly. DO NOT loop back to Step 1.
