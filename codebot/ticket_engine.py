@@ -1804,6 +1804,21 @@ class TicketStore:
                                 f"requires an implementation plan before IMPLEMENT; "
                                 f"create plan in PLANNING state"
                             )
+            from codebot.context_contracts import (
+                check_transition_contract,
+                ContextContractViolation,
+            )
+            _ctx_ok, _ctx_missing, _ctx_inv = check_transition_contract(
+                ticket, ticket.state.value, new_state.value,
+            )
+            if not _ctx_ok:
+                raise ContextContractViolation(
+                    ticket_id=ticket_id,
+                    source_state=ticket.state.value,
+                    dest_state=new_state.value,
+                    missing_fields=_ctx_missing,
+                    failed_invariants=_ctx_inv,
+                )
             old_state = ticket.state
             prev_updated_at = ticket.updated_at
             updated = ticket.transition(new_state, reviewer_feedback)
@@ -1912,6 +1927,22 @@ class TicketStore:
                                         f"requires an implementation plan before IMPLEMENT; "
                                         f"create plan in PLANNING state"
                                     )
+
+                    from codebot.context_contracts import (
+                        check_transition_contract,
+                        ContextContractViolation,
+                    )
+                    _ctx_ok, _ctx_missing, _ctx_inv = check_transition_contract(
+                        ticket, ticket.state.value, new_state.value,
+                    )
+                    if not _ctx_ok:
+                        raise ContextContractViolation(
+                            ticket_id=ticket_id,
+                            source_state=ticket.state.value,
+                            dest_state=new_state.value,
+                            missing_fields=_ctx_missing,
+                            failed_invariants=_ctx_inv,
+                        )
 
                     old_state = ticket.state
                     prev_updated_at = ticket.updated_at
