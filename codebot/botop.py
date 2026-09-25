@@ -422,6 +422,8 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
     names: set[str] = set()
     for p in state_dir.glob("*.heartbeat"):
         names.add(p.stem)
+    for p in state_dir.glob("*.progress.json"):
+        names.add(p.name.replace(".progress.json", ""))
     for p in state_dir.glob("*.status.json"):
         names.add(p.name.replace(".status.json", ""))
     for p in state_dir.glob("*.state.json"):
@@ -438,6 +440,7 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
     agents: list[dict[str, Any]] = []
     for name in sorted(names):
         hb_path = state_dir / f"{name}.heartbeat"
+        progress_path = state_dir / f"{name}.progress.json"
         status_path = state_dir / f"{name}.status.json"
         state_path = state_dir / f"{name}.state.json"
         ckpt_path = state_dir / f"{name}.checkpoint.json"
@@ -452,7 +455,9 @@ def _collect_agents(project_root: Path) -> list[dict[str, Any]]:
         if hb_age is not None and hb_age < 0:
             hb_age = 0
 
-        status = _read_json_safe(status_path)
+        status = _read_json_safe(progress_path)
+        if not isinstance(status, dict) or not status:
+            status = _read_json_safe(status_path)
         if not isinstance(status, dict):
             status = {}
         state = _read_json_safe(state_path)
@@ -627,6 +632,13 @@ def _collect_claims(project_root: Path) -> list[dict[str, Any]]:
                     data = {}
             if not isinstance(data, dict):
                 data = {}
+            
+            # Validate schema before processing
+            from codebot.ticket_dispatcher import _validate_claim_schema
+            if not _validate_claim_schema(data, cf):
+                claims.append({"file": cf.name, "path": cf, "ticket_id": "?", "worker": "?", "at": 0, "age": 0, "class": "", "raw": {}})
+                continue
+            
             ticket_id = data.get("ticket_id") or data.get("id") or cf.stem.split(".")[0]
             worker = data.get("bot") or data.get("worker") or data.get("agent") or data.get("owner") or "?"
             at = data.get("at") or data.get("claimed_at") or data.get("ts") or 0

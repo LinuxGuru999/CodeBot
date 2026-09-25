@@ -125,8 +125,8 @@ class FlaskAppAdapter(ProjectAdapter):
         # Generic roles suitable for a standard web app
         return [
             {
-                "name": "backend_implementer",
-                "prompt": "roles/backend_implementer.md",
+"name": "implementer",
+"prompt": "roles/implementer.md",
                 "interval": 300,
                 "model": "qwen-3.7-plus",
                 "fallback_model": "qwen-3.6-plus",
@@ -138,8 +138,8 @@ class FlaskAppAdapter(ProjectAdapter):
                 "category": "implementation",
             },
             {
-                "name": "test_implementer",
-                "prompt": "roles/test_implementer.md",
+"name": "implementer",
+"prompt": "roles/implementer.md",
                 "interval": 300,
                 "model": "qwen-3.6-plus",
                 "fallback_model": "qwen-3.5-plus",
@@ -198,8 +198,7 @@ class FlaskAppAdapter(ProjectAdapter):
 
     def tier_priority(self) -> dict[str, int]:
         return {
-            "backend_implementer": 13,
-            "test_implementer": 13,
+            "implementer": 13,
             "security_reviewer": 21,
             "bug_hunter": 11,
         }

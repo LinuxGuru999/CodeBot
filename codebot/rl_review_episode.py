@@ -462,12 +462,11 @@ def rebuild_all_episodes(state_dir: Path | str, incremental: bool = False) -> in
     seen: set[str] = set()
     if tickets_path.exists():
         try:
-            from codebot.ticket_engine import TicketStore
-            store = TicketStore(tickets_path, start_background_workers=False)
-            # Collect snapshot of tickets without holding lock long
-            tickets = []
-            with store._lock:
-                tickets = list(store._tickets.values())
+            from codebot.ticket_dispatcher import get_ticket_store
+            from codebot.ticket_engine import ReadOnlyTicketView
+            s = get_ticket_store(state_path)
+            view = ReadOnlyTicketView(s) if s is not None else None
+            tickets = view.list_tickets(include_workers=False) if view is not None else []
             for t in tickets:
                 cid = str(getattr(t, "current_review_cycle_id", "") or "")
                 if not cid:
@@ -475,30 +474,24 @@ def rebuild_all_episodes(state_dir: Path | str, incremental: bool = False) -> in
                 if cid in seen:
                     continue
                 seen.add(cid)
-                # Determine completion_result from state
                 try:
                     st_val = t.state.value if hasattr(t.state, "value") else str(t.state)
                 except Exception:
                     st_val = str(getattr(t, "state",""))
-                # Map ticket state to completion_result
                 cr_map = {"COMPLETE":"COMPLETE","REWORK":"REWORK","RESOLVED":"RESOLVED","CANCELLED":"CANCELLED","DEFERRED":"DEFERRED","SUPERSEDED":"SUPERSEDED","REVIEW":"REVIEW"}
                 cr = cr_map.get(str(st_val).upper(), str(st_val).upper())
-                # Try to load specialist verdicts for this attempt
                 spec_results: dict[str, Any] = {}
                 specialists_run: list[str] = []
                 try:
                     from codebot.review_store import load_ticket_verdicts
                     verdicts = load_ticket_verdicts(state_path, t.id)
                     for v in verdicts:
-                        # Filter to current attempt/revision if possible
                         if int(v.get("implementation_attempt_id",0) or 0) != int(getattr(t,"attempts",0) or 0):
-                            # still include if matches revision?
                             pass
                         reviewer = str(v.get("reviewer",""))
                         base = reviewer.split("-",1)[0]
                         if base in ("reviewer", "primary_reviewer"):
                             continue
-                        # Map reviewer to specialist type
                         from codebot.escalation_rules import SPECIALIST_ROLES
                         type_for = None
                         for stype, rname in SPECIALIST_ROLES.items():
@@ -523,7 +516,6 @@ def rebuild_all_episodes(state_dir: Path | str, incremental: bool = False) -> in
                     started_at=float(getattr(t,"updated_at",time.time())),
                     completed_at=float(getattr(t,"updated_at",time.time())),
                 )
-                # Preserve specialists_run order dedup
                 if specialists_run:
                     ep.specialists_run = sorted(set(specialists_run))
                     ep.specialist_results = spec_results
@@ -549,14 +541,13 @@ def rebuild_all_episodes(state_dir: Path | str, incremental: bool = False) -> in
                 seen.add(rc)
                 # Find ticket id
                 tid = str(evs[0].get("ticket_id","") or "")
-                # Try to find ticket snapshot
                 ticket_obj = None
                 if tickets_path.exists():
                     try:
-                        from codebot.ticket_engine import TicketStore
-                        store = TicketStore(tickets_path, start_background_workers=False)
-                        with store._lock:
-                            ticket_obj = store._tickets.get(tid)
+                        from codebot.ticket_dispatcher import get_ticket_store
+                        s2 = get_ticket_store(state_path)
+                        if s2 is not None:
+                            ticket_obj = s2.get(tid)
                     except Exception:
                         pass
                 if ticket_obj is None:

@@ -182,13 +182,16 @@ def _create_ticket_from_signal(data: dict[str, Any], state_dir: Path) -> dict[st
     except ValueError as ve:
         return {"success": False, "error": str(ve)}
 
-    store_path = state_dir / "tickets.json"
-    store = None
     try:
-        store = TicketStore(store_path)
+        from codebot.ticket_dispatcher import get_ticket_store
+    except ImportError:
+        logger.error("ticket_dispatcher not available for telemetry ingestion")
+        return {"success": False, "error": "ticket_dispatcher unavailable"}
+    store = get_ticket_store(state_dir)
+    if store is None:
+        return {"success": False, "error": "ticket store unavailable"}
+    try:
         stored = store.add(ticket)
-        # Force synchronous persist so subsequent TicketStore instances (and tests)
-        # observe the ticket immediately; TicketStore.add() is debounced async.
         store.flush()
         logger.info(
             "Telemetry ticket created: %s (state=%s, requires human triage)",
@@ -197,17 +200,10 @@ def _create_ticket_from_signal(data: dict[str, Any], state_dir: Path) -> dict[st
         )
         return {"success": True, "ticket_id": stored.id}
     except ValueError as ve:
-        # Duplicate evidence hash — signal already tracked
         return {"success": True, "ticket_id": str(ve), "duplicate": True}
     except Exception as e:
         logger.error("Failed to store telemetry ticket: %s", e)
         return {"success": False, "error": f"store failed: {e}"}
-    finally:
-        if store is not None:
-            try:
-                store.close()
-            except Exception:
-                pass
 
 
 class TelemetryHandler(BaseHTTPRequestHandler):

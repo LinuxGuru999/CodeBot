@@ -212,8 +212,12 @@ MAX_LOG_LINES = 2_000
 MAX_REQUEST_BYTES = 65_536
 REQUEST_TIMEOUT_SECONDS = 15
 
-# Bot name validation pattern: alphanumeric, hyphens, underscores only
-BOT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Bot name validation pattern: alphanumeric, hyphens, and underscores only.
+# This blocks shell metacharacters (=, /, ., ;, |, &, $, `, space, newline) and
+# flag-like names (starting with --) to prevent argument injection attacks.
+# Names must be 1-64 characters, start with a letter or digit, and not resemble
+# command-line flags or path traversal attempts.
+BOT_NAME_PATTERN = re.compile(r"^(?!-)(?!.*--)[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 # Telemetry token from environment; empty means reject all telemetry requests
 TELEMETRY_TOKEN = os.environ.get("CODEBOT_TELEMETRY_TOKEN", "").strip()
@@ -1851,7 +1855,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
 
         # POST /bots/{name}/restart
-        m = re.match(r"^/(?:api/)?bots/([^/]+)/restart$", path)
+        # Use permissive regex (.+) to capture bot names with unusual characters
+        # so validate_bot_name() can reject them with 400 instead of 404
+        m = re.match(r"^/(?:api/)?bots/(.+)/restart$", path)
         if m:
             name = m.group(1)
             # Validate bot name format before any subprocess calls (Constitution §2)
@@ -1891,7 +1897,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
-        m = re.match(r"^/(?:api/)?bots/([^/]+)/pause$", path)
+        # Use permissive regex (.+) to capture bot names with unusual characters
+        # so validate_bot_name() can reject them with 400 instead of 404
+        m = re.match(r"^/(?:api/)?bots/(.+)/pause$", path)
         if m:
             name = m.group(1)
             # Validate bot name format before any subprocess calls (Constitution §2)
@@ -1928,7 +1936,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
-        m = re.match(r"^/(?:api/)?bots/([^/]+)/resume$", path)
+        # Use permissive regex (.+) to capture bot names with unusual characters
+        # so validate_bot_name() can reject them with 400 instead of 404
+        m = re.match(r"^/(?:api/)?bots/(.+)/resume$", path)
         if m:
             name = m.group(1)
             # Validate bot name format before any subprocess calls (Constitution §2)
@@ -2177,6 +2187,49 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._json(201, response)
         else:
             self._json(500, {"error": result.get("error", "internal error")})
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        """Override send_error to include security headers (Constitution §2).
+
+        Args:
+            code: HTTP status code.
+            message: Short message (used as reason phrase).
+            explain: Optional explanation text included in response body.
+        """
+        # HTTP/0.9 does not support headers
+        if getattr(self, "request_version", "") == "HTTP/0.9":
+            self.close_connection = True
+            return
+
+        # Determine short and long messages
+        if message is None:
+            if code in self.responses:
+                shortmsg, longmsg = self.responses[code]
+            else:
+                shortmsg, longmsg = "Error", "Unknown error"
+        else:
+            shortmsg = message
+            longmsg = message
+
+        body_content = f"<html><head><title>{code} {shortmsg}</title></head>"
+        body_content += f"<body><h1>{code} {shortmsg}</h1>"
+        if explain:
+            body_content += f"<p>{explain}</p>"
+        body_content += "</body></html>"
+        body = body_content.encode("utf-8")
+
+        self.send_response(code, shortmsg)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        # Security headers per Constitution §2
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+        self.close_connection = True
 
     def log_message(self, format, *args):  # noqa: A002
         # quiet except errors; fly logs capture stdout

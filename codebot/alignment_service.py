@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from codebot.state_manager import get_paths
+from codebot.state_manager import get_paths, get_adapter_instance
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,15 @@ def _ensure_rl_adapter() -> None:
 
 def run_alignment_pipeline(bot_name: str) -> bool:
     _ensure_rl_adapter()
+    
+    # Invariant guard: verify ProjectAdapter is active OR state_dir is canonical
+    adapter = get_adapter_instance()
     paths = get_paths()
+    canonical_state_dir = (Path(__file__).parent.parent / ".codebot" / "state").resolve()
+    if adapter is None and paths.state_dir.resolve() != canonical_state_dir:
+        logging.critical("Alignment pipeline aborted: no active ProjectAdapter and non-canonical state_dir")
+        return False
+    
     state_dir = paths.state_dir
     events_dir = paths.alignment_events_dir
     if not events_dir.exists():

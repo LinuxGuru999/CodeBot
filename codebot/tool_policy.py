@@ -115,6 +115,16 @@ WORKSPACE_ROOT = Path(os.getenv('BOT_WORKSPACE_ROOT', str(Path(__file__).parent.
 
 SHELL_METACHARACTERS = frozenset("&;<>()$`\\\n")
 SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", ">", ">>", "<", "<<"})
+# Shell metacharacters that must be rejected when embedded in bare command arguments
+# to prevent command injection via crafted paths or arguments.
+# NOTE: {} brace expansion is NOT blocked here - it is handled in
+# _validate_bare_command_paths() with context about find -name patterns
+# where braces are legitimate pattern syntax (not shell expansion).
+# NOTE: $ is NOT blocked here because:
+#   - $(...) backtick expansion is blocked explicitly earlier
+#   - With shell=False, $var won't be expanded
+#   - $ is legitimate in awk/sed/grep patterns (field refs, regex end-anchor)
+EMBEDDED_METACHARACTERS = frozenset(";|&`\\<>!")
 BLOCKED_COMMANDS = frozenset({
     "sudo", "su", "mkfs", "dd", "shutdown", "reboot", "init",
     "kill", "killall", "pkill",
@@ -519,6 +529,31 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[l
     if any((token in SHELL_CONTROL_TOKENS and token not in _ALLOWED_CHAINING) or "$(" in token or "`" in token for token in argv):
         return None
 
+    # SECURITY: Reject shell metacharacters embedded within arguments.
+    # This prevents command injection via crafted paths/arguments like
+    # 'file.txt; rm -rf /' or 'name$(id)' where the metacharacter is
+    # part of a larger token rather than a standalone operator.
+    # Allowed as standalone chaining operators: && ; |
+    # Blocked when embedded in any token: ; | & $ ` \ < > ! { }
+    for token in argv:
+        # Skip standalone chaining operators (allowed by design)
+        if token in ("&&", ";", "|"):
+            continue
+        # Skip flags (start with -) as they may legitimately contain special chars
+        # in their values (e.g., --regexp='a|b'). However, flag VALUES are checked
+        # below after splitting on '='.
+        if token.startswith("-"):
+            # Check --key=value form: validate the value portion
+            if "=" in token:
+                eq_idx = token.index("=")
+                value_part = token[eq_idx + 1:]
+                if any(c in EMBEDDED_METACHARACTERS for c in value_part):
+                    return None
+            continue
+        # For non-flag, non-operator tokens, reject any embedded metacharacter
+        if any(c in EMBEDDED_METACHARACTERS for c in token):
+            return None
+
     base_cmd = Path(argv[0]).name
 
     if base_cmd in BLOCKED_COMMANDS:
@@ -541,10 +576,8 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[l
         # due to sandbox escape/exfiltration risks (Reviewer Feedback #59).
         PYTHON_M_ALLOWLIST = frozenset({
             "pytest", "py.test", "unittest", "coverage",
-            "json.tool",
             "codebot.check_drain", "codebot.ticket_status",
-            "codebot.health_check", "codebot.migrate_queue",
-            "py_compile", "compileall", "doctest", "importlib.metadata",
+            "codebot.health_check",
         })
         is_python_module_exec = False
         allowed_module = None
@@ -561,11 +594,24 @@ def validate_command(command: str, workspace_root: Path | None = None) -> list[l
         # For python/python3, block -c/-e/--eval (arbitrary code execution).
         # For other interpreters (bash, perl, etc.), block all EXECUTION_FLAGS
         # including -i (interactive), -c, -e, --eval, etc.
+        # SECURITY: For python/python3, also detect -c embedded in combined short
+        # flags (e.g., -rc, -cr, -Bc) to prevent bypass via flag stacking.
         if base_cmd in ("python", "python3"):
             dangerous_flags = {"-c", "-e", "--eval"}
+            # Check for -c or -e embedded in combined short flags like -rc, -cr, -Be
+            # These are arbitrary code execution vectors regardless of other flags present.
+            has_embedded_code_flag = False
+            for token in args:
+                if len(token) >= 2 and token[0] == '-' and token[1] != '-':
+                    # Combined short flag like -rc, -cr, -Bc, -ie, or single letter flag like -c
+                    flag_chars = token[1:]  # strip leading '-'
+                    if 'c' in flag_chars or 'e' in flag_chars:
+                        has_embedded_code_flag = True
+                        break
+            has_dangerous_flag = any(token in dangerous_flags for token in args) or has_embedded_code_flag
         else:
             dangerous_flags = EXECUTION_FLAGS
-        has_dangerous_flag = any(token in dangerous_flags for token in args)
+            has_dangerous_flag = any(token in dangerous_flags for token in args)
         
         # Check for file path arguments that could be scripts
         has_script_path = False
