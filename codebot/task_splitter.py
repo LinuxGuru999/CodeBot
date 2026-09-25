@@ -1,5 +1,6 @@
 """Task splitter logic for decomposing oversized tickets."""
 
+from dataclasses import replace
 from typing import List, Optional, Dict, Any
 from codebot.ticket_engine import Ticket, TicketState
 from codebot.scratchpad import ScratchpadState
@@ -254,11 +255,19 @@ def split_ticket(
             try:
                 store.transition(sub_ticket.id, TicketState.TRIAGED)
                 store.transition(sub_ticket.id, TicketState.GOAL)
+                current = store.get(sub_ticket.id)
+                if current is not None:
+                    updated = replace(
+                        current,
+                        goal_disposition="NOW",
+                        goal_reason="auto-split sub-ticket",
+                    )
+                    assert updated.state == current.state, "same-state update must not change state"
+                    store._tickets[sub_ticket.id] = updated
+                    store._dirty_ids.add(sub_ticket.id)
                 store.transition(sub_ticket.id, TicketState.DECOMP)
                 store.transition(sub_ticket.id, TicketState.PLANNING)
-                store.transition(sub_ticket.id, TicketState.READY)
             except Exception:
-                # Fallback if state machine differs
                 pass
 
             sub_ids.append(sub_ticket.id)
