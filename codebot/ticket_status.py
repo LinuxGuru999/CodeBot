@@ -16,13 +16,15 @@ def main() -> None:
         return
 
     try:
-        # Add project root to path to ensure imports work
         project_root = Path(__file__).resolve().parent.parent
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
-            
-        from codebot.ticket_engine import TicketStore
-        ts = TicketStore(tickets_file)
+
+        from codebot.ticket_dispatcher import get_ticket_store
+        ts = get_ticket_store(state_dir)
+        if ts is None:
+            print("Tickets: no store found")
+            return
         print(f"Tickets: {ts.count()} total")
         for s, c in sorted(ts.summary().items()):
             if c > 0:

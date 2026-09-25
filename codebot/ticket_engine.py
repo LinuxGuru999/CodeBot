@@ -86,6 +86,7 @@ atexit.register(_atexit_cleanup)
 
 class TicketState(str, Enum):
     DISCOVERED = "DISCOVERED"
+    REQUESTED = "REQUESTED"
     TRIAGED = "TRIAGED"
     GOAL = "GOAL"
     DECOMP = "DECOMP"
@@ -95,6 +96,7 @@ class TicketState(str, Enum):
     IMPLEMENTING = IMPLEMENT
     REVIEW = "REVIEW"
     REVIEWING = REVIEW
+    VERIFY = "VERIFY"
     COMPLETE = "COMPLETE"
     REWORK = "REWORK"
     DEFERRED = "DEFERRED"
@@ -131,6 +133,7 @@ class TicketClass(str, Enum):
     DEPENDENCY = "dependency"
     ARCHITECTURE = "architecture"
     INFRASTRUCTURE = "infrastructure"
+    REQUEST = "request"
 
 
 class Severity(str, Enum):
@@ -203,11 +206,15 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.REJECTED,
         TicketState.DUPLICATE,
     }),
-    TicketState.TRIAGED: frozenset({
-        TicketState.GOAL,
-        TicketState.DUPLICATE,
-        TicketState.NOT_ACTIONABLE,
+    TicketState.REQUESTED: frozenset({
+        TicketState.COMPLETE,
         TicketState.REJECTED,
+        TicketState.DEFERRED,
+    }),
+    TicketState.TRIAGED: frozenset({
+        TicketState.DECOMP,
+        TicketState.LATER,
+        TicketState.NEVER,
         TicketState.RESOLVED,
         TicketState.SUPERSEDED,
         TicketState.CANCELLED,
@@ -242,7 +249,7 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.CANCELLED,
     }),
     TicketState.REVIEW: frozenset({
-        TicketState.COMPLETE,
+        TicketState.VERIFY,
         TicketState.REWORK,
         TicketState.BLOCKED,
         TicketState.RESOLVED,
@@ -251,9 +258,6 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
     }),
     TicketState.REWORK: frozenset({
         TicketState.IMPLEMENT,
-        TicketState.PLANNING,
-        TicketState.DECOMP,
-        TicketState.DEFERRED,
         TicketState.RESOLVED,
         TicketState.SUPERSEDED,
         TicketState.CANCELLED,
@@ -271,8 +275,17 @@ TRANSITIONS: dict[TicketState, frozenset[TicketState]] = {
         TicketState.DECOMP,
         TicketState.IMPLEMENT,
         TicketState.BLOCKED,
+        TicketState.REQUESTED,
     }),
     TicketState.COMPLETE: frozenset(),
+    TicketState.VERIFY: frozenset({
+        TicketState.COMPLETE,
+        TicketState.REWORK,
+        TicketState.BLOCKED,
+        TicketState.RESOLVED,
+        TicketState.SUPERSEDED,
+        TicketState.CANCELLED,
+    }),
     TicketState.REJECTED: frozenset(),
     TicketState.DUPLICATE: frozenset(),
     TicketState.NOT_ACTIONABLE: frozenset(),
@@ -339,6 +352,8 @@ class Ticket:
     discovery_category: str = ""
     finding_id: str = ""
     fingerprint: str = ""
+    origin_id: str = ""
+    origin_type: str = ""
     goal_disposition: str = ""
     goal_reason: str = ""
     goal_relevant_to: str = ""
@@ -458,6 +473,9 @@ def create_ticket(
     discovery_category: str = "",
     finding_id: str = "",
     fingerprint: str = "",
+    origin_id: str = "",
+    origin_type: str = "",
+    initial_state: TicketState | None = None,
 ) -> Ticket:
     if not title or not title.strip():
         raise ValueError("title is required")
@@ -469,12 +487,13 @@ def create_ticket(
         raise ValueError("evidence is required (file:line reference or code snippet proving the issue)")
 
     now = time.time()
+    state = initial_state if initial_state is not None else TicketState.DISCOVERED
     return Ticket(
         id=generate_ticket_id(),
         title=title.strip(),
         ticket_class=ticket_class,
         severity=severity,
-        state=TicketState.DISCOVERED,
+        state=state,
         source=source,
         evidence=evidence,
         problem_statement=problem_statement.strip(),
@@ -500,6 +519,8 @@ def create_ticket(
         discovery_category=discovery_category,
         finding_id=finding_id,
         fingerprint=fingerprint,
+        origin_id=origin_id,
+        origin_type=origin_type,
     )
 
 

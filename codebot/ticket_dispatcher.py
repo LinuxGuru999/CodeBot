@@ -45,10 +45,22 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Role name sets
-IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({
-    "general_implementer", "backend_implementer", "frontend_implementer",
-    "test_implementer", "migration_implementer", "documentation_implementer",
-})
+IMPLEMENTER_ROLE_NAMES: frozenset[str] = frozenset({"implementer"})
+
+IMPLEMENTATION_ROLE_ORDER: tuple[str, ...] = ("implementer",)
+
+
+def next_implementation_role(ticket):
+    """Return next implementation role needed for multi-role approval, or None if all done."""
+    approvals = getattr(ticket, "implementation_approvals", []) or []
+    for role in IMPLEMENTATION_ROLE_ORDER:
+        if role not in approvals:
+            return role
+    return None
+
+
+def is_implementer_role(base_role: str) -> bool:
+    return base_role in IMPLEMENTER_ROLE_NAMES
 
 DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
     "bug_hunter", "security_auditor", "architecture_auditor", "performance_auditor",
@@ -57,13 +69,14 @@ DISCOVERY_ROLE_NAMES: frozenset[str] = frozenset({
 })
 
 REVIEWER_ROLE_NAMES: frozenset[str] = frozenset({
-    "correctness_reviewer", "security_reviewer", "architecture_reviewer",
+    "reviewer", "correctness_reviewer", "security_reviewer", "architecture_reviewer",
     "test_reviewer", "performance_reviewer", "simplicity_reviewer",
-    "documentation_reviewer", "adversarial_reviewer",
+    "documentation_reviewer", "adversarial_reviewer", "concurrency_reviewer",
+    "data_integrity_reviewer",
 })
 
 PLANNING_ROLE_NAMES: frozenset[str] = frozenset({
-    "implementation_planner",
+    "planner",
 })
 
 DECOMPOSER_ROLE_NAMES: frozenset[str] = frozenset({
@@ -75,16 +88,16 @@ TRIAGER_ROLE_NAMES: frozenset[str] = frozenset({
 })
 
 TICKET_CLASS_TO_IMPLEMENTER: dict[str, str] = {
-    "bug": "general_implementer",
-    "feature": "general_implementer",
-    "refactor": "general_implementer",
-    "security": "backend_implementer",
-    "performance": "backend_implementer",
-    "architecture": "backend_implementer",
-    "test": "test_implementer",
-    "documentation": "documentation_implementer",
-    "dependency": "migration_implementer",
-    "infrastructure": "migration_implementer",
+    "bug": "implementer",
+    "feature": "implementer",
+    "refactor": "implementer",
+    "security": "implementer",
+    "performance": "implementer",
+    "architecture": "implementer",
+    "test": "implementer",
+    "documentation": "implementer",
+    "dependency": "implementer",
+    "infrastructure": "implementer",
 }
 
 CLAIM_TTL_SECONDS = 1800
@@ -92,18 +105,7 @@ TRIAGER_MAX_CONCURRENT = 5
 SWEEP_INTERVAL = 300
 _last_sweep_time: float = 0.0
 
-# ---------------------------------------------------------------------------
-# In-Memory Claim Index
-# ---------------------------------------------------------------------------
-# Maps claim_file_name -> {"worker": str, "at": float, "path": Path}
-# Eliminates disk I/O during sweep by tracking claims in memory.
-_claim_index: dict[str, dict[str, Any]] = {}
 
-# Reverse index: ticket_id -> set of claim_file_name keys in _claim_index.
-# Enables O(1) per-ticket claim lookup instead of O(C) linear scan.
-_claims_by_ticket_id: dict[str, set[str]] = {}
-
-DEMAND_STAGGER_SECONDS = 1.0
 REVIEWER_TYPES = (
     "correctness_reviewer", "security_reviewer", "architecture_reviewer",
     "test_reviewer", "performance_reviewer", "simplicity_reviewer",
@@ -159,66 +161,199 @@ MODEL_TIER_EXPENSIVE = frozenset({"qwen-3.8-max", "qwen-3.8-max-thinking", "qwen
 _model_rotation_index = 0
 
 
-_ticket_store_cache: Any = None
+import threading as _td_threading
+
+_ticket_store_cache: dict[Path, Any] = {}
+_ticket_store_fingerprints: dict[Path, tuple[float, int]] = {}
+# Backward-compat alias for tests that reference _ticket_store_meta directly.
+# Arch invariant §3 keys on canonical state_dir identity; fingerprint is
+# mtime/size — legacy name _ticket_store_meta is kept as alias.
+_ticket_store_meta: dict[Path, tuple[float, int]] = _ticket_store_fingerprints
+_ticket_store_cache_lock = _td_threading.Lock()
 
 
 def clear_ticket_store_cache() -> None:
-    """Invalidate the cached TicketStore so the next access reloads from disk.
+    """Invalidate the cached TicketStore(s) so the next access reloads from disk.
 
-    Called at the start of each orchestrator health-check tick to ensure
-    we read tickets.json exactly once per cycle rather than once per
-    dispatcher function invocation.
+    Clears the entire canonical-state_dir-keyed cache. Callers that hold a
+    reference to a previously returned store may continue to use it until GC,
+    but the next ``get_ticket_store(state_dir)`` for that state_dir will
+    construct a fresh instance. This is the **sole** cache invalidation
+    operation — no other cache-op exists (see docs/CODING_STANDARDS.md §3).
+
+    Compatibility: tests historically set ``_ticket_store_cache = None`` or
+    ``_ticket_store_cache is store`` (single-slot cache) and manipulated
+    ``_ticket_store_meta = {}``. This function handles all shapes — None,
+    single TicketStore instance, dict — and keeps ``_ticket_store_meta`` and
+    ``_ticket_store_fingerprints`` synced so legacy fixtures remain safe.
     """
-    global _ticket_store_cache
-    _ticket_store_cache = None
+    global _ticket_store_cache, _ticket_store_fingerprints, _ticket_store_meta
+    with _ticket_store_cache_lock:
+        # Normalise _ticket_store_cache shape — handle legacy None / single instance
+        if _ticket_store_cache is None:
+            _ticket_store_cache = {}
+        elif isinstance(_ticket_store_cache, dict):
+            for _old in list(_ticket_store_cache.values()):
+                try:
+                    _old.close()
+                except Exception:
+                    pass
+            _ticket_store_cache.clear()
+        else:
+            # Legacy single-instance cache (TicketStore object)
+            try:
+                _ticket_store_cache.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            _ticket_store_cache = {}
+        # Clear fingerprints — handle both names (alias may have diverged via
+        # test assignment ``td._ticket_store_meta = {}``)
+        try:
+            _ticket_store_fingerprints.clear()
+        except Exception:
+            _ticket_store_fingerprints = {}
+        try:
+            if isinstance(_ticket_store_meta, dict):
+                _ticket_store_meta.clear()
+            else:
+                _ticket_store_meta = {}
+        except Exception:
+            _ticket_store_meta = {}
+        # Re-sync alias — both names point to same dict going forward
+        _ticket_store_meta = _ticket_store_fingerprints
     logger.debug("TicketStore cache cleared")
 
 
-def get_ticket_store():
-    """Get a shared TicketStore instance, cached per orchestrator tick.
+def _canonical_state_dir(state_dir: Path | str | None) -> Path | None:
+    if state_dir is None:
+        p = Path(STATE_DIR)
+    else:
+        p = Path(state_dir)
+        if p.name == "tickets.json":
+            p = p.parent
+        elif p.suffix == ".json" and p.name.startswith("tickets"):
+            p = p.parent
+    try:
+        return p.resolve() if p.exists() else p.absolute()
+    except Exception:
+        return p
 
-    Returns a module-level TicketStore that is only instantiated once between
-    calls to ``clear_ticket_store_cache()``.  This eliminates redundant disk
-    reads and JSON parses when multiple dispatcher/service functions are
-    invoked within a single orchestrator health-check tick.
 
-    All callers within a health-check cycle (dispatcher, gatekeeper, services,
-    process_manager, alignment_events) should use this instead of creating
-    their own ``TicketStore(path)`` instances.
+def get_ticket_store(state_dir: Path | str | None = None):
+    """Get the canonical TicketStore for *state_dir*.
 
-    Returns ``None`` if tickets.json is missing or unreadable.
+    Factory is the **sole** TicketStore construction site in production
+    (see docs/CODING_STANDARDS.md §3 — arch test enforces one hit). Keyed
+    exclusively on canonical storage identity (resolved ``state_dir`` /
+    ``tickets.json`` path), not on constructor flags. View behavior like
+    ``include_workers`` belongs on method arguments, not on the cache key.
+
+    ``state_dir`` may be ``None`` (default location), a directory Path/str,
+    or a ``tickets.json`` file path for back-compat. Returns ``None`` if
+    ``tickets.json`` is missing or unreadable (preserves legacy contract for
+    callers that treat ``None`` as “no store yet”).
+
+    Thread-safe; uses an mtime/size fingerprint to detect external file
+    replacement (cross-process WAL writer) and refresh the cached instance.
+    Explicit invalidation is via :func:`clear_ticket_store_cache`.
     """
-    global _ticket_store_cache
-    if _ticket_store_cache is not None:
-        logger.debug("Returning cached TicketStore")
-        return _ticket_store_cache
+    global _ticket_store_cache, _ticket_store_fingerprints, _ticket_store_meta
+    with _ticket_store_cache_lock:
+        if _ticket_store_cache is None or not isinstance(_ticket_store_cache, dict):
+            if _ticket_store_cache is None:
+                _ticket_store_cache = {}
+            elif not isinstance(_ticket_store_cache, dict):
+                try:
+                    legacy_path = getattr(_ticket_store_cache, "_path", None)
+                    if legacy_path is not None:
+                        legacy_canonical = _canonical_state_dir(Path(legacy_path).parent)
+                    else:
+                        legacy_canonical = None
+                    if legacy_canonical is not None:
+                        _ticket_store_cache = {legacy_canonical: _ticket_store_cache}
+                    else:
+                        _ticket_store_cache = {}
+                except Exception:
+                    _ticket_store_cache = {}
+        if not isinstance(_ticket_store_fingerprints, dict):
+            _ticket_store_fingerprints = {}
+        if _ticket_store_meta is not _ticket_store_fingerprints:
+            _ticket_store_meta = _ticket_store_fingerprints
+    canonical = _canonical_state_dir(state_dir)
+    if canonical is None:
+        return None
+
+    store_path = canonical / "tickets.json"
+    if not store_path.exists():
+        if state_dir is None:
+            alt = Path(".codebot/state/tickets.json")
+            if alt.exists():
+                store_path = alt
+                try:
+                    canonical = alt.parent.resolve() if alt.parent.exists() else alt.parent.absolute()
+                except Exception:
+                    canonical = alt.parent
+        if not store_path.exists():
+            return None
+    if not store_path.exists():
+        return None
+
+    with _ticket_store_cache_lock:
+        cached = _ticket_store_cache.get(canonical)
+        if cached is not None:
+            try:
+                st = store_path.stat()
+                mtime = float(st.st_mtime)
+                size = int(st.st_size)
+                fp = _ticket_store_fingerprints.get(canonical)
+                if fp is not None and fp != (mtime, size):
+                    try:
+                        cached.close()
+                    except Exception:
+                        pass
+                    _ticket_store_cache.pop(canonical, None)
+                    _ticket_store_fingerprints.pop(canonical, None)
+                    cached = None
+                else:
+                    logger.debug("Returning cached TicketStore for %s", canonical)
+                    return cached
+            except Exception:
+                logger.debug("Returning cached TicketStore for %s (stat failed)", canonical)
+                return cached
 
     try:
         from codebot.ticket_engine import TicketStore
     except ImportError:
         return None
 
-    # Resolve STATE_DIR dynamically to honor test patches on dispatch_service
-    _state_dir = STATE_DIR
     try:
-        import codebot.dispatch_service as _ds
-        if hasattr(_ds, 'STATE_DIR'):
-            _state_dir = _ds.STATE_DIR
-    except Exception:
-        pass
-
-    store_path = _state_dir / "tickets.json"
-    if not store_path.exists():
-        store_path = Path(".codebot/state/tickets.json")
-    if not store_path.exists():
-        return None
-
-    try:
-        _ticket_store_cache = TicketStore(store_path)
-        logger.debug("Creating new TicketStore (cache miss)")
-        return _ticket_store_cache
+        new_store = TicketStore(store_path)
+        logger.debug("Creating new TicketStore for %s (cache miss)", canonical)
     except Exception:
         return None
+
+    with _ticket_store_cache_lock:
+        if not isinstance(_ticket_store_cache, dict):
+            _ticket_store_cache = {}
+        if not isinstance(_ticket_store_fingerprints, dict):
+            _ticket_store_fingerprints = {}
+            _ticket_store_meta = _ticket_store_fingerprints
+        existing = _ticket_store_cache.get(canonical)
+        if existing is not None:
+            try:
+                new_store.close()
+            except Exception:
+                pass
+            return existing
+        try:
+            st = store_path.stat()
+            _ticket_store_fingerprints[canonical] = (float(st.st_mtime), int(st.st_size))
+            _ticket_store_meta = _ticket_store_fingerprints
+        except Exception:
+            _ticket_store_fingerprints[canonical] = (0.0, 0)
+            _ticket_store_meta = _ticket_store_fingerprints
+        _ticket_store_cache[canonical] = new_store
+        return new_store
 
 
 # Backward-compatible alias for tests and internal callers
@@ -228,6 +363,50 @@ _get_ticket_store = get_ticket_store
 # ---------------------------------------------------------------------------
 # Claim Management
 # ---------------------------------------------------------------------------
+
+MAX_CLAIM_FILE_SIZE = 1024  # 1KB safety limit to prevent memory exhaustion
+
+
+def _validate_claim_schema(data: dict, claim_path: Path) -> bool:
+    """Validate claim JSON schema to prevent type confusion attacks.
+    
+    Args:
+        data: Parsed claim JSON data
+        claim_path: Path to claim file (for logging)
+    
+    Returns:
+        True if schema is valid, False otherwise
+    
+    Required fields:
+        - worker: must be a string
+        - at: must be a numeric type (int or float)
+    """
+    if not isinstance(data, dict):
+        logger.warning("Claim file %s has invalid schema: root is not a dict", claim_path)
+        return False
+    
+    # Validate 'worker' field if present
+    if "worker" in data:
+        worker = data["worker"]
+        if not isinstance(worker, str):
+            logger.warning(
+                "Claim file %s has invalid schema: 'worker' is %s, expected string",
+                claim_path, type(worker).__name__
+            )
+            return False
+    
+    # Validate 'at' field if present
+    if "at" in data:
+        at = data["at"]
+        if not isinstance(at, (int, float)):
+            logger.warning(
+                "Claim file %s has invalid schema: 'at' is %s, expected numeric",
+                claim_path, type(at).__name__
+            )
+            return False
+    
+    return True
+
 
 def _reap_expired_claims(bot_name: str) -> int:
     """Delete my own expired claim files so dead owners never wedge tasks."""
@@ -239,17 +418,28 @@ def _reap_expired_claims(bot_name: str) -> int:
         now = time.time()
         for p in claims_dir.glob(f"*.{bot_name}.json"):
             try:
+                file_size = p.stat().st_size
+                if file_size > MAX_CLAIM_FILE_SIZE:
+                    logger.warning(
+                        "Skipping oversized claim file %s (%d bytes > %d byte limit)",
+                        p, file_size, MAX_CLAIM_FILE_SIZE,
+                    )
+                    continue
                 data = json.loads(p.read_text(encoding="utf-8"))
+                
+                # Validate schema before processing
+                if not _validate_claim_schema(data, p):
+                    logger.warning("Skipping malformed claim file %s", p)
+                    continue
+                
                 at = float(data.get("at", 0))
                 if now - at > CLAIM_TTL_SECONDS:
                     p.unlink()
-                    release_claim(p.name)
                     reaped += 1
             except Exception:
                 try:
                     if now - p.stat().st_mtime > CLAIM_TTL_SECONDS:
                         p.unlink()
-                        release_claim(p.name)
                         reaped += 1
                 except Exception:
                     pass
@@ -260,173 +450,60 @@ def _reap_expired_claims(bot_name: str) -> int:
     return reaped
 
 
-def register_claim(claim_name: str, worker: str, at: float, path: Path) -> None:
-    """Register a claim in the in-memory index when created.
-
-    Also updates the reverse index ``_claims_by_ticket_id`` for O(1)
-    per-ticket claim lookups in dispatch functions.
-    """
-    _claim_index[claim_name] = {"worker": worker, "at": at, "path": path}
-    # Extract ticket_id from claim_name format: "{ticket_id}.{bot_name}.json"
-    parts = claim_name.rsplit(".", 2)
-    if len(parts) >= 3:
-        ticket_id = parts[0]
-        _claims_by_ticket_id.setdefault(ticket_id, set()).add(claim_name)
-
-
-def release_claim(claim_name: str) -> None:
-    """Remove a claim from the in-memory index when released/deleted.
-
-    Also removes the claim from the reverse index ``_claims_by_ticket_id``.
-    """
-    _claim_index.pop(claim_name, None)
-    parts = claim_name.rsplit(".", 2)
-    if len(parts) >= 3:
-        ticket_id = parts[0]
-        claims_set = _claims_by_ticket_id.get(ticket_id)
-        if claims_set is not None:
-            claims_set.discard(claim_name)
-            if not claims_set:
-                del _claims_by_ticket_id[ticket_id]
-
-
 def _sweep_orphan_claims(bots: dict[str, Any]) -> int:
-    """Delete claim files whose owning bot process is dead or timed out.
+    """Remove claim files belonging to bots that are no longer active.
 
-    Uses in-memory claim index for O(1) lookup per claim instead of
-    performing disk I/O (glob + JSON parse) on every sweep cycle.
-    Falls back to directory scan only on first run to seed the index.
+    Security: Enforces max file size (1KB) before parsing to prevent memory exhaustion.
+    Skips oversized files with a warning.
     """
-    global _last_sweep_time
-    now = time.time()
+    swept = 0
+    try:
+        claims_dir = STATE_DIR / "claims"
+        if not claims_dir.exists():
+            return 0
 
-    if now - _last_sweep_time < SWEEP_INTERVAL:
-        return 0
-    _last_sweep_time = now
+        valid_bot_names = set(bots.keys())
 
-    claims_dir = STATE_DIR / "claims"
-    if not claims_dir.exists():
-        return 0
-
-    # Seed index on first run if empty but claims exist on disk
-    if not _claim_index:
         for p in claims_dir.glob("*.json"):
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                worker = data.get("worker", data.get("bot", ""))
-                at = float(data.get("at", 0))
-                _claim_index[p.name] = {"worker": worker, "at": at, "path": p}
-            except (json.JSONDecodeError, ValueError, OSError):
-                try:
-                    _claim_index[p.name] = {"worker": "", "at": p.stat().st_mtime, "path": p}
-                except OSError:
-                    pass
-            # Build reverse index from seeded claims
-            parts = p.name.rsplit(".", 2)
-            if len(parts) >= 3:
-                ticket_id = parts[0]
-                _claims_by_ticket_id.setdefault(ticket_id, set()).add(p.name)
+                # SECURITY CHECK: Verify file size before reading/parsing
+                file_size = p.stat().st_size
+                if file_size > MAX_CLAIM_FILE_SIZE:
+                    logger.warning(
+                        "Sweep: Skipping oversized claim file %s (%d bytes > %d byte limit)",
+                        p, file_size, MAX_CLAIM_FILE_SIZE,
+                    )
+                    continue
 
-    alive_bots = {name for name, bot in bots.items() if bot.process is not None and bot.process.poll() is None}
-    swept = 0
-    stale_keys: list[str] = []
+                raw_content = p.read_text(encoding="utf-8")
+                data = json.loads(raw_content)
 
-    # O(n) iteration over in-memory index, no disk I/O
-    for claim_name, info in _claim_index.items():
-        worker = info["worker"]
-        at = info["at"]
-        age = now - at
-        path = info["path"]
+                # Validate schema to ensure 'worker' field is trustworthy
+                if not _validate_claim_schema(data, p):
+                    logger.warning("Sweep: Skipping malformed claim file %s", p)
+                    continue
 
-        should_sweep = False
-        if worker not in alive_bots and age > CLAIM_TTL_SECONDS:
-            should_sweep = True
-            logger.info(f"Swept orphan claim {claim_name} (worker={worker}, age={age:.0f}s)")
-        elif age > CLAIM_TTL_SECONDS * 2:
-            should_sweep = True
-            logger.warning(f"Swept expired claim {claim_name} (worker={worker}, age={age:.0f}s > {CLAIM_TTL_SECONDS * 2}s)")
+                worker = data.get("worker", "")
+                if worker and worker not in valid_bot_names:
+                    # Orphan claim: worker no longer exists in active bots
+                    p.unlink()
+                    swept += 1
+                    logger.debug("Sweep: Removed orphan claim %s for inactive worker '%s'", p.name, worker)
 
-        if should_sweep:
-            try:
-                if path.exists():
-                    path.unlink()
-            except OSError:
-                pass
-            stale_keys.append(claim_name)
-            swept += 1
+            except json.JSONDecodeError:
+                logger.warning("Sweep: Failed to decode JSON in claim file %s", p)
+            except OSError as e:
+                logger.error("Sweep: OS error accessing claim file %s: %s", p, e)
+            except Exception as e:
+                logger.error("Sweep: Unexpected error processing claim file %s: %s", p, e)
 
-    # Remove swept claims from index
-    for key in stale_keys:
-        del _claim_index[key]
-
+        if swept:
+            logger.info(f"Swept {swept} orphan claim(s)")
+    except Exception as e:
+        logger.error(f"Sweep failed: {e}")
     return swept
 
 
-def _sweep_and_build_active_claims(live_bots: dict[str, str], grace_seconds: float = 60) -> set[str]:
-    """Sweep stale claims and build the active_claims set using in-memory indexes.
-
-    Replaces the O(C) disk glob pattern that was duplicated in
-    ``dispatch_decompose_agents`` and ``dispatch_planning_agents``.
-    Uses ``_claim_index`` (forward) and ``_claims_by_ticket_id`` (reverse)
-    for O(C) in-memory iteration with no disk I/O per tick.
-
-    Falls back to seeding the index from disk on first call (cold start)
-    when the in-memory index is empty.
-
-    Args:
-        live_bots: dict mapping alive bot names to their assigned ticket_id.
-        grace_seconds: minimum claim age before sweeping (default 60s).
-
-    Returns:
-        Set of ticket_ids that have at least one active claim.
-    """
-    now = time.time()
-
-    # Seed index from disk on cold start (first call after process restart)
-    if not _claim_index:
-        claims_dir = STATE_DIR / "claims"
-        if claims_dir.exists():
-            for p in claims_dir.glob("*.json"):
-                try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
-                    worker = data.get("worker", data.get("bot", ""))
-                    at = float(data.get("at", 0))
-                    _claim_index[p.name] = {"worker": worker, "at": at, "path": p}
-                    parts = p.name.rsplit(".", 2)
-                    if len(parts) >= 3:
-                        ticket_id = parts[0]
-                        _claims_by_ticket_id.setdefault(ticket_id, set()).add(p.name)
-                except (json.JSONDecodeError, ValueError, OSError):
-                    try:
-                        _claim_index[p.name] = {"worker": "", "at": p.stat().st_mtime, "path": p}
-                    except OSError:
-                        pass
-
-    # O(C) sweep over in-memory index — no disk I/O
-    stale_keys: list[str] = []
-    for claim_name, info in _claim_index.items():
-        worker = info["worker"]
-        parts = claim_name.rsplit(".", 2)
-        if len(parts) < 3:
-            continue
-        claimed_tid = parts[0]
-        if worker not in live_bots or live_bots.get(worker) != claimed_tid:
-            age = now - info["at"]
-            if age < grace_seconds:
-                continue
-            path = info["path"]
-            try:
-                if path.exists():
-                    path.unlink()
-                stale_keys.append(claim_name)
-            except OSError:
-                pass
-
-    for key in stale_keys:
-        release_claim(key)
-
-    # O(K) active claims via reverse index (K = unique ticket_ids with claims)
-    return set(_claims_by_ticket_id.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -437,1180 +514,18 @@ def _rank_tickets_for_dispatch(
     tickets: list[Any],
     state_counts: dict[str, int] | None = None,
 ) -> list[Any]:
-    """Rank tickets by work score for dispatch ordering.
+    """No-op: work_scorer deleted per ADR-007 Phase 2. Authoritative ordering via BucketDispatcher GOAL tier."""
+    return tickets
 
-    Uses work_scorer.rank_work_items with queue pressure derived from
-    state_counts. Falls back to original order if scoring fails.
-    Does NOT change eligibility — only ordering.
-    """
-    if not tickets:
-        return tickets
-    try:
-        from codebot.work_scorer import rank_work_items
-        from codebot.queue_pressure import calculate_pressure
-        pressure = None
-        if state_counts is not None:
-            try:
-                pressure = calculate_pressure(
-                    ready_count=state_counts.get("READY", 0),
-                    implementing_count=state_counts.get("IMPLEMENTING", 0),
-                    reviewing_count=state_counts.get("REVIEWING", 0),
-                    verifying_count=state_counts.get("VERIFYING", 0),
-                    rework_count=state_counts.get("REWORK", 0),
-                    planning_count=state_counts.get("PLANNING", 0),
-                )
-            except Exception:
-                pressure = None
-        ranked = rank_work_items(tickets, queue_pressure=pressure)
-        id_to_ticket = {getattr(t, "id", ""): t for t in tickets if getattr(t, "id", "")}
-        result = []
-        for scored in ranked:
-            t = id_to_ticket.get(scored.ticket_id)
-            if t is not None:
-                result.append(t)
-        for t in tickets:
-            if t not in result:
-                result.append(t)
-        return result
-    except Exception:
-        return tickets
 
 
-def spawn_demand_agents(
-    bots: dict[str, Any],
-    max_concurrent: int,
-    start_bot_fn,
-    store: Any | None = None,
-    implementation_limit: int | None = None,
-    review_limit: int | None = None,
-    reservations: Any | None = None,
-) -> int:
-    """Spawn agents based on current ticket demand.
-    
-    Args:
-        bots: Dict of bot name to BotState
-        max_concurrent: Maximum concurrent bots allowed
-        start_bot_fn: Function to start a bot (injected from orchestrator)
-        store: Optional shared TicketStore instance for this tick. If supplied,
-               used directly to avoid an extra tickets.json read/parse.
-    
-    Returns:
-        Number of agents spawned
-    """
-    try:
-        from codebot.ticket_engine import TicketState
-    except ImportError:
-        return 0
-    
-    ts = store if store is not None else get_ticket_store()
-    if ts is None:
-        return 0
 
-    implementing = ts.list_by_state(TicketState.IMPLEMENTING)
-    reviewing = ts.list_by_state(TicketState.REVIEWING)
-    rework_tickets = ts.list_by_state(TicketState.REWORK)
 
-    running_count = sum(
-        1 for b in bots.values()
-        if b.process is not None and b.process.poll() is None
-    )
-    budget = max(0, max_concurrent - running_count)
-    if budget <= 0:
-        return 0
 
-    claims_dir = STATE_DIR / "claims"
-    claims_dir.mkdir(parents=True, exist_ok=True)
-    active_claims: set[str] = set()
-    alive_bots = {name for name, b in bots.items() if b.process is not None and b.process.poll() is None}
 
-    # Use in-memory _claim_index instead of disk glob — O(C) in-memory vs O(C) disk I/O
-    stale_claim_keys: list[str] = []
-    for claim_name, info in _claim_index.items():
-        worker = info["worker"]
-        try:
-            if worker in alive_bots:
-                # Extract ticket_id from claim_name: "{ticket_id}.{bot_name}.json"
-                parts = claim_name.rsplit(".", 2)
-                if len(parts) >= 3:
-                    active_claims.add(parts[0])
-            else:
-                base = worker.split("-")[0] if "-" in worker else worker
-                if base in REVIEWER_ROLE_NAMES:
-                    parts = claim_name.rsplit(".", 2)
-                    if len(parts) >= 3:
-                        active_claims.add(parts[0])
-                else:
-                    path = info["path"]
-                    try:
-                        if path.exists():
-                            path.unlink()
-                        stale_claim_keys.append(claim_name)
-                    except OSError:
-                        pass
-        except Exception:
-            pass
-    for key in stale_claim_keys:
-        release_claim(key)
 
-    spawned = 0
-    global _model_rotation_index
 
-    def _get_or_create_bot(base_name: str, suffix: str = "") -> Any:
-        from codebot.process_manager import BotConfig, BotState
-        bot_name = f"{base_name}-{suffix}" if suffix else base_name
-        if bot_name in bots:
-            bot = bots[bot_name]
-            if not bot.config.enabled:
-                bot.config.enabled = True
-            return bot
-        prompt_file = f"codebot/roles/{base_name}.md"
-        prompt_path = BOTS_DIR / prompt_file
-        if not prompt_path.exists():
-            prompt_file = f"{base_name}.md"
-            prompt_path = BOTS_DIR / prompt_file
-            if not prompt_path.exists():
-                return None
-        global _model_rotation_index
-        idx = _model_rotation_index % len(WORKER_MODEL_CYCLE)
-        model = WORKER_MODEL_CYCLE[idx]
-        fb = WORKER_FALLBACK_CYCLE[idx] if idx < len(WORKER_FALLBACK_CYCLE) else _MODEL_FALLBACKS.get(model, "xiaomi-mimo-2.5")
-        _model_rotation_index += 1
-        tier = 13 if model in MODEL_TIER_EXPENSIVE or "thinking" in model else 12
-        cfg = BotConfig(
-            name=bot_name,
-            prompt_file=prompt_file,
-            interval_seconds=30,
-            heartbeat_timeout=90,
-            model=model,
-            fallback_model=fb,
-            enabled=True,
-            clean_exit_wait=False,
-            runner_mode="api",
-            tier=tier,
-            max_restarts=5,
-        )
-        state = BotState(config=cfg)
-        bots[bot_name] = state
-        return state
 
-    def _is_idle(bot: Any) -> bool:
-        return bot.process is None or bot.process.poll() is not None
-
-    def _assign_and_spawn(bot: Any, tid: str) -> bool:
-        claim_file = claims_dir / f"{tid}.{bot.config.name}.json"
-        if claim_file.exists():
-            return False
-        if reservations is not None and not reservations.try_reserve_count(tid, running_count):
-            return False
-        try:
-            claim_at = time.time()
-            claim_data = {"ticket_id": tid, "bot": bot.config.name, "worker": bot.config.name, "at": claim_at}
-            tmp = claim_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
-            tmp.replace(claim_file)
-            register_claim(claim_file.name, bot.config.name, claim_at, claim_file)
-        except OSError:
-            if reservations is not None:
-                reservations.release(tid)
-            return False
-        bot._assigned_ticket_id = tid
-        ok = start_bot_fn(bot, bots=bots, is_demand=True)
-        if ok:
-            nonlocal spawned
-            spawned += 1
-            logger.info(f"Demand spawn: {bot.config.name} -> ticket {tid}")
-            time.sleep(DEMAND_STAGGER_SECONDS)
-            return True
-        else:
-            logger.warning(f"Demand spawn FAILED: {bot.config.name} -> ticket {tid}")
-            try:
-                claim_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-            release_claim(claim_file.name)
-            bot._assigned_ticket_id = ""
-            if reservations is not None:
-                reservations.release(tid)
-            return False
-
-    # Dispatch implementers — O(n+m) via role-indexed lookup
-    impl_all = list(implementing) + list(rework_tickets)
-    max_concurrent_impl = 8 if implementation_limit is None else implementation_limit
-
-    # Rank tickets by work score so bottleneck/critical work dispatches first
-    summary = ts.summary() if ts is not None else {}
-    impl_all = _rank_tickets_for_dispatch(impl_all, state_counts=summary)
-
-    # Build role-indexed dictionary: O(m) where m = number of bots
-    # Why O(1) per-ticket: idle_bots_by_role maps role -> deque[idle bots],
-    # avoiding the prior O(n*m) nested scan over tickets×bots. Index build is
-    # measured and logged so perf regressions are observable per tick.
-    _index_start = time.perf_counter()
-    idle_bots_by_role: dict[str, deque[Any]] = {}
-    all_bots_by_role: dict[str, list[str]] = {}
-    running_impl = 0
-    for name, b in bots.items():
-        base = name.split("-")[0] if "-" in name else name
-        all_bots_by_role.setdefault(base, []).append(name)
-        if b.process is not None and b.process.poll() is None:
-            if base in IMPLEMENTER_ROLE_NAMES:
-                running_impl += 1
-        else:
-            if b.config.enabled and not getattr(b, "_assigned_ticket_id", ""):
-                if base not in idle_bots_by_role:
-                    idle_bots_by_role[base] = deque()
-                idle_bots_by_role[base].append(b)
-    _index_elapsed = time.perf_counter() - _index_start
-    logger.info("Dispatch index built in %.3fs for %d bots (O(1) lookup enabled)", _index_elapsed, len(bots))
-
-    impl_budget = min(len(impl_all), budget, max(0, max_concurrent_impl - running_impl))
-
-    _o1_logged = False
-    for ticket in impl_all[:impl_budget]:
-        if spawned >= impl_budget:
-            break
-        tid = getattr(ticket, "id", "")
-        if not tid or tid in active_claims:
-            continue
-        tc = getattr(ticket, "ticket_class", None)
-        tc_val = tc.value if hasattr(tc, "value") else str(tc) if tc else "feature"
-        target_base = TICKET_CLASS_TO_IMPLEMENTER.get(tc_val, "general_implementer")
-
-        assigned = False
-        # O(1) average-case lookup by role instead of O(m) scan
-        if not _o1_logged:
-            logger.debug("O(1) role-indexed lookup for ticket %s -> role %s", tid, target_base)
-            _o1_logged = True
-        candidates = idle_bots_by_role.get(target_base)
-        while candidates:
-            bot = candidates.popleft()
-            if not bot.config.enabled or getattr(bot, "_assigned_ticket_id", ""):
-                continue
-            if _assign_and_spawn(bot, tid):
-                assigned = True
-                active_claims.add(tid)
-                break
-        if assigned:
-            continue
-
-        existing = all_bots_by_role.get(target_base, [])
-        suffix = str(len(existing) + 1) if existing else ""
-        bot = _get_or_create_bot(target_base, suffix)
-        if bot and _is_idle(bot):
-            if _assign_and_spawn(bot, tid):
-                active_claims.add(tid)
-
-    budget -= spawned
-    if budget <= 0:
-        return spawned
-
-    # Dispatch reviewers — O(n+m) via role-indexed lookup
-    max_concurrent_reviewers = 8 if review_limit is None else review_limit
-
-    # Reuse idle_bots_by_role built above; also build reviewer-specific indexes: O(m)
-    idle_reviewers_by_role: dict[str, deque[Any]] = {}
-    all_reviewers_by_role: dict[str, list[str]] = {}
-    running_reviewers = 0
-    for name, b in bots.items():
-        base = name.split("-")[0] if "-" in name else name
-        if base in REVIEWER_ROLE_NAMES or name == "ux_reviewer":
-            all_reviewers_by_role.setdefault(base, []).append(name)
-            if b.process is not None and b.process.poll() is None:
-                running_reviewers += 1
-            elif b.config.enabled and not getattr(b, "_assigned_ticket_id", ""):
-                if base not in idle_reviewers_by_role:
-                    idle_reviewers_by_role[base] = deque()
-                idle_reviewers_by_role[base].append(b)
-
-    review_budget = min(len(reviewing) * len(REVIEWER_TYPES), budget, max(0, max_concurrent_reviewers - running_reviewers))
-    reviewer_spawned = 0
-
-    for ticket in reviewing:
-        if reviewer_spawned >= review_budget:
-            break
-        tid = getattr(ticket, "id", "")
-        if not tid or tid in active_claims:
-            continue
-        for rtype in REVIEWER_TYPES:
-            if reviewer_spawned >= review_budget:
-                break
-            assigned = False
-            # O(1) average-case lookup by role instead of O(m) scan
-            candidates = idle_reviewers_by_role.get(rtype)
-            while candidates:
-                bot = candidates.popleft()
-                if not bot.config.enabled or getattr(bot, "_assigned_ticket_id", ""):
-                    continue
-                if _assign_and_spawn(bot, tid):
-                    assigned = True
-                    reviewer_spawned += 1
-                    break
-            if assigned:
-                continue
-
-            existing = all_reviewers_by_role.get(rtype, [])
-            suffix = str(len(existing) + 1) if existing else ""
-            bot = _get_or_create_bot(rtype, suffix)
-            if bot and _is_idle(bot):
-                if _assign_and_spawn(bot, tid):
-                    reviewer_spawned += 1
-
-    return spawned + reviewer_spawned
-
-
-def dispatch_triage_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None, store: Any | None = None) -> int:
-    try:
-        from codebot.ticket_engine import TicketState
-    except ImportError:
-        return 0
-
-    ts = store if store is not None else get_ticket_store()
-    if ts is None:
-        return 0
-
-    discovered = ts.list_by_state(TicketState.DISCOVERED)
-    validating = ts.list_by_state(TicketState.VALIDATING)
-    triaged = ts.list_by_state(TicketState.TRIAGED)
-    if not discovered and not validating and not triaged:
-        return 0
-
-    summary = ts.summary() if ts is not None else {}
-    all_tickets = list(discovered) + list(validating) + list(triaged)
-    all_tickets = _rank_tickets_for_dispatch(all_tickets, state_counts=summary)
-
-    claims_dir = STATE_DIR / "claims"
-    claims_dir.mkdir(parents=True, exist_ok=True)
-
-    live_bots: dict[str, str] = {}
-    for name, bot in bots.items():
-        if bot.process is not None and bot.process.poll() is None:
-            assigned = getattr(bot, '_assigned_ticket_id', '')
-            if assigned:
-                live_bots[name] = assigned
-
-    active_claims = _sweep_and_build_active_claims(live_bots)
-
-    idle_triagers = []
-    unassigned_running = []
-    busy_ticket_ids: set[str] = set()
-    for name, bot in bots.items():
-        base_name = name.split("-")[0] if "-" in name else name
-        if base_name not in TRIAGER_ROLE_NAMES:
-            continue
-        if bot.process is not None and bot.process.poll() is None:
-            assigned = getattr(bot, '_assigned_ticket_id', '')
-            if assigned:
-                busy_ticket_ids.add(assigned)
-            else:
-                unassigned_running.append((name, bot))
-        else:
-            idle_triagers.append((name, bot))
-
-    running_triagers = len(unassigned_running) + len(busy_ticket_ids)
-    dispatch_capacity = max(0, max_agents - running_triagers) if max_agents > 0 else 0
-    dispatch_capacity = min(dispatch_capacity, TRIAGER_MAX_CONCURRENT)
-    available = idle_triagers + unassigned_running
-    available = available[:max(dispatch_capacity, 0)]
-    dispatched = 0
-
-    def _get_or_create_triager(suffix: str = "") -> Any:
-        from codebot.process_manager import BotConfig, BotState
-        from codebot.model_manager import next_model_for_role
-        bot_name = f"ticket_triager-{suffix}" if suffix else "ticket_triager"
-        if bot_name in bots:
-            bot = bots[bot_name]
-            if not bot.config.enabled:
-                bot.config.enabled = True
-            return bot
-        prompt_path = BOTS_DIR / "codebot" / "roles" / "ticket_triager.md"
-        if not prompt_path.exists():
-            prompt_path = BOTS_DIR / "ticket_triager.md"
-        if not prompt_path.exists():
-            return None
-        assignment = next_model_for_role("ticket_triager")
-        cfg = BotConfig(
-            name=bot_name,
-            prompt_file="codebot/roles/ticket_triager.md",
-            interval_seconds=30,
-            heartbeat_timeout=90,
-            model=assignment.model,
-            fallback_model=assignment.fallback,
-            enabled=True,
-            clean_exit_wait=False,
-            runner_mode="api",
-            tier=11,
-            max_restarts=5,
-        )
-        state = BotState(config=cfg)
-        bots[bot_name] = state
-        return state
-
-    transitions: list[tuple[str, Any, list[dict] | None]] = []
-    transition_logs: list[str] = []
-
-    for ticket in all_tickets:
-        if dispatch_capacity is not None and dispatched >= dispatch_capacity:
-            break
-        tid = getattr(ticket, 'id', '')
-        if not tid:
-            continue
-
-        current_state = getattr(ticket, 'state', None)
-        if hasattr(current_state, 'value'):
-            current_state_val = current_state.value
-        else:
-            current_state_val = str(current_state) if current_state else "DISCOVERED"
-
-        if current_state_val == "TRIAGED":
-            transitions.append((tid, TicketState.READY, None))
-            transition_logs.append(f"Triaged: {tid} TRIAGED -> READY")
-            continue
-
-        if current_state_val == "VALIDATING":
-            transitions.append((tid, TicketState.TRIAGED, None))
-            transition_logs.append(f"Validated: {tid} VALIDATING -> TRIAGED")
-            continue
-
-        if tid in active_claims or tid in busy_ticket_ids:
-            continue
-
-        if not available:
-            existing = [n for n, b in bots.items() if n.split("-")[0] == "ticket_triager" and b.process is not None and b.process.poll() is None]
-            if len(existing) >= TRIAGER_MAX_CONCURRENT:
-                break
-            suffix = str(len(existing) + 1)
-            bot = _get_or_create_triager(suffix)
-            if bot and (bot.process is None or bot.process.poll() is not None):
-                available.append((bot.config.name, bot))
-            else:
-                break
-
-        bot_name, bot = available.pop(0)
-
-        claim_file = claims_dir / f"{tid}.{bot_name}.json"
-        if claim_file.exists():
-            continue
-
-        try:
-            claim_at = time.time()
-            claim_data = {"ticket_id": tid, "bot": bot_name, "at": claim_at, "class": "triage"}
-            tmp = claim_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
-            tmp.replace(claim_file)
-            register_claim(claim_file.name, bot_name, claim_at, claim_file)
-        except OSError:
-            continue
-
-        bot._assigned_ticket_id = tid
-        if bot.process is not None and bot.process.poll() is None:
-            dispatched += 1
-            logger.info(f"Dispatched triage for {tid} -> {bot_name}")
-        else:
-            started = start_bot_fn(bot, bots=bots, is_demand=True) if start_bot_fn else False
-            if not started:
-                claim_file.unlink(missing_ok=True)
-                release_claim(claim_file.name)
-                bot._assigned_ticket_id = ""
-                break
-            dispatched += 1
-            logger.info(f"Dispatched triage for {tid} -> {bot_name}")
-
-    if transitions:
-        try:
-            results = ts.batch_transition(transitions)
-            dispatched += len(results)
-            for msg in transition_logs:
-                logger.info(msg)
-            for tid, _, _ in transitions:
-                for cf in claims_dir.glob(f"{tid}.*.json"):
-                    release_claim(cf.name)
-                    try:
-                        cf.unlink()
-                    except OSError:
-                        pass
-        except (ValueError, KeyError) as e:
-            logger.warning(f"Batch triage transition failed ({e}), falling back to individual")
-            for i, (tid, target_state, fb) in enumerate(transitions):
-                try:
-                    ts.transition(tid, target_state, fb)
-                    logger.info(transition_logs[i])
-                    dispatched += 1
-                    for cf in claims_dir.glob(f"{tid}.*.json"):
-                        release_claim(cf.name)
-                        try:
-                            cf.unlink()
-                        except OSError:
-                            pass
-                except ValueError as ve:
-                    for cf in claims_dir.glob(f"{tid}.*.json"):
-                        release_claim(cf.name)
-                        cf.unlink(missing_ok=True)
-                    logger.debug(f"Failed to advance {tid}: {ve}")
-
-    return dispatched
-
-
-def dispatch_decompose_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None, store: Any | None = None) -> int:
-    """Dispatch DECOMPOSE tickets to decomposer agents."""
-    try:
-        from codebot.ticket_engine import TicketState
-    except ImportError:
-        return 0
-
-    ts = store if store is not None else get_ticket_store()
-    if ts is None:
-        return 0
-
-    decomposing = ts.list_by_state(TicketState.DECOMPOSE)
-    if not decomposing:
-        return 0
-
-    # Rank by work score so higher-priority decomposition runs first
-    summary = ts.summary() if ts is not None else {}
-    decomposing = _rank_tickets_for_dispatch(decomposing, state_counts=summary)
-
-    decomp_dir = STATE_DIR / "decompositions"
-    decomp_dir.mkdir(parents=True, exist_ok=True)
-
-    claims_dir = STATE_DIR / "claims"
-    claims_dir.mkdir(parents=True, exist_ok=True)
-
-    live_bots: dict[str, str] = {}
-    for name, bot in bots.items():
-        if bot.process is not None and bot.process.poll() is None:
-            assigned = getattr(bot, '_assigned_ticket_id', '')
-            if assigned:
-                live_bots[name] = assigned
-
-    # O(C) in-memory sweep via _claim_index — replaces O(C) disk glob
-    active_claims = _sweep_and_build_active_claims(live_bots)
-
-    idle_decomposers = []
-    unassigned_running = []
-    busy_ticket_ids: set[str] = set()
-    for name, bot in bots.items():
-        base_name = name.split("-")[0] if "-" in name else name
-        if base_name not in DECOMPOSER_ROLE_NAMES:
-            continue
-        if bot.process is not None and bot.process.poll() is None:
-            assigned = getattr(bot, '_assigned_ticket_id', '')
-            if assigned:
-                busy_ticket_ids.add(assigned)
-            else:
-                unassigned_running.append((name, bot))
-        else:
-            idle_decomposers.append((name, bot))
-
-    running_decomposers = len(unassigned_running) + len(busy_ticket_ids)
-    dispatch_capacity = max(0, max_agents - running_decomposers) if max_agents > 0 else 0
-    available = idle_decomposers + unassigned_running
-    available = available[:max(dispatch_capacity, 0)]
-    dispatched = 0
-
-    def _get_or_create_decomposer(suffix: str = "") -> Any:
-        from codebot.process_manager import BotConfig, BotState
-        bot_name = f"decomposer-{suffix}" if suffix else "decomposer"
-        if bot_name in bots:
-            bot = bots[bot_name]
-            if not bot.config.enabled:
-                bot.config.enabled = True
-            return bot
-        prompt_path = BOTS_DIR / "codebot" / "roles" / "decomposer.md"
-        if not prompt_path.exists():
-            prompt_path = BOTS_DIR / "decomposer.md"
-        if not prompt_path.exists():
-            return None
-        cfg = BotConfig(
-            name=bot_name,
-            prompt_file="codebot/roles/decomposer.md",
-            interval_seconds=30,
-            heartbeat_timeout=90,
-            model="qwen-3.7-plus",
-            fallback_model="xiaomi-mimo-2.5",
-            enabled=True,
-            clean_exit_wait=False,
-            runner_mode="api",
-            tier=12,
-            max_restarts=5,
-        )
-        state = BotState(config=cfg)
-        bots[bot_name] = state
-        return state
-
-    # Phase 1: Collect transitions for completed decompositions and dispatch new ones
-    transitions: list[tuple[str, Any, list[dict] | None]] = []
-    transition_tids: list[str] = []
-    transition_logs: list[str] = []
-
-    for ticket in decomposing:
-        if dispatch_capacity is not None and dispatched >= dispatch_capacity:
-            break
-        tid = getattr(ticket, 'id', '')
-        if not tid:
-            continue
-
-        decomp_file = decomp_dir / f"{tid}.decomp.json"
-        if decomp_file.exists():
-            try:
-                artifact = json.loads(decomp_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                artifact = {}
-            transitions.append((tid, TicketState.PLANNING, None))
-            transition_tids.append(tid)
-            sub_count = len(artifact.get('sub_tickets', []))
-            transition_logs.append(f"Decomposition complete: {tid} DECOMPOSE -> PLANNING (sub_tickets={sub_count})")
-            continue
-
-        if tid in active_claims:
-            continue
-
-        if tid in busy_ticket_ids:
-            continue
-
-        if not available:
-            existing_decomp = [n for n, b in bots.items() if n.split("-")[0] == "decomposer" and b.process is not None and b.process.poll() is None]
-            suffix = str(len(existing_decomp) + 1)
-            bot = _get_or_create_decomposer(suffix)
-            if bot and (bot.process is None or bot.process.poll() is not None):
-                available.append((bot.config.name, bot))
-            else:
-                break
-
-        bot_name, bot = available.pop(0)
-
-        existing_claim = claims_dir / f"{tid}.{bot_name}.json"
-        if existing_claim.exists():
-            continue
-
-        claim_file = claims_dir / f"{tid}.{bot_name}.json"
-        try:
-            claim_at = time.time()
-            claim_data = {"ticket_id": tid, "bot": bot_name, "at": claim_at, "class": "decompose"}
-            tmp = claim_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
-            tmp.replace(claim_file)
-            register_claim(claim_file.name, bot_name, claim_at, claim_file)
-        except OSError:
-            continue
-
-        bot._assigned_ticket_id = tid
-        if bot.process is not None and bot.process.poll() is None:
-            dispatched += 1
-            logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
-        else:
-            started = start_bot_fn(bot, bots=bots, is_demand=True) if start_bot_fn else False
-            if not started:
-                claim_file.unlink(missing_ok=True)
-                release_claim(claim_file.name)
-                bot._assigned_ticket_id = ""
-                break
-            dispatched += 1
-            logger.info(f"Dispatched decomposition for {tid} -> {bot_name}")
-
-    # Phase 2: Apply all decomposition-complete transitions in a single batch
-    if transitions:
-        try:
-            results = ts.batch_transition(transitions)
-            dispatched += len(results)
-            for msg in transition_logs:
-                logger.info(msg)
-            for tid in transition_tids:
-                for cf in claims_dir.glob(f"{tid}.*.json"):
-                    release_claim(cf.name)
-                    try:
-                        cf.unlink()
-                    except OSError:
-                        pass
-        except (ValueError, KeyError) as e:
-            logger.warning(f"Batch decompose transition failed ({e}), falling back to individual")
-            for i, (tid, target_state, fb) in enumerate(transitions):
-                try:
-                    ts.transition(tid, target_state, fb)
-                    logger.info(transition_logs[i])
-                    dispatched += 1
-                    for cf in claims_dir.glob(f"{tid}.*.json"):
-                        release_claim(cf.name)
-                        try:
-                            cf.unlink()
-                        except OSError:
-                            pass
-                except ValueError as ve:
-                    for cf in claims_dir.glob(f"{tid}.*.json"):
-                        release_claim(cf.name)
-                        cf.unlink(missing_ok=True)
-                    logger.debug(f"Failed to advance {tid} to PLANNING: {ve}")
-
-    return dispatched
-
-
-def dispatch_planning_agents(bots: dict[str, Any], max_agents: int = 0, start_bot_fn=None, store: Any | None = None) -> int:
-    """Dispatch PLANNING tickets to planner agents."""
-    try:
-        from codebot.ticket_engine import TicketState
-    except ImportError:
-        return 0
-
-    ts = store if store is not None else get_ticket_store()
-    if ts is None:
-        return 0
-
-    planning = ts.list_by_state(TicketState.PLANNING)
-    if not planning:
-        return 0
-
-    # Rank by work score so higher-priority planning runs first
-    summary = ts.summary() if ts is not None else {}
-    planning = _rank_tickets_for_dispatch(planning, state_counts=summary)
-
-    plans_dir = STATE_DIR / "plans"
-    plans_dir.mkdir(parents=True, exist_ok=True)
-
-    claims_dir = STATE_DIR / "claims"
-    claims_dir.mkdir(parents=True, exist_ok=True)
-
-    live_bots: dict[str, str] = {}
-    for name, bot in bots.items():
-        if bot.process is not None and bot.process.poll() is None:
-            assigned = getattr(bot, '_assigned_ticket_id', '')
-            if assigned:
-                live_bots[name] = assigned
-
-    # O(C) in-memory sweep via _claim_index — replaces O(C) disk glob
-    active_claims = _sweep_and_build_active_claims(live_bots)
-
-    idle_planners = []
-    unassigned_running = []
-    busy_ticket_ids: set[str] = set()
-    for name, bot in bots.items():
-        base_name = name.split("-")[0] if "-" in name else name
-        if base_name not in PLANNING_ROLE_NAMES:
-            continue
-        if bot.process is not None and bot.process.poll() is None:
-            assigned = getattr(bot, '_assigned_ticket_id', '')
-            if assigned:
-                busy_ticket_ids.add(assigned)
-            else:
-                unassigned_running.append((name, bot))
-        else:
-            idle_planners.append((name, bot))
-
-    running_planners = len(unassigned_running) + len(busy_ticket_ids)
-    dispatch_capacity = max(0, max_agents - running_planners) if max_agents > 0 else 0
-    available = idle_planners + unassigned_running
-    available = available[:max(dispatch_capacity, 0)]
-    dispatched = 0
-
-    # Phase 1: Collect transitions for completed plans and dispatch new ones
-    transitions: list[tuple[str, Any, list[dict] | None]] = []
-    transition_tids: list[str] = []
-
-    for ticket in planning:
-        tid = getattr(ticket, 'id', '')
-        if not tid:
-            continue
-
-        plan_file = plans_dir / f"{tid}.plan.json"
-        if plan_file.exists():
-            try:
-                json.loads(plan_file.read_text(encoding="utf-8"))
-                transitions.append((tid, TicketState.IMPLEMENTING, None))
-                transition_tids.append(tid)
-                continue
-            except (json.JSONDecodeError, ValueError):
-                raw = plan_file.read_text(encoding="utf-8")
-                try:
-                    parsed = ast.literal_eval(raw)
-                    if isinstance(parsed, dict):
-                        tmp = plan_file.with_suffix(".tmp")
-                        tmp.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
-                        tmp.replace(plan_file)
-                        transitions.append((tid, TicketState.IMPLEMENTING, None))
-                        transition_tids.append(tid)
-                        logger.info(f"Normalized Python-dict plan to JSON for {tid}")
-                        continue
-                except (ValueError, SyntaxError):
-                    pass
-                try:
-                    plan_file.unlink()
-                    logger.warning(f"Deleted malformed plan for {tid}, re-queuing for planning")
-                except OSError:
-                    pass
-
-        if tid in active_claims:
-            continue
-
-        if tid in busy_ticket_ids:
-            continue
-
-        if not available:
-            break
-
-        bot_name, bot = available.pop(0)
-
-        existing_claim = claims_dir / f"{tid}.{bot_name}.json"
-        if existing_claim.exists():
-            continue
-
-        claim_file = claims_dir / f"{tid}.{bot_name}.json"
-        try:
-            claim_at = time.time()
-            claim_data = {"ticket_id": tid, "bot": bot_name, "at": claim_at, "class": "planning"}
-            tmp = claim_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(claim_data), encoding="utf-8")
-            tmp.replace(claim_file)
-            register_claim(claim_file.name, bot_name, claim_at, claim_file)
-        except OSError:
-            continue
-
-        bot._assigned_ticket_id = tid
-        if bot.process is not None and bot.process.poll() is None:
-            dispatched += 1
-            logger.info(f"Dispatched planning for {tid} -> {bot_name}")
-        else:
-            started = start_bot_fn(bot, bots=bots, is_demand=True) if start_bot_fn else False
-            if not started:
-                claim_file.unlink(missing_ok=True)
-                release_claim(claim_file.name)
-                bot._assigned_ticket_id = ""
-                break
-            dispatched += 1
-            logger.info(f"Dispatched planning for {tid} -> {bot_name}")
-
-    # Phase 2: Apply all planning-complete transitions in a single batch
-    if transitions:
-        try:
-            results = ts.batch_transition(transitions)
-            dispatched += len(results)
-            for tid in transition_tids:
-                logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
-                for cf in claims_dir.glob(f"{tid}.*.json"):
-                    release_claim(cf.name)
-                    try:
-                        cf.unlink()
-                    except OSError:
-                        pass
-        except (ValueError, KeyError) as e:
-            logger.warning(f"Batch planning transition failed ({e}), falling back to individual")
-            for i, (tid, target_state, fb) in enumerate(transitions):
-                try:
-                    ts.transition(tid, target_state, fb)
-                    logger.info(f"Planning complete: {tid} PLANNING -> IMPLEMENTING")
-                    dispatched += 1
-                    for cf in claims_dir.glob(f"{tid}.*.json"):
-                        release_claim(cf.name)
-                        try:
-                            cf.unlink()
-                        except OSError:
-                            pass
-                except ValueError as ve:
-                    for cf in claims_dir.glob(f"{tid}.*.json"):
-                        release_claim(cf.name)
-                        cf.unlink(missing_ok=True)
-                    logger.debug(f"Failed to advance {tid} to IMPLEMENTING: {ve}")
-
-    return dispatched
-
-
-def advance_reviewed_tickets(bots: dict[str, Any], store: Any | None = None) -> int:
-    """Transition REVIEWING tickets to VERIFYING or REWORK based on reviewer verdicts.
-
-    Integrates the adversarial review framework:
-    - Reads structured *_review.json files for each ticket
-    - Parses ReviewDecision objects with severity-tagged findings
-    - Routes to REWORK when unresolved BLOCKER/CRITICAL/MAJOR findings exist
-    - Falls back to tasklog-based verdict detection for legacy reviews
-
-    Uses batch_transition to apply all state changes in memory and save once,
-    avoiding O(K*N) serialization cost per dispatch cycle.
-    """
-    try:
-        from codebot.ticket_engine import TicketState
-        from codebot.review_types import ReviewDecision, StructuredFinding
-        from codebot.review_config import get_review_config
-    except ImportError:
-        return 0
-
-    ts = store if store is not None else get_ticket_store()
-    if ts is None:
-        return 0
-
-    reviewing = ts.list_by_state(TicketState.REVIEWING)
-    if not reviewing:
-        return 0
-
-    claims_dir = STATE_DIR / "claims"
-    if not claims_dir.exists():
-        return 0
-
-    cfg = get_review_config()
-    blocking = cfg.blocking_severities
-
-    review_file_patterns = (
-        "correctness_review.json",
-        "security_review.json",
-        "architecture_review.json",
-        "performance_review.json",
-        "simplicity_review.json",
-        "test_review.json",
-        "documentation_review.json",
-        "adversarial_review.json",
-    )
-
-    transitions: list[tuple[str, Any, list[dict] | None]] = []
-    tickets_to_clean: list[tuple[str, list]] = []
-
-    for ticket in reviewing:
-        tid = getattr(ticket, 'id', '')
-        if not tid:
-            continue
-
-        # O(1) lookup via reverse index instead of O(C) linear scan
-        claim_names = _claims_by_ticket_id.get(tid, set())
-        review_claims = [info["path"] for name in claim_names
-                         if (info := _claim_index.get(name)) and info["path"].exists()]
-        if not review_claims:
-            # Fallback: only hit disk when reverse index is stale (e.g. process restart)
-            review_claims = list(claims_dir.glob(f"{tid}.*.json"))
-            # Seed reverse index from disk for future lookups
-            for rc in review_claims:
-                if rc.name not in _claim_index:
-                    try:
-                        data = json.loads(rc.read_text(encoding="utf-8"))
-                        worker = data.get("worker", data.get("bot", ""))
-                        at = float(data.get("at", 0))
-                        _claim_index[rc.name] = {"worker": worker, "at": at, "path": rc}
-                        _claims_by_ticket_id.setdefault(tid, set()).add(rc.name)
-                    except (json.JSONDecodeError, ValueError, OSError):
-                        pass
-        if not review_claims:
-            verdicts_dir = STATE_DIR / "reviews" / tid
-            has_verdicts = verdicts_dir.exists() and any(
-                p.suffix == ".json" and p.parent.name != "quarantine"
-                for p in verdicts_dir.iterdir()
-            ) if verdicts_dir.exists() else False
-            if not has_verdicts:
-                continue
-
-        all_reviewers_done = True
-        if review_claims:
-            for claim_file in review_claims:
-                bot_name = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
-                base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
-                if base_name not in REVIEWER_ROLE_NAMES:
-                    continue
-                bot = bots.get(bot_name)
-                if bot is None:
-                    continue
-                is_running = bot.process is not None and bot.process.poll() is None
-                assigned = getattr(bot, '_assigned_ticket_id', '')
-                if is_running and assigned == tid:
-                    all_reviewers_done = False
-                    break
-
-        if not all_reviewers_done:
-            continue
-
-        review_decisions: list[ReviewDecision] = []
-        verdicts_dir = STATE_DIR / "reviews" / tid
-        if verdicts_dir.exists():
-            for vf in verdicts_dir.glob("*.json"):
-                if vf.parent.name == "quarantine":
-                    continue
-                try:
-                    data = json.loads(vf.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    import ast as _ast
-                    try:
-                        data = _ast.literal_eval(vf.read_text(encoding="utf-8"))
-                    except (ValueError, SyntaxError):
-                        continue
-                if not isinstance(data, dict):
-                    continue
-                if data.get("ticket_id", "") != tid:
-                    continue
-                try:
-                    review_decisions.append(ReviewDecision.from_dict(data))
-                except (ValueError, KeyError):
-                    continue
-        if not review_decisions:
-            for pattern in review_file_patterns:
-                review_path = STATE_DIR / pattern
-                if not review_path.exists():
-                    continue
-                try:
-                    data = json.loads(review_path.read_text(encoding="utf-8"))
-                    if not isinstance(data, dict):
-                        continue
-                    if data.get("ticket_id", "") != tid:
-                        continue
-                    review_decisions.append(ReviewDecision.from_dict(data))
-                except (json.JSONDecodeError, OSError, ValueError, KeyError):
-                    continue
-
-        all_findings: list[StructuredFinding] = []
-        for rd in review_decisions:
-            all_findings.extend(rd.findings)
-
-        unresolved_blocking = [f for f in all_findings if f.is_blocking(blocking)]
-
-        has_rework_verdict = any(
-            rd.effective_verdict(blocking) == "REWORK"
-            for rd in review_decisions
-        )
-
-        if not review_decisions:
-            has_rework_flag = False
-            has_reviewer_claims = bool(review_claims)
-            for claim_file in review_claims:
-                bot_name = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
-                base_name = bot_name.split("-")[0] if "-" in bot_name else bot_name
-                if base_name not in REVIEWER_ROLE_NAMES:
-                    continue
-                has_reviewer_claims = True
-                tasklog = LOGS_DIR / f"{bot_name}.tasklog"
-                if tasklog.exists():
-                    try:
-                        content = tasklog.read_text(encoding="utf-8", errors="ignore")
-                        last_lines = content.strip().splitlines()[-5:] if content.strip() else []
-                        last_text = " ".join(last_lines).upper()
-                        if "VERDICT: REWORK" in last_text or "VERDICT: BLOCK" in last_text or "VERDICT: FAIL" in last_text:
-                            has_rework_flag = True
-                    except OSError:
-                        pass
-            target_state = TicketState.REWORK if has_rework_flag else TicketState.COMPLETE
-            if not has_reviewer_claims and not has_rework_flag:
-                verdicts_dir = STATE_DIR / "reviews" / tid
-                if verdicts_dir.exists():
-                    for vf in verdicts_dir.glob("*.json"):
-                        if vf.parent.name == "quarantine":
-                            continue
-                        try:
-                            vdata = json.loads(vf.read_text(encoding="utf-8"))
-                        except (json.JSONDecodeError, OSError):
-                            import ast as _ast
-                            try:
-                                vdata = _ast.literal_eval(vf.read_text(encoding="utf-8"))
-                            except (ValueError, SyntaxError):
-                                continue
-                        if isinstance(vdata, dict):
-                            v = str(vdata.get("verdict", "")).upper()
-                            if v in ("REWORK", "ESCALATE", "BLOCK"):
-                                target_state = TicketState.REWORK
-                                break
-                            elif v in ("APPROVE", "PASS", "COMPLETE"):
-                                target_state = TicketState.COMPLETE
-                    if target_state == TicketState.COMPLETE and any(
-                        p.suffix == ".json" and p.parent.name != "quarantine"
-                        for p in verdicts_dir.iterdir()
-                    ):
-                        target_state = TicketState.COMPLETE
-            reviewer_feedback = None
-        else:
-            target_state = TicketState.REWORK if (unresolved_blocking or has_rework_verdict) else TicketState.COMPLETE
-            reviewer_feedback = [
-                {
-                    "reviewer": f.reviewer,
-                    "file": f.file,
-                    "severity": f.severity.value,
-                    "category": f.category,
-                    "description": f.finding,
-                    "recommendation": f.recommended_fix,
-                    "evidence": f.evidence,
-                    "reproduction": f.reproduction,
-                }
-                for f in unresolved_blocking
-            ] if unresolved_blocking else None
-            if reviewer_feedback is None and has_rework_verdict:
-                reviewer_feedback = [
-                    {
-                        "reviewer": rd.reviewer,
-                        "file": "",
-                        "severity": "medium",
-                        "category": "general",
-                        "description": rd.summary[:500] if rd.summary else "Reviewer requested rework without blocking findings",
-                        "recommendation": "Address reviewer concerns from verdict summary",
-                        "evidence": "",
-                        "reproduction": "",
-                    }
-                    for rd in review_decisions
-                    if rd.effective_verdict(blocking) == "REWORK"
-                ] or None
-
-        if target_state == TicketState.REWORK:
-            try:
-                from codebot.scratchpad import load_scratchpad, save_scratchpad
-                scratch = load_scratchpad(STATE_DIR, tid)
-                for rd in review_decisions:
-                    if rd.effective_verdict(blocking) == "REWORK":
-                        scratch.agent_history.append({
-                            "agent": rd.reviewer,
-                            "stage": "REVIEWING",
-                            "started_at": rd.completed_at,
-                            "finished_at": rd.completed_at,
-                            "completed_steps": [],
-                            "files_changed": [],
-                            "summary": f"reviewer verdict: REWORK ({len(rd.findings)} findings)",
-                            "error": rd.summary[:2000],
-                        })
-                if not review_decisions:
-                    for claim_file in review_claims:
-                        bn = claim_file.stem.rsplit(".", 1)[-1] if "." in claim_file.stem else ""
-                        tl = LOGS_DIR / f"{bn}.tasklog"
-                        if tl.exists():
-                            try:
-                                content = tl.read_text(encoding="utf-8", errors="ignore")
-                                if content.strip():
-                                    scratch.agent_history.append({
-                                        "agent": bn,
-                                        "stage": "REVIEWING",
-                                        "started_at": time.time(),
-                                        "finished_at": time.time(),
-                                        "completed_steps": [],
-                                        "files_changed": [],
-                                        "summary": "reviewer verdict: REWORK",
-                                        "error": content.strip()[-2000:],
-                                    })
-                            except OSError:
-                                pass
-                save_scratchpad(STATE_DIR, scratch)
-            except Exception as se:
-                logger.warning(f"Failed to write reviewer feedback to scratchpad for {tid}: {se}")
-
-        transitions.append((tid, target_state, reviewer_feedback))
-        tickets_to_clean.append((tid, review_claims))
-
-    if not transitions:
-        return 0
-
-    for tid, target_state, _ in transitions:
-        if target_state == TicketState.COMPLETE:
-            try:
-                ts.record_gate_result(tid, True)
-            except Exception:
-                pass
-
-    advanced = 0
-    results = ts.batch_transition(transitions)
-    advanced = len(results)
-    for i, (tid, target_state, _) in enumerate(transitions):
-        if any(r.id == tid for r in results):
-            logger.info(f"Review verdict: {tid} -> {target_state.value}")
-
-    tids_to_clean = {tid for tid, _ in tickets_to_clean}
-    for tid, review_claims in tickets_to_clean:
-        for claim_file in review_claims:
-            release_claim(claim_file.name)
-            try:
-                claim_file.unlink()
-            except OSError:
-                pass
-                
-    # O(B) pass to clear assignments instead of O(T*B) nested loop
-    for name, bot in bots.items():
-        if getattr(bot, '_assigned_ticket_id', '') in tids_to_clean:
-            bot._assigned_ticket_id = ''
-
-    return advanced
 
 
 def gatekeeper_verify_tickets(store: Any | None = None) -> int:
@@ -1862,84 +777,6 @@ def route_ready_tickets(store: Any | None = None, skip_tids: set[str] | None = N
     return routed
 
 
-def process_rework_tickets(bots: dict[str, Any], store: Any | None = None) -> int:
-    """Process REWORK tickets by routing them back to IMPLEMENT.
-
-    Tickets with rework_count >= 5 are routed to DEFERRED for cooling off.
-    Claims are released before transition so the V2 scheduler can re-dispatch cleanly.
-
-    Uses batch_transition to apply all state changes in memory and save once,
-    avoiding O(K*N) serialization cost per dispatch cycle.
-    """
-    try:
-        from codebot.ticket_engine import TicketState
-    except ImportError:
-        return 0
-
-    ts = store if store is not None else get_ticket_store()
-    if ts is None:
-        return 0
-    try:
-        rework = ts.list_by_state(TicketState.REWORK)
-    except Exception:
-        return 0
-    if not rework:
-        return 0
-
-    try:
-        from codebot.review_config import get_review_config
-        max_rework = get_review_config().max_rework_cycles
-    except Exception:
-        max_rework = 5
-
-    transitions: list[tuple[str, Any, list[dict] | None]] = []
-
-    for ticket in rework:
-        tid = ticket.id
-        rework_count = getattr(ticket, 'rework_count', 0)
-        if rework_count >= max_rework:
-            transitions.append((tid, TicketState.DEFERRED, None))
-        else:
-            transitions.append((tid, TicketState.IMPLEMENT, None))
-
-    if not transitions:
-        return 0
-
-    claims_dir = STATE_DIR / "claims"
-    tids_to_clean = {tid for tid, _, _ in transitions}
-    for tid in tids_to_clean:
-        for cf in claims_dir.glob(f"{tid}*.json"):
-            try:
-                release_claim(cf.name)
-            except Exception:
-                pass
-            try:
-                cf.unlink(missing_ok=True)
-            except OSError:
-                pass
-        for lf in claims_dir.glob(f"{tid}*.lock"):
-            try:
-                lf.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    advanced = 0
-    results = ts.batch_transition(transitions)
-    advanced = len(results)
-    result_ids = {r.id for r in results}
-    for i, (tid, target_state, _) in enumerate(transitions):
-        if tid in result_ids:
-            rc = getattr(rework[i], 'rework_count', 0) if i < len(rework) else 0
-            if target_state == TicketState.DEFERRED:
-                logger.warning(f"Rework ticket {tid} -> DEFERRED (failed {rc} implementations, needs cooling off)")
-            else:
-                logger.info(f"Rework ticket {tid} -> IMPLEMENT (rework_count={rc})")
-
-    for name, bot in bots.items():
-        if getattr(bot, '_assigned_ticket_id', '') in tids_to_clean:
-            bot._assigned_ticket_id = ''
-
-    return advanced
 
 
 def recover_deferred_tickets(store: Any | None = None) -> int:
