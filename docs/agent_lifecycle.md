@@ -71,11 +71,30 @@ tick() → _changed_files_block() → _ensure_bot(role) → _init_and_prepare_bo
 
 A failed scheduler agent goes `ZOMBIE → DEAD` and releases its claim + slot. Retry allocates a new `agent_id` from the bucket dispatcher on the next `tick()`. The old ticket is eligible again once its claim is released. The new agent reads the same ticket-scoped scratchpad (`state/{ticket_id}.scratchpad.json`) for context — no state is carried in the agent record.
 
+### Rate-Limit Handling (exit code 3)
+
+Implementers exiting with code 3 (429 rate limit) are requeued with exponential backoff instead of transitioning to REWORK immediately. However, after 5 consecutive rate-limit exits for the same ticket, the agent transitions to REWORK to break infinite requeue loops. Non-implementer roles use standard backoff + model rotation.
+
+### Empty-Work Guard
+
+Implementers that exit cleanly (code 0) but produced no work (< 2 tool iterations, 0 files touched) have their approval skipped. This prevents agents that make a single API call and return empty output from advancing tickets through the pipeline.
+
+### Drain Loop Gates
+
+The drain loop in `health_check_loop.run_dispatchers()` applies two gates around `start_bot_fn()`:
+1. **Pre-spawn review packet gate**: For reviewer roles, verifies `review_packets/{ticket_id}.json` exists before spawning. If missing, creates it from the ticket store. If the ticket can't be found, cancels the dispatch.
+2. **Post-spawn survival check**: After `start_bot_fn()` succeeds, waits 0.5s then checks `process.poll()`. If the agent died immediately, cancels the dispatch and clears the assignment instead of leaving an orphaned claim.
+
 ## Cleanup (reconcile)
 
-`Scheduler._reconcile()` runs at the start of each `tick()`:
+`Scheduler._reconcile()` runs at the start of each `tick()` and executes five sweeps:
 1. `RUNNING` + stale heartbeat → `ZOMBIE`.
 2. `ZOMBIE` → `DEAD` via `with_exit("zombie-cleanup")` + `gate.complete_dispatch()`.
+3. `_sweep_leaked_slots()` — releases gate entries for agents that are DEAD but still in `_gate._active`.
+4. `_sweep_orphan_claims()` — scans `claims/*.claim.json`, cross-references live PIDs via `pgrep -f codebot.api_runner`, deletes claims for dead agents. For claims still in `gate_claimed_tickets`, verifies process liveness per-role+ticket before deleting. Fires every cycle for all active reviewer claims (not just newly registered ones) to recover from transient failures.
+5. `_sweep_stale_verify_tickets()` — finds VERIFY tickets older than 10 minutes with no live verifier process, writes auto-approve verdict to `verification/{ticket_id}.json`, transitions to COMPLETE.
+
+Additionally, `_register_dispatched_agents()` calls `_ensure_review_packet(ticket_id)` every cycle for all active reviewer claims, retrying packet creation if it failed on prior ticks.
 
 Idempotent — running twice is safe. Double `finalize_agent(DEAD)` returns `False`.
 
@@ -93,7 +112,7 @@ Never nest TicketStore save lock inside a claim lock. A daemon `flock` on `.orch
 
 | Subsystem | Lives via | Backed by |
 |-----------|-----------|-----------|
-| Scheduler (GOAL, DECOMP, PLANNING, REWORK, IMPLEMENT, REVIEW) | `AgentState` per `ticket_id` | `DispatchGate` + `ClaimRecord` |
+| Scheduler (GOAL, DECOMP, PLANNING, REWORK, IMPLEMENT, REVIEW, VERIFY) | `AgentState` per `ticket_id` | `DispatchGate` + `ClaimRecord` |
 | Discovery (9 auditors + feature_hunter) | `BotState.next_run_at` cooldown | `Beat + _last_run` (no claims) |
-| Control (scheduler, git_sync, etc.) | `BotState` | heartbeat file |
+| Control (ticket_triager, git_sync, etc.) | `BotState` | heartbeat file |
 

@@ -1,6 +1,6 @@
 # CodeBot Architecture
 
-Last updated: 2026-09-20
+Last updated: 2026-09-25
 
 ## System Overview
 
@@ -132,22 +132,23 @@ sequenceDiagram
 |--------|-------|---------|
 | `scheduler_v2/lifecycle.py` | ~330 | AgentState (CREATED→DEAD), AgentRecord, Clock/ProcessSpawner protocols, per-model stale timeouts |
 | `scheduler_v2/dispatch_gate.py` | ~490 | DispatchGate (ConcurrencyController + claims + SpawnQueue 0.5s stagger) |
-| `scheduler_v2/dispatcher.py` | ~690 | BucketDispatcher (6 buckets: GOAL/DECOMP/PLANNING/REWORK/IMPLEMENT/REVIEW), ModelSelector, Scheduler |
+| `scheduler_v2/dispatcher.py` | ~545 | Scheduler, ModelSelector, ReasonCode, reconciliation sweeps (orphan claims, leaked slots, stale verify) |
+| `scheduler_v2/bucket_dispatcher.py` | ~363 | BucketDispatcher (7 buckets: GOAL/DECOMP/PLANNING/REWORK/IMPLEMENT/REVIEW/VERIFY), BUCKET_ORDER, BUCKET_TO_ROLE_SETS |
 | `discovery_daemon.py` | ~385 | 5-slot discovery outside scheduler, round-robin 9 roles, 60s cooldown, dirty-file CHANGED_FILES, cheap tier |
 | `orchestrator.py` | ~490 | Thin coordinator, delegates to orchestrator_runtime/process_manager/health_check_loop |
 | `orchestrator_runtime.py` | ~240 | Bootstrap adapter, shutdown handlers, run_main_loop (spawns discovery daemon thread) |
 | `orchestrator_services.py` | ~670 | Bot registry loading from adapter, skip-discovery in apply_agent_availability |
-| `health_check_loop.py` | ~850 | Per-tick bot lifecycle, dispatcher invocation, eligible-bot startup (skips discovery) |
+| `health_check_loop.py` | ~913 | Per-tick bot lifecycle, drain loop with pre-spawn review packet gate + post-spawn survival check, rate-limit retry cap (5x→REWORK), dispatcher invocation |
 | `process_manager.py` | ~1270 | Bot lifecycle start/stop/restart, `_prepare_prompt_with_context(extra_block)` for CHANGED_FILES |
-| `scheduler_config.py` | ~453 | Frozen dataclass configs for scheduler + Backlog/Workforce/Cost/Hysteresis |
+| `scheduler_config.py` | 36 | Flat config constants: MAX_CONCURRENT_AGENTS=90, ROLE_CAPS, BUCKET_WEIGHTS, SPAWN_STAGGER_SECONDS=5.0 |
 | `pipeline_state.py` | ~350 | Frozen dataclass snapshot of the entire engineering pipeline for scheduler decisions |
 | `ticket_engine.py` | ~2300 | Schema v3 (19 states incl. GOAL/LATER/NEVER/RESOLVED), WAL + compaction, fingerprint dedup |
 | `role_registry.py` | ~475 | 24 role definitions (9 discovery + 1 impl + 6 review + 5 control + 3 planning) |
 | `roles/*.md` | 22–26 | 8 scanner prompts lean (batch_grep + CHANGED_FILES), feature_hunter index-driven |
 | `discovery_finding.py` | ~560 | Structured finding schema with evidence separation, fingerprinting, validation |
 | `evidence_validator.py` | ~520 | Pre-ticket verification (file/symbol, generated/vendor hallucination) |
-| `dispatch_service.py` | ~810 | Pipeline state, agent availability (skips discovery), ticket transitions, model rotation |
-| `api_runner.py` | ~3300 | LLM execution loop, tool dispatch, bounded I/O, 50 iterations/120s timeout |
+| `dispatch_service.py` | ~868 | Pipeline state, agent availability (skips discovery), ticket transitions (REVIEW→VERIFY, VERIFY→COMPLETE), empty-work guard, model rotation |
+| `api_runner.py` | ~3378 | LLM execution loop, tool dispatch, bounded I/O (MAX_SIZE=2MB), streaming deadline enforcement, create_ticket list coercion, verdict ast.literal_eval fallback |
 | `prompt_gateway.py` | ~210 | Prompt compression, shared contract injection |
 | `config_reloader.py` | ~160 | Hot-reloading for prompts, source code, and bot registry config |
 | `dependency_graph.py` | ~160 | DAG, cycle detection, topological sort, ready-ticket resolution |
@@ -238,9 +239,20 @@ api_runner executes via LLM with tools
     └── Transitions → REVIEW (no commit here)
     │
     ▼
-Reviewers (reviewer + security/architecture/performance/concurrency/data_integrity)
-    ├── APPROVE → COMPLETE
+Reviewers (11 roles: reviewer + 10 specialists)
+    ├── Read review_packets/{ticket_id}.json (created by implementer completion or scheduler pre-spawn gate)
+    ├── APPROVE → VERIFY
     └── REWORK → REWORK (increment rework_count, back to IMPLEMENT or PLANNING)
+    │
+    ▼
+Verifier (verifier role, read-only tools: read/grep/glob, no bash)
+    ├── Reads review packet + changed files statically
+    ├── Writes verdict to verification/{ticket_id}.json
+    ├── APPROVE → COMPLETE
+    └── REWORK → REWORK
+    │
+    ▼
+Stale verify sweep: VERIFY tickets >10min with no live verifier auto-approved → COMPLETE
     │
     ▼
 quality_gate + gatekeeper runs gates (YAML policy)
@@ -260,10 +272,10 @@ alignment_scorer → rl_engine updates Q-values → prompt_optimizer refines pro
 Schema v3 (19 states incl. aliases). `TicketState` aliases: `DECOMPOSE=DECOMP`, `IMPLEMENTING=IMPLEMENT`, `REVIEWING=REVIEW`.
 
 ```
-DISCOVERED → TRIAGED → GOAL → DECOMP → PLANNING → IMPLEMENT → REVIEW → COMPLETE
-    ↓           ↓         ↓        ↓         ↓           ↓          ↓
- REJECTED   DUPLICATE  LATER    BLOCKED   BLOCKED   REWORK/RESOLVED REWORK/RESOLVED/BLOCKED
- NOT_ACTIONABLE        NEVER   RESOLVED  RESOLVED  CANCELLED     CANCELLED
+DISCOVERED → TRIAGED → GOAL → DECOMP → PLANNING → IMPLEMENT → REVIEW → VERIFY → COMPLETE
+    ↓           ↓         ↓        ↓         ↓           ↓          ↓       ↓
+ REJECTED   DUPLICATE  LATER    BLOCKED   BLOCKED   REWORK/RESOLVED REWORK  REWORK/RESOLVED
+ NOT_ACTIONABLE        NEVER   RESOLVED  RESOLVED  CANCELLED     CANCELLED CANCELLED
  RESOLVED   RESOLVED CANCELLED CANCELLED CANCELLED
  SUPERSEDED SUPERSEDED        SUPERSEDED
  CANCELLED  CANCELLED
@@ -276,8 +288,8 @@ Goal alignment: `TRIAGED → GOAL (NOW→DECOMP / LATER / NEVER via goal_aligner
 
 ## Concurrency Model
 
-- **Orchestrator**: single process + 2 thread pools: scheduler_v2 (90 slots via DispatchGate + ClaimRecord + SpawnQueue 0.5s stagger) and discovery daemon (5 slots, round-robin, 60s cooldown via BotState.next_run_at + _last_run, 2s stagger, yarn-style dirty-first via CHANGED_FILES)
-- **Claims**: scheduler tickets use `claims/{ticket}.{role}.claim.json` with `flock` on `.claim.lock` (atomic tmp+replace). Discovery is claim-free — only `create_ticket`.
+- **Orchestrator**: single process + 2 thread pools: scheduler_v2 (90 slots via DispatchGate + ClaimRecord + SpawnQueue 5.0s per-role stagger) and discovery daemon (5 slots, round-robin, 60s cooldown via BotState.next_run_at + _last_run, 2s stagger, yarn-style dirty-first via CHANGED_FILES)
+- **Claims**: scheduler tickets use `claims/ticket--{ticket_id}.claim.json` with `flock` on `.claim.lock` (atomic tmp+replace). `_reconcile()` sweeps orphaned claims by cross-referencing live PIDs via `pgrep`. Discovery is claim-free — only `create_ticket`.
 - **Heartbeat monitoring**: each agent writes timestamp to `.codebot/state/{name}.heartbeat` after every atomic task; orchestrator kills agents exceeding `effective_timeout` (model-aware: xiaomi 1.5x → thinking 2.8x)
 - **TicketStore**: `threading.RLock` + WAL + periodic compaction (`TicketStore.flush()`); debounce 0.5s batch; `BACKUP_EVERY_N_COMPACT=5`, max file size 50MB guard; `weakref` atexit registry for clean close across daemon + workers
 - **Drain flag**: `.codebot/state/.drain` file — `dispatch_service` + daemon `tick()` both check `state_manager.is_draining()` before launch; graceful shutdown via `run_main_loop` SIGINT/SIGTERM joining daemon
@@ -294,6 +306,7 @@ Goal alignment: `TRIAGED → GOAL (NOW→DECOMP / LATER / NEVER via goal_aligner
 | Credential isolation | Secrets resolved from env vars only, never hardcoded |
 | Atomic writes | `tmp.write_text()` + `os.replace()` prevents partial writes |
 | No type suppression | Zero `as any`, `@ts-ignore`, or equivalent patterns |
+| Streaming API deadline | Absolute timeout enforced on streaming reads via socket.settimeout(remaining_time) |
 
 ## Performance Characteristics
 

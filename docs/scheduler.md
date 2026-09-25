@@ -14,17 +14,17 @@ Scheduler.tick(store) — orchestrator_runtime run_main_loop every 30s
     │
     └── BucketDispatcher.tick(store)
             │
-            ├── _snapshot_buckets()  ── group tickets by bucket (GOAL, DECOMP, PLANNING, REWORK, IMPLEMENT, REVIEW)
+            ├── _snapshot_buckets()  ── group tickets by bucket (GOAL, DECOMP, PLANNING, REWORK, IMPLEMENT, REVIEW, VERIFY)
             │   └── DISCOVERED is intentionally absent — DISCOVERED → TRIAGED is platform code (triage), not a bucket
             ├── weighted round-robin  ── pick next bucket with actionable work
-            ├── _select_ticket()  ── priority → age → id
+            ├── _select_ticket()  ── priority → age → id (GOAL tier takes precedence)
             ├── ModelSelector.next_model()  ── persisted round-robin
             └── DispatchGate.try_dispatch()
                     │
-                    ├── ConcurrencyController.reserve()  ── atomic, MAX_CONCURRENCY is sole limit
+                    ├── ConcurrencyController.reserve()  ── atomic, MAX_CONCURRENCY is sole limit, per-role stagger dict
                     ├── claim_ticket()  ── flock-guarded, one owner per ticket
-                    └── SpawnQueue.enqueue()  ── 0.5s stagger, heartbeat-aware
-                    └── health_check_loop drains ready queue → start_bot() via process_manager
+                    └── SpawnQueue.enqueue()  ── 5.0s per-role stagger, drain(role) enforces per-role spacing
+                    └── health_check_loop drains ready queue → pre-spawn review packet gate → start_bot() → post-spawn survival check (0.5s) via process_manager
 ```
 
 Discovery is **outside** the scheduler (see Discovery Daemon below).
@@ -45,10 +45,11 @@ orchestrator_runtime.run_main_loop
 |------|-------|
 | `codebot/scheduler_v2/lifecycle.py` | `AgentState`, `Clock`, `FakeClock`, `ProcessSpawner`, `AgentRecord` |
 | `codebot/scheduler_v2/dispatch_gate.py` | `ConcurrencyController`, `ClaimRecord`, `SpawnQueue`, `DispatchGate` |
-| `codebot/scheduler_v2/dispatcher.py` | `ModelSelector`, `BucketDispatcher`, `Scheduler`, `ReasonCode` |
+| `codebot/scheduler_v2/dispatcher.py` | `ModelSelector`, `Scheduler`, `ReasonCode`, `InvariantViolation`, reconciliation sweeps |
+| `codebot/scheduler_v2/bucket_dispatcher.py` | `BucketDispatcher`, `BUCKET_ORDER`, `BUCKET_TO_ROLE_SETS` |
 | `codebot/discovery_daemon.py` | `DiscoveryDaemon`, `DISCOVERY_ROLES`, `DISCOVERY_MAX_CONCURRENT=5`, `_changed_files_block()` |
 | `codebot/orchestrator_runtime.py` | `run_main_loop()` spawns daemon thread alongside health checks, joins on shutdown |
-| `codebot/process_manager.py` | `_prepare_prompt_with_context(extra_block=)`, `_init_and_prepare_bot(extra_block=)` injects CHANGED_FILES |
+| `codebot/process_manager.py` | `_prepare_prompt_with_context(extra_block=)`, `_init_and_prepare_bot(extra_block=)` injects CHANGED_FILES; REVIEWER_ROLE_NAMES imported for inline review packet injection |
 | `codebot/codebot_adapter.py` | `bot_registry()` intervals: discovery 60s, planning 3600s, implementation 300s, review 600s, control 900s |
 
 Any diagnostic path touches at most 3 files.
@@ -74,10 +75,7 @@ DEAD is terminal. Retries create a new `agent_id`.
 
 ## Stagger
 
-Global 0.5s minimum between scheduler spawns. `SpawnQueue` rules:
-- Queue non-empty → next at `last_scheduled + 0.5s`.
-- Queue empty → next at `max(now, latest_heartbeat + 0.5s)` reading disk `*.heartbeat` files.
-- Once scheduled, timestamp is fixed; later heartbeats do not postpone.
+Per-role 5.0s minimum between scheduler spawns (configurable via `SPAWN_STAGGER_SECONDS`). `SpawnQueue.drain(role)` enforces per-role spacing using `_last_process_start: dict[str, float]`. `record_spawn(ts, role)` updates the per-role timestamp after each dispatch.
 
 Discovery daemon uses its own 2s stagger between discovery spawns.
 
@@ -92,7 +90,8 @@ Discovery daemon uses its own 2s stagger between discovery spawns.
 | PLANNING | PLANNING | planner | .plan.json → IMPLEMENT |
 | REWORK | REWORK | implementer | failed review, prior feedback |
 | IMPLEMENT | IMPLEMENT | implementer | primary build work |
-| REVIEW | REVIEW | reviewer + specialists | adversarial swarm |
+| REVIEW | REVIEW | reviewer + 10 specialists | adversarial swarm, creates review_packets |
+| VERIFY | VERIFY | verifier | read-only static analysis (no bash), auto-approve sweep >10min |
 | DISCOVERED | — | — | not a bucket; triage is platform code. Discovery runs outside via discovery_daemon |
 
 No discovery watermark inside scheduler; discovery is on its own pool.
@@ -111,23 +110,34 @@ No discovery watermark inside scheduler; discovery is on its own pool.
 - One ticket → at most one active scheduler claim. Discovery is claim-free.
 - One scheduler agent → at most one ticket.
 - `DEAD` owns nothing and consumes no slot.
-- Spawn spacing >= 0.5s (scheduler), >= 2s (discovery).
+- Spawn spacing >= 5.0s per-role (scheduler), >= 2s (discovery).
+- Review packets exist before reviewer spawn (pre-spawn gate + retry sweep).
+- Empty-work approvals rejected (< 2 iterations, 0 files touched).
+- Rate-limited agents transition to REWORK after 5 consecutive exit-code-3 events.
+- VERIFY tickets auto-approved after 10 minutes with no live verifier.
 
 ## Configuration
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `MAX_CONCURRENT_AGENTS` | 90 | Scheduler global agent limit |
-| `stagger_seconds` | 0.5 | Scheduler spawn spacing |
-| `bucket_weights` | 1 per bucket | Static weighted round-robin |
-| `role_caps` | none | Per-bucket concurrent cap |
-| `DISCOVERY_MAX_CONCURRENT` | 5 | Discovery daemon slots (outside scheduler) |
-| `DISCOVERY_INTERVAL_SECONDS` | 60 | Per-role cooldown |
-| `DISCOVERY_TICK_SECONDS` | 10 | Daemon tick period |
-| `DISCOVERY_STAGGER_SECONDS` | 2.0 | Discovery spawn spacing |
+| `SPAWN_STAGGER_SECONDS` | 5.0 | Per-role scheduler spawn spacing |
+| `BUCKET_WEIGHTS` | USER:1, GOAL:1, DECOMP:1, PLANNING:1, REWORK:2, IMPLEMENT:3, REVIEW:2, VERIFY:1 | Static weighted round-robin |
+| `ROLE_CAPS` | triage:10, goal:10, verify:5, discovery:3 | Per-role concurrent cap |
+| `DISCOVERY_MAX` | 3 | Discovery daemon slots (outside scheduler) |
+| `SCHEDULER_INTERVAL_SECONDS` | 30 | Orchestrator tick period |
 
 Discovery interval is also in `codebot_adapter` bot_registry (discovery=60s). Workers run outside both.
 
+## Reconciliation Sweeps
+
+`Scheduler._reconcile()` runs five sweeps each tick:
+1. Stale agent detection → ZOMBIE → DEAD transitions
+2. `_sweep_leaked_slots()` — releases gate entries for DEAD agents
+3. `_sweep_orphan_claims()` — purges claim files with no live PID, cross-references `pgrep`
+4. `_sweep_stale_verify_tickets()` — auto-approves VERIFY tickets >10min old with no live verifier
+5. `_ensure_review_packet()` — retries review packet creation for all active reviewer claims every cycle
+
 ## Migration
 
-`scheduler_v2` is the scheduler. `apply_agent_availability` no longer disables discovery roles — `DISCOVERY_ROLE_NAMES` are skipped and health_check_loop `start_eligible_bots` also skips them. `_count_api_runner_processes` delegates to `DispatchGate.count_active()` in V2.
+`scheduler_v2` is the sole scheduler (ADR-007 Phase 2 complete). Legacy modules (`adaptive_scheduler.py`, `queue_pressure.py`, `work_scorer.py`, `discovery_manager.py`) deleted. `scheduler_config.py` flattened from 453 LOC to 36 LOC. `dispatcher.py` decomposed into `dispatcher.py` + `bucket_dispatcher.py`. Single top-level `DispatchMode` switch removed; always AUTHORITATIVE.

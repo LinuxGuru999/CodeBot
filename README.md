@@ -1,8 +1,12 @@
+> **⚠️ Pre-Alpha Software** — This project is still in active development and not yet suitable for production use. APIs, architecture, and behavior may change without notice.
+
 # CodeBot
 
 **Autonomous Software Engineering Platform**
 
-CodeBot is an autonomous software engineering environment capable of creating, understanding, documenting, maintaining, testing, reviewing, and continuously improving software projects.
+**Contact:** linuxguru999@gmail.com
+
+CodeBot is an autonomous software engineering platform utilizing agent swarms to create, understand, document, maintain, test, review, and continuously improve software projects.
 
 It can begin with either an existing repository or a user description of a new application.
 

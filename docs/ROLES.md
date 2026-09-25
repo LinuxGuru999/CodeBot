@@ -1,10 +1,10 @@
 # CodeBot Roles Reference
 
-Last updated: 2026-09-23
+Last updated: 2026-09-25
 
-CodeBot defines **24 registered roles** in `role_registry.py` (plus `implementer` is unified, legacy prompts remain). Current prompt files are 35 in `codebot/roles/*.md` (24 registered, 1 unified implementation, plus planning/control prompt-only leftovers).
+CodeBot defines **24 registered roles** in `role_registry.py` (plus `implementer` is unified, legacy prompts remain). Current prompt files are in `codebot/roles/*.md` (24 registered, 1 unified implementation, plus planning/control prompt-only leftovers).
 
-All prompts follow `docs/ROLE_PROMPT_STANDARDS.md`. Discovery scanners are lean 22–26 line prompts since Sep 2026. `feature_hunter` remains 201 lines (index-driven).
+All prompts follow `docs/ROLE_PROMPT_STANDARDS.md`. Discovery scanners are lean 22–26 line prompts since Sep 2026. `feature_hunter` remains 201 lines (index-driven). All reviewer prompts include inline `--- REVIEW PACKET ---` fallback instructions so agents proceed if the file read fails.
 
 Legacy bot names are mapped via `roles/__init__.py` and `role_registry`.
 
@@ -54,32 +54,44 @@ All ticket classes (bug/feature/security/performance/architecture/test/documenta
 4. **Checkpoint**: `state/{ticket}.scratchpad.json` via `scratchpad.py` (claim protocol).
 5. **Noop cap**: 20 empty scans → exit cleanly. Zero tickets = success for discovery.
 
-## Review Roles (6 + ux_reviewer if enabled)
+## Review Roles (11)
 
-Review agents evaluate implementations. All are READ-ONLY. Their incentives intentionally conflict with implementers.
+Review agents evaluate implementations. All are READ-ONLY. Their incentives intentionally conflict with implementers. Review packets (`review_packets/{ticket_id}.json`) are created by the implementer completion handler or the scheduler's pre-spawn gate before reviewers start.
 
 | Role | Incentive | Adversarial To |
 |------|-----------|----------------|
 | `reviewer` | Default broad reviewer: correctness, acceptance, scope. Escalates to specialists | implementer |
+| `correctness_reviewer` | Specialist: logic errors, spec violations | implementer |
 | `security_reviewer` | Specialist: security question escalated from reviewer | implementer |
 | `architecture_reviewer` | Specialist: architecture question | implementer |
 | `performance_reviewer` | Specialist: performance question | implementer |
 | `concurrency_reviewer` | Specialist: races, lock ordering, TOCTOU | implementer |
 | `data_integrity_reviewer` | Specialist: migrations, schema, destructive writes | implementer |
+| `test_reviewer` | Specialist: test adequacy, coverage gaps | implementer |
+| `documentation_reviewer` | Specialist: doc accuracy, drift | implementer |
+| `adversarial_reviewer` | Specialist: hostile edge-case analysis | implementer |
+| `simplicity_reviewer` | Specialist: complexity reduction | implementer |
 
 Plus `ux_reviewer` (evaluates browser/a11y, only if `scheduler_v2` REVIEW routes to it). Specialists only answer the escalated question.
 
 ### Verdicts
 
-- **APPROVE** → COMPLETE (via gatekeeper)
+- **APPROVE** → VERIFY (not directly to COMPLETE)
 - **REWORK** → REWORK with findings
 - **Escalation** → reviewer escalates security/architecture/perf/concurrency/data to specialist, then re-evaluates
+
+## Verification Role (1)
+
+| Role | Purpose | Tool Access |
+|------|---------|-------------|
+| `verifier` | Static verification of implementation against acceptance criteria after reviewer approval | read/grep/glob only (no bash) |
+
+The verifier reads `review_packets/{ticket_id}.json`, inspects changed files statically, and writes a verdict to `verification/{ticket_id}.json`. APPROVE → COMPLETE, REWORK → REWORK. VERIFY tickets older than 10 minutes with no live verifier are auto-approved by the scheduler's stale verify sweep.
 
 ## Control Roles (5)
 
 | Role | Purpose | Tier |
 |------|---------|------|
-| `scheduler` | Agent scheduling, concurrency limits (legacy, mostly superseded by scheduler_v2 DispatchGate) | interactive CHEAP |
 | `ticket_triager` | Validates DISCOVERED → TRIAGED: completeness, dedup, fingerprint | interactive CHEAP |
 | `git_sync` | Batched push / vendor sync (commits from completion_commit) | background CHEAP |
 | `github_mirror` | Mirror issue files to GitHub Issues via `gh` CLI | background CHEAP |

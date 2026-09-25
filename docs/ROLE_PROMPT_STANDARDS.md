@@ -34,7 +34,7 @@ Optional sections by category: Output Format, Detection Patterns, Complexity Tie
 
 Reference implementations:
 - **Discovery (cheap models)**: `codebot/roles/bug_hunter.md`
-- **Implementation (TDD)**: `codebot/roles/general_implementer.md`
+- **Implementation (TDD)**: `codebot/roles/implementer.md`
 - **Review (verdict)**: `codebot/roles/correctness_reviewer.md`
 - **Control (state-only)**: `codebot/roles/scheduler.md`
 - **Planning (decomposition)**: `codebot/roles/feature_decomposer.md`
