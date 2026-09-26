@@ -3,7 +3,7 @@
 > **Authority:** This document is normative. All code that touches scheduling, claims, slots, queues, tickets, or lifecycle MUST conform. Violations are invariant violations, not style nits.
 >
 > **Source of truth for dispatch:** §2–§8 define the 7 invariants. Grep-enforceable where noted.
-> **Source of truth for context:** §22 defines the CONTEXT IS THE CONTROL PLANE invariant. CodeBot is a context compiler. See ADR-008.
+> **Source of truth for context:** [`MANIFESTO.md`](../MANIFESTO.md) is the governing doctrine. §22 below defines the CONTEXT IS THE CONTROL PLANE operational invariant. CodeBot is a context compiler. See ADR-008.
 > **Constitution anchor:** Constitution §4 — single-owner authority, bounded contexts, atomic ownership, one-way reconstructable mapping.
 > **ADR:** `docs/adr/007-authoritative-dispatch.md` (Status: Accepted).
 
@@ -482,9 +482,11 @@ Tag `pre-authoritative-dispatch` is the rollback point before any dispatch chang
 
 ## 22. Invariant 10 — CONTEXT IS THE CONTROL PLANE
 
+> **Normative reference:** [`MANIFESTO.md`](../MANIFESTO.md) §§1, 3, 5, 9, 10 are the governing doctrine for this invariant. Every lifecycle transition is a context boundary. NO CONTEXT, NO ADVANCE. Enforcement and recovery are separate authorities. Fail closed.
+>
 > The swarm is controlled through durable authoritative context produced by the lifecycle. Critical intent, constraints, decisions, acceptance criteria, and discovered facts must not exist only in prompts, chat history, agent memory, or scratchpads.
 >
-> **Scope:** Within this implementation, this invariant is enforced at the REQUESTED ingress boundary. Lifecycle-wide context gate enforcement for GOAL/TRIAGE/DECOMP/PLANNING/IMPLEMENT/REVIEW/COMPLETE transitions is a separate roadmap item. The pattern established here extends to all stages in future work. Every lifecycle stage must leave the project with equal or better authoritative context than it received.
+> **Scope:** Context contract enforcement is active at the authoritative transition boundary (`TicketStore.transition()` / `batch_transition()`). All 66 legal transitions have explicit contracts. Missing contracts fail closed. See `codebot/context_contracts.py` and `.omo/plans/context-contracts.md`. Every lifecycle stage must leave the project with equal or better authoritative context than it received.
 
 The lifecycle is a context compiler: each stage produces durable context consumed by the next. Agents consume context; lifecycle stages produce and validate context. State transitions without the required context are invalid.
 

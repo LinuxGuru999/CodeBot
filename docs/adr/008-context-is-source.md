@@ -1,5 +1,7 @@
 # ADR 008: Context is Source — Foundational Doctrine
 
+> **Normative reference:** This ADR formalizes the architecture decisions derived from [`MANIFESTO.md`](../../MANIFESTO.md). The Manifesto is the governing doctrine for all CodeBot work. Every plan, agent role, lifecycle stage, and code change MUST conform to it. When this ADR and the Manifesto disagree, the Manifesto wins.
+
 ## Status
 
 **Accepted** — 2026-09-24
