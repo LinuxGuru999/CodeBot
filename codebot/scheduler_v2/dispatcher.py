@@ -12,6 +12,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from codebot.ticket_dispatcher import _validate_claim_schema
+
 from .dispatch_gate import DispatchGate, DispatchResult
 from .lifecycle import (
     AgentRecord,
@@ -390,6 +392,13 @@ class Scheduler:
             try:
                 data = json.loads(claim_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError, ValueError):
+                try:
+                    claim_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            # Validate claim schema to prevent type confusion attacks
+            if not _validate_claim_schema(data, claim_file):
                 try:
                     claim_file.unlink(missing_ok=True)
                 except OSError:
