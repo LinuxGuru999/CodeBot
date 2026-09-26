@@ -39,7 +39,7 @@ import shutil
 import threading
 import time
 import weakref
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -1775,6 +1775,53 @@ class TicketStore:
         # Signal background worker for deferred compaction (outside lock).
         self._queue_save()
         return updated
+
+    def update_context_fields(
+        self,
+        ticket_id: str,
+        expected_state: str,
+        expected_transition_version: int,
+        expected_field_values: dict[str, Any],
+        fields_to_update: dict[str, Any],
+    ) -> bool:
+        _validate_ticket_id(ticket_id)
+        if "state" in fields_to_update:
+            return False
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None:
+                return False
+            if ticket.state.value != expected_state:
+                return False
+            if ticket.transition_version != expected_transition_version:
+                return False
+            for field_name, expected_val in expected_field_values.items():
+                if getattr(ticket, field_name, None) != expected_val:
+                    return False
+            ticket_fields = set(ticket.__dataclass_fields__.keys())
+            if not set(fields_to_update.keys()) <= ticket_fields:
+                return False
+            was_dirty = ticket_id in self._dirty_ids
+            old_ticket = ticket
+            updated = replace(
+                ticket,
+                **fields_to_update,
+                transition_version=ticket.transition_version + 1,
+            )
+            self._tickets[ticket_id] = updated
+            self._dirty_ids.add(ticket_id)
+            try:
+                self._append_wal_locked({ticket_id})
+            except Exception as exc:
+                self._tickets[ticket_id] = old_ticket
+                if was_dirty:
+                    self._dirty_ids.add(ticket_id)
+                else:
+                    self._dirty_ids.discard(ticket_id)
+                logger.error("WAL append failed in update_context_fields(): %s", exc)
+                raise
+        self._queue_save()
+        return True
 
     def transition(self, ticket_id: str, new_state: TicketState, reviewer_feedback: list[dict] | None = None, actor: str = "") -> Ticket:
         _validate_ticket_id(ticket_id)
